@@ -1,4 +1,5 @@
 pub use crate::ingress::IngressProof;
+pub use crate::CommitmentType;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
@@ -14,7 +15,6 @@ use crate::{
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 use irys_macros_integer_tagged::IntegerTagged;
-pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
 use thiserror::Error;

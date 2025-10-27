@@ -1,6 +1,6 @@
 use crate::mempool_service::AtomicMempoolState;
 use irys_domain::BlockTreeReadGuard;
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{transaction::PledgeDataProvider, Address, H256};
 use std::collections::HashSet;
 

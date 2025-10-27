@@ -1,6 +1,6 @@
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Bytes;
-use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
+use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use reth_evm::precompiles::PrecompilesMap;
 use revm::precompile::{PrecompileOutput, PrecompileResult};
 use revm::primitives::hardfork::SpecId;

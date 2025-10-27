@@ -27,12 +27,12 @@
 /// - perm_fee total value: Prepaid amount covering 200 years x 10 replicas with 1% annual decline in storage costs PLUS ingress proof rewards (5% of term_fee × number_of_ingress_proofs)
 use crate::ingress::IngressProof;
 use crate::storage_pricing::{mul_div, PRECISION_SCALE};
+pub use crate::CommitmentType;
 pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use eyre::{ensure, eyre, OptionExt as _};
-pub use irys_primitives::CommitmentType;
 use serde::{Deserialize, Serialize};
 
 pub enum FeeDistribution {

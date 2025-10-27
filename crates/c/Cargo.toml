@@ -6,7 +6,6 @@ rust-version.workspace = true
 version = "0.1.0"
 
 [dependencies]
-irys-primitives.workspace = true
 irys-types.workspace = true
 openssl.workspace = true
 rand.workspace = true

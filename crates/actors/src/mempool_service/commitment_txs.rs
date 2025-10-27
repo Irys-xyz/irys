@@ -3,7 +3,7 @@ use crate::mempool_service::{
 };
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,

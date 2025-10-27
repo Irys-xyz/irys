@@ -1,4 +1,4 @@
-use irys_primitives::CommitmentStatus;
+use irys_types::CommitmentStatus;
 use irys_types::{Address, IrysTransactionId, H256, U256};
 use std::collections::BTreeMap;
 

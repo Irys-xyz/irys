@@ -3,7 +3,7 @@ use alloy_core::primitives::B256;
 use irys_database::reth_db::Database as _;
 use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
-use irys_primitives::Address;
+use irys_types::Address;
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
     PeerNetworkSender,

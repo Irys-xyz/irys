@@ -1,4 +1,4 @@
-use irys_primitives::Address;
+use irys_types::Address;
 use irys_types::PeerListItem;
 
 /// Events related to peer lifecycle and activity.

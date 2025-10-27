@@ -354,8 +354,8 @@ pub struct NodeInfo {
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
+    use crate::Address;
     use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
-    use irys_primitives::Address;
     use serde_json;
 
     #[test]

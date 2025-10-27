@@ -1,4 +1,4 @@
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{Address, CommitmentTransaction};
 use std::{
     collections::BTreeMap,
@@ -383,7 +383,7 @@ impl CommitmentSnapshot {
 mod tests {
     use super::super::epoch_snapshot::commitment_state::CommitmentStateEntry;
     use super::*;
-    use irys_primitives::CommitmentStatus;
+    use irys_types::CommitmentStatus;
     use irys_types::{partition::PartitionAssignment, IrysSignature, H256, U256};
 
     fn create_test_commitment(

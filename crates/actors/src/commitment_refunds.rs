@@ -1,6 +1,6 @@
 use eyre::{bail, Result};
 use irys_domain::CommitmentSnapshot;
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, ConsensusConfig};
 
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};

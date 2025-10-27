@@ -1030,7 +1030,7 @@ mod tests {
 
     mod data_retrieval_scoring_tests {
         use super::*;
-        use irys_primitives::Address;
+        use irys_types::Address;
         use irys_types::{PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -1244,7 +1244,7 @@ mod tests {
 
     mod concurrent_scoring_tests {
         use super::*;
-        use irys_primitives::Address;
+        use irys_types::Address;
         use irys_types::{PeerListItem, PeerScore};
         use std::sync::Arc;
         use tokio::task::JoinSet;

@@ -3,7 +3,7 @@
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Bytes, B256, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
-use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
+use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use std::io::{Read, Write};
 
 /// PD storage key components extracted from a 32-byte access-list key.

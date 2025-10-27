@@ -157,7 +157,7 @@ jobs:
         uses: ./.github/actions/setup-repo
 
       - name: cargo test
-        run: RUST_LOG=debug cargo xtask test
+        run: RUST_LOG=info cargo xtask test
 
   cargo-check:
     name: cargo check
@@ -231,7 +231,7 @@ jobs:
         run: cargo xtask doc -- --all-features
 
       - name: cargo test docs
-        run: RUST_LOG=debug cargo test --doc
+        run: RUST_LOG=info cargo test --doc
 
   cargo-unused-deps:
     name: cargo unused-deps
