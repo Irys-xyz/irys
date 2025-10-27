@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
-    UnstakeDebit,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, PdBaseFeeUpdate, ShadowTransaction,
+    TransactionPacket, UnstakeDebit,
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -39,6 +39,9 @@ pub struct ShadowTxGenerator<'a> {
     commitment_txs: &'a [CommitmentTransaction],
     submit_txs: &'a [DataTransactionHeader],
 
+    // PD base fee per chunk (for PdBaseFeeUpdate shadow tx)
+    pd_base_fee_per_chunk: U256,
+
     // Iterator state
     treasury_balance: U256,
     phase: Phase,
@@ -58,13 +61,28 @@ impl Iterator for ShadowTxGenerator<'_> {
         loop {
             match self.phase {
                 Phase::Header => {
-                    self.phase = Phase::Commitments;
+                    self.phase = Phase::PdBaseFee;
                     self.index = 0;
                     // Block reward has no treasury impact
                     return Some(Ok(ShadowMetadata {
                         shadow_tx: ShadowTransaction::new_v1(
                             TransactionPacket::BlockReward(BlockRewardIncrement {
                                 amount: (*self.reward_amount).into(),
+                            }),
+                            (*self.solution_hash).into(),
+                        ),
+                        transaction_fee: 0,
+                    }));
+                }
+
+                Phase::PdBaseFee => {
+                    self.phase = Phase::Commitments;
+                    self.index = 0;
+                    // PD base fee update has no treasury impact
+                    return Some(Ok(ShadowMetadata {
+                        shadow_tx: ShadowTransaction::new_v1(
+                            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                                per_chunk: self.pd_base_fee_per_chunk.into(),
                             }),
                             (*self.solution_hash).into(),
                         ),
@@ -140,6 +158,7 @@ impl<'a> ShadowTxGenerator<'a> {
         submit_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
+        pd_base_fee_per_chunk: U256,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
         unstake_refund_events: &[UnstakeRefundEvent],
@@ -174,6 +193,7 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
+            pd_base_fee_per_chunk,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -229,6 +249,7 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             commitment_txs,
             submit_txs,
+            pd_base_fee_per_chunk,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -672,6 +693,7 @@ impl<'a> ShadowTxGenerator<'a> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
     Header,
+    PdBaseFee,
     Commitments,
     SubmitLedger,
     ExpiredLedgerFees,

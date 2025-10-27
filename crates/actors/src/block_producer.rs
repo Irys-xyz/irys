@@ -492,12 +492,20 @@ pub trait BlockProdStrategy {
 
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
 
+        // Calculate PD base fee for the new block
+        let pd_base_fee = self.calculate_pd_base_fee_for_new_block(
+            &prev_block_header,
+            &prev_evm_block,
+            &prev_block_ema_snapshot,
+        )?;
+
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
                 &mempool_bundle,
                 block_reward,
+                pd_base_fee,
                 current_timestamp,
                 solution.solution_hash,
             )
@@ -685,6 +693,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+        pd_base_fee: Amount<(CostPerChunk, Irys)>,
         timestamp_ms: u128,
         solution_hash: H256,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
@@ -706,6 +715,7 @@ pub trait BlockProdStrategy {
             &mempool.submit_txs,
             &mempool.publish_txs,
             initial_treasury_balance,
+            pd_base_fee.amount,
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
@@ -1145,28 +1155,89 @@ pub trait BlockProdStrategy {
     /// Calculate the new PD base fee for a new block based on utilization.
     ///
     /// This method computes the PD (Programmable Data) base fee per chunk by:
-    /// 1. Converting from per-chunk Irys to per-chunk USD using the EMA price
-    /// 2. Adjusting the USD fee based on block utilization (target: 50%, range: ±12.5%)
-    /// 3. Converting the adjusted per-chunk USD fee back to per-chunk Irys
+    /// 1. Extracting the current PD base fee from the parent block's 2nd shadow transaction (PdBaseFeeUpdate)
+    /// 2. Counting PD chunks used in the parent block from all PD transactions
+    /// 3. Converting from per-chunk Irys to per-chunk USD using the EMA price
+    /// 4. Adjusting the USD fee based on block utilization (target: 50%, range: ±12.5%)
+    /// 5. Converting the adjusted per-chunk USD fee back to per-chunk Irys
     ///
     /// This approach minimizes rounding errors by working in per-chunk units throughout,
     /// eliminating redundant conversions (3 mul_div operations vs 5 in naive approach).
     ///
     /// # Notes
     ///
+    /// - Reads `current_pd_base_fee_irys` directly from parent block's 2nd shadow tx
+    /// - Counts PD chunks by iterating through all transactions and detecting PD txs
     /// - Uses `prev_block_ema_snapshot.ema_for_public_pricing()` for stable price conversion
     /// - This EMA is from 2 intervals ago, providing predictable pricing for users
-    /// - TODO: Future enhancement to read `current_pd_base_fee_irys` from EVM state directly
     fn calculate_pd_base_fee_for_new_block(
         &self,
-        _prev_block_header: &IrysBlockHeader,
+        prev_block_header: &IrysBlockHeader,
+        prev_evm_block: &reth_ethereum_primitives::Block,
         prev_block_ema_snapshot: &EmaSnapshot,
-        chunks_used_in_block: u32,
-        current_pd_base_fee_irys: Amount<(CostPerChunk, Irys)>,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+        use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
+        use irys_reth::shadow_tx::{detect_and_decode, TransactionPacket};
+        use alloy_consensus::Transaction as _;
+
+        // Extract current PD base fee from parent block's 2nd shadow transaction (PdBaseFeeUpdate)
+        // The ordering is: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs
+        let second_tx = prev_evm_block
+            .body
+            .transactions
+            .get(1)
+            .ok_or_eyre("Parent block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)")?;
+
+        let shadow_tx = detect_and_decode(second_tx)
+            .map_err(|e| eyre!("Failed to decode 2nd transaction as shadow tx: {}", e))?
+            .ok_or_eyre("2nd transaction in parent block is not a shadow transaction")?;
+
+        let current_pd_base_fee_irys = match &shadow_tx {
+            irys_reth::shadow_tx::ShadowTransaction::V1 { packet, .. } => {
+                match packet {
+                    TransactionPacket::PdBaseFeeUpdate(update) => {
+                        // Convert alloy U256 to irys U256
+                        Amount::new(update.per_chunk.into())
+                    }
+                    _ => {
+                        eyre::bail!(
+                            "2nd transaction in parent block is not a PdBaseFeeUpdate (found: {:?})",
+                            packet
+                        );
+                    }
+                }
+            }
+            _ => {
+                eyre::bail!(
+                    "Unsupported shadow transaction version in parent block's 2nd transaction"
+                );
+            }
+        };
+
+        // Count PD chunks used in parent block
+        let mut total_pd_chunks: u64 = 0;
+        for tx in prev_evm_block.body.transactions.iter() {
+            // Try to detect PD header in transaction input
+            let input = tx.input();
+            if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
+                // This is a PD transaction, sum chunks from access list if present
+                if let Some(access_list) = tx.access_list() {
+                    let chunks = sum_pd_chunks_in_access_list(access_list);
+                    total_pd_chunks = total_pd_chunks.saturating_add(chunks);
+                }
+            }
+        }
+
+        debug!(
+            prev_block_height = prev_block_header.height,
+            current_pd_base_fee_irys = %current_pd_base_fee_irys.amount,
+            total_pd_chunks,
+            "Calculated PD metrics from parent block"
+        );
+
         pd_base_fee::calculate_pd_base_fee_for_new_block(
             prev_block_ema_snapshot,
-            chunks_used_in_block,
+            total_pd_chunks as u32,
             current_pd_base_fee_irys,
             &self.inner().config.consensus.programmable_data,
             self.inner().config.consensus.chunk_size,
