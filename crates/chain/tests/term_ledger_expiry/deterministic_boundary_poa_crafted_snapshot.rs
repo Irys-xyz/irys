@@ -197,7 +197,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
             .expect("receive migration result (prelude)")
             .expect("migrate prelude block");
 
-        // ensure the migration has occured
+        // ensure the migration has occurred
         loop {
             let current_height = {
                 let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
