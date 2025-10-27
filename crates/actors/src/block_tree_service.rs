@@ -192,7 +192,7 @@ impl BlockTreeService {
             }
         }
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }
@@ -296,9 +296,9 @@ impl BlockTreeServiceInner {
     async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &markers.head;
         debug!(
-            head = %tip_block.block_hash,
-            migration = %markers.migration_block.block_hash,
-            prune = %markers.prune_block.block_hash,
+            fcu.head = %tip_block.block_hash,
+            fcu.migration = %markers.migration_block.block_hash,
+            fcu.prune = %markers.prune_block.block_hash,
             "broadcasting canonical chain update",
         );
 
@@ -359,7 +359,7 @@ impl BlockTreeServiceInner {
             }
         }
 
-        debug!(hash = %block.block_hash, height = block.height, "migrating irys block");
+        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block");
 
         // NOTE: order of events is very important! block migration event
         // writes chunks to db, which is expected by `send_block_migration_message`.
@@ -502,13 +502,19 @@ impl BlockTreeServiceInner {
         );
 
         if validation_result == ValidationResult::Invalid {
-            error!(block_hash = %block_hash,"invalid block");
+            error!(
+                block.hash = %block_hash,
+                "invalid block"
+            );
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(block_hash = %block_hash,"invalid block");
+            error!(
+                block.hash = %block_hash,
+                "invalid block"
+            );
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());

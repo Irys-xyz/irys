@@ -189,7 +189,7 @@ pub fn run_vdf<B: BlockProvider>(
             next_reset_seed,
         );
     }
-    debug!(?global_step_number, "VDF thread stopped");
+    debug!(vdf.global_step_number = ?global_step_number, "VDF thread stopped");
 }
 
 #[must_use]

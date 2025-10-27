@@ -215,12 +215,12 @@ impl Inner {
             if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
                 header.promoted_height = None;
                 state.recent_valid_tx.put(txid, ());
-                tracing::debug!(%txid, "Cleared promoted_height in mempool");
+                tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
                 return Ok(());
             }
         }
 
-        tracing::debug!(%txid, "Tx not in mempool; leaving unchanged");
+        tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
         Ok(())
     }
 
@@ -594,11 +594,15 @@ impl Inner {
             .unwrap_or_default();
 
         // these txs have been confirmed, but NOT migrated
-        for tx in orphaned_confirmed_publish_txs {
-            debug!("reorging orphaned publish tx: {}", &tx);
+        for tx_id in orphaned_confirmed_publish_txs {
+            debug!("reorging orphaned publish tx: {}", &tx_id);
             // Clear promotion state for txs that were promoted on an orphaned fork
-            if let Err(e) = self.mark_unpromoted_in_mempool(tx).await {
-                warn!(%tx, error = %e, "Failed to unpromote tx during reorg");
+            if let Err(e) = self.mark_unpromoted_in_mempool(tx_id).await {
+                warn!(
+                    tx.id = %tx_id,
+                    tx.err = %e,
+                    "Failed to unpromote tx during reorg"
+                );
             }
         }
 

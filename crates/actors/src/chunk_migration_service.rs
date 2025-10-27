@@ -329,7 +329,7 @@ fn get_block_offsets_in_ledger(
     ))
 }
 
-#[instrument(skip_all, err, fields(block_hash = %block.block_hash, height = %block.height))]
+#[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 fn get_tx_path_pairs(
     block: &IrysBlockHeader,
     ledger: DataLedger,

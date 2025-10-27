@@ -268,9 +268,9 @@ impl CommitmentSnapshot {
                     Self::active_pledge_count(miner_commitments, pledges_in_epoch) as u64;
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
-                        tx_id = ?commitment_tx.id,
-                        ?pledge_count_before_executing,
-                        ?current_pledge_count,
+                        tx.id = ?commitment_tx.id,
+                        custom.pledge_count_before_executing = ?pledge_count_before_executing,
+                        custom.current_pledge_count = ?current_pledge_count,
                         "rejected"
                     );
                     return CommitmentSnapshotStatus::InvalidPledgeCount;
