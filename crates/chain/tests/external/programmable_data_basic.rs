@@ -8,7 +8,7 @@ use irys_actors::mempool_service::MempoolServiceMessage;
 
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
-use irys_primitives::precompile::IrysPrecompileOffsets;
+use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx as _;

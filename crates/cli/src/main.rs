@@ -4,7 +4,7 @@ use irys_chain::utils::load_config;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
-use irys_reth_node_bridge::irys_reth::chainspec::irys_chain_spec;
+use irys_types::chainspec::irys_chain_spec;
 use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use std::{path::PathBuf, sync::Arc};

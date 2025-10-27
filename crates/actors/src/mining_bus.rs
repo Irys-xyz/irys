@@ -29,7 +29,7 @@ pub enum MiningBroadcastEvent {
 
 #[derive(Debug)]
 struct MiningBusInner {
-    subscribers: Mutex<Vec<UnboundedSender<MiningBroadcastEvent>>>,
+    subscribers: Mutex<Vec<UnboundedSender<Arc<MiningBroadcastEvent>>>>,
     span: Option<Span>,
 }
 
@@ -67,7 +67,7 @@ impl MiningBus {
 
     /// Subscribe to mining events. Returns a new UnboundedReceiver.
     /// The receiver will get all subsequent broadcast events.
-    pub fn subscribe(&self) -> UnboundedReceiver<MiningBroadcastEvent> {
+    pub fn subscribe(&self) -> UnboundedReceiver<Arc<MiningBroadcastEvent>> {
         let (tx, rx) = unbounded_channel();
         let mut subs = self.0.subscribers.lock().expect("mining bus poisoned");
         subs.push(tx);
@@ -76,7 +76,7 @@ impl MiningBus {
 
     /// Broadcast a raw event to all current subscribers.
     /// Returns the number of subscribers after pruning closed channels.
-    pub fn send_event(&self, evt: MiningBroadcastEvent) -> usize {
+    pub fn send_event(&self, evt: Arc<MiningBroadcastEvent>) -> usize {
         let mut subs = self.0.subscribers.lock().expect("mining bus poisoned");
 
         // Retain only senders that can receive this event
@@ -97,18 +97,18 @@ impl MiningBus {
             checkpoints,
             global_step,
         };
-        self.send_event(MiningBroadcastEvent::Seed(msg))
+        self.send_event(Arc::new(MiningBroadcastEvent::Seed(msg)))
     }
 
     /// Send a difficulty update to all subscribers.
     pub fn send_difficulty(&self, msg: BroadcastDifficultyUpdate) -> usize {
-        self.send_event(MiningBroadcastEvent::Difficulty(msg))
+        self.send_event(Arc::new(MiningBroadcastEvent::Difficulty(msg)))
     }
 
     /// Send partition expiration notice to all subscribers.
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
         debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
-        self.send_event(MiningBroadcastEvent::PartitionsExpiration(msg))
+        self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
 }
 

@@ -55,7 +55,7 @@ arbitrary.workspace = true
 bytes.workspace = true
 lru.workspace = true
 thiserror.workspace = true
-irys-primitives.workspace = true
+irys-types.workspace = true
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }

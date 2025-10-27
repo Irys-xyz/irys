@@ -3,7 +3,7 @@ use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FIL
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
-use irys_primitives::CommitmentStatus;
+use irys_types::CommitmentStatus;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -291,10 +291,10 @@ impl EpochSnapshot {
 
         self.expire_term_ledger_slots(new_epoch_block);
 
-        // Apply any unpledge operations contained in this epoch
         self.apply_unpledges(&new_epoch_commitments)?;
-        // Apply unstake operations after unpledges
+
         self.apply_unstakes(&new_epoch_commitments)?;
+
         self.backfill_missing_partitions();
 
         self.allocate_additional_capacity();
@@ -315,7 +315,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_primitives::CommitmentType::Unstake = &commitment.commitment_type else {
+            let irys_types::CommitmentType::Unstake = &commitment.commitment_type else {
                 continue;
             };
             let signer = commitment.signer;
@@ -746,14 +746,12 @@ impl EpochSnapshot {
         let mut pledge_commitments: Vec<&CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments.iter() {
             match commitment_tx.commitment_type {
-                irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
-                irys_primitives::CommitmentType::Pledge { .. } => {
-                    pledge_commitments.push(commitment_tx)
-                }
+                irys_types::CommitmentType::Stake => stake_commitments.push(commitment_tx),
+                irys_types::CommitmentType::Pledge { .. } => pledge_commitments.push(commitment_tx),
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
-                irys_primitives::CommitmentType::Unpledge { .. } => {}
+                irys_types::CommitmentType::Unpledge { .. } => {}
                 // Unstakes are applied in `apply_unstakes()` after pledges have been processed
-                irys_primitives::CommitmentType::Unstake => {}
+                irys_types::CommitmentType::Unstake => {}
             }
         }
 
@@ -822,7 +820,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_primitives::CommitmentType::Unpledge { partition_hash, .. } =
+            let irys_types::CommitmentType::Unpledge { partition_hash, .. } =
                 &commitment.commitment_type
             else {
                 continue;
@@ -1435,7 +1433,7 @@ mod tests {
 
     mod unpledge_processing {
         use super::*;
-        use irys_primitives::CommitmentStatus;
+        use irys_types::CommitmentStatus;
         use irys_types::{transaction::CommitmentType, U256};
 
         fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {

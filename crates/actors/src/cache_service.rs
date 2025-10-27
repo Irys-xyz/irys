@@ -1140,13 +1140,23 @@ mod tests {
     #[cfg(test)]
     mod fifo_properties {
         use super::*;
+        use irys_types::UnixTimestamp;
         use proptest::prelude::*;
+
+        prop_compose! {
+            fn unix_timestamps()(
+                // Realistic range: 2020-01-01 to 2030-01-01
+                secs in 1_577_836_800_u64..1_893_456_000_u64
+            ) -> UnixTimestamp {
+                UnixTimestamp::from_secs(secs)
+            }
+        }
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(10))]
             #[test]
             fn slow_fifo_ordering_always_maintained(
-                timestamps in prop::collection::vec(100_u64..1_000_000, 5..20)
+                timestamps in prop::collection::vec(unix_timestamps(), 5..20)
             ) {
                 let rt = tokio::runtime::Runtime::new().unwrap();
                 rt.block_on(async {
@@ -1158,8 +1168,7 @@ mod tests {
                         .unwrap();
 
                     // Insert entries with random timestamps
-                    for ts in &timestamps {
-                        let timestamp = irys_types::UnixTimestamp::from_secs(*ts);
+                    for timestamp in timestamps {
                         insert_entry_with_timestamp(&service, timestamp)
                             .unwrap();
                     }
