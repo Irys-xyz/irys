@@ -361,6 +361,7 @@ pub struct DifficultyAdjustmentConfig {
     pub min_difficulty_adjustment_factor: Decimal,
 }
 
+// todo move this to a hardfork configuration
 /// # Programmable Data Configuration
 ///
 /// Controls pricing and cost parameters for Programmable Data (PD) transactions.
@@ -374,6 +375,7 @@ pub struct ProgrammableDataConfig {
     )]
     pub cost_per_mb: Amount<Usd>,
 
+    // todo do we need this
     /// Minimum transaction cost in USD (regardless of data size)
     #[serde(
         deserialize_with = "serde_utils::token_amount",
@@ -382,6 +384,7 @@ pub struct ProgrammableDataConfig {
     pub minimum_tx_cost: Amount<Usd>,
 
     /// Floor for base fee - base fee cannot drop below this value in USD
+    /// (expressed as USD per mb)
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"

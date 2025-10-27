@@ -30,11 +30,17 @@ use irys_reth::{
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    app_state::DatabaseProvider,
+    block_production::SolutionContext,
+    calculate_difficulty, next_cumulative_diff,
+    storage_pricing::{
+        phantoms::{CostPerChunk, Irys},
+        Amount,
+    },
+    Address, AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
+    IrysBlockHeader, IrysTokenPrice, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle,
+    VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -59,6 +65,7 @@ use tracing::{debug, error, info, warn, Instrument as _};
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
+pub mod pd_base_fee;
 pub use block_validation_tracker::BlockValidationTracker;
 
 /// Result of checking parent validity and solution compatibility
@@ -1133,6 +1140,37 @@ pub trait BlockProdStrategy {
             current_timestamp.saturating_div(1000),
         )?;
         Ok(reward_amount)
+    }
+
+    /// Calculate the new PD base fee for a new block based on utilization.
+    ///
+    /// This method computes the PD (Programmable Data) base fee per chunk by:
+    /// 1. Converting from per-chunk Irys to per-chunk USD using the EMA price
+    /// 2. Adjusting the USD fee based on block utilization (target: 50%, range: ±12.5%)
+    /// 3. Converting the adjusted per-chunk USD fee back to per-chunk Irys
+    ///
+    /// This approach minimizes rounding errors by working in per-chunk units throughout,
+    /// eliminating redundant conversions (3 mul_div operations vs 5 in naive approach).
+    ///
+    /// # Notes
+    ///
+    /// - Uses `prev_block_ema_snapshot.ema_for_public_pricing()` for stable price conversion
+    /// - This EMA is from 2 intervals ago, providing predictable pricing for users
+    /// - TODO: Future enhancement to read `current_pd_base_fee_irys` from EVM state directly
+    fn calculate_pd_base_fee_for_new_block(
+        &self,
+        _prev_block_header: &IrysBlockHeader,
+        prev_block_ema_snapshot: &EmaSnapshot,
+        chunks_used_in_block: u32,
+        current_pd_base_fee_irys: Amount<(CostPerChunk, Irys)>,
+    ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+        pd_base_fee::calculate_pd_base_fee_for_new_block(
+            prev_block_ema_snapshot,
+            chunks_used_in_block,
+            current_pd_base_fee_irys,
+            &self.inner().config.consensus.programmable_data,
+            self.inner().config.consensus.chunk_size,
+        )
     }
 
     async fn get_ema_price(

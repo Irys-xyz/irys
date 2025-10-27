@@ -8,7 +8,7 @@ use irys_types::{
         phantoms::{Percentage, Usd},
         safe_sub, Amount, PRECISION_SCALE,
     },
-    BlockHash, DatabaseProvider, ProgrammableDataConfig, RethPeerInfo, TokioServiceHandle, H256,
+    BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256,
     U256,
 };
 use reth::{
@@ -324,7 +324,7 @@ impl RethService {
     }
 }
 
-mod pd_fee_adjustments {
+pub(crate) mod pd_fee_adjustments {
     use rust_decimal_macros::dec;
 
     use super::*;
@@ -335,12 +335,11 @@ mod pd_fee_adjustments {
     /// - At 50% utilization (target): no change
     /// - At 100% utilization: +12.5% adjustment
     /// - At 0% utilization: -12.5% adjustment
-    ///
-    /// The adjusted fee is always at least `pd_config.base_fee_floor`.
     pub(crate) fn calculate_new_base_fee(
         current_base_fee: Amount<Usd>,
         chunks_used_in_block: u32,
-        pd_config: &ProgrammableDataConfig,
+        max_pd_chunks_per_block: u64,
+        base_fee_floor: Amount<Usd>,
     ) -> Result<Amount<Usd>> {
         // Protocol constants for base fee adjustment
         let max_adjustment = Amount::<Percentage>::percentage(dec!(0.125))?; // 12.5%
@@ -351,7 +350,7 @@ mod pd_fee_adjustments {
         let utilization = mul_div(
             U256::from(chunks_used_in_block),
             PRECISION_SCALE,
-            U256::from(pd_config.max_pd_chunks_per_block),
+            U256::from(max_pd_chunks_per_block),
         )?;
 
         // Calculate adjustment percentage based on utilization vs target
@@ -382,8 +381,8 @@ mod pd_fee_adjustments {
         };
 
         // Enforce floor
-        let final_fee = if new_fee.amount < pd_config.base_fee_floor.amount {
-            pd_config.base_fee_floor
+        let final_fee = if new_fee.amount < base_fee_floor.amount {
+            base_fee_floor
         } else {
             new_fee
         };
@@ -395,6 +394,7 @@ mod pd_fee_adjustments {
     mod tests {
         use super::*;
         use eyre::Result;
+        use irys_types::ProgrammableDataConfig;
         use rust_decimal::Decimal;
         use rust_decimal_macros::dec;
 
@@ -434,7 +434,12 @@ mod pd_fee_adjustments {
             };
 
             // Action
-            let new_fee = calculate_new_base_fee(current_base_fee, chunks_used, &pd_config)?;
+            let new_fee = calculate_new_base_fee(
+                current_base_fee,
+                chunks_used,
+                pd_config.max_pd_chunks_per_block,
+                pd_config.base_fee_floor,
+            )?;
 
             // Assert
             let actual = new_fee.token_to_decimal()?;
