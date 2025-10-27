@@ -528,8 +528,7 @@ where
             let treasury = Address::ZERO;
 
             // Strip the PD header from calldata before executing the tx logic.
-            // TODO: we can skip the .to_vec()
-            let stripped: Bytes = tx.data[consumed..].to_vec().into();
+            let stripped: Bytes = tx.data.slice(consumed..);
             let mut tx = tx;
             tx.data = stripped;
 
