@@ -1,7 +1,7 @@
 //! Shared context for PD precompile execution.
 
 use alloy_eips::eip2930::AccessListItem;
-use irys_primitives::chunk_provider::RethChunkProvider;
+use irys_types::chunk_provider::RethChunkProvider;
 use parking_lot::RwLock;
 use std::sync::Arc;
 

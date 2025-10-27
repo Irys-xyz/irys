@@ -296,9 +296,7 @@ pub struct IrysEvmFactory {
 }
 
 impl IrysEvmFactory {
-    pub fn new(
-        chunk_provider: Arc<dyn irys_primitives::chunk_provider::RethChunkProvider>,
-    ) -> Self {
+    pub fn new(chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>) -> Self {
         let context = PdContext::new(chunk_provider);
         Self { context }
     }
@@ -1458,8 +1456,7 @@ mod tests {
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -1497,8 +1494,7 @@ mod tests {
     /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
     #[test]
     fn evm_processes_normal_tx_success() {
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit

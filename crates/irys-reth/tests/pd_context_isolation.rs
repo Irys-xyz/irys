@@ -6,15 +6,15 @@
 //! 3. Concurrent EVM execution is safe and deterministic
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
-use alloy_evm::Evm;
+use alloy_evm::Evm as _;
 use alloy_primitives::{aliases::U200, Address, Bytes, TxKind, B256, U256};
-use irys_primitives::chunk_provider::MockChunkProvider;
-use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_primitives::range_specifier::{
+use irys_reth::evm::{IrysEvm, IrysEvmFactory};
+use irys_types::chunk_provider::MockChunkProvider;
+use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
+use irys_types::range_specifier::{
     ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
 };
-use irys_reth::evm::{IrysEvm, IrysEvmFactory};
-use reth_evm::{precompiles::PrecompilesMap, EvmEnv, EvmFactory};
+use reth_evm::{precompiles::PrecompilesMap, EvmEnv, EvmFactory as _};
 use revm::context::result::ResultAndState;
 use revm::context::{BlockEnv, CfgEnv, TxEnv};
 use revm::database::EmptyDB;
@@ -148,12 +148,11 @@ fn test_empty_access_list_isolation() {
     let tx2 = create_pd_transaction(empty_access_list, 0, 0);
     let result2 = evm2.transact_raw(tx2);
 
-    match result2 {
-        Ok(res) => assert!(
+    if let Ok(res) = result2 {
+        assert!(
             !res.result.is_success(),
             "Transaction with empty access list should fail"
-        ),
-        Err(_) => {}
+        )
     }
 }
 

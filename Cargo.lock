@@ -5402,7 +5402,6 @@ dependencies = [
  "clap",
  "eyre",
  "irys-database",
- "irys-primitives",
  "irys-reth",
  "irys-types",
  "reth",

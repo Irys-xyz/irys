@@ -1,8 +1,8 @@
 //! Utilities for parsing PD precompile access lists.
 
 use alloy_eips::eip2930::AccessListItem;
-use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_primitives::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg};
+use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
+use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg};
 use tracing::warn;
 
 /// Parsed PD access list entries categorized by read type.

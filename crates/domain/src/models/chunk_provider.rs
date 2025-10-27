@@ -120,7 +120,7 @@ impl ChunkProvider {
     }
 }
 
-impl irys_primitives::chunk_provider::RethChunkProvider for ChunkProvider {
+impl irys_types::chunk_provider::RethChunkProvider for ChunkProvider {
     fn get_unpacked_chunk_by_ledger_offset(
         &self,
         ledger: u32,
@@ -148,8 +148,8 @@ impl irys_primitives::chunk_provider::RethChunkProvider for ChunkProvider {
         Ok(unpacked)
     }
 
-    fn config(&self) -> irys_primitives::chunk_provider::ChunkConfig {
-        irys_primitives::chunk_provider::ChunkConfig {
+    fn config(&self) -> irys_types::chunk_provider::ChunkConfig {
+        irys_types::chunk_provider::ChunkConfig {
             num_chunks_in_partition: self.config.consensus.num_chunks_in_partition,
             chunk_size: self.config.consensus.chunk_size,
             entropy_packing_iterations: self.config.consensus.entropy_packing_iterations as u8,

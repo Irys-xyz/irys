@@ -1,6 +1,6 @@
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Bytes;
-use irys_primitives::precompile::PD_PRECOMPILE_ADDRESS;
+use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use reth_evm::precompiles::PrecompilesMap;
 use revm::precompile::PrecompileError;
 use revm::precompile::{PrecompileOutput, PrecompileResult};
@@ -144,8 +144,7 @@ mod tests {
         input: Vec<u8>,
         access_list: AccessList,
     ) -> revm::context::result::ResultAndState {
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
 
         let mut cfg_env = CfgEnv::default();
@@ -184,7 +183,7 @@ mod tests {
     fn pd_precompile_read_full_byte_range() {
         use alloy_eips::eip2930::AccessListItem;
         use alloy_primitives::{aliases::U200, B256};
-        use irys_primitives::range_specifier::{
+        use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
 
@@ -238,8 +237,7 @@ mod tests {
         use alloy_evm::{Evm as _, EvmFactory as _};
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -278,13 +276,12 @@ mod tests {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
         use alloy_primitives::{aliases::U200, B256};
-        use irys_primitives::range_specifier::{
+        use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -356,8 +353,7 @@ mod tests {
         use alloy_evm::{Evm as _, EvmFactory as _};
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -396,13 +392,12 @@ mod tests {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
         use alloy_primitives::{aliases::U200, B256};
-        use irys_primitives::range_specifier::{
+        use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -461,13 +456,12 @@ mod tests {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
         use alloy_primitives::{aliases::U200, B256};
-        use irys_primitives::range_specifier::{
+        use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -536,13 +530,12 @@ mod tests {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
         use alloy_primitives::{aliases::U200, B256};
-        use irys_primitives::range_specifier::{
+        use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -610,13 +603,12 @@ mod tests {
         use alloy_eips::eip2930::{AccessList, AccessListItem};
         use alloy_evm::{Evm as _, EvmFactory as _};
         use alloy_primitives::{aliases::U200, B256};
-        use irys_primitives::range_specifier::{
+        use irys_types::range_specifier::{
             ByteRangeSpecifier, ChunkRangeSpecifier, PdAccessListArg, U18, U34,
         };
         use revm::primitives::{TxKind, U256};
 
-        let mock_chunk_provider =
-            Arc::new(irys_primitives::chunk_provider::MockChunkProvider::new());
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
         let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;

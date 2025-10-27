@@ -71,10 +71,9 @@ reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 rand09 = { package = "rand", version = "0.9" }
-irys-primitives = { workspace = true, features = ["test-utils"] }
 
 [features]
-test-utils = ["reth-e2e-test-utils", "reth-engine-local", "irys-primitives/test-utils"]
+test-utils = ["reth-e2e-test-utils", "reth-engine-local"]
 
 [lints]
 workspace = true

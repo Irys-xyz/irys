@@ -7,7 +7,7 @@
 //! 3. **Core byte range read** ([`read_bytes_range`]) - Fetches chunks and returns requested bytes
 
 use alloy_primitives::{aliases::U200, Bytes};
-use irys_primitives::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, U34};
+use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, U34};
 use revm::precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 use tracing::{debug, warn};
 
@@ -346,8 +346,8 @@ mod tests {
     use super::*;
     use crate::precompiles::pd::context::PdContext;
     use crate::precompiles::pd::utils::ParsedAccessLists;
-    use irys_primitives::chunk_provider::MockChunkProvider;
-    use irys_primitives::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
+    use irys_types::chunk_provider::MockChunkProvider;
+    use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
     use std::sync::Arc;
 
     /// Creates a test PD context with a mock chunk provider.
@@ -433,7 +433,7 @@ mod tests {
             let calldata = Bytes::from(vec![0, 5]); // Request index 5
 
             // Create access list with only 2 byte reads
-            use irys_primitives::range_specifier::U18;
+            use irys_types::range_specifier::U18;
             let byte_reads = vec![
                 ByteRangeSpecifier {
                     index: 0,
@@ -464,7 +464,7 @@ mod tests {
 
         #[test]
         fn test_invalid_calldata_length() {
-            use irys_primitives::range_specifier::U18;
+            use irys_types::range_specifier::U18;
             let context = create_test_context();
             let calldata = Bytes::from(vec![0]); // Too short
 
@@ -494,7 +494,7 @@ mod tests {
 
         #[test]
         fn test_invalid_calldata() {
-            use irys_primitives::range_specifier::U18;
+            use irys_types::range_specifier::U18;
             let context = create_test_context();
             let calldata = Bytes::from(vec![0; 5]); // Wrong length
 
@@ -520,7 +520,7 @@ mod tests {
 
         #[test]
         fn test_index_out_of_bounds() {
-            use irys_primitives::range_specifier::U18;
+            use irys_types::range_specifier::U18;
             let context = create_test_context();
 
             let mut calldata = vec![0, 10]; // function_id=0, index=10
@@ -564,7 +564,7 @@ mod tests {
         #[test]
         fn test_chunk_range_index_out_of_bounds() {
             use alloy_primitives::aliases::U200;
-            use irys_primitives::range_specifier::U18;
+            use irys_types::range_specifier::U18;
             let context = create_test_context();
 
             // ByteRangeSpecifier with index=5 but only provide 2 chunk reads
@@ -605,7 +605,7 @@ mod tests {
         #[test]
         fn test_valid_read() {
             use alloy_primitives::aliases::U200;
-            use irys_primitives::range_specifier::U18;
+            use irys_types::range_specifier::U18;
             let context = create_test_context();
 
             let byte_range = ByteRangeSpecifier {
@@ -685,7 +685,7 @@ mod tests {
                 offset_delta in 0_u64..10_000,
                 chunk_size in 1_u64..1_000_000
             ) {
-                use irys_primitives::range_specifier::U18;
+                use irys_types::range_specifier::U18;
 
                 let Ok(length_u34) = U34::try_from(length) else { return Ok(()); };
                 let Ok(byte_offset_u18) = U18::try_from(byte_offset) else { return Ok(()); };

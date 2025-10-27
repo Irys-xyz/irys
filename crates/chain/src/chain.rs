@@ -244,7 +244,7 @@ async fn start_reth_node(
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
     shadow_tx_store: ShadowTxStore,
-    chunk_provider: Arc<dyn irys_primitives::chunk_provider::RethChunkProvider>,
+    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -885,7 +885,7 @@ impl IrysNode {
                 let _span = span.enter();
                 let run_reth_until_ctrl_c_or_signal = async move {
                     // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
-                    let mock_provider = irys_primitives::chunk_provider::MockChunkProvider::new();
+                    let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
 
                     let node_handle = start_reth_node(
                         exec,
