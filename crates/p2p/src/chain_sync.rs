@@ -6,10 +6,7 @@ use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
-use irys_types::{
-    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
-    PeerListItem, SyncMode, TokioServiceHandle,
-};
+use irys_types::{Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, PeerListItem, SyncMode, TokioServiceHandle, U256};
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{HashMap, VecDeque};
@@ -1439,7 +1436,8 @@ async fn estimate_canonical_height(
     api_client: &impl ApiClient,
     mut highest_trusted_peer_height: u64,
 ) -> u64 {
-    // Don't wait for hydration, since the
+    let mut highest_difficulty = U256::zero();
+    // Don't wait for hydration, since we're just asking the API endpoints of trusted peers
     let trusted_peers = peer_list.all_trusted_peers();
     if trusted_peers.is_empty() {
         warn!("The node has no trusted peers configured, falling back to local index height for canonical height estimation");
@@ -1451,7 +1449,7 @@ async fn estimate_canonical_height(
         async move {
             debug!("Sync task: Trusted peer: {:?}", peer);
             match api_client.node_info(peer.address.api).await {
-                Ok(info) => Some(info.block_index_height),
+                Ok(info) => Some(info),
                 Err(err) => {
                     warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
                     None
@@ -1460,15 +1458,17 @@ async fn estimate_canonical_height(
         }
     });
 
-    let heights = futures::future::join_all(futures).await;
+    let infos = futures::future::join_all(futures).await;
 
-    for index_tip in heights.into_iter().flatten() {
-        if index_tip > highest_trusted_peer_height {
+    for info in infos.into_iter().flatten() {
+        let difficulty = info.latest_cumulative_difficulty;
+        if difficulty > highest_difficulty {
             debug!(
-                "Sync task: Updating the highest trusted peer height from {} to {}",
-                highest_trusted_peer_height, index_tip
+                "Sync task: Updating the highest trusted peer height from {} to the value from Info {}",
+                highest_trusted_peer_height, info
             );
-            highest_trusted_peer_height = index_tip;
+            highest_difficulty = difficulty;
+            highest_trusted_peer_height = info.block_index_height;
         }
     }
 
