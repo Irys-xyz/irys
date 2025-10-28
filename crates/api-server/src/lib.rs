@@ -58,7 +58,14 @@ impl ApiState {
 pub fn routes() -> impl HttpServiceFactory {
     web::scope(API_VERSION)
         .route("/", web::get().to(index::info_route))
-        .route("/block/{block_tag}", web::get().to(block::get_block))
+        .route(
+            "/block/{block_tag}",
+            web::get().to(block::get_block_without_poa),
+        )
+        .route(
+            "/block/{block_tag}/full",
+            web::get().to(block::get_block_with_poa),
+        )
         .route(
             "/block_index",
             web::get().to(block_index::block_index_route),
