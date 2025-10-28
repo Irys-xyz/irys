@@ -510,6 +510,7 @@ where
             // Read the actual PD base fee from EVM state and cap by user's max.
             let actual_per_chunk = self.read_pd_base_fee_per_chunk();
             let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
+                // TODO: reject the tx!!!
                 pd_header.max_base_fee_per_chunk
             } else {
                 actual_per_chunk
@@ -524,37 +525,46 @@ where
             let beneficiary = self.block().beneficiary;
             // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
             // that will also make accounting easier on irys side
-            let base_sink = Address::ZERO;
-
-            // Charge PD base fee and PD priority fee.
-            // - Base: transfer from payer -> sink
-            // - Priority: transfer from payer -> beneficiary
-            self.distribute_base_fee(base_total, fee_payer, base_sink)?;
-            self.distribute_priority_fee(prio_total, Some(fee_payer), beneficiary)?;
+            let treasury = Address::ZERO;
 
             // Strip the PD header from calldata before executing the tx logic.
-            let stripped: Bytes = tx.data[consumed..].to_vec().into();
+            let stripped: Bytes = tx.data.slice(consumed..);
             let mut tx = tx;
             tx.data = stripped;
 
-            // TODO: bug - when we distribute fees we only update the self.state hashmap, not the undrlying evm state. As a result, if `self.inner` operates on any evm state for an account, then it will be ovreriden.
-            // - We need to either change the order of operations (play evm, then deduct fees)
-            // - Or make a more sophisticated state tracking apporac, interacting with the evm more directly, eliminating our self.state
+            let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
+            {
+                // deduct fees from payer
+                // TODO: if user does not have enough fees then we extract all the funds we can from him
+                if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                    &mut self.inner.ctx.journaled_state.database,
+                    fee_payer,
+                    treasury,
+                    base_total,
+                )? {
+                    return Err(EVMError::Custom(
+                        "insufficient balance for PD base fees".to_string(),
+                    ));
+                }
+                if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                    &mut self.inner.ctx.journaled_state.database,
+                    fee_payer,
+                    beneficiary,
+                    prio_total,
+                )? {
+                    return Err(EVMError::Custom(
+                        "insufficient balance for PD priority fees".to_string(),
+                    ));
+                }
+            }
+            self.inner.ctx.journaled_state.checkpoint_commit();
 
-            // Execute the (stripped) transaction and merge our custom fee distribution changes
-            // into the returned state so they are persisted by the caller.
-            let mut res = if self.inspect {
+            let res = if self.inspect {
                 self.inner.set_tx(tx);
                 self.inner.inspect_replay()
             } else {
                 self.inner.transact(tx)
             }?;
-
-            // Merge any staged account changes from PD fee charging.
-            // This mirrors how shadow-tx path returns `self.state` for commit.
-            for (addr, account) in std::mem::take(&mut self.state) {
-                res.state.insert(addr, account);
-            }
 
             return Ok(res);
         }
@@ -964,40 +974,6 @@ where
         Ok(())
     }
 
-    /// Distributes PD base fees to a designated sink address by debiting the fee payer.
-    /// If `total_fee` is zero, this is a no-op.
-    pub fn distribute_base_fee(
-        &mut self,
-        total_fee: U256,
-        fee_payer_address: Address,
-        sink: Address,
-    ) -> Result<(), <Self as Evm>::Error> {
-        if total_fee.is_zero() {
-            return Ok(());
-        }
-
-        // Early return for same-address transfer (no-op)
-        if fee_payer_address == sink {
-            // Ensure account exists
-            let account_state = self.load_account(fee_payer_address)?;
-            if account_state.is_none() {
-                return Err(Self::create_internal_error(format!(
-                    "PD base fee failed: payer account does not exist for same-address transfer. Payer: {fee_payer_address}, Fee: {total_fee}"
-                )));
-            }
-            return Ok(());
-        }
-
-        // Prepare transfer: payer -> sink
-        let (payer_state, sink_state) =
-            self.prepare_fee_transfer(fee_payer_address, sink, total_fee)?;
-
-        self.commit_account_change(fee_payer_address, payer_state);
-        self.commit_account_change(sink, sink_state);
-
-        Ok(())
-    }
-
     /// Prepares the fee transfer by validating and creating state changes for both accounts.
     ///
     /// Returns the updated state for both target and beneficiary accounts.
@@ -1390,11 +1366,59 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+    use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
+    use crate::test_utils::{
+        advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
+        DEFAULT_PRIORITY_FEE,
+    };
+    use alloy_consensus::TxEip1559;
+    use alloy_eips::eip2930::AccessListItem as AlItem;
     use alloy_primitives::{Address, B256, U256};
+    use alloy_primitives::{Bytes, FixedBytes};
+    use reth::rpc::api::eth::EthApiServer as _;
     use reth_evm::EvmEnv;
+    use reth_provider::ReceiptProvider as _;
+
+    use reth_transaction_pool::{PoolTransaction as _, TransactionOrigin, TransactionPool as _};
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
+
+    fn tx_request_base() -> alloy_rpc_types::TransactionRequest {
+        alloy_rpc_types::TransactionRequest {
+            chain_id: Some(1),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas: Some(100_000),
+            ..Default::default()
+        }
+    }
+
+    fn tx_eip1559_base() -> TxEip1559 {
+        TxEip1559 {
+            chain_id: 1,
+            gas_limit: 100_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            to: TxKind::Call(Address::random()),
+            value: U256::ZERO,
+            nonce: 0,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }
+    }
+
+    /// Helper to build PD access list with N chunks
+    fn build_pd_access_list(num_chunks: usize) -> alloy_eips::eip2930::AccessList {
+        let keys: Vec<_> = (0..num_chunks)
+            .map(|i| encode_pd_storage_key([0_u8; 26], i as u32, 1))
+            .collect();
+        alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: keys,
+        }])
+    }
 
     /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
     #[test]
@@ -1476,27 +1500,21 @@ mod tests {
     }
 
     /// Ensure a PD-shaped transaction with header charges base and priority fees end-to-end via node execution.
+    /// Tests with different transfer values (0, 1, 2, 3) to ensure proper accounting across all scenarios.
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
     #[test_log::test(tokio::test)]
-    async fn evm_pd_header_tx_charges_fees() -> eyre::Result<()> {
-        use alloy_consensus::TxEip1559;
-        use alloy_eips::eip2930::AccessListItem as AlItem;
-        use alloy_primitives::{Bytes, FixedBytes};
-        use reth_transaction_pool::{TransactionOrigin, TransactionPool as _};
-
-        use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
-        use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
-        use crate::test_utils::{
-            advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
-            DEFAULT_PRIORITY_FEE,
-        };
-
+    async fn evm_pd_header_tx_charges_fees(#[case] transfer_value: u64) -> eyre::Result<()> {
         // Spin up a single node and set PD base fee via shadow transaction
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
         let payer = ctx.normal_signer.address();
         let beneficiary = ctx.block_producer_a.address();
-        let sink = Address::ZERO;
+        let treasury = Address::ZERO;
 
         let pd_base_fee = U256::from(7_u64);
         let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
@@ -1511,10 +1529,11 @@ mod tests {
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
 
-        // Capture initial balances
+        // Capture initial balances and nonce
         let payer_initial = get_balance(&node.inner, payer);
         let beneficiary_initial = get_balance(&node.inner, beneficiary);
-        let sink_initial = get_balance(&node.inner, sink);
+        let sink_initial = get_balance(&node.inner, treasury);
+        let payer_initial_nonce = get_nonce(&node.inner, payer);
 
         // Build and submit a PD-header transaction: 3 chunks, prio=10, base<=7
         let header = PdHeaderV1 {
@@ -1534,55 +1553,375 @@ mod tests {
         }]);
 
         // Compose EIP-1559 tx with zero priority gas fee so only PD fees affect balances
-        let nonce = get_nonce(&node.inner, payer);
+        let value = U256::from(transfer_value);
         let tx_raw = TxEip1559 {
             access_list,
-            chain_id: 1,
-            gas_limit: 100_000,
             input,
-            max_fee_per_gas: 1_000_000_000, // basefee=0 => effective gas price 0
             max_priority_fee_per_gas: 0,
-            nonce,
-            to: TxKind::Call(Address::random()),
-            value: U256::ZERO,
+            nonce: payer_initial_nonce,
+            value,
+            ..tx_eip1559_base()
         };
         let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
-        let _tx_hash = node
+        let tx_hash = *pooled.hash();
+        let _add_result = node
             .inner
             .pool
             .add_transaction(TransactionOrigin::Local, pooled)
             .await?;
 
         // Mine a block including the PD-header tx
-        advance_block(&mut node, &shadow_tx_store, vec![]).await?;
+        let payload = advance_block(&mut node, &shadow_tx_store, vec![]).await?;
 
-        // Expected PD fees
-        let base_total = U256::from(3_u64) * pd_base_fee; // 3 chunks * 7 = 21
-        let prio_total = U256::from(3_u64) * U256::from(10_u64); // 3 chunks * 10 = 30
+        // Query the receipt to get actual gas used
+        let receipt = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .receipt_by_hash(tx_hash)
+            .unwrap()
+            .expect("Receipt should exist for mined transaction");
+        let gas_used = receipt.cumulative_gas_used;
 
-        // Validate balances
+        // Get the block basefee
+        let block = payload.block();
+        let block_basefee = block.header().base_fee_per_gas.unwrap_or(0);
+
+        // Calculate PD fees
+        let pd_base_total = U256::from(3_u64) * pd_base_fee; // 3 chunks * 7 = 21
+        let pd_prio_total = U256::from(3_u64) * U256::from(10_u64); // 3 chunks * 10 = 30
+
+        // Calculate EVM gas costs
+        // Note: max_priority_fee_per_gas = 0 in this test, so only base fee matters
+        let evm_base_cost = U256::from(gas_used) * U256::from(block_basefee);
+        let evm_priority_cost = U256::ZERO; // max_priority_fee_per_gas is 0
+
+        // Total expected deduction: PD fees + EVM gas + tx.value
+        let expected_total =
+            pd_base_total + pd_prio_total + evm_base_cost + evm_priority_cost + value;
+
+        // Validate payer balance deduction
         let payer_final = get_balance(&node.inner, payer);
         let deducted = payer_initial.saturating_sub(payer_final);
-        // With dev chain basefee=0 and tx priority gas tip=0, the only deduction is PD base+priority.
         assert_eq!(
             deducted,
-            base_total + prio_total,
-            "payer balance not deducted exactly by PD fees"
+            expected_total,
+            "Payer balance deduction mismatch. Expected: {} (PD base: {} + PD prio: {} + EVM base: {} + EVM prio: {}), Got: {}",
+            expected_total,
+            pd_base_total,
+            pd_prio_total,
+            evm_base_cost,
+            evm_priority_cost,
+            deducted
         );
 
+        // Beneficiary should receive: PD priority fees + EVM priority tips
+        // In this test, EVM priority tip = 0, so only PD priority fees
         let beneficiary_final = get_balance(&node.inner, beneficiary);
+        let expected_beneficiary_gain = pd_prio_total + evm_priority_cost;
         assert_eq!(
             beneficiary_final,
-            beneficiary_initial + prio_total,
-            "beneficiary should receive priority fees"
+            beneficiary_initial + expected_beneficiary_gain,
+            "Beneficiary balance mismatch. Expected gain: {} (PD prio: {} + EVM prio: {}), Got: {}",
+            expected_beneficiary_gain,
+            pd_prio_total,
+            evm_priority_cost,
+            beneficiary_final.saturating_sub(beneficiary_initial)
         );
 
-        let sink_final = get_balance(&node.inner, sink);
+        // Sink should receive: PD base fees
+        let sink_final = get_balance(&node.inner, treasury);
+        let expected_sink_gain = pd_base_total;
         assert_eq!(
             sink_final,
-            sink_initial + base_total,
-            "sink should receive base fees"
+            sink_initial + expected_sink_gain,
+            "Sink balance mismatch. Expected gain: {} (PD base: {} + EVM base: {}), Got: {}",
+            expected_sink_gain,
+            pd_base_total,
+            evm_base_cost,
+            sink_final.saturating_sub(sink_initial)
         );
+
+        // Verify nonce was incremented
+        let payer_final_nonce = get_nonce(&node.inner, payer);
+        assert_eq!(
+            payer_final_nonce,
+            payer_initial_nonce + 1,
+            "Nonce should increment after transaction execution. Expected: {}, Got: {}",
+            payer_initial_nonce + 1,
+            payer_final_nonce
+        );
+
+        Ok(())
+    }
+
+    /// Validates that batch simulation via eth_simulateV1 does not modify chain state.
+    ///
+    /// This test simulates a PD transaction using the batch simulation API and verifies
+    /// that account balances and nonces remain unchanged after simulation completes.
+    #[test_log::test(tokio::test)]
+    async fn test_pd_tx_batch_simulation_doesnt_modify_state() -> eyre::Result<()> {
+        use alloy_rpc_types::simulate::{SimBlock, SimulatePayload};
+
+        // Spin up a single node and set PD base fee
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let payer = ctx.normal_signer.address();
+
+        // Set PD base fee to a known value
+        let pd_base_fee = U256::from(100_u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x44; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: pd_base_fee,
+            }),
+            solution_hash,
+        );
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
+
+        // Capture pre-simulation state
+        let balance_before = get_balance(&node.inner, payer);
+        let nonce_before = get_nonce(&node.inner, payer);
+        println!(
+            "Pre-simulation: balance={}, nonce={}",
+            balance_before, nonce_before
+        );
+
+        // Build single PD transaction with 2 chunks
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: U256::from(50_u64),
+            max_base_fee_per_chunk: U256::from(100_u64),
+        };
+        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xAA]));
+
+        let tx_request = alloy_rpc_types::TransactionRequest {
+            from: Some(payer),
+            to: Some(TxKind::Call(Address::random())),
+            value: Some(U256::from(100_u64)),
+            input: alloy_rpc_types::TransactionInput::new(input),
+            nonce: Some(nonce_before),
+            access_list: Some(build_pd_access_list(2)),
+            ..tx_request_base()
+        };
+
+        // Build simulation payload
+        let payload = SimulatePayload {
+            block_state_calls: vec![SimBlock {
+                block_overrides: None,
+                state_overrides: None,
+                calls: vec![tx_request],
+            }],
+            trace_transfers: true,
+            validation: true,
+            return_full_transactions: false,
+        };
+
+        // Get the eth API and simulate
+        let eth_api = node.rpc.inner.eth_api();
+        let simulation_result = eth_api
+            .simulate_v1(payload, Some(alloy_rpc_types::BlockId::latest()))
+            .await;
+
+        // Validate simulation succeeded
+        let simulated_blocks = simulation_result?;
+        assert_eq!(simulated_blocks.len(), 1, "Expected 1 simulated block");
+        assert_eq!(simulated_blocks[0].calls.len(), 1, "Expected 1 call result");
+        assert!(
+            simulated_blocks[0].calls[0].status,
+            "Simulation should succeed"
+        );
+
+        // Verify state unchanged
+        let balance_after = get_balance(&node.inner, payer);
+        let nonce_after = get_nonce(&node.inner, payer);
+        println!(
+            "Post-simulation: balance={}, nonce={}",
+            balance_after, nonce_after
+        );
+
+        assert_eq!(
+            balance_before, balance_after,
+            "Balance changed after simulation"
+        );
+        assert_eq!(nonce_before, nonce_after, "Nonce changed after simulation");
+
+        Ok(())
+    }
+
+    /// Validates that PD fees are deducted even when the transaction execution fails.
+    ///
+    /// This test ensures that PD fees are charged upfront regardless of transaction success:
+    /// 1. Creates a PD transaction that calls a non-existent contract (will fail)
+    /// 2. Executes the transaction in a block (not simulation)
+    /// 3. Verifies the transaction failed
+    /// 4. Verifies PD fees were still deducted from payer
+    /// 5. Verifies PD fees were distributed to beneficiary and treasury
+    /// 6. Verifies nonce was incremented (even failed txs increment nonce)
+    ///
+    /// This is critical for the protocol's fee model - PD fees must be charged
+    /// regardless of execution outcome to prevent spam attacks.
+    #[test_log::test(tokio::test)]
+    async fn test_pd_tx_failed_execution_still_charges_fees() -> eyre::Result<()> {
+        // Spin up a single node and set PD base fee
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        let payer = ctx.normal_signer.address();
+        let beneficiary = ctx.block_producer_a.address();
+        let treasury = Address::ZERO;
+
+        // Set PD base fee to a known value
+        let pd_base_fee = U256::from(100_u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x44; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: pd_base_fee,
+            }),
+            solution_hash,
+        );
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
+
+        // Capture initial state
+        let payer_initial_balance = get_balance(&node.inner, payer);
+        let payer_initial_nonce = get_nonce(&node.inner, payer);
+        let beneficiary_initial_balance = get_balance(&node.inner, beneficiary);
+        let treasury_initial_balance = get_balance(&node.inner, treasury);
+
+        println!(
+            "Initial: payer={}, beneficiary={}, treasury={}, nonce={}",
+            payer_initial_balance,
+            beneficiary_initial_balance,
+            treasury_initial_balance,
+            payer_initial_nonce
+        );
+
+        // Build PD transaction header (3 chunks with fees)
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: U256::from(50_u64),
+            max_base_fee_per_chunk: U256::from(100_u64),
+        };
+
+        // Reverting initcode: PUSH1 0 PUSH1 0 REVERT (0x60006000fd)
+        let reverting_initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]);
+        let input = prepend_pd_header_v1_to_calldata(&header, &reverting_initcode);
+
+        let access_list = build_pd_access_list(3);
+
+        // CREATE transaction with reverting init code (will fail)
+        let nonce = payer_initial_nonce;
+        let tx_raw = TxEip1559 {
+            access_list,
+            input,
+            max_priority_fee_per_gas: 0, // Zero priority fee to simplify calculations
+            nonce,
+            to: TxKind::Create,
+            ..tx_eip1559_base()
+        };
+        let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
+        let tx_hash = *pooled.hash();
+
+        // Submit transaction to mempool
+        let _add_result = node
+            .inner
+            .pool
+            .add_transaction(TransactionOrigin::Local, pooled)
+            .await?;
+
+        // Mine block including the transaction
+        let payload = advance_block(&mut node, &shadow_tx_store, vec![]).await?;
+
+        // Query the receipt
+        let receipt = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .receipt_by_hash(tx_hash)
+            .unwrap()
+            .expect("Receipt should exist for mined transaction");
+
+        let gas_used = receipt.cumulative_gas_used;
+        let tx_success = receipt.success;
+        println!("TX failed: {}, gas_used: {}", !tx_success, gas_used);
+
+        // CRITICAL ASSERTION: Transaction should have FAILED
+        assert!(
+            !tx_success,
+            "Transaction should have failed due to reverting init code in CREATE transaction"
+        );
+
+        // Get block basefee for gas cost calculation
+        let block = payload.block();
+        let block_basefee = block.header().base_fee_per_gas.unwrap_or(0);
+
+        // Calculate expected PD fees
+        let num_chunks = 3_u64;
+        let pd_base_total = U256::from(num_chunks) * pd_base_fee; // 3 * 100 = 300
+        let pd_prio_total = U256::from(num_chunks) * U256::from(50_u64); // 3 * 50 = 150
+
+        // Calculate EVM gas costs
+        let evm_base_cost = U256::from(gas_used) * U256::from(block_basefee);
+        let evm_priority_cost = U256::ZERO; // max_priority_fee_per_gas is 0
+
+        // Note: Failed transactions don't transfer value but still charge fees
+        let expected_total_deduction =
+            pd_base_total + pd_prio_total + evm_base_cost + evm_priority_cost;
+
+        // Capture final state
+        let payer_final_balance = get_balance(&node.inner, payer);
+        let payer_final_nonce = get_nonce(&node.inner, payer);
+        let beneficiary_final_balance = get_balance(&node.inner, beneficiary);
+        let treasury_final_balance = get_balance(&node.inner, treasury);
+
+        let actual_deduction = payer_initial_balance.saturating_sub(payer_final_balance);
+
+        println!(
+            "Final: payer={}, beneficiary={}, treasury={}, nonce={}",
+            payer_final_balance,
+            beneficiary_final_balance,
+            treasury_final_balance,
+            payer_final_nonce
+        );
+        println!(
+            "Fees: PD_base={}, PD_prio={}, EVM={}, expected={}, actual={}",
+            pd_base_total, pd_prio_total, evm_base_cost, expected_total_deduction, actual_deduction
+        );
+
+        // Verify fees charged correctly despite transaction failure
+        assert_eq!(
+            actual_deduction, expected_total_deduction,
+            "Payer deduction: expected {}, got {}",
+            expected_total_deduction, actual_deduction
+        );
+
+        let beneficiary_gain =
+            beneficiary_final_balance.saturating_sub(beneficiary_initial_balance);
+        assert_eq!(
+            beneficiary_gain, pd_prio_total,
+            "Beneficiary gain: expected {}, got {}",
+            pd_prio_total, beneficiary_gain
+        );
+
+        let treasury_gain = treasury_final_balance.saturating_sub(treasury_initial_balance);
+        assert_eq!(
+            treasury_gain, pd_base_total,
+            "Treasury gain: expected {}, got {}",
+            pd_base_total, treasury_gain
+        );
+
+        assert_eq!(
+            payer_final_nonce,
+            payer_initial_nonce + 1,
+            "Nonce should increment despite failure"
+        );
+
+        println!("Fees charged correctly despite failure");
 
         Ok(())
     }
