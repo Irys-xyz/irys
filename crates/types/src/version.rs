@@ -1,4 +1,4 @@
-use crate::{address_base58_stringify};
+use crate::address_base58_stringify;
 use crate::{
     decode_address, encode_address, serialization::string_u64, Arbitrary, IrysSignature,
     RethPeerInfo, H256,
