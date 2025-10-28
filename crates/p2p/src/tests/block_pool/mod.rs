@@ -78,6 +78,7 @@ impl ApiClient for MockApiClient {
         &self,
         _peer: SocketAddr,
         _block_hash: BlockHash,
+        _with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
         Ok(self.block_response.clone())
     }
@@ -85,6 +86,7 @@ impl ApiClient for MockApiClient {
     async fn get_latest_block(
         &self,
         _peer: SocketAddr,
+        _with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
         Ok(None)
     }
@@ -93,6 +95,7 @@ impl ApiClient for MockApiClient {
         &self,
         _peer: SocketAddr,
         _block_height: u64,
+        _with_poa: bool,
     ) -> eyre::Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }

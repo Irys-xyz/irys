@@ -1461,7 +1461,7 @@ async fn estimate_canonical_height(
         };
         let api_2 = api_client.clone();
         let diff = async move {
-            match api_2.get_latest_block(peer.address.api).await {
+            match api_2.get_latest_block(peer.address.api, false).await {
                 Ok(block) => {
                     match block {
                         Some(block) => Some(block.irys.cumulative_diff),

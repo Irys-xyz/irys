@@ -356,11 +356,16 @@ impl ApiClient for ApiClientStub {
         &self,
         _peer: SocketAddr,
         _block_hash: H256,
+        _with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }
 
-    async fn get_latest_block(&self, _peer: SocketAddr) -> Result<Option<CombinedBlockHeader>> {
+    async fn get_latest_block(
+        &self,
+        _peer: SocketAddr,
+        _with_poa: bool,
+    ) -> Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }
 
@@ -368,6 +373,7 @@ impl ApiClient for ApiClientStub {
         &self,
         _peer: SocketAddr,
         _block_height: u64,
+        _with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
         Ok(None)
     }

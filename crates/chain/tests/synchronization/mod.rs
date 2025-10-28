@@ -293,7 +293,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
     info!("Commitment whitelist test: getting block 1 from peer");
     // Check that the peer has the block mined on the genesis node
     let block_1 = api_client
-        .get_block_by_height(peer_socket_address, first_block.height)
+        .get_block_by_height(peer_socket_address, first_block.height, true)
         .await?
         .expect("block to be accessible");
 
@@ -388,7 +388,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         .await?;
 
     let another_anchor_block = api_client
-        .get_block_by_height(peer_socket_address, block_to_wait_for)
+        .get_block_by_height(peer_socket_address, block_to_wait_for, true)
         .await?
         .expect("block to be accessible");
 
