@@ -236,7 +236,11 @@ impl ApiClient for IrysApiClient {
         block_hash: H256,
         with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = if with_poa { format!("/block/{}/full", block_hash) } else { format!("/block/{}", block_hash) };
+        let path = if with_poa {
+            format!("/block/{}/full", block_hash)
+        } else {
+            format!("/block/{}", block_hash)
+        };
 
         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
             .await
@@ -248,7 +252,11 @@ impl ApiClient for IrysApiClient {
         block_height: u64,
         with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = if with_poa { format!("/block/{}/full", block_height) } else { format!("/block/{}", block_height) };
+        let path = if with_poa {
+            format!("/block/{}/full", block_height)
+        } else {
+            format!("/block/{}", block_height)
+        };
 
         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, &path, None::<&()>)
             .await
@@ -259,7 +267,11 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>> {
-        let path = if with_poa { "/block/latest/full" } else { "/block/latest" };
+        let path = if with_poa {
+            "/block/latest/full"
+        } else {
+            "/block/latest"
+        };
 
         self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, path, None::<&()>)
             .await
