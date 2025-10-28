@@ -768,6 +768,25 @@ impl<'de> Deserialize<'de> for H256List {
 // Uint <-> string HTTP/JSON serialization/deserialization
 //------------------------------------------------------------------------------
 
+/// Module containing serialization/deserialization for usize to/from a string
+pub mod string_usize {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
 /// Module containing serialization/deserialization for u64 to/from a string
 pub mod string_u64 {
     use super::*;
