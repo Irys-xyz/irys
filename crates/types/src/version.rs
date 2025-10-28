@@ -1,4 +1,4 @@
-use crate::{address_base58_stringify, U256};
+use crate::{address_base58_stringify};
 use crate::{
     decode_address, encode_address, serialization::string_u64, Arbitrary, IrysSignature,
     RethPeerInfo, H256,
@@ -349,14 +349,13 @@ pub struct NodeInfo {
     pub uptime_secs: u64,
     #[serde(with = "address_base58_stringify")]
     pub mining_address: Address,
-    pub latest_cumulative_difficulty: U256,
 }
 
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
     use crate::Address;
-    use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256, U256};
+    use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
     use serde_json;
 
     #[test]
@@ -395,7 +394,6 @@ mod tests {
             current_sync_height: 0,
             uptime_secs: 0,
             mining_address: Address::ZERO,
-            latest_cumulative_difficulty: U256::zero(),
         };
 
         let json = serde_json::to_string(&node_info).unwrap();

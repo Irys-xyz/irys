@@ -41,7 +41,6 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
         current_sync_height: state.sync_state.sync_target_height(),
         uptime_secs: state.started_at.elapsed().as_secs(),
         mining_address: state.mining_address,
-        latest_cumulative_difficulty,
     };
 
     HttpResponse::Ok()
