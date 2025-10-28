@@ -1467,7 +1467,7 @@ async fn estimate_canonical_height(
         let difficulty = info.latest_cumulative_difficulty;
         if difficulty > highest_difficulty {
             debug!(
-                "Sync task: Updating the highest trusted peer height from {} to the value from Info {}",
+                "Sync task: Updating the highest trusted peer height from {} to the value from Info {:?}",
                 highest_trusted_peer_height, info
             );
             highest_difficulty = difficulty;
