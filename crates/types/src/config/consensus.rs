@@ -375,7 +375,7 @@ pub struct ProgrammableDataConfig {
     )]
     pub cost_per_mb: Amount<Usd>,
 
-    // todo do we need this
+    // todo remove
     /// Minimum transaction cost in USD (regardless of data size)
     #[serde(
         deserialize_with = "serde_utils::token_amount",

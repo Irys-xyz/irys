@@ -1,4 +1,5 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::pd_base_fee::compute_base_fee_per_chunk;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
@@ -11,7 +12,6 @@ use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
-use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
 };
@@ -912,6 +912,7 @@ pub fn poa_is_valid(
 pub async fn reth_block_is_valid(
     config: &Config,
     service_senders: &ServiceSenders,
+    parent_block: &IrysBlockHeader,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
@@ -1063,15 +1064,26 @@ pub async fn reth_block_is_valid(
     });
 
     // 3. Generate expected shadow transactions
+    // TODO: instead of re-querrying the parent evm block to re-compute the PD
+    // related fields, we should have a cache living on the block tree that way
+    // we only ever have to compute the PD chunk consumption once.
+    let parent_execution_data = payload_provider
+        .wait_for_payload(&parent_block.evm_block_hash)
+        .await
+        .ok_or_eyre("reth execution payload never arrived")?;
+    let ExecutionData { payload, sidecar: _ } = parent_execution_data;
+    let parent_evm_block: Block = payload.try_into_block()?;
     let expected_txs = generate_expected_shadow_transactions_from_db(
         config,
         service_senders,
         block,
         db,
         reth_adapter,
+        parent_block,
         parent_epoch_snapshot,
         parent_ema_snapshot,
         parent_commitment_snapshot,
+        &parent_evm_block,
         block_index,
     )
     .await?;
@@ -1186,36 +1198,20 @@ pub async fn submit_payload_to_reth(
 }
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
-#[tracing::instrument(skip_all, err)]
+// #[tracing::instrument(skip_all, err)]
 async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
-    reth_adapter: &IrysRethNodeAdapter,
+    _reth_adapter: &IrysRethNodeAdapter,
+    parent_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_ema_snapshot: Arc<EmaSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
+    parent_evm_block: &Block,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
-    // Look up previous block to get EVM hash
-    let prev_block = {
-        let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
-        service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(
-                block.previous_block_hash,
-                false,
-                tx_prev,
-            ))?;
-        match rx_prev.await? {
-            Some(h) => h,
-            None => db
-                .view_eyre(|tx| block_header_by_hash(tx, &block.previous_block_hash, false))?
-                .ok_or_eyre("Previous block not found")?,
-        }
-    };
-
     // Look up commitment txs
     let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
 
@@ -1227,7 +1223,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         extract_publish_ledger_with_txs(service_senders, block, db).await?;
 
     // Get treasury balance from previous block
-    let initial_treasury_balance = prev_block.treasury;
+    let initial_treasury_balance = parent_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
     let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
@@ -1268,57 +1264,13 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     };
 
     // Calculate PD base fee from parent block
-    let pd_base_fee_per_chunk = {
-        use reth::providers::BlockReader as _;
-        use alloy_eips::BlockHashOrNumber;
-
-        // Fetch parent EVM block
-        let prev_evm_block = {
-            let mut attempts = 0;
-            loop {
-                if attempts > 50 {
-                    eyre::bail!("Failed to get parent EVM block {} after 50 attempts", prev_block.evm_block_hash);
-                }
-                let result = reth_adapter.reth_node.inner.provider
-                    .block(BlockHashOrNumber::Hash(prev_block.evm_block_hash))?;
-                match result {
-                    Some(block) => break block,
-                    None => {
-                        attempts += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    }
-                }
-            }
-        };
-
-        // Extract current PD base fee from parent block's 2nd shadow transaction
-        let current_pd_base_fee_irys = crate::block_producer::pd_base_fee::extract_pd_base_fee_from_block(
-            &prev_block,
-            &prev_evm_block,
-            &config.consensus.programmable_data,
-            config.consensus.chunk_size,
-        )?;
-
-        // Count PD chunks used in parent block
-        let total_pd_chunks = crate::block_producer::pd_base_fee::count_pd_chunks_in_block(&prev_evm_block);
-
-        // Calculate the new PD base fee based on utilization
-        let pd_base_fee = crate::block_producer::pd_base_fee::calculate_pd_base_fee_for_new_block(
-            &parent_ema_snapshot,
-            total_pd_chunks as u32,
-            current_pd_base_fee_irys,
-            &config.consensus.programmable_data,
-            config.consensus.chunk_size,
-        )?;
-
-        pd_base_fee.amount
-    };
+    let pd_base_fee_per_chunk = compute_base_fee_per_chunk(config, parent_block, &parent_ema_snapshot, parent_evm_block)?;
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
-        &prev_block,
+        &parent_block,
         &block.solution_hash,
         &config.consensus,
         &commitment_txs,
@@ -1352,6 +1304,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 
     Ok(shadow_txs_vec)
 }
+
 
 async fn extract_commitment_txs(
     config: &Config,

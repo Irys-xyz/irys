@@ -715,7 +715,7 @@ pub trait BlockProdStrategy {
             &mempool.submit_txs,
             &mempool.publish_txs,
             initial_treasury_balance,
-            pd_base_fee.amount,
+            pd_base_fee,
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
@@ -1176,31 +1176,11 @@ pub trait BlockProdStrategy {
         prev_evm_block: &reth_ethereum_primitives::Block,
         prev_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-        // Extract current PD base fee from parent block's 2nd shadow transaction
-        let current_pd_base_fee_irys = pd_base_fee::extract_pd_base_fee_from_block(
+        pd_base_fee::compute_base_fee_per_chunk(
+            &self.inner().config,
             prev_block_header,
-            prev_evm_block,
-            &self.inner().config.consensus.programmable_data,
-            self.inner().config.consensus.chunk_size,
-        )?;
-
-        // Count PD chunks used in parent block
-        let total_pd_chunks = pd_base_fee::count_pd_chunks_in_block(prev_evm_block);
-
-        debug!(
-            prev_block_height = prev_block_header.height,
-            current_pd_base_fee_irys = %current_pd_base_fee_irys.amount,
-            total_pd_chunks,
-            "Calculated PD metrics from parent block"
-        );
-
-        // Calculate the new PD base fee based on utilization
-        pd_base_fee::calculate_pd_base_fee_for_new_block(
             prev_block_ema_snapshot,
-            total_pd_chunks as u32,
-            current_pd_base_fee_irys,
-            &self.inner().config.consensus.programmable_data,
-            self.inner().config.consensus.chunk_size,
+            prev_evm_block,
         )
     }
 

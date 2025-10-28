@@ -4,6 +4,7 @@
 //! based on utilization and market conditions. The fee is calculated per chunk and
 //! denominated in Irys tokens.
 
+
 use crate::reth_service::pd_fee_adjustments;
 use irys_domain::EmaSnapshot;
 use irys_types::{
@@ -12,7 +13,7 @@ use irys_types::{
         phantoms::{CostPerChunk, Irys},
         Amount, PRECISION_SCALE,
     },
-    ProgrammableDataConfig, U256,
+    Config, IrysBlockHeader, ProgrammableDataConfig, U256,
 };
 
 /// Calculate the new PD base fee for a new block based on utilization.
@@ -135,11 +136,10 @@ pub fn extract_pd_base_fee_from_block(
 
     // Extract current PD base fee from block's 2nd shadow transaction (PdBaseFeeUpdate)
     // The ordering is: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs
-    let second_tx = evm_block
-        .body
-        .transactions
-        .get(1)
-        .ok_or_eyre("Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)")?;
+    let second_tx =
+        evm_block.body.transactions.get(1).ok_or_eyre(
+            "Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)",
+        )?;
 
     let shadow_tx = detect_and_decode(second_tx)
         .map_err(|e| eyre!("Failed to decode 2nd transaction as shadow tx: {}", e))?
@@ -161,9 +161,7 @@ pub fn extract_pd_base_fee_from_block(
             }
         }
         _ => {
-            eyre::bail!(
-                "Unsupported shadow transaction version in block's 2nd transaction"
-            );
+            eyre::bail!("Unsupported shadow transaction version in block's 2nd transaction");
         }
     }
 }
@@ -181,8 +179,8 @@ pub fn extract_pd_base_fee_from_block(
 ///
 /// The total number of PD chunks used in the block
 pub fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 {
-    use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
     use alloy_consensus::Transaction as _;
+    use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 
     let mut total_pd_chunks: u64 = 0;
     for tx in evm_block.body.transactions.iter() {
@@ -200,3 +198,29 @@ pub fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> 
     total_pd_chunks
 }
 
+pub fn compute_base_fee_per_chunk(
+    config: &Config,
+    parent_block: &IrysBlockHeader,
+    parent_ema_snapshot: &EmaSnapshot,
+    parent_evm_block: &alloy_consensus::Block<
+        alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844>,
+    >,
+) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+    let current_pd_base_fee_irys =
+        crate::block_producer::pd_base_fee::extract_pd_base_fee_from_block(
+            &parent_block,
+            &parent_evm_block,
+            &config.consensus.programmable_data,
+            config.consensus.chunk_size,
+        )?;
+    let total_pd_chunks =
+        crate::block_producer::pd_base_fee::count_pd_chunks_in_block(&parent_evm_block);
+    let pd_base_fee = crate::block_producer::pd_base_fee::calculate_pd_base_fee_for_new_block(
+        &parent_ema_snapshot,
+        total_pd_chunks as u32,
+        current_pd_base_fee_irys,
+        &config.consensus.programmable_data,
+        config.consensus.chunk_size,
+    )?;
+    Ok(pd_base_fee)
+}

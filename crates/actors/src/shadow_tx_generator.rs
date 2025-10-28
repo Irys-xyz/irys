@@ -4,9 +4,7 @@ use irys_reth::shadow_tx::{
     TransactionPacket, UnstakeDebit,
 };
 use irys_types::{
-    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, H256, U256,
+    storage_pricing::{phantoms::{CostPerChunk, Irys}, Amount}, transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges}, Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList, IrysBlockHeader, H256, U256
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -40,7 +38,7 @@ pub struct ShadowTxGenerator<'a> {
     submit_txs: &'a [DataTransactionHeader],
 
     // PD base fee per chunk (for PdBaseFeeUpdate shadow tx)
-    pd_base_fee_per_chunk: U256,
+    pd_base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
 
     // Iterator state
     treasury_balance: U256,
@@ -82,7 +80,7 @@ impl Iterator for ShadowTxGenerator<'_> {
                     return Some(Ok(ShadowMetadata {
                         shadow_tx: ShadowTransaction::new_v1(
                             TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                                per_chunk: self.pd_base_fee_per_chunk.into(),
+                                per_chunk: self.pd_base_fee_per_chunk.amount.into(),
                             }),
                             (*self.solution_hash).into(),
                         ),
@@ -158,7 +156,7 @@ impl<'a> ShadowTxGenerator<'a> {
         submit_txs: &'a [DataTransactionHeader],
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
-        pd_base_fee_per_chunk: U256,
+        pd_base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
         unstake_refund_events: &[UnstakeRefundEvent],
@@ -866,7 +864,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &empty_fees,
             &[],
             &[],
@@ -1008,7 +1006,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &empty_fees,
             &[],
             &[],
@@ -1101,7 +1099,7 @@ mod tests {
             &submit_txs,
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &empty_fees,
             &[],
             &[],
@@ -1299,7 +1297,7 @@ mod tests {
             &submit_txs,
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &empty_fees,
             &[],
             &[],
@@ -1405,7 +1403,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &expired_fees,
             &[],
             &[],
@@ -1517,7 +1515,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &expired_fees,
             &[],
             &[],
@@ -1592,7 +1590,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            U256::from(1000000u64),
+            Amount::new(U256::from(1000000u64)),
             &expired_fees,
             &[],
             &[],

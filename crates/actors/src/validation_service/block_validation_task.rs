@@ -374,9 +374,16 @@ impl BlockValidationTask {
                 .read()
                 .get_commitment_snapshot(&block.previous_block_hash)
                 .expect("parent block should have a commitment snapshot in the block_tree");
+            let parent_block = self
+                .block_tree_guard
+                .read()
+                .get_block(&block.previous_block_hash)
+                .map(|header| Arc::new(header.clone()))
+                .expect("parent block should have a commitment snapshot in the block_tree");
             reth_block_is_valid(
                 config,
                 service_senders,
+                &parent_block,
                 block,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
