@@ -49,7 +49,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            pd_base_fee: Amount<(irys_types::storage_pricing::phantoms::CostPerChunk, irys_types::storage_pricing::phantoms::Irys)>,
+            pd_base_fee: Amount<(
+                irys_types::storage_pricing::phantoms::CostPerChunk,
+                irys_types::storage_pricing::phantoms::Irys,
+            )>,
             _timestamp_ms: u128,
             solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {

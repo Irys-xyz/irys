@@ -8,8 +8,7 @@ use irys_types::{
         phantoms::{Percentage, Usd},
         safe_sub, Amount, PRECISION_SCALE,
     },
-    BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256,
-    U256,
+    BlockHash, DatabaseProvider, RethPeerInfo, TokioServiceHandle, H256, U256,
 };
 use reth::{
     network::{NetworkInfo as _, Peers as _},

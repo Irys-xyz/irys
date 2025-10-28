@@ -1071,7 +1071,10 @@ pub async fn reth_block_is_valid(
         .wait_for_payload(&parent_block.evm_block_hash)
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
-    let ExecutionData { payload, sidecar: _ } = parent_execution_data;
+    let ExecutionData {
+        payload,
+        sidecar: _,
+    } = parent_execution_data;
     let parent_evm_block: Block = payload.try_into_block()?;
     let expected_txs = generate_expected_shadow_transactions_from_db(
         config,
@@ -1264,13 +1267,14 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     };
 
     // Calculate PD base fee from parent block
-    let pd_base_fee_per_chunk = compute_base_fee_per_chunk(config, parent_block, &parent_ema_snapshot, parent_evm_block)?;
+    let pd_base_fee_per_chunk =
+        compute_base_fee_per_chunk(config, parent_block, &parent_ema_snapshot, parent_evm_block)?;
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
         &block.reward_amount,
-        &parent_block,
+        parent_block,
         &block.solution_hash,
         &config.consensus,
         &commitment_txs,
@@ -1304,7 +1308,6 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 
     Ok(shadow_txs_vec)
 }
-
 
 async fn extract_commitment_txs(
     config: &Config,

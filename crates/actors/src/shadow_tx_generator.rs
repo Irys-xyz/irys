@@ -4,7 +4,13 @@ use irys_reth::shadow_tx::{
     TransactionPacket, UnstakeDebit,
 };
 use irys_types::{
-    storage_pricing::{phantoms::{CostPerChunk, Irys}, Amount}, transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges}, Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList, IrysBlockHeader, H256, U256
+    storage_pricing::{
+        phantoms::{CostPerChunk, Irys},
+        Amount,
+    },
+    transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
+    Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
+    IrysBlockHeader, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -840,7 +846,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     solution_hash.into(),
                 ),
@@ -864,7 +870,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &empty_fees,
             &[],
             &[],
@@ -936,7 +942,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1006,7 +1012,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &empty_fees,
             &[],
             &[],
@@ -1060,7 +1066,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1099,7 +1105,7 @@ mod tests {
             &submit_txs,
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &empty_fees,
             &[],
             &[],
@@ -1224,7 +1230,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1297,7 +1303,7 @@ mod tests {
             &submit_txs,
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &empty_fees,
             &[],
             &[],
@@ -1368,7 +1374,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1403,7 +1409,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &expired_fees,
             &[],
             &[],
@@ -1480,7 +1486,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1515,7 +1521,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &expired_fees,
             &[],
             &[],
@@ -1570,7 +1576,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                        per_chunk: U256::from(1000000u64).into(),
+                        per_chunk: U256::from(1000000_u64).into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1590,7 +1596,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            Amount::new(U256::from(1000000u64)),
+            Amount::new(U256::from(1000000_u64)),
             &expired_fees,
             &[],
             &[],

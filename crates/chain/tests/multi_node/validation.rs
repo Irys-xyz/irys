@@ -31,7 +31,10 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            pd_base_fee: Amount<(irys_types::storage_pricing::phantoms::CostPerChunk, irys_types::storage_pricing::phantoms::Irys)>,
+            pd_base_fee: Amount<(
+                irys_types::storage_pricing::phantoms::CostPerChunk,
+                irys_types::storage_pricing::phantoms::Irys,
+            )>,
             timestamp_ms: u128,
             solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
@@ -181,7 +184,10 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            pd_base_fee: Amount<(irys_types::storage_pricing::phantoms::CostPerChunk, irys_types::storage_pricing::phantoms::Irys)>,
+            pd_base_fee: Amount<(
+                irys_types::storage_pricing::phantoms::CostPerChunk,
+                irys_types::storage_pricing::phantoms::Irys,
+            )>,
             timestamp_ms: u128,
             solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
@@ -269,7 +275,10 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            pd_base_fee: Amount<(irys_types::storage_pricing::phantoms::CostPerChunk, irys_types::storage_pricing::phantoms::Irys)>,
+            pd_base_fee: Amount<(
+                irys_types::storage_pricing::phantoms::CostPerChunk,
+                irys_types::storage_pricing::phantoms::Irys,
+            )>,
             timestamp_ms: u128,
             solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
