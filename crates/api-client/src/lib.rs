@@ -69,6 +69,8 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         block_height: u64,
     ) -> Result<Option<CombinedBlockHeader>>;
 
+    async fn get_latest_block(&self, peer: SocketAddr) -> Result<Option<CombinedBlockHeader>>;
+
     async fn get_block_index(
         &self,
         peer: SocketAddr,
@@ -244,6 +246,11 @@ impl ApiClient for IrysApiClient {
             .await
     }
 
+    async fn get_latest_block(&self, peer: SocketAddr) -> Result<Option<CombinedBlockHeader>> {
+        self.make_request::<CombinedBlockHeader, _>(peer, Method::GET, "/block/latest", None::<&()>)
+            .await
+    }
+
     async fn get_block_index(
         &self,
         peer: SocketAddr,
@@ -340,6 +347,13 @@ pub mod test_utils {
             Ok(None)
         }
 
+        async fn get_latest_block(
+            &self,
+            _peer: std::net::SocketAddr,
+        ) -> eyre::Result<Option<CombinedBlockHeader>> {
+            Ok(None)
+        }
+
         async fn get_block_index(
             &self,
             _peer: SocketAddr,
@@ -431,6 +445,10 @@ mod tests {
             _peer: SocketAddr,
             _block_hash: H256,
         ) -> Result<Option<CombinedBlockHeader>> {
+            Ok(None)
+        }
+
+        async fn get_latest_block(&self, _peer: SocketAddr) -> Result<Option<CombinedBlockHeader>> {
             Ok(None)
         }
 

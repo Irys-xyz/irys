@@ -82,6 +82,13 @@ impl ApiClient for MockApiClient {
         Ok(self.block_response.clone())
     }
 
+    async fn get_latest_block(
+        &self,
+        _peer: SocketAddr,
+    ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
+        Ok(None)
+    }
+
     async fn get_block_by_height(
         &self,
         _peer: SocketAddr,

@@ -360,6 +360,10 @@ impl ApiClient for ApiClientStub {
         Ok(None)
     }
 
+    async fn get_latest_block(&self, _peer: SocketAddr) -> Result<Option<CombinedBlockHeader>> {
+        Ok(None)
+    }
+
     async fn get_block_by_height(
         &self,
         _peer: SocketAddr,

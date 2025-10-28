@@ -1448,15 +1448,43 @@ async fn estimate_canonical_height(
     }
 
     let futures = trusted_peers.iter().map(|(_, peer)| {
-        let api_client = api_client.clone();
-        async move {
-            debug!("Sync task: Trusted peer: {:?}", peer);
-            match api_client.node_info(peer.address.api).await {
-                Ok(info) => Some(info),
+        debug!("Sync task: Trusted peer: {:?}", peer);
+        let api_1 = api_client.clone();
+        let height = async move {
+            match api_1.node_info(peer.address.api).await {
+                Ok(info) => Some(info.block_index_height),
                 Err(err) => {
                     warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
                     None
                 }
+            }
+        };
+        let api_2 = api_client.clone();
+        let diff = async move {
+            match api_2.get_latest_block(peer.address.api).await {
+                Ok(block) => {
+                    match block {
+                        Some(block) => Some(block.irys.cumulative_diff),
+                        None => {
+                            warn!("Sync task: Trusted peer {} returned no latest block, trying another peer", peer.address.api);
+                            None
+                        }
+                    }
+                },
+                Err(err) => {
+                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
+                    None
+                }
+            }
+        };
+
+        async move {
+            let (block_index_height, latest_cumulative_difficulty) = tokio::join!(
+                height, diff
+            );
+            match (block_index_height, latest_cumulative_difficulty) {
+                (Some(h), Some(d)) => Some((h, d)),
+                _ => None,
             }
         }
     });
@@ -1464,14 +1492,14 @@ async fn estimate_canonical_height(
     let infos = futures::future::join_all(futures).await;
 
     for info in infos.into_iter().flatten() {
-        let difficulty = info.latest_cumulative_difficulty;
+        let difficulty = info.1;
         if difficulty > highest_difficulty {
             debug!(
                 "Sync task: Updating the highest trusted peer height from {} to the value from Info {:?}",
                 highest_trusted_peer_height, info
             );
             highest_difficulty = difficulty;
-            highest_trusted_peer_height = info.block_index_height;
+            highest_trusted_peer_height = info.0;
         }
     }
 

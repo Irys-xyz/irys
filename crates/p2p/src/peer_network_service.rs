@@ -1102,6 +1102,13 @@ mod tests {
             Err(eyre!("not implemented"))
         }
 
+        async fn get_latest_block(
+            &self,
+            _peer: SocketAddr,
+        ) -> EyreResult<Option<CombinedBlockHeader>> {
+            Err(eyre!("not implemented"))
+        }
+
         async fn get_block_by_height(
             &self,
             _peer: SocketAddr,
