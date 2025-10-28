@@ -1098,6 +1098,15 @@ mod tests {
             &self,
             _peer: SocketAddr,
             _block_hash: H256,
+            _with_poa: bool,
+        ) -> EyreResult<Option<CombinedBlockHeader>> {
+            Err(eyre!("not implemented"))
+        }
+
+        async fn get_latest_block(
+            &self,
+            _peer: SocketAddr,
+            _with_poa: bool,
         ) -> EyreResult<Option<CombinedBlockHeader>> {
             Err(eyre!("not implemented"))
         }
@@ -1106,6 +1115,7 @@ mod tests {
             &self,
             _peer: SocketAddr,
             _block_height: u64,
+            _with_poa: bool,
         ) -> EyreResult<Option<CombinedBlockHeader>> {
             Err(eyre!("not implemented"))
         }
