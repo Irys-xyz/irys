@@ -1,7 +1,7 @@
 use crate::address_base58_stringify;
 use crate::{
-    decode_address, encode_address, serialization::string_u64, Arbitrary, IrysSignature,
-    RethPeerInfo, H256,
+    decode_address, encode_address, serialization::string_u64, serialization::string_usize,
+    Arbitrary, IrysSignature, RethPeerInfo, H256,
 };
 use alloy_primitives::{keccak256, Address};
 use bytes::Buf as _;
@@ -345,7 +345,9 @@ pub struct NodeInfo {
     #[serde(with = "string_u64")]
     pub pending_blocks: u64,
     pub is_syncing: bool,
+    #[serde(with = "string_usize")]
     pub current_sync_height: usize,
+    #[serde(with = "string_u64")]
     pub uptime_secs: u64,
     #[serde(with = "address_base58_stringify")]
     pub mining_address: Address,
