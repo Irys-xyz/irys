@@ -105,7 +105,11 @@ impl PartitionMiningServiceInner {
         if let Some(partition_hash) = self.storage_module.partition_hash() {
             if expired.0.contains(&partition_hash) {
                 if let Ok(interval) = self.storage_module.reset() {
-                    debug!(?partition_hash, ?interval, "Expiring partition hash");
+                    debug!(
+                        storage_module.partition_hash = ?partition_hash,
+                        storage_module.packing_interval = ?interval,
+                        "Expiring partition hash"
+                    );
                     if let Ok(req) = PackingRequest::new(
                         self.storage_module.clone(),
                         PartitionChunkRange(interval),
@@ -114,17 +118,17 @@ impl PartitionMiningServiceInner {
                             Ok(()) => {}
                             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                                 warn!(
-                                    storage_module_id = %self.storage_module.id,
-                                    ?partition_hash,
-                                    ?interval,
-                                    "Dropping packing request due to saturated channel"
+                                    storage_module.id = %self.storage_module.id,
+                                    storage_module.partition_hash = ?partition_hash,
+                                    storage_module.packing_interval = ?interval,
+                                    "Dropping packing request due to a saturated channel"
                                 );
                             }
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                                 error!(
-                                    storage_module_id = %self.storage_module.id,
-                                    ?partition_hash,
-                                    ?interval,
+                                    storage_module.id = %self.storage_module.id,
+                                    storage_module.partition_hash = ?partition_hash,
+                                    storage_module.packing_interval = ?interval,
                                     "Packing channel closed; failed to enqueue repacking request"
                                 );
                             }
@@ -132,7 +136,7 @@ impl PartitionMiningServiceInner {
                     }
                 } else {
                     error!(
-                        ?partition_hash,
+                        storage_module.partition_hash = ?partition_hash,
                         "Expiring partition hash, could not reset its storage module!"
                     );
                 }
@@ -188,7 +192,7 @@ impl PartitionMiningServiceInner {
         &mut self,
         mining_seed: irys_types::H256,
         vdf_step: u64,
-        checkpoints: H256List,
+        checkpoints: &H256List,
     ) -> eyre::Result<Option<SolutionContext>> {
         let partition_hash = match self.storage_module.partition_hash() {
             Some(p) => p,
@@ -265,7 +269,7 @@ impl PartitionMiningServiceInner {
                     data_path,
                     chunk: chunk_bytes.clone(),
                     vdf_step,
-                    checkpoints,
+                    checkpoints: checkpoints.clone(),
                     seed: Seed(mining_seed),
                     solution_hash,
                 };
@@ -278,8 +282,8 @@ impl PartitionMiningServiceInner {
         Ok(None)
     }
 
-    fn handle_seed(&mut self, msg: BroadcastMiningSeed) {
-        let seed = msg.seed;
+    fn handle_seed(&mut self, msg: &BroadcastMiningSeed) {
+        let seed = msg.seed.clone();
         if !self.should_mine {
             debug!("Mining disabled, skipping seed {:?}", seed);
             return;
@@ -317,7 +321,7 @@ impl PartitionMiningServiceInner {
             self.difficulty
         );
 
-        match self.mine_partition_with_seed(seed.into_inner(), msg.global_step, msg.checkpoints) {
+        match self.mine_partition_with_seed(seed.into_inner(), msg.global_step, &msg.checkpoints) {
             Ok(Some(s)) => {
                 let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
                 let cmd = BlockProducerCommand::SolutionFound {
@@ -356,7 +360,7 @@ pub struct PartitionMiningService {
     shutdown: Shutdown,
     state: PartitionMiningServiceInner,
     cmd_rx: UnboundedReceiver<PartitionMiningCommand>,
-    broadcast_rx: UnboundedReceiver<MiningBroadcastEvent>,
+    broadcast_rx: UnboundedReceiver<Arc<MiningBroadcastEvent>>,
 }
 
 impl PartitionMiningService {
@@ -421,15 +425,17 @@ impl PartitionMiningService {
                 // Broadcast messages (seed/diff/expiration)
                 evt = self.broadcast_rx.recv() => {
                     match evt {
-                        Some(MiningBroadcastEvent::Seed(msg)) => {
-                            self.state.handle_seed(msg);
-                        }
-                        Some(MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h))) => {
-                            self.state.update_difficulty(h.diff);
-                        }
-                        Some(MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list))) => {
-                            self.state.handle_partitions_expiration(&list);
-                        }
+                        Some(arc_evt) => match arc_evt.as_ref() {
+                            MiningBroadcastEvent::Seed(msg) => {
+                                self.state.handle_seed(msg);
+                            }
+                            MiningBroadcastEvent::Difficulty(BroadcastDifficultyUpdate(h)) => {
+                                self.state.update_difficulty(h.diff);
+                            }
+                            MiningBroadcastEvent::PartitionsExpiration(BroadcastPartitionsExpiration(list)) => {
+                                self.state.handle_partitions_expiration(list);
+                            }
+                        },
                         None => {
                             warn!("Mining broadcaster channel closed; stopping service");
                             break;

@@ -4,7 +4,7 @@ use irys_chain::utils::load_config;
 use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
-use irys_reth_node_bridge::irys_reth::chainspec::irys_chain_spec;
+use irys_types::chainspec::irys_chain_spec;
 use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use std::{path::PathBuf, sync::Arc};
@@ -239,7 +239,7 @@ pub fn cli_init_reth_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv
         .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|err| {
             tracing::warn!(
-                ?err,
+                custom.error = ?err,
                 "config file not provided, defaulting to testnet config"
             );
             NodeConfig::testnet()
@@ -269,7 +269,7 @@ pub fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv
         .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|err| {
             tracing::warn!(
-                ?err,
+                custom.error = ?err,
                 "config file not provided, defaulting to testnet config"
             );
             NodeConfig::testnet()

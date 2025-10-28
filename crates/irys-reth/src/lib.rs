@@ -62,7 +62,6 @@ use crate::{
     payload_service_builder::IyrsPayloadServiceBuilder,
 };
 
-pub mod chainspec;
 pub mod evm;
 pub mod payload;
 pub mod payload_builder_builder;
@@ -70,7 +69,7 @@ pub mod payload_service_builder;
 pub mod pd_tx;
 pub mod precompile;
 pub mod shadow_tx;
-pub use chainspec::{IrysChainHardforks, IrysHardfork};
+pub use irys_types::chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
 #[must_use]
@@ -353,8 +352,8 @@ where
         match crate::shadow_tx::detect_and_decode_from_parts(to, input) {
             Ok(Some(_)) | Err(_) => {
                 tracing::trace!(
-                    sender = ?tx.sender(),
-                    tx_hash = ?tx.hash(),
+                    shadow_tx.sender = ?tx.sender(),
+                    shadow_tx.hash = ?tx.hash(),
                     "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
                 );
                 return Err(TransactionValidationOutcome::Invalid(
@@ -398,7 +397,7 @@ where
             Err(outcome) => return outcome,
         };
 
-        tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
+        tracing::trace!(shadow_tx.hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
         self.eth_tx_validator.validate_one(origin, transaction)
     }
 

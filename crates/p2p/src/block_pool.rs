@@ -406,9 +406,9 @@ where
             let confirmed_hash = fcu_markers.migration_block.block_hash;
             let finalized_hash = fcu_markers.prune_block.block_hash;
             debug!(
-                head = %head_hash,
-                confirmed = %confirmed_hash,
-                finalized = %finalized_hash,
+                fcu.head = %head_hash,
+                fcu.confirmed = %confirmed_hash,
+                fcu.finalized = %finalized_hash,
                 "Sending ForkChoiceUpdateMessage to Reth service"
             );
             let (tx, rx) = oneshot::channel();

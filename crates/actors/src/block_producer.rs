@@ -33,8 +33,8 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -49,9 +49,10 @@ use reth::{
     tasks::shutdown::Shutdown,
 };
 use reth_transaction_pool::EthPooledTransaction;
+use std::time::UNIX_EPOCH;
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
@@ -286,16 +287,16 @@ impl BlockProducerService {
             BlockProducerCommand::SolutionFound { solution, response } => {
                 let solution_hash = solution.solution_hash;
                 info!(
-                    solution_hash = %solution_hash,
-                    vdf_step = solution.vdf_step,
-                    mining_address = %solution.mining_address,
+                    solution.hash = %solution_hash,
+                    solution.vdf_step = solution.vdf_step,
+                    solution.mining_address = %solution.mining_address,
                     "Block producer received mining solution"
                 );
 
                 if let Some(blocks_remaining) = self.blocks_remaining_for_test {
                     if blocks_remaining == 0 {
                         info!(
-                            solution_hash = %solution_hash,
+                            solution.hash = %solution_hash,
                             "No more blocks needed for test, skipping block production"
                         );
                         let _ = response.send(Ok(None));
@@ -310,8 +311,8 @@ impl BlockProducerService {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
                 if let Some((irys_block_header, eth_built_payload)) = &result {
                     info!(
-                        block_hash = %irys_block_header.block_hash,
-                        block_height = irys_block_header.height,
+                        block.hash = %irys_block_header.block_hash,
+                        block.height = irys_block_header.height,
                         "Block production completed successfully"
                     );
 
@@ -342,8 +343,8 @@ impl BlockProducerService {
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
-                    old_value = ?self.blocks_remaining_for_test,
-                    new_value = ?remaining,
+                    custom.old_value = ?self.blocks_remaining_for_test,
+                    custom.new_value = ?remaining,
                     "Updating test blocks remaining"
                 );
                 self.blocks_remaining_for_test = remaining;
@@ -354,17 +355,17 @@ impl BlockProducerService {
 
     /// Internal method to produce a block without the non-Send trait
     #[tracing::instrument(skip_all, fields(
-        solution_hash = %solution.solution_hash,
-        vdf_step = solution.vdf_step,
-        mining_address = %solution.mining_address
+        solution.hash = %solution.solution_hash,
+        solution.vdf_step = solution.vdf_step,
+        solution.mining_address = %solution.mining_address
     ))]
     async fn produce_block_inner(
         inner: Arc<BlockProducerInner>,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
-            partition_hash = %solution.partition_hash,
-            chunk_offset = solution.chunk_offset,
+            solution.partition_hash = %solution.partition_hash,
+            solution.chunk_offset = solution.chunk_offset,
             "Starting block production for solution"
         );
 
@@ -600,10 +601,10 @@ pub trait BlockProdStrategy {
 
                 ParentCheckResult::MustRebuild { new_parent } => {
                     info!(
-                        solution_hash = %solution.solution_hash,
-                        solution_vdf_step = solution.vdf_step,
-                        new_parent = %new_parent,
-                        rebuild_attempt = rebuild_attempts + 1,
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        block.new_parent = %new_parent,
+                        block.rebuild_attempt = rebuild_attempts + 1,
                         "Parent changed but solution is valid - rebuilding on new parent"
                     );
 
@@ -622,10 +623,10 @@ pub trait BlockProdStrategy {
                             solution_vdf_step,
                         } => {
                             warn!(
-                                solution_hash = %solution.solution_hash,
-                                solution_vdf_step,
-                                new_parent = %new_parent,
-                                parent_vdf_step,
+                                solution.hash = %solution.solution_hash,
+                                solution.vdf_step = solution.vdf_step,
+                                block.new_parent = %new_parent,
+                                block.parent_vdf_step = parent_vdf_step,
                                 "Solution is too old for new parent (vdf_step {} <= {}), discarding",
                                 solution_vdf_step,
                                 parent_vdf_step
@@ -644,10 +645,10 @@ pub trait BlockProdStrategy {
 
         if rebuild_attempts > 0 {
             info!(
-                solution_hash = %solution.solution_hash,
-                final_parent = %block.previous_block_hash,
-                block_height = block.height,
-                rebuild_count = rebuild_attempts,
+                block.solution_hash = %solution.solution_hash,
+                block.final_parent = %block.previous_block_hash,
+                block.block_height = block.height,
+                block.rebuild_count = rebuild_attempts,
                 "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
             );
         }
@@ -737,9 +738,9 @@ pub trait BlockProdStrategy {
     }
 
     #[tracing::instrument(skip_all, fields(
-        parent_evm_hash = %prev_block_header.evm_block_hash,
-        timestamp_sec = timestamp_ms / 1000,
-        shadow_tx_count = shadow_txs.len()
+        payload.parent_evm_hash = %prev_block_header.evm_block_hash,
+        payload.timestamp_sec = timestamp_ms / 1000,
+        payload.shadow_tx_count = shadow_txs.len()
     ))]
     async fn build_and_submit_reth_payload(
         &self,
@@ -760,9 +761,9 @@ pub trait BlockProdStrategy {
         };
 
         debug!(
-            timestamp_sec = attributes.timestamp,
-            fee_recipient = %attributes.suggested_fee_recipient,
-            parent_beacon_root = ?attributes.parent_beacon_block_root,
+            payload.timestamp_sec = attributes.timestamp,
+            payload.fee_recipient = %attributes.suggested_fee_recipient,
+            payload.parent_beacon_root = ?attributes.parent_beacon_block_root,
             "Payload attributes created"
         );
 
@@ -775,7 +776,7 @@ pub trait BlockProdStrategy {
         // store shadow txs
         let key = DeterministicShadowTxKey::new(attributes.payload_id());
         debug!(
-            payload_id = %attributes.payload_id(),
+            payload.id = %attributes.payload_id(),
             "Storing shadow transactions"
         );
         self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
@@ -790,7 +791,7 @@ pub trait BlockProdStrategy {
             .map_err(|e| eyre!("Payload builder returned error: {}", e))?;
 
         debug!(
-            payload_id = %payload_id,
+            payload.id = %payload_id,
             "Payload accepted by builder"
         );
 
@@ -824,8 +825,8 @@ pub trait BlockProdStrategy {
         );
 
         info!(
-            payload_block_hash = %built_payload.block().hash(),
-            payload_tx_count = built_payload.block().body().transactions.len(),
+            payload.block_hash = %built_payload.block().hash(),
+            payload.tx_count = built_payload.block().body().transactions.len(),
             "Reth payload built successfully"
         );
 
@@ -1056,9 +1057,9 @@ pub trait BlockProdStrategy {
                     stats.min_threshold
                 );
                 info!(
-                    max_difficulty = ?U256::MAX,
-                    previous_cumulative_diff = ?block.previous_cumulative_diff,
-                    current_diff = ?block.diff,
+                    block.max_difficulty = ?U256::MAX,
+                    block.previous_cumulative_diff = ?block.previous_cumulative_diff,
+                    block.current_diff = ?block.diff,
                     "Difficulty data",
                 );
                 is_difficulty_updated = true;
@@ -1113,8 +1114,8 @@ pub trait BlockProdStrategy {
         }
 
         info!(
-            block_height = ?block.height,
-            hash = ?block.block_hash,
+            block.height = ?block.height,
+            block.hash = ?block.block_hash,
             "Finished producing block",
         );
 
@@ -1139,7 +1140,16 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let oracle_irys_price = self.inner().price_oracle.current_price().await?;
+        let (fresh_price, last_updated) = self.inner().price_oracle.current_snapshot()?;
+        let oracle_updated_ms = millis_since_epoch(last_updated);
+
+        let oracle_irys_price = choose_oracle_price(
+            parent_block.timestamp,
+            parent_block.oracle_irys_price,
+            fresh_price,
+            oracle_updated_ms,
+        );
+
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
@@ -1164,8 +1174,8 @@ pub trait BlockProdStrategy {
 
         if !is_epoch {
             debug!(
-                block_height,
-                commitment_ids = ?mempool_txs
+                block.height = block_height,
+                custom.commitment_ids = ?mempool_txs
                     .commitment_tx
                     .iter()
                     .map(|t| t.id)
@@ -1254,7 +1264,7 @@ pub trait BlockProdStrategy {
             txids.push(tx.id);
         }
         debug!(
-            tx_count = commitments.len(),
+            custom.tx_count = commitments.len(),
             "Producing epoch rollup for commitment ledger"
         );
         SystemTransactionLedger {
@@ -1364,6 +1374,38 @@ pub trait BlockProdStrategy {
     }
 }
 
+fn millis_since_epoch(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+#[inline]
+fn choose_oracle_price(
+    parent_ts_ms: u128,
+    parent_price: IrysTokenPrice,
+    oracle_price: IrysTokenPrice,
+    oracle_updated_ms: u128,
+) -> IrysTokenPrice {
+    let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
+        (parent_price, "parent_fallback")
+    } else {
+        (oracle_price, "oracle_fresh")
+    };
+
+    tracing::debug!(
+        parent_ts_ms,
+        oracle_updated_ms,
+        parent_price = %parent_price,
+        oracle_price = %oracle_price,
+        chosen_price = %chosen,
+        source,
+        "selected oracle price for EMA calculation"
+    );
+
+    chosen
+}
+
 pub struct ProductionStrategy {
     pub inner: Arc<BlockProducerInner>,
 }
@@ -1412,4 +1454,50 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
     });
 
     bytes_added / chunk_size
+}
+
+#[cfg(test)]
+mod oracle_choice_tests {
+    use super::{choose_oracle_price, millis_since_epoch};
+    use irys_types::storage_pricing::Amount;
+    use rust_decimal_macros::dec;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn chooses_parent_when_parent_is_newer() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(2_000); // parent block timestamp 2 seconds
+        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
+
+        let chosen = choose_oracle_price(
+            millis_since_epoch(parent_ts_ms),
+            parent_price,
+            oracle_price,
+            millis_since_epoch(oracle_updated_at),
+        );
+        assert_eq!(
+            chosen, parent_price,
+            "should choose parent price when parent is newer"
+        );
+    }
+
+    #[test]
+    fn chooses_oracle_when_oracle_is_fresh() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(1_000); // parent block timestamp 1 second
+        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
+
+        let chosen = choose_oracle_price(
+            millis_since_epoch(parent_ts_ms),
+            parent_price,
+            oracle_price,
+            millis_since_epoch(oracle_updated_at),
+        );
+        assert_eq!(
+            chosen, oracle_price,
+            "should choose oracle price when oracle is fresher"
+        );
+    }
 }

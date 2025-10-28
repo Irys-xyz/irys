@@ -2,6 +2,7 @@ mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
+mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
@@ -49,7 +50,7 @@ async fn send_block_to_block_tree(
 // from the consensus config.
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
-    use irys_primitives::CommitmentType;
+    use irys_types::CommitmentType;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -145,7 +146,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
-    use irys_primitives::CommitmentType;
+    use irys_types::CommitmentType;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
