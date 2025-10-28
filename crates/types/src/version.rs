@@ -443,14 +443,17 @@ mod tests {
     }
 
     #[test]
-    fn test_backwards_compatibility() -> eyre::Result<()> {
+    fn test_info_serde_roundtrip() -> eyre::Result<()> {
+        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111"}"#;
         // Test that we can still deserialize old numeric format for small values
-        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":0, "uptimeSecs": 0,"miningAddress":"11111111111111111111"}"#;
-
+        // TODO: remove this at some point?
         let node_info: NodeInfo = serde_json::from_str(old_json)?;
-
         assert_eq!(node_info.chain_id, 12345);
         assert_eq!(node_info.height, 67890);
+
+        // this should ensure that we don't break U64 as string serialisation
+        let reenc_node_info = serde_json::to_string(&node_info)?;
+        assert_eq!(old_json, reenc_node_info.as_str());
         Ok(())
     }
 }
