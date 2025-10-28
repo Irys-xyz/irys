@@ -45,7 +45,8 @@ use irys_p2p::{
     ChainSyncServiceInner, GossipDataHandler, P2PService, ServiceHandleWithShutdownSignal,
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
-use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+use irys_price_oracle::IrysPriceOracle;
+use irys_price_oracle::SingleOracle;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
@@ -1219,8 +1220,9 @@ impl IrysNode {
             chain_sync_tx.clone(),
         )?;
 
-        // set up the price oracle
-        let price_oracle = Self::init_price_oracle(&config);
+        // set up the price oracles (initial price(s) fetched during construction)
+        let (price_oracle, price_oracle_handles) =
+            Self::init_price_oracle(&config, &runtime_handle).await;
 
         // set up the block producer
         let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
@@ -1394,8 +1396,8 @@ impl IrysNode {
         let mut services = Vec::new();
         {
             // Services are shut down in FIFO order (first added = first to shut down)
-
             // 1. Mining operations
+            services.extend(price_oracle_handles.into_iter());
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
             services.extend(packing_controller_handles.into_iter());
@@ -1651,21 +1653,51 @@ impl IrysNode {
         (block_producer_inner, tokio_service_handle)
     }
 
-    fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
-        let price_oracle = match config.node_config.oracle {
-            OracleConfig::Mock {
-                initial_price,
-                incremental_change,
-                smoothing_interval,
-            } => IrysPriceOracle::MockOracle(MockOracle::new(
-                initial_price,
-                incremental_change,
-                smoothing_interval,
-            )),
-            // note: depending on the oracle, it may require spawning an async background service.
-        };
+    async fn init_price_oracle(
+        config: &Config,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+        // Use configured oracles (must be provided in config)
+        let oracle_cfgs: Vec<OracleConfig> = config.node_config.oracles.clone();
 
-        Arc::new(price_oracle)
+        let mut instances: Vec<Arc<SingleOracle>> = Vec::new();
+        let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
+
+        for oc in oracle_cfgs {
+            let oracle = match oc {
+                OracleConfig::Mock {
+                    initial_price,
+                    incremental_change,
+                    smoothing_interval,
+                    poll_interval_ms,
+                } => SingleOracle::new_mock(
+                    initial_price,
+                    incremental_change,
+                    smoothing_interval,
+                    poll_interval_ms,
+                ),
+                OracleConfig::CoinMarketCap {
+                    api_key,
+                    id,
+                    poll_interval_ms,
+                } => SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
+                    .await
+                    .expect("coinmarketcap initial price"),
+                OracleConfig::CoinGecko {
+                    api_key,
+                    coin_id,
+                    demo_api_key,
+                    poll_interval_ms,
+                } => SingleOracle::new_coingecko(api_key, coin_id, demo_api_key, poll_interval_ms)
+                    .await
+                    .expect("coingecko initial price"),
+            };
+            let handle = Arc::clone(&oracle).spawn_poller(runtime_handle);
+            handles.push(handle);
+            instances.push(oracle);
+        }
+
+        (IrysPriceOracle::new(instances), handles)
     }
 
     fn init_block_discovery_service(
