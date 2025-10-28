@@ -21,7 +21,12 @@ pub async fn info_route(state: web::Data<ApiState>) -> HttpResponse {
     let (chain, blocks) = get_canonical_chain(state.block_tree.clone()).await.unwrap();
     let latest = chain.last().unwrap();
 
-    let latest_cumulative_difficulty = state.block_tree.read().get_block(&latest.block_hash).map(|block| block.cumulative_diff).unwrap_or(0.into());
+    let latest_cumulative_difficulty = state
+        .block_tree
+        .read()
+        .get_block(&latest.block_hash)
+        .map(|block| block.cumulative_diff)
+        .unwrap_or(0.into());
 
     let node_info = NodeInfo {
         version: "0.0.1".into(),

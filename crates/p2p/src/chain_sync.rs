@@ -6,7 +6,10 @@ use irys_actors::MempoolFacade;
 use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
-use irys_types::{Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode, PeerListItem, SyncMode, TokioServiceHandle, U256};
+use irys_types::{
+    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
+    PeerListItem, SyncMode, TokioServiceHandle, U256,
+};
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
 use std::collections::{HashMap, VecDeque};
