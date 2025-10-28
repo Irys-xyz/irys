@@ -1314,7 +1314,7 @@ async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<
     config.fund_genesis_accounts(vec![&signer]);
     let source_node = IrysNodeTest::new_genesis(config).start().await;
     let genesis_block = source_node.node_ctx.genesis_hash;
-    tracing::error!(genesis_hash = ? genesis_block);
+    tracing::error!(genesis.hash = ? genesis_block);
 
     // Create a peer configuration derived from the genesis node and start it with validation disabled.
     let peer_node = source_node.testing_peer_with_assignments(&signer).await?;
@@ -1327,7 +1327,10 @@ async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<
     for _ in 0..BLOCKS_TO_PIPELINE {
         let block = source_node.mine_block().await?;
         source_node.send_full_block(&peer_node, &block).await?;
-        tracing::error!(i = ?block.block_hash, prev = ?block.previous_block_hash);
+        tracing::error!(
+            block.hash = ?block.block_hash,
+            block.previous_block_hash = ?block.previous_block_hash
+        );
         source_blocks.push(block);
     }
 

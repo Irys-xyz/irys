@@ -3,7 +3,7 @@ use crate::mempool_service::{
 };
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
-use irys_primitives::CommitmentType;
+use irys_types::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
@@ -104,8 +104,8 @@ impl Inner {
             }
             CommitmentSnapshotStatus::Unstaked => {
                 warn!(
-                    tx = ?commitment_tx.id,
-                    status = ?commitment_status,
+                    tx.id = ?commitment_tx.id,
+                    tx.commitment_status = ?commitment_status,
                     "commitment tx cached while address is unstaked"
                 );
                 // Cache pledge while address is unstaked
@@ -128,8 +128,8 @@ impl Inner {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx_id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
+            tx.id = ?commitment_tx.id,
+            tx.signer = ?commitment_tx.signer,
             "Received commitment tx from Gossip"
         );
 
@@ -167,8 +167,8 @@ impl Inner {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx_id = ?commitment_tx.id,
-            signer = ?commitment_tx.signer,
+            tx.id = ?commitment_tx.id,
+            tx.signer = ?commitment_tx.signer,
             "Received commitment tx from API"
         );
 
@@ -271,8 +271,8 @@ impl Inner {
                     .await
                 {
                     warn!(
-                        tx = ?tx_id,
-                        error = ?e,
+                        tx.id = ?tx_id,
+                        tx.err = ?e,
                         "Failed to process pending pledge for newly staked address"
                     );
                 }
@@ -495,7 +495,7 @@ impl Inner {
         found
     }
 
-    #[tracing::instrument(skip_all, fields(tx_id = ?commitment_tx.id))]
+    #[tracing::instrument(skip_all, fields(tx.id = ?commitment_tx.id))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,

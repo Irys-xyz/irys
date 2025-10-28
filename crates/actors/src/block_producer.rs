@@ -287,16 +287,16 @@ impl BlockProducerService {
             BlockProducerCommand::SolutionFound { solution, response } => {
                 let solution_hash = solution.solution_hash;
                 info!(
-                    solution_hash = %solution_hash,
-                    vdf_step = solution.vdf_step,
-                    mining_address = %solution.mining_address,
+                    solution.hash = %solution_hash,
+                    solution.vdf_step = solution.vdf_step,
+                    solution.mining_address = %solution.mining_address,
                     "Block producer received mining solution"
                 );
 
                 if let Some(blocks_remaining) = self.blocks_remaining_for_test {
                     if blocks_remaining == 0 {
                         info!(
-                            solution_hash = %solution_hash,
+                            solution.hash = %solution_hash,
                             "No more blocks needed for test, skipping block production"
                         );
                         let _ = response.send(Ok(None));
@@ -311,8 +311,8 @@ impl BlockProducerService {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
                 if let Some((irys_block_header, eth_built_payload)) = &result {
                     info!(
-                        block_hash = %irys_block_header.block_hash,
-                        block_height = irys_block_header.height,
+                        block.hash = %irys_block_header.block_hash,
+                        block.height = irys_block_header.height,
                         "Block production completed successfully"
                     );
 
@@ -343,8 +343,8 @@ impl BlockProducerService {
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
-                    old_value = ?self.blocks_remaining_for_test,
-                    new_value = ?remaining,
+                    custom.old_value = ?self.blocks_remaining_for_test,
+                    custom.new_value = ?remaining,
                     "Updating test blocks remaining"
                 );
                 self.blocks_remaining_for_test = remaining;
@@ -355,17 +355,17 @@ impl BlockProducerService {
 
     /// Internal method to produce a block without the non-Send trait
     #[tracing::instrument(skip_all, fields(
-        solution_hash = %solution.solution_hash,
-        vdf_step = solution.vdf_step,
-        mining_address = %solution.mining_address
+        solution.hash = %solution.solution_hash,
+        solution.vdf_step = solution.vdf_step,
+        solution.mining_address = %solution.mining_address
     ))]
     async fn produce_block_inner(
         inner: Arc<BlockProducerInner>,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
-            partition_hash = %solution.partition_hash,
-            chunk_offset = solution.chunk_offset,
+            solution.partition_hash = %solution.partition_hash,
+            solution.chunk_offset = solution.chunk_offset,
             "Starting block production for solution"
         );
 
@@ -601,10 +601,10 @@ pub trait BlockProdStrategy {
 
                 ParentCheckResult::MustRebuild { new_parent } => {
                     info!(
-                        solution_hash = %solution.solution_hash,
-                        solution_vdf_step = solution.vdf_step,
-                        new_parent = %new_parent,
-                        rebuild_attempt = rebuild_attempts + 1,
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        block.new_parent = %new_parent,
+                        block.rebuild_attempt = rebuild_attempts + 1,
                         "Parent changed but solution is valid - rebuilding on new parent"
                     );
 
@@ -623,10 +623,10 @@ pub trait BlockProdStrategy {
                             solution_vdf_step,
                         } => {
                             warn!(
-                                solution_hash = %solution.solution_hash,
-                                solution_vdf_step,
-                                new_parent = %new_parent,
-                                parent_vdf_step,
+                                solution.hash = %solution.solution_hash,
+                                solution.vdf_step = solution.vdf_step,
+                                block.new_parent = %new_parent,
+                                block.parent_vdf_step = parent_vdf_step,
                                 "Solution is too old for new parent (vdf_step {} <= {}), discarding",
                                 solution_vdf_step,
                                 parent_vdf_step
@@ -645,10 +645,10 @@ pub trait BlockProdStrategy {
 
         if rebuild_attempts > 0 {
             info!(
-                solution_hash = %solution.solution_hash,
-                final_parent = %block.previous_block_hash,
-                block_height = block.height,
-                rebuild_count = rebuild_attempts,
+                block.solution_hash = %solution.solution_hash,
+                block.final_parent = %block.previous_block_hash,
+                block.block_height = block.height,
+                block.rebuild_count = rebuild_attempts,
                 "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
             );
         }
@@ -738,9 +738,9 @@ pub trait BlockProdStrategy {
     }
 
     #[tracing::instrument(skip_all, fields(
-        parent_evm_hash = %prev_block_header.evm_block_hash,
-        timestamp_sec = timestamp_ms / 1000,
-        shadow_tx_count = shadow_txs.len()
+        payload.parent_evm_hash = %prev_block_header.evm_block_hash,
+        payload.timestamp_sec = timestamp_ms / 1000,
+        payload.shadow_tx_count = shadow_txs.len()
     ))]
     async fn build_and_submit_reth_payload(
         &self,
@@ -761,9 +761,9 @@ pub trait BlockProdStrategy {
         };
 
         debug!(
-            timestamp_sec = attributes.timestamp,
-            fee_recipient = %attributes.suggested_fee_recipient,
-            parent_beacon_root = ?attributes.parent_beacon_block_root,
+            payload.timestamp_sec = attributes.timestamp,
+            payload.fee_recipient = %attributes.suggested_fee_recipient,
+            payload.parent_beacon_root = ?attributes.parent_beacon_block_root,
             "Payload attributes created"
         );
 
@@ -776,7 +776,7 @@ pub trait BlockProdStrategy {
         // store shadow txs
         let key = DeterministicShadowTxKey::new(attributes.payload_id());
         debug!(
-            payload_id = %attributes.payload_id(),
+            payload.id = %attributes.payload_id(),
             "Storing shadow transactions"
         );
         self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
@@ -791,7 +791,7 @@ pub trait BlockProdStrategy {
             .map_err(|e| eyre!("Payload builder returned error: {}", e))?;
 
         debug!(
-            payload_id = %payload_id,
+            payload.id = %payload_id,
             "Payload accepted by builder"
         );
 
@@ -825,8 +825,8 @@ pub trait BlockProdStrategy {
         );
 
         info!(
-            payload_block_hash = %built_payload.block().hash(),
-            payload_tx_count = built_payload.block().body().transactions.len(),
+            payload.block_hash = %built_payload.block().hash(),
+            payload.tx_count = built_payload.block().body().transactions.len(),
             "Reth payload built successfully"
         );
 
@@ -1057,9 +1057,9 @@ pub trait BlockProdStrategy {
                     stats.min_threshold
                 );
                 info!(
-                    max_difficulty = ?U256::MAX,
-                    previous_cumulative_diff = ?block.previous_cumulative_diff,
-                    current_diff = ?block.diff,
+                    block.max_difficulty = ?U256::MAX,
+                    block.previous_cumulative_diff = ?block.previous_cumulative_diff,
+                    block.current_diff = ?block.diff,
                     "Difficulty data",
                 );
                 is_difficulty_updated = true;
@@ -1114,8 +1114,8 @@ pub trait BlockProdStrategy {
         }
 
         info!(
-            block_height = ?block.height,
-            hash = ?block.block_hash,
+            block.height = ?block.height,
+            block.hash = ?block.block_hash,
             "Finished producing block",
         );
 
@@ -1174,8 +1174,8 @@ pub trait BlockProdStrategy {
 
         if !is_epoch {
             debug!(
-                block_height,
-                commitment_ids = ?mempool_txs
+                block.height = block_height,
+                custom.commitment_ids = ?mempool_txs
                     .commitment_tx
                     .iter()
                     .map(|t| t.id)
@@ -1264,7 +1264,7 @@ pub trait BlockProdStrategy {
             txids.push(tx.id);
         }
         debug!(
-            tx_count = commitments.len(),
+            custom.tx_count = commitments.len(),
             "Producing epoch rollup for commitment ledger"
         );
         SystemTransactionLedger {

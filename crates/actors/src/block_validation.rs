@@ -18,7 +18,6 @@ use irys_domain::{
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
-use irys_primitives::CommitmentType;
 use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
@@ -26,6 +25,7 @@ use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
 use irys_types::u256_from_le_bytes as hash_to_number;
+use irys_types::CommitmentType;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -231,8 +231,8 @@ pub async fn prevalidate_block(
     parent_ema_snapshot: &EmaSnapshot,
 ) -> Result<(), PreValidationError> {
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "Prevalidating block",
     );
 
@@ -254,16 +254,16 @@ pub async fn prevalidate_block(
     // Check prev_output (vdf)
     prev_output_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "prev_output_is_valid",
     );
 
     // Check block height continuity
     height_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "height_is_valid",
     );
 
@@ -289,24 +289,24 @@ pub async fn prevalidate_block(
     )?;
 
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "difficulty_is_valid",
     );
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
     previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "previous_cumulative_difficulty_is_valid",
     );
 
     // Check the cumulative difficulty
     cumulative_difficulty_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "cumulative_difficulty_is_valid",
     );
 
@@ -316,24 +316,24 @@ pub async fn prevalidate_block(
     // Check the solution_hash
     solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "solution_hash_is_valid",
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
     solution_hash_link_is_valid(&block, &poa_chunk)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "solution_hash_link_is_valid",
     );
 
     // Check the previous solution hash references the parent correctly
     previous_solution_hash_is_valid(&block, &previous_block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "previous_solution_hash_is_valid",
     );
 
@@ -355,8 +355,8 @@ pub async fn prevalidate_block(
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "last_epoch_hash_is_valid",
     );
 
@@ -409,8 +409,8 @@ pub async fn prevalidate_block(
     // Validate ingress proof signer uniqueness
     validate_unique_ingress_proof_signers(&block)?;
     debug!(
-        block_hash = ?block.block_hash,
-        ?block.height,
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
         "ingress_proof_signers_unique",
     );
 
@@ -762,11 +762,11 @@ pub fn get_recall_range(
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
 #[tracing::instrument(skip_all, fields(
-    ?miner_address,
-    chunk_offset = ?poa.partition_chunk_offset,
-    partition_hash = ?poa.partition_hash,
-    entropy_packing_iterations = ?config.entropy_packing_iterations,
-    chunk_size = ?config.chunk_size
+    block.miner_address = ?miner_address,
+    poa.chunk_offset = ?poa.partition_chunk_offset,
+    poa.partition_hash = ?poa.partition_hash,
+    config.entropy_packing_iterations = ?config.entropy_packing_iterations,
+    config.chunk_size = ?config.chunk_size
 ), err)]
 
 pub fn poa_is_valid(
@@ -804,8 +804,7 @@ pub fn poa_is_valid(
             }
         })?;
         let ledger_chunk_offset =
-            slot_index_u64 * config.num_partitions_per_slot * config.num_chunks_in_partition
-                + u64::from(poa.partition_chunk_offset);
+            slot_index_u64 * config.num_chunks_in_partition + u64::from(poa.partition_chunk_offset);
 
         // ledger data -> block
         let ledger = DataLedger::try_from(ledger_id)
@@ -936,18 +935,18 @@ pub async fn shadow_transactions_are_valid(
     // Reject any blob gas usage in the payload
     if payload_v3.blob_gas_used != 0 {
         tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
-            blob_gas_used = payload_v3.blob_gas_used,
+            block.hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            payload.blob_gas_used = payload_v3.blob_gas_used,
             "Rejecting block: blob_gas_used must be zero",
         );
         eyre::bail!("block has non-zero blob_gas_used which is disabled");
     }
     if payload_v3.excess_blob_gas != 0 {
         tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
-            excess_blob_gas = payload_v3.excess_blob_gas,
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
+            payload.excess_blob_gas = payload_v3.excess_blob_gas,
             "Rejecting block: excess_blob_gas must be zero",
         );
         eyre::bail!("block has non-zero excess_blob_gas which is disabled");
@@ -958,9 +957,9 @@ pub async fn shadow_transactions_are_valid(
     if let Some(versioned_hashes) = sidecar.versioned_hashes() {
         if !versioned_hashes.is_empty() {
             tracing::debug!(
-                block_hash = %block.block_hash,
-                evm_block_hash = %block.evm_block_hash,
-                versioned_hashes_len = versioned_hashes.len(),
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                block.versioned_hashes_len = versioned_hashes.len(),
                 "Rejecting block: EIP-4844 blobs/sidecars are not supported",
             );
             eyre::bail!("block contains EIP-4844 blobs/sidecars which are disabled");
@@ -970,9 +969,9 @@ pub async fn shadow_transactions_are_valid(
     if let Some(requests) = sidecar.requests() {
         if !requests.is_empty() {
             tracing::debug!(
-                block_hash = %block.block_hash,
-                evm_block_hash = %block.evm_block_hash,
-                versioned_hashes_len = requests.len(),
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
+                block.versioned_hashes_len = requests.len(),
                 "Rejecting block: EIP-7685 requests which are disabled",
             );
             eyre::bail!("block contains EIP-7685 requests which are disabled");
@@ -995,8 +994,8 @@ pub async fn shadow_transactions_are_valid(
     // Reject presence of EIP-7685 requests via header-level requests_hash as we disable requests.
     if evm_block.header.requests_hash.is_some() {
         tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
+            block.block_hash = %block.block_hash,
+            block.evm_block_hash = %block.evm_block_hash,
             "Rejecting block: EIP-7685 requests_hash present which is disabled",
         );
         eyre::bail!("block contains EIP-7685 requests_hash which is disabled");
@@ -1006,8 +1005,8 @@ pub async fn shadow_transactions_are_valid(
     for tx in evm_block.body.transactions.iter() {
         if tx.is_eip4844() {
             tracing::debug!(
-                block_hash = %block.block_hash,
-                evm_block_hash = %block.evm_block_hash,
+                block.block_hash = %block.block_hash,
+                block.evm_block_hash = %block.evm_block_hash,
                 "Rejecting block: contains EIP-4844 transaction which is disabled",
             );
             eyre::bail!("block contains EIP-4844 transaction which is disabled");
@@ -1091,9 +1090,9 @@ fn extract_leading_shadow_txs(
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
 #[tracing::instrument(skip_all, err, fields(
-    block_hash = %block.block_hash,
-    block_height = %block.height,
-    evm_block_hash = %block.evm_block_hash
+    block.hash = %block.block_hash,
+    block.height = %block.height,
+    block.evm_block_hash = %block.evm_block_hash
 ))]
 pub async fn submit_payload_to_reth(
     block: &IrysBlockHeader,
@@ -1405,7 +1404,7 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err, fields(block_hash = %block.block_hash, block_height = %block.height))]
+#[tracing::instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -2254,7 +2253,7 @@ enum TxInclusionState {
     },
 }
 
-#[tracing::instrument(skip_all, fields(block_under_validation = ?block_under_validation.block_hash))]
+#[tracing::instrument(skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,
@@ -2942,7 +2941,6 @@ mod tests {
             .slot_index
             .expect("Expected to have a slot index in the assignment")
             as u64
-            * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 
@@ -3201,7 +3199,6 @@ mod tests {
             .partition_assignment
             .slot_index
             .expect("Expected to get slot index") as u64
-            * context.consensus_config.num_partitions_per_slot
             * context.consensus_config.num_chunks_in_partition
             + (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num) as u64;
 

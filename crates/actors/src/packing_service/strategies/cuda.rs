@@ -125,9 +125,13 @@ impl super::PackingStrategy for CudaPackingStrategy {
             handles.push(handle);
 
             debug!(
-                target: "irys::packing::update",
-                ?start, ?end, ?storage_module_id, ?partition_hash, ?mining_address,
-                ?storage_module.config.consensus.entropy_packing_iterations,
+                target = "irys::packing::update",
+                packing.start = ?start,
+                packing.end = ?end,
+                packing.storage_module_id = ?storage_module_id,
+                packing.partition_hash = ?partition_hash,
+                packing.mining_address = ?mining_address,
+                packing.entropy_iterations = ?storage_module.config.consensus.entropy_packing_iterations,
                 "CUDA Packed chunks"
             );
         }

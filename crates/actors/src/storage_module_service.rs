@@ -274,17 +274,17 @@ impl StorageModuleServiceInner {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             tracing::warn!(
-                                target: "irys::packing",
-                                storage_module_id = %packing_sm.id,
-                                ?interval,
-                                "Dropping packing request due to saturated channel"
+                                target = "irys::packing",
+                                storage_module.id = %packing_sm.id,
+                                storage_module.packing_interval = ?interval,
+                                "Dropping packing request due to a saturated channel"
                             );
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
                             tracing::error!(
-                                target: "irys::packing",
-                                storage_module_id = %packing_sm.id,
-                                ?interval,
+                                target = "irys::packing",
+                                storage_module.id = %packing_sm.id,
+                                storage_module.packing_interval = ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }
@@ -460,38 +460,45 @@ impl StorageModuleServiceInner {
 
         if newer_local {
             debug!(
-                module_id = module.id,
-                update_height,
-                reason,
+                storage_module.id = module.id,
+                storage_module.update_height = update_height,
+                storage_module.clear_reason = reason,
                 "skipping unassign: local packing params are newer than update"
             );
             return;
         }
 
         debug!(
-            module_id = module.id,
-            update_height, reason, "clearing local partition assignment"
+            storage_module.id = module.id,
+            storage_module.update_height = update_height,
+            storage_module.clear_reason = reason,
+            "clearing local partition assignment"
         );
         module.clear_assignment(update_height);
 
         match module.reset() {
             Ok(interval) => {
                 debug!(
-                    ?interval,
-                    module_id = module.id,
-                    reason,
+                    packing.interval = ?interval,
+                    storage_module.id = module.id,
+                    storage_module.clear_reason = reason,
                     "storage module reset after unassign"
                 );
             }
             Err(e) => {
                 warn!(
-                    module_id = module.id,
-                    reason, "failed to reset storage module after unassign: {}", e
+                    storage_module.id = module.id,
+                    storage_module.clear_reason = reason,
+                    "failed to reset storage module after unassign: {}",
+                    e
                 );
             }
         }
     }
 
+    /// Gets the maximum offset in the partition that has been assigned data chunks
+    /// by data transactions. Used for retrieving the  the maximum possible ledger offset
+    /// within a partition relative to the start of the partition.
     fn get_max_partition_offset(&self, storage_module: Arc<StorageModule>) -> PartitionChunkOffset {
         let ledger_id = storage_module
             .partition_assignment()
@@ -713,7 +720,7 @@ impl StorageModuleService {
             }
         }
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?
         }

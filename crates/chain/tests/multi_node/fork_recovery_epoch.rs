@@ -119,9 +119,8 @@ async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
     // Make sure the blocks on each for have different hashes
     assert_ne!(fork1_3.block_hash, fork2_3.block_hash);
     debug!(
-        fork1_3_height = fork1_3.height,
-        fork2_3_height = fork2_3.height,
-        "Comparing fork heights"
+        "Comparing fork heights: fork1 height: {}, fork2 height: {}",
+        fork1_3.height, fork2_3.height
     );
 
     // Have peer1 mine its epoch block first

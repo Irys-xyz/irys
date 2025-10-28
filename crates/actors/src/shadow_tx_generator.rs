@@ -357,7 +357,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         match tx.commitment_type {
-            irys_primitives::CommitmentType::Stake => Ok(ShadowMetadata {
+            irys_types::CommitmentType::Stake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: tx.value.into(),
@@ -368,7 +368,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee as u128,
             }),
-            irys_primitives::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: tx.value.into(),
@@ -379,7 +379,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee as u128,
             }),
-            irys_primitives::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
@@ -390,7 +390,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee as u128,
             }),
-            irys_primitives::CommitmentType::Unstake => Ok(ShadowMetadata {
+            irys_types::CommitmentType::Unstake => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
@@ -513,18 +513,17 @@ impl<'a> ShadowTxGenerator<'a> {
 
         // Update treasury based on commitment type
         match tx.commitment_type {
-            irys_primitives::CommitmentType::Stake
-            | irys_primitives::CommitmentType::Pledge { .. } => {
+            irys_types::CommitmentType::Stake | irys_types::CommitmentType::Pledge { .. } => {
                 // Stake and Pledge lock funds in the treasury
                 self.treasury_balance =
                     self.treasury_balance.checked_add(tx.value).ok_or_else(|| {
                         eyre!("Treasury balance overflow when adding commitment value")
                     })?;
             }
-            irys_primitives::CommitmentType::Unstake => {
+            irys_types::CommitmentType::Unstake => {
                 // Unstake handled on epoch boundary
             }
-            irys_primitives::CommitmentType::Unpledge { .. } => {
+            irys_types::CommitmentType::Unpledge { .. } => {
                 // Unpledge handled on epoch boundary
             }
         }
@@ -720,8 +719,8 @@ impl RollingHash {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_primitives::CommitmentType;
     use irys_types::ingress::IngressProofV1;
+    use irys_types::CommitmentType;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
         IrysBlockHeader, IrysSignature, Signature, H256,

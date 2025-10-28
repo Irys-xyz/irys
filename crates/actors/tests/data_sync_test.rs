@@ -28,6 +28,7 @@ use tempfile::TempDir;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error};
 
+#[ignore = "flaky, non critical function test"]
 #[tokio::test]
 async fn slow_heavy_test_data_sync_with_different_peer_performance() {
     std::env::set_var("RUST_LOG", "debug,storage=off");

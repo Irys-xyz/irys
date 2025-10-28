@@ -202,22 +202,6 @@ impl IrysPriceOracle {
         Arc::new(Self { oracles })
     }
 
-    pub fn current_price(&self) -> eyre::Result<Amount<(IrysPrice, Usd)>> {
-        let mut best_ts: Option<std::time::SystemTime> = None;
-        let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
-        for o in &self.oracles {
-            let guard = o
-                .cache
-                .read()
-                .map_err(|_| eyre::eyre!("oracle price cache lock poisoned"))?;
-            if best_ts.map(|t| guard.last_updated > t).unwrap_or(true) {
-                best_ts = Some(guard.last_updated);
-                best_val = Some(guard.value);
-            }
-        }
-        best_val.ok_or_else(|| eyre::eyre!("no oracles configured"))
-    }
-
     /// Returns the freshest price along with its last_updated timestamp.
     pub fn current_snapshot(
         &self,
