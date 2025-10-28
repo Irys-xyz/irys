@@ -239,7 +239,9 @@ impl EpochSnapshot {
     }
 
     /// Main worker function
-    #[tracing::instrument(skip_all, err, fields(new_epoch_block = ?new_epoch_block.block_hash))]
+    #[tracing::instrument(skip_all, err, fields(
+        block.hash = ?new_epoch_block.block_hash
+    ))]
     pub fn perform_epoch_tasks(
         &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
@@ -273,8 +275,8 @@ impl EpochSnapshot {
             .map_err(|_| EpochSnapshotError::InvalidCommitments)?;
 
         debug!(
-            height = new_epoch_block.height,
-            block_hash = %new_epoch_block.block_hash,
+            block.height = new_epoch_block.height,
+            block.hash = %new_epoch_block.block_hash,
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
@@ -335,7 +337,7 @@ impl EpochSnapshot {
                 return Err(EpochSnapshotError::UnstakeSignerNotStaked { signer });
             }
 
-            debug!(signer = %signer, "unstake_applied");
+            debug!(tx.signer = %signer, "unstake_applied");
         }
         Ok(())
     }
@@ -831,8 +833,8 @@ impl EpochSnapshot {
             let partition_miner_address = match (data_present, cap_present) {
                 (None, None) => {
                     warn!(
-                        partition_hash = %ph,
-                        signer = %signer,
+                        tx.partition_hash = %ph,
+                        tx.signer = %signer,
                         "unpledge_target_not_found"
                     );
                     return Err(EpochSnapshotError::UnpledgeTargetNotFound {
@@ -856,7 +858,7 @@ impl EpochSnapshot {
                     data_partition.miner_address
                 }
                 (Some(_), Some(_)) => {
-                    warn!(partition_hash = %ph, "unpledge_target_in_both_maps");
+                    warn!(tx.partition_hash = %ph, "unpledge_target_in_both_maps");
                     return Err(EpochSnapshotError::UnpledgeTargetInBothMaps {
                         partition_hash: ph,
                     });
@@ -882,8 +884,8 @@ impl EpochSnapshot {
             }
 
             debug!(
-                partition_hash = %ph,
-                signer = %signer,
+                tx.partition_hash = %ph,
+                tx.signer = %signer,
                 "unpledge_retired_to_unassigned"
             );
         }

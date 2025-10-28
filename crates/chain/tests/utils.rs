@@ -502,8 +502,8 @@ impl IrysNodeTest<()> {
 
     fn get_span(&self) -> tracing::Span {
         match &self.name {
-            Some(name) => error_span!("NODE", name = %name),
-            None => error_span!("NODE", name = "genesis"),
+            Some(name) => error_span!("NODE", node.name = %name),
+            None => error_span!("NODE", node.name = "genesis"),
         }
     }
 
@@ -521,7 +521,7 @@ impl IrysNodeTest<()> {
         log_name: &str,
         seconds_to_wait: usize,
     ) -> IrysNodeTest<IrysNodeCtx> {
-        let span = error_span!("NODE", name = %log_name);
+        let span = error_span!("NODE", node.name = %log_name);
         let _enter = span.enter();
         let node = self.start().await;
         node.wait_for_packing(seconds_to_wait).await;
@@ -1450,11 +1450,11 @@ impl IrysNodeTest<IrysNodeCtx> {
                 }
                 Ok(Some(block)) => {
                     tracing::error!(
-                        target = "test.reth",
-                        ?tag,
-                        expected = %expected_hash,
-                        actual = %block.header.hash,
-                        attempt,
+                        custom.target = "test.reth",
+                        custom.tag = ?tag,
+                        custom.expected = %expected_hash,
+                        custom.actual = %block.header.hash,
+                        custom.attempt = attempt,
                         "reth tag mismatch while waiting"
                     );
                 }

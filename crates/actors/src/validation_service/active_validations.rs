@@ -92,7 +92,7 @@ pub(super) struct PreemptibleVdfTask {
 }
 
 impl PreemptibleVdfTask {
-    #[instrument(skip_all, fields(block_hash = %self.task.block.block_hash))]
+    #[instrument(skip_all, fields(block.hash = %self.task.block.block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
         let inner = Arc::clone(&self.task.service_inner);
         let block = Arc::clone(&self.task.block);
@@ -152,7 +152,7 @@ impl VdfScheduler {
     }
 
     /// Submit a VDF task
-    #[instrument(skip_all, fields(block_hash = %task.block.block_hash, ?priority))]
+    #[instrument(skip_all, fields(block.hash = %task.block.block_hash, ?priority))]
     pub(super) fn submit(&mut self, task: BlockValidationTask, priority: BlockPriorityMeta) {
         let hash = task.block.block_hash;
 
@@ -216,7 +216,11 @@ impl VdfScheduler {
         let handle = tokio::spawn(
             preemptible
                 .execute()
-                .instrument(tracing::info_span!("vdf_validation", block_hash = %hash, ?priority))
+                .instrument(tracing::info_span!(
+                    "vdf_validation",
+                    block.hash = %hash,
+                    block.priority = ?priority
+                ))
                 .in_current_span(),
         );
         self.current = Some(CurrentVdfTask {
@@ -282,7 +286,7 @@ impl ValidationCoordinator {
     }
 
     /// Calculate priority for a block
-    #[instrument(skip_all, fields(block_hash = %block.block_hash, block_height = %block.height))]
+    #[instrument(skip_all, fields(block.hash = %block.block_hash, block.height = %block.height))]
     pub(super) fn calculate_priority(&self, block: &IrysBlockHeader) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
@@ -323,7 +327,7 @@ impl ValidationCoordinator {
     }
 
     /// Submit a validation task
-    #[instrument(skip_all, fields(block_hash = %task.block.block_hash, block_height = %task.block.height))]
+    #[instrument(skip_all, fields(block.hash = %task.block.block_hash, block.height = %task.block.height))]
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
         let priority = self.calculate_priority(&task.block);
         self.vdf_scheduler.submit(task, priority);
@@ -348,9 +352,10 @@ impl ValidationCoordinator {
                                 validation_result,
                             }
                         }
-                        .instrument(
-                            tracing::error_span!("concurrent_validation", block_hash = %block_hash),
-                        )
+                        .instrument(tracing::error_span!(
+                            "concurrent_validation",
+                            block.hash = %block_hash
+                        ))
                         .in_current_span(),
                     );
                 }
@@ -400,9 +405,9 @@ impl ValidationCoordinator {
         }
 
         debug!(
-            block_hash = %current.hash,
-            old_priority = ?current.priority,
-            ?new_priority,
+            block.hash = %current.hash,
+            block.priority.old = ?current.priority,
+            block.priority.new = ?new_priority,
             "Current VDF task priority changed after reorg"
         );
 
@@ -445,7 +450,7 @@ impl ValidationCoordinator {
 
         if updated_count > 0 {
             debug!(
-                vdf_pending_updated = updated_count,
+                vdf.pending_updated = updated_count,
                 "Reevaluated VDF pending task priorities after reorg"
             );
         }

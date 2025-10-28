@@ -481,7 +481,7 @@ impl BlockTree {
             self.blocks.get(&hash).map(|b| b.chain_state),
             Some(ChainState::Onchain)
         ) {
-            debug!(?hash, "already part of the main chian state");
+            debug!(block.hash = ?hash, "already part of the main chian state");
             return Ok(());
         }
 
@@ -1147,7 +1147,7 @@ impl BlockTree {
                                 if !matches!(child_entry.chain_state, ChainState::Onchain) {
                                     let _ = self
                                         .remove_block(&child)
-                                        .inspect_err(|err| tracing::error!(?err));
+                                        .inspect_err(|err| tracing::error!(custom.error = ?err));
                                 }
                             }
                         }
@@ -1155,7 +1155,7 @@ impl BlockTree {
                         // Now remove just this block
                         let _ = self
                             .delete_block(&hash)
-                            .inspect_err(|err| tracing::error!(?err));
+                            .inspect_err(|err| tracing::error!(custom.error = ?err));
                     }
                 }
             }

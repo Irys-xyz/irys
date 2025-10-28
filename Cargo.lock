@@ -5313,10 +5313,15 @@ dependencies = [
 name = "irys-price-oracle"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "eyre",
  "irys-types",
+ "reqwest 0.12.15",
+ "reth",
  "rust_decimal",
  "rust_decimal_macros",
+ "serde",
+ "serde_json",
  "test-log",
  "tokio",
  "tracing",

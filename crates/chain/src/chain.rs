@@ -45,7 +45,8 @@ use irys_p2p::{
     ChainSyncServiceInner, GossipDataHandler, P2PService, ServiceHandleWithShutdownSignal,
     SyncChainServiceFacade, SyncChainServiceMessage,
 };
-use irys_price_oracle::{mock_oracle::MockOracle, IrysPriceOracle};
+use irys_price_oracle::IrysPriceOracle;
+use irys_price_oracle::SingleOracle;
 use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
@@ -338,7 +339,10 @@ impl IrysNode {
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
     ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
-        info!(miner_address = ?self.config.node_config.miner_address(), "Starting Irys Node: {:?}", node_mode);
+        info!(
+            config.miner_address = ?self.config.node_config.miner_address(),
+            "Starting Irys Node: {:?}", node_mode
+        );
 
         // Check if blockchain data already exists
         let has_existing_data = block_index.num_blocks() > 0;
@@ -900,7 +904,7 @@ impl IrysNode {
                             _ = &mut service_set => {
                             },
                             res = &mut task_manager_pinned => {
-                                tracing::warn!(?res)
+                                tracing::warn!(custom.res = ?res)
                             }
                             _ = reth_node => {}
                         }
@@ -1216,8 +1220,9 @@ impl IrysNode {
             chain_sync_tx.clone(),
         )?;
 
-        // set up the price oracle
-        let price_oracle = Self::init_price_oracle(&config);
+        // set up the price oracles (initial price(s) fetched during construction)
+        let (price_oracle, price_oracle_handles) =
+            Self::init_price_oracle(&config, &runtime_handle).await;
 
         // set up the block producer
         let (block_producer_inner, block_producer_handle) = Self::init_block_producer(
@@ -1318,9 +1323,9 @@ impl IrysNode {
             .map_err(|err| eyre::eyre!("reth service dropped initial FCU acknowledgment: {err}"))?;
 
         debug!(
-            head = %fcu_markers.head.block_hash,
-            confirmed = %fcu_markers.migration_block.block_hash,
-            finalized = %fcu_markers.prune_block.block_hash,
+            fcu.head = %fcu_markers.head.block_hash,
+            fcu.confirmed = %fcu_markers.migration_block.block_hash,
+            fcu.finalized = %fcu_markers.prune_block.block_hash,
             "Initial fork choice update applied to Reth"
         );
 
@@ -1391,8 +1396,8 @@ impl IrysNode {
         let mut services = Vec::new();
         {
             // Services are shut down in FIFO order (first added = first to shut down)
-
             // 1. Mining operations
+            services.extend(price_oracle_handles.into_iter());
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
             services.extend(packing_controller_handles.into_iter());
@@ -1579,18 +1584,20 @@ impl IrysNode {
                     match sender.try_send(req) {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::warn!(
+                            tracing::event!(
                                 target: "irys::packing",
-                                storage_module_id = %sm.id,
-                                ?interval,
-                                "Dropping packing request due to saturated channel"
+                                tracing::Level::WARN,
+                                storage_module.id = %sm.id,
+                                packing.interval = ?interval,
+                                "Dropping packing request due to a saturated channel"
                             );
                         }
                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
-                            tracing::error!(
+                            tracing::event!(
                                 target: "irys::packing",
-                                storage_module_id = %sm.id,
-                                ?interval,
+                                tracing::Level::ERROR,
+                                storage_module.id = %sm.id,
+                                packing.interval = ?interval,
                                 "Packing channel closed; failed to enqueue repacking request"
                             );
                         }
@@ -1646,21 +1653,51 @@ impl IrysNode {
         (block_producer_inner, tokio_service_handle)
     }
 
-    fn init_price_oracle(config: &Config) -> Arc<IrysPriceOracle> {
-        let price_oracle = match config.node_config.oracle {
-            OracleConfig::Mock {
-                initial_price,
-                incremental_change,
-                smoothing_interval,
-            } => IrysPriceOracle::MockOracle(MockOracle::new(
-                initial_price,
-                incremental_change,
-                smoothing_interval,
-            )),
-            // note: depending on the oracle, it may require spawning an async background service.
-        };
+    async fn init_price_oracle(
+        config: &Config,
+        runtime_handle: &tokio::runtime::Handle,
+    ) -> (Arc<IrysPriceOracle>, Vec<irys_types::TokioServiceHandle>) {
+        // Use configured oracles (must be provided in config)
+        let oracle_cfgs: Vec<OracleConfig> = config.node_config.oracles.clone();
 
-        Arc::new(price_oracle)
+        let mut instances: Vec<Arc<SingleOracle>> = Vec::new();
+        let mut handles: Vec<irys_types::TokioServiceHandle> = Vec::new();
+
+        for oc in oracle_cfgs {
+            let oracle = match oc {
+                OracleConfig::Mock {
+                    initial_price,
+                    incremental_change,
+                    smoothing_interval,
+                    poll_interval_ms,
+                } => SingleOracle::new_mock(
+                    initial_price,
+                    incremental_change,
+                    smoothing_interval,
+                    poll_interval_ms,
+                ),
+                OracleConfig::CoinMarketCap {
+                    api_key,
+                    id,
+                    poll_interval_ms,
+                } => SingleOracle::new_coinmarketcap(api_key, id, poll_interval_ms)
+                    .await
+                    .expect("coinmarketcap initial price"),
+                OracleConfig::CoinGecko {
+                    api_key,
+                    coin_id,
+                    demo_api_key,
+                    poll_interval_ms,
+                } => SingleOracle::new_coingecko(api_key, coin_id, demo_api_key, poll_interval_ms)
+                    .await
+                    .expect("coingecko initial price"),
+            };
+            let handle = Arc::clone(&oracle).spawn_poller(runtime_handle);
+            handles.push(handle);
+            instances.push(oracle);
+        }
+
+        (IrysPriceOracle::new(instances), handles)
     }
 
     fn init_block_discovery_service(
@@ -1781,7 +1818,10 @@ fn init_peer_list_service(
                     peer: reth_peer_info,
                     response: response_tx,
                 }) {
-                    error!(%send_error, "Failed to enqueue connect-to-peer request for reth service");
+                    error!(
+                        custom.error = %send_error,
+                        "Failed to enqueue connect-to-peer request for reth service"
+                    );
                     return;
                 }
 
@@ -1790,10 +1830,10 @@ fn init_peer_list_service(
                         debug!("Successfully connected to reth peer");
                     }
                     Ok(Err(err)) => {
-                        error!(error = %err, "Reth service failed to connect to peer");
+                        error!(custom.error = %err, "Reth service failed to connect to peer");
                     }
                     Err(recv_error) => {
-                        error!(%recv_error, "Reth service connect-to-peer response channel closed");
+                        error!(custom.error = %recv_error, "Reth service connect-to-peer response channel closed");
                     }
                 }
             }

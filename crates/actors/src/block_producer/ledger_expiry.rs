@@ -84,7 +84,7 @@ use tokio::sync::{mpsc::UnboundedSender, oneshot};
 ///
 /// # Returns
 /// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
-#[tracing::instrument(skip_all, fields(block_height, ledger_type = ?ledger_type))]
+#[tracing::instrument(skip_all, fields(block.height = block_height, ledger.type = ?ledger_type))]
 pub async fn calculate_expired_ledger_fees(
     parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
@@ -676,8 +676,8 @@ fn aggregate_balance_deltas(
                     .push((data_tx.id, perm_fee, data_tx.signer));
             } else {
                 tracing::debug!(
-                    id = ?data_tx.id,
-                    promoted_height = ?data_tx.promoted_height,
+                    tx.id = ?data_tx.id,
+                    tx.promoted_height = ?data_tx.promoted_height,
                     "Tx was promoted, no refund needed",
                 );
             }

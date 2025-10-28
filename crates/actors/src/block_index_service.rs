@@ -136,7 +136,7 @@ impl BlockIndexServiceInner {
     /// Safety
     /// - Expects `all_txs` to contain transaction headers for every transaction ID in the block's
     ///   Submit and Publish ledgers. This is normally guaranteed by prior validation.
-    #[instrument(skip_all, err, fields(height = %block.height, hash = %block.block_hash))]
+    #[instrument(skip_all, err, fields(block.height = %block.height, block.hash = %block.block_hash))]
     pub fn migrate_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
