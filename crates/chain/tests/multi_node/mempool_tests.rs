@@ -1639,7 +1639,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // mine a block
     let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
 
-    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
+    assert_eq!(reth_exec_env.block().transaction_count(), 1 + 2); // +2 for block reward & PD base fee moving
 
     let _block_hash = peer1.wait_until_height(3, seconds_to_wait).await?;
     let _block_hash = peer2.wait_until_height(3, seconds_to_wait).await?;
@@ -2004,7 +2004,7 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     let evm_block2 = peer1.get_evm_block_by_hash2(evm_block_hash).await?;
     assert_eq!(evm_block, evm_block2.into());
 
-    assert_eq!(evm_block.body.transactions.len(), 2);
+    assert_eq!(evm_block.body.transactions.len(), 3);
 
     tokio::join!(genesis.stop(), peer1.stop(), peer2.stop());
 
