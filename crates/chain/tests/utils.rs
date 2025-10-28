@@ -1245,7 +1245,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         Err(eyre::eyre!(
-            "Failed waiting {} for ingress proofs. Waited {} seconds",
+            "Timed out waiting for {} ingress proof(s) within {} seconds",
             num_proofs,
             seconds,
         ))
