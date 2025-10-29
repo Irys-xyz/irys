@@ -1165,23 +1165,6 @@ pub trait BlockProdStrategy {
     }
 
     /// Calculate the new PD base fee for a new block based on utilization.
-    ///
-    /// This method computes the PD (Programmable Data) base fee per chunk by:
-    /// 1. Extracting the current PD base fee from the parent block's 2nd shadow transaction (PdBaseFeeUpdate)
-    /// 2. Counting PD chunks used in the parent block from all PD transactions
-    /// 3. Converting from per-chunk Irys to per-chunk USD using the EMA price
-    /// 4. Adjusting the USD fee based on block utilization (target: 50%, range: ±12.5%)
-    /// 5. Converting the adjusted per-chunk USD fee back to per-chunk Irys
-    ///
-    /// This approach minimizes rounding errors by working in per-chunk units throughout,
-    /// eliminating redundant conversions (3 mul_div operations vs 5 in naive approach).
-    ///
-    /// # Notes
-    ///
-    /// - Reads `current_pd_base_fee_irys` directly from parent block's 2nd shadow tx
-    /// - Counts PD chunks by iterating through all transactions and detecting PD txs
-    /// - Uses `prev_block_ema_snapshot.ema_for_public_pricing()` to convert parent Irys fee to USD
-    /// - Uses `current_ema_price` to convert the adjusted USD fee back to Irys
     fn calculate_pd_base_fee_for_new_block(
         &self,
         prev_block_header: &IrysBlockHeader,

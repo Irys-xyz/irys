@@ -178,10 +178,6 @@ impl<T: std::fmt::Debug> Amount<T> {
     /// Percentage must be expressed using PRECISION_SCALE.
     ///
     /// Formula: result = amount * (1 + percentage)
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
     #[tracing::instrument(err)]
     pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 + percentage) / PRECISION_SCALE
@@ -194,10 +190,6 @@ impl<T: std::fmt::Debug> Amount<T> {
     /// Percentage must be expressed using PRECISION_SCALE.
     ///
     /// Formula: result = amount * (1 - percentage)
-    ///
-    /// # Errors
-    ///
-    /// Whenever any of the math operations fail due to bounds checks.
     #[tracing::instrument(err)]
     pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 - percentage) / PRECISION_SCALE
