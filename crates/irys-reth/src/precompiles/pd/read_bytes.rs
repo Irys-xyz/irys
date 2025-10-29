@@ -8,6 +8,8 @@
 
 use alloy_primitives::{aliases::U200, Bytes};
 use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier, U34};
+use irys_types::storage::ii;
+use irys_types::{ledger_chunk_offset_ii, LedgerChunkOffset, LedgerChunkRange};
 use revm::precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
 use tracing::{debug, warn};
 
@@ -24,7 +26,7 @@ fn calculate_chunk_offsets(
     offset: u32,
     chunk_count: u16,
     num_chunks_in_partition: u64,
-) -> Result<(u64, u64), PdPrecompileError> {
+) -> Result<LedgerChunkRange, PdPrecompileError> {
     let partition_index_u64: u64 = (*partition_index).try_into().map_err(|_| {
         warn!(partition_index = %partition_index, "Partition index exceeds u64::MAX");
         PdPrecompileError::PartitionIndexTooLarge {
@@ -69,7 +71,7 @@ fn calculate_chunk_offsets(
         }
     })?;
 
-    Ok((start, end))
+    Ok(LedgerChunkRange::from(ledger_chunk_offset_ii!(start, end)))
 }
 
 fn calculate_byte_offset(
@@ -256,38 +258,43 @@ pub fn read_bytes_range(
     let config = chunk_provider.config();
     let chunk_size = config.chunk_size;
 
-    let (translated_chunks_start, translated_chunks_end) = calculate_chunk_offsets(
+    let ledger_range = calculate_chunk_offsets(
         partition_index,
         *offset,
         *chunk_count,
         config.num_chunks_in_partition,
     )?;
 
+    let ledger_start = ledger_range.start();
+    let ledger_end = ledger_range.end();
+
     debug!(
         partition_index = %partition_index,
         chunk_offset = offset,
         chunk_count = chunk_count,
-        ledger_start = translated_chunks_start,
-        ledger_end = translated_chunks_end,
+        ledger_start = *ledger_start,
+        ledger_end = *ledger_end,
         "Fetching chunks from storage"
     );
 
     // Fetch and collect all chunks
     let mut bytes = Vec::with_capacity((*chunk_count as u64 * chunk_size) as usize);
 
-    for i in translated_chunks_start..translated_chunks_end {
+    for ledger_offset in *ledger_start..*ledger_end {
         let unpacked_chunk = chunk_provider
-            .get_unpacked_chunk_by_ledger_offset(0, i)
+            .get_unpacked_chunk_by_ledger_offset(0, ledger_offset)
             .map_err(|e| {
-                warn!(ledger_offset = i, error = %e, "Failed to fetch chunk");
+                warn!(ledger_offset, error = %e, "Failed to fetch chunk");
                 PdPrecompileError::ChunkFetchFailed {
-                    offset: i,
+                    offset: ledger_offset,
                     reason: e.to_string(),
                 }
             })?
             .ok_or_else(|| {
-                warn!(ledger_offset = i, "Chunk not found");
-                PdPrecompileError::ChunkNotFound { offset: i }
+                warn!(ledger_offset, "Chunk not found");
+                PdPrecompileError::ChunkNotFound {
+                    offset: ledger_offset,
+                }
             })?;
 
         bytes.extend(unpacked_chunk);
