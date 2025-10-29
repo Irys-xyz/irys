@@ -24,3 +24,9 @@ priority = 100
 filter = 'test(/.*heavy_.*/)'
 threads-required = 2
 priority = 90
+
+# heavy tests
+[[profile.default.overrides]]
+filter = 'test(/.*heavy2x_.*/)'
+threads-required = 4
+priority = 90

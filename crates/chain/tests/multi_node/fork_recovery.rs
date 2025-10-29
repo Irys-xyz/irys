@@ -343,7 +343,7 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 /// - Reth FCU propagation (`Latest`, `Safe`, `Finalized`) matching the canonical/migrated blocks.
 /// - Reth latest tags on both nodes reflect their respective fork tips before the reorg.
 #[test_log::test(tokio::test)]
-async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
+async fn heavy2x_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let num_blocks_in_epoch = 3;
     let block_tree_depth: u64 = 6;
