@@ -4,7 +4,6 @@
 //! based on utilization and market conditions. The fee is calculated per chunk and
 //! denominated in Irys tokens.
 
-use crate::reth_service::pd_fee_adjustments;
 use irys_domain::EmaSnapshot;
 use irys_types::{
     storage_pricing::{
@@ -190,8 +189,6 @@ mod tests {
     use irys_domain::EmaSnapshot;
     use rust_decimal_macros::dec;
 
-    
-
     /// Test correct price conversion when EMA prices change.
     ///
     /// When parent EMA price differs from current EMA price, the function should:
@@ -203,9 +200,9 @@ mod tests {
     ///
     /// At 50% utilization: new_fee_irys = parent_fee_irys × (parent_ema_price / current_ema_price)
     #[rstest::rstest]
-    #[case(dec!(1.0), dec!(1.0), dec!(1.5))]  // No price change
+    #[case(dec!(1.0), dec!(1.0), dec!(1.5))] // No price change
     #[case(dec!(2.0), dec!(1.0), dec!(0.75))] // Current price doubles → need fewer tokens
-    #[case(dec!(0.5), dec!(1.0), dec!(3.0))]  // Current price halves → need more tokens
+    #[case(dec!(0.5), dec!(1.0), dec!(3.0))] // Current price halves → need more tokens
     fn test_price_conversion_with_changing_ema(
         #[case] current_ema_price_decimal: rust_decimal::Decimal,
         #[case] parent_ema_price_decimal: rust_decimal::Decimal,
@@ -247,5 +244,145 @@ mod tests {
         assert_eq!(result, expected);
 
         Ok(())
+    }
+}
+
+pub(crate) mod pd_fee_adjustments {
+    use rust_decimal_macros::dec;
+
+    use super::*;
+    use irys_types::storage_pricing::{
+        phantoms::{Percentage, Usd},
+        safe_sub,
+    };
+
+    /// Calculate a new base fee for Programmable Data based on block utilization.
+    ///
+    /// The base fee adjusts linearly based on how much of the PD chunk budget was used:
+    /// - At 50% utilization (target): no change
+    /// - At 100% utilization: +12.5% adjustment
+    /// - At 0% utilization: -12.5% adjustment
+    pub(crate) fn calculate_new_base_fee(
+        current_base_fee: Amount<Usd>,
+        chunks_used_in_block: u32,
+        max_pd_chunks_per_block: u64,
+        base_fee_floor: Amount<Usd>,
+    ) -> eyre::Result<Amount<Usd>> {
+        // Protocol constants for base fee adjustment
+        let max_adjustment = Amount::<Percentage>::percentage(dec!(0.125))?; // 12.5%
+        let target_utilization = Amount::<Percentage>::percentage(dec!(0.5))?; // 50%
+
+        // Calculate utilization as a ratio in PRECISION_SCALE
+        // utilization = (chunks_used * PRECISION_SCALE) / max_chunks
+        let utilization = mul_div(
+            U256::from(chunks_used_in_block),
+            PRECISION_SCALE,
+            U256::from(max_pd_chunks_per_block),
+        )?;
+
+        // Calculate adjustment percentage based on utilization vs target
+        let adjustment_pct = if utilization > target_utilization.amount {
+            // Linear increase: 0% at 50%, +12.5% at 100%
+            // delta = (utilization - target) / (100% - target)
+            let numerator = safe_sub(utilization, target_utilization.amount)?;
+            let denominator = safe_sub(PRECISION_SCALE, target_utilization.amount)?;
+            let delta = mul_div(numerator, PRECISION_SCALE, denominator)?;
+
+            // adjustment = delta * max_adjustment / PRECISION_SCALE
+            Amount::new(mul_div(delta, max_adjustment.amount, PRECISION_SCALE)?)
+        } else {
+            // Linear decrease: 0% at 50%, -12.5% at 0%
+            // delta = (target - utilization) / target
+            let numerator = safe_sub(target_utilization.amount, utilization)?;
+            let delta = mul_div(numerator, PRECISION_SCALE, target_utilization.amount)?;
+
+            // adjustment = delta * max_adjustment / PRECISION_SCALE
+            Amount::new(mul_div(delta, max_adjustment.amount, PRECISION_SCALE)?)
+        };
+
+        // Apply adjustment
+        let new_fee = if utilization >= target_utilization.amount {
+            current_base_fee.add_multiplier(adjustment_pct)?
+        } else {
+            current_base_fee.sub_multiplier(adjustment_pct)?
+        };
+
+        // Enforce floor
+        let final_fee = if new_fee.amount < base_fee_floor.amount {
+            base_fee_floor
+        } else {
+            new_fee
+        };
+
+        Ok(final_fee)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use eyre::Result;
+        use irys_types::ProgrammableDataConfig;
+        use rust_decimal::Decimal;
+        use rust_decimal_macros::dec;
+
+        /// Comprehensive parametrized test for PD base fee adjustment algorithm.
+        #[rstest::rstest]
+        // No change at 50% utilization (target)
+        #[case(50, 100, dec!(1.00), dec!(1.00))]
+        #[case(500, 1000, dec!(0.50), dec!(0.50))]
+        #[case(3750, 7500, dec!(0.01), dec!(0.01))]
+        // Fee converges to floor
+        #[case(0, 100, dec!(0.011), dec!(0.01))] // -12.5% → $0.009625 → floor $0.01
+        #[case(10, 100, dec!(0.0105), dec!(0.01))] // -10% → $0.00945 → floor $0.01
+        #[case(0, 100, dec!(0.02), dec!(0.0175))] // -12.5% → $0.0175 (above floor)
+        // Fee increases linearly (>50% utilization)
+        #[case(100, 100, dec!(1.00), dec!(1.125))] // 100% → +12.5% (cap check)
+        #[case(75, 100, dec!(1.00), dec!(1.0625))] // 75% → +6.25%
+        #[case(60, 100, dec!(1.00), dec!(1.025))] // 60% → +2.5%
+        #[case(90, 100, dec!(0.50), dec!(0.55))] // 90% → +10%
+        // Fee decreases linearly (<50% utilization)
+        #[case(0, 100, dec!(1.00), dec!(0.875))] // 0% → -12.5% (cap check)
+        #[case(25, 100, dec!(1.00), dec!(0.9375))] // 25% → -6.25%
+        #[case(40, 100, dec!(1.00), dec!(0.975))] // 40% → -2.5%
+        #[case(10, 100, dec!(0.50), dec!(0.45))] // 10% → -10%
+        fn test_calculate_new_base_fee(
+            #[case] chunks_used: u32,
+            #[case] max_chunks_per_block: u64,
+            #[case] current_fee_usd: Decimal,
+            #[case] expected_fee_usd: Decimal,
+        ) -> Result<()> {
+            // Setup
+            let current_base_fee = Amount::token(current_fee_usd)?;
+            let pd_config = ProgrammableDataConfig {
+                cost_per_mb: Amount::token(dec!(0.01))?,
+                base_fee_floor: Amount::token(dec!(0.01))?,
+                max_pd_chunks_per_block: max_chunks_per_block,
+            };
+
+            // Action
+            let new_fee = calculate_new_base_fee(
+                current_base_fee,
+                chunks_used,
+                pd_config.max_pd_chunks_per_block,
+                pd_config.base_fee_floor,
+            )?;
+
+            // Assert
+            let actual = new_fee.token_to_decimal()?;
+            let diff = (actual - expected_fee_usd).abs();
+
+            assert!(
+                diff < dec!(0.000001),
+                "Fee mismatch for {}/{} chunks, current=${}: expected ${}, got ${} (diff: ${})",
+                chunks_used,
+                max_chunks_per_block,
+                current_fee_usd,
+                expected_fee_usd,
+                actual,
+                diff
+            );
+
+            Ok(())
+        }
     }
 }
