@@ -1202,10 +1202,10 @@ pub async fn submit_payload_to_reth(
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
 // #[tracing::instrument(skip_all, err)]
-async fn generate_expected_shadow_transactions_from_db<'a>(
+async fn generate_expected_shadow_transactions_from_db(
     config: &Config,
     service_senders: &ServiceSenders,
-    block: &'a IrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
     parent_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,

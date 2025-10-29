@@ -477,7 +477,6 @@ mod tests {
 
         [programmable_data]
         cost_per_mb = 0.01
-        minimum_tx_cost = 0.01
         base_fee_floor = 0.01
         max_pd_chunks_per_block = 7500
 
