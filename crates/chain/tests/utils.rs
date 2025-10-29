@@ -944,6 +944,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                 })
                 .unwrap();
 
+            // Snapshot ingress proofs from DB, then drop the read transaction before awaiting
+            let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+            drop(ro_tx);
+
             // Retrieve the transaction header from mempool or database
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             self.node_ctx
@@ -951,8 +955,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                 .mempool
                 .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
             if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
-                let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
-
                 let tx_proofs: Vec<_> = ingress_proofs
                     .iter()
                     .filter(|(data_root, _)| data_root == &tx_header.data_root)
@@ -973,7 +975,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                     unconfirmed_promotions.pop();
                 }
             }
-            drop(ro_tx);
             if mine_blocks {
                 self.mine_block().await?;
             }
