@@ -926,12 +926,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             seconds,
             unconfirmed_promotions
         );
-        for attempts in 1..=seconds {
+        for _ in 1..=seconds {
             // Do we have any unconfirmed promotions?
-            let Some(txid) = unconfirmed_promotions.last() else {
-                // if not return we are done
+            if unconfirmed_promotions.is_empty() {
+                // if not return as we are done
                 return Ok(());
-            };
+            }
 
             // Snapshot ingress proofs from DB and drop the read transaction
             let ingress_proofs = {
@@ -948,32 +948,45 @@ impl IrysNodeTest<IrysNodeCtx> {
                 walk_all::<IngressProofs, _>(&ro_tx).unwrap()
             };
 
-            // Retrieve the transaction header from mempool or database
+            // Retrieve the transaction headers for all pending txids in a single batch
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            let to_check: Vec<H256> = unconfirmed_promotions.clone();
             self.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
-            if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
-                let tx_proofs: Vec<_> = ingress_proofs
-                    .iter()
-                    .filter(|(data_root, _)| data_root == &tx_header.data_root)
-                    .map(|p| p.1.clone())
-                    .collect();
+                .send(MempoolServiceMessage::GetDataTxs(
+                    to_check.clone(),
+                    oneshot_tx,
+                ))?;
+            let headers = oneshot_rx.await.unwrap();
 
-                //read its ingressproof(s)
-                if tx_proofs.len() >= num_proofs {
-                    for ingress_proof in tx_proofs {
-                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                        tracing::info!("proof signer: {}", ingress_proof.address);
+            // Track which txids have met the required number of proofs
+            let mut to_remove: HashSet<H256> = HashSet::new();
+
+            for (idx, maybe_header) in headers.iter().enumerate() {
+                if let Some(tx_header) = maybe_header {
+                    let tx_proofs: Vec<_> = ingress_proofs
+                        .iter()
+                        .filter(|(data_root, _)| data_root == &tx_header.data_root)
+                        .map(|p| p.1.clone())
+                        .collect();
+
+                    if tx_proofs.len() >= num_proofs {
+                        for ingress_proof in tx_proofs.iter() {
+                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                            tracing::info!("proof signer: {}", ingress_proof.address);
+                        }
+                        to_remove.insert(to_check[idx]);
                     }
-                    tracing::info!(
-                        "{} Proofs available after {} attempts",
-                        ingress_proofs.len(),
-                        attempts
-                    );
-                    unconfirmed_promotions.pop();
                 }
+            }
+
+            // Remove satisfied txids and early-exit if none remain
+            if !to_remove.is_empty() {
+                unconfirmed_promotions.retain(|id| !to_remove.contains(id));
+            }
+            if unconfirmed_promotions.is_empty() {
+                return Ok(());
             }
             if mine_blocks {
                 self.mine_block().await?;
