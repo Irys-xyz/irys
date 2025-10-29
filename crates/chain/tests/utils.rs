@@ -926,54 +926,67 @@ impl IrysNodeTest<IrysNodeCtx> {
             seconds,
             unconfirmed_promotions
         );
-        for attempts in 1..seconds {
+        for _ in 1..=seconds {
             // Do we have any unconfirmed promotions?
-            let Some(txid) = unconfirmed_promotions.first() else {
-                // if not return we are done
+            if unconfirmed_promotions.is_empty() {
+                // if not return as we are done
                 return Ok(());
+            }
+
+            // Snapshot ingress proofs from DB into a map by data_root and drop the read transaction
+            let ingress_proofs_by_root = {
+                let ro_tx = self
+                    .node_ctx
+                    .db
+                    .as_ref()
+                    .tx()
+                    .map_err(|e| {
+                        tracing::error!("Failed to create mdbx transaction: {}", e);
+                    })
+                    .unwrap();
+                let proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+                let mut map: HashMap<_, Vec<_>> = HashMap::new();
+                for (data_root, proof) in proofs {
+                    map.entry(data_root).or_default().push(proof);
+                }
+                map
             };
 
-            // create db read transaction
-            let ro_tx = self
-                .node_ctx
-                .db
-                .as_ref()
-                .tx()
-                .map_err(|e| {
-                    tracing::error!("Failed to create mdbx transaction: {}", e);
-                })
-                .unwrap();
+            // Retrieve the transaction headers for all pending txids in a single batch
+            let to_check: Vec<H256> = unconfirmed_promotions.clone();
+            let headers =
+                {
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    self.node_ctx.service_senders.mempool.send(
+                        MempoolServiceMessage::GetDataTxs(to_check.clone(), oneshot_tx),
+                    )?;
+                    oneshot_rx.await.unwrap()
+                };
 
-            // Retrieve the transaction header from mempool or database
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::GetDataTxs(vec![*txid], oneshot_tx))?;
-            if let Some(tx_header) = oneshot_rx.await.unwrap().first().unwrap() {
-                let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+            // Track which txids have met the required number of proofs
+            let mut to_remove: HashSet<H256> = HashSet::new();
 
-                let tx_proofs: Vec<_> = ingress_proofs
-                    .iter()
-                    .filter(|(data_root, _)| data_root == &tx_header.data_root)
-                    .map(|p| p.1.clone())
-                    .collect();
-
-                //read its ingressproof(s)
-                if tx_proofs.len() >= num_proofs {
-                    for ingress_proof in tx_proofs {
-                        assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                        tracing::info!("proof signer: {}", ingress_proof.address);
+            for (idx, maybe_header) in headers.iter().enumerate() {
+                if let Some(tx_header) = maybe_header {
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                        if tx_proofs.len() >= num_proofs {
+                            for ingress_proof in tx_proofs.iter() {
+                                assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                                tracing::info!("proof signer: {}", ingress_proof.address);
+                            }
+                            to_remove.insert(to_check[idx]);
+                        }
                     }
-                    tracing::info!(
-                        "{} Proofs available after {} attempts",
-                        ingress_proofs.len(),
-                        attempts
-                    );
-                    unconfirmed_promotions.pop();
                 }
             }
-            drop(ro_tx);
+
+            // Remove satisfied txids and early-exit if none remain
+            if !to_remove.is_empty() {
+                unconfirmed_promotions.retain(|id| !to_remove.contains(id));
+            }
+            if unconfirmed_promotions.is_empty() {
+                return Ok(());
+            }
             if mine_blocks {
                 self.mine_block().await?;
             }
