@@ -847,35 +847,50 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
         for attempt in 1..=seconds {
-            // Do we have any unconfirmed tx?
-            let Some(tx) = unconfirmed_txs.last() else {
-                // if not return we are done
+            if unconfirmed_txs.is_empty() {
                 return Ok(());
-            };
+            }
 
-            let maybe_header = {
-                let ro_tx = self
-                    .node_ctx
-                    .db
-                    .as_ref()
-                    .tx()
-                    .map_err(|e| {
-                        tracing::error!("Failed to create mdbx transaction: {}", e);
-                    })
-                    .unwrap();
-                tx_header_by_txid(&ro_tx, &tx.id)
-            };
+            // Check all remaining transactions
+            let mut found_ids: Vec<IrysTransactionId> = Vec::new();
+            for tx in unconfirmed_txs.iter() {
+                let maybe_header = {
+                    let ro_tx = self
+                        .node_ctx
+                        .db
+                        .as_ref()
+                        .tx()
+                        .map_err(|e| {
+                            tracing::error!("Failed to create mdbx transaction: {}", e);
+                        })
+                        .unwrap();
+                    tx_header_by_txid(&ro_tx, &tx.id)
+                };
 
-            // Retrieve the transaction header from database
-            if let Ok(Some(header)) = maybe_header {
-                // the proofs may be added to the tx during promotion
-                // and so we cant do a direct comparison
-                // we can however check some key fields are equal
-                assert_eq!(tx.id, header.id);
-                assert_eq!(tx.anchor, header.anchor);
-                tracing::info!("Transaction was retrieved ok after {} attempts", attempt);
-                unconfirmed_txs.pop();
-            };
+                if let Ok(Some(header)) = maybe_header {
+                    // the proofs may be added to the tx during promotion
+                    // and so we cant do a direct comparison
+                    // we can however check some key fields are equal
+                    assert_eq!(tx.id, header.id);
+                    assert_eq!(tx.anchor, header.anchor);
+                    tracing::info!(
+                        "Transaction {:?} was retrieved ok after {} attempts",
+                        tx.id,
+                        attempt
+                    );
+                    found_ids.push(tx.id);
+                }
+            }
+
+            // Remove all found transactions
+            if !found_ids.is_empty() {
+                unconfirmed_txs.retain(|t| !found_ids.contains(&t.id));
+            }
+
+            if unconfirmed_txs.is_empty() {
+                return Ok(());
+            }
+
             mine_blocks(&self.node_ctx, 1).await.unwrap();
             sleep(delay).await;
         }
