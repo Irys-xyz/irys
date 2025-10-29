@@ -852,7 +852,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
 
             // Check all remaining transactions
-            let mut found_ids: Vec<IrysTransactionId> = Vec::new();
+            let mut found_ids: HashSet<IrysTransactionId> = HashSet::new();
             for tx in unconfirmed_txs.iter() {
                 let maybe_header = {
                     let ro_tx = self
@@ -878,7 +878,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                         tx.id,
                         attempt
                     );
-                    found_ids.push(tx.id);
+                    found_ids.insert(tx.id);
                 }
             }
 
