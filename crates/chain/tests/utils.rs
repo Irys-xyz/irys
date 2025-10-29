@@ -890,7 +890,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         }
         Err(eyre::eyre!(
-            "Failed waiting for confirmed txs. Waited {} seconds",
+            "Failed waiting for migrated txs. Waited {} seconds",
             seconds,
         ))
     }
