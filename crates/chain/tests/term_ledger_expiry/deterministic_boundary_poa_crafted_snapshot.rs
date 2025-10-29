@@ -294,8 +294,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     }
     let synthetic_block = Arc::new(synthetic_block_v);
 
-    //panic!("gets here");
-
     // Migrate the boundary-like block into the BlockIndex so get_block_bounds() works
     let txs = Arc::new(vec![tx_header.clone()]);
     let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
@@ -306,13 +304,10 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
             response: tx_migrate,
         })
         .expect("send migrate block");
-    //panic!("gets here");
     rx_migrate
         .await
         .expect("receive migration result")
         .expect("migrate synthetic block");
-
-    //panic!("does not get here 2");
 
     // Obtain a read guard for PoA validation
     let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
