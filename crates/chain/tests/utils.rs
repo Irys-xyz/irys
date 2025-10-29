@@ -888,7 +888,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
 
             if !unconfirmed_txs.is_empty() {
-                mine_blocks(&self.node_ctx, 1).await.unwrap();
+                self.mine_block().await?;
                 sleep(delay).await;
             }
         }
