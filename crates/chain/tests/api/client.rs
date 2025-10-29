@@ -140,7 +140,7 @@ async fn check_get_block_endpoint(
 
     let previous_block_hash = previous_header.block_hash;
     let block = api_client
-        .get_block_by_hash(api_address, previous_block_hash)
+        .get_block_by_hash(api_address, previous_block_hash, true)
         .await
         .expect("valid get block response");
 

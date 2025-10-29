@@ -85,7 +85,7 @@ impl BlockIndex {
         Ok(())
     }
 
-    #[instrument(skip_all, err, fields(%block_hash=block.block_hash, %block_height=block.height))]
+    #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
     pub fn push_block(
         &mut self,
         block: &IrysBlockHeader,

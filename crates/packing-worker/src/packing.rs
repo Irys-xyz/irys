@@ -125,8 +125,11 @@ impl PackingWorkerState {
                             })
                             .await?;
                         tracing::debug!(
-                            target: "irys::packing::update",
-                            ?chunk_range, ?partition_hash, ?mining_address, ?entropy_packing_iterations,
+                            target = "irys::packing::update",
+                            packing_job.chunk_range = ?chunk_range,
+                            packing_job.partition_hash = ?partition_hash,
+                            packing_job.mining_address = ?mining_address,
+                            packing_job.entropy_packing_iterations = ?entropy_packing_iterations,
                             "CUDA Packed chunks"
                         );
                         Ok(out)

@@ -239,7 +239,7 @@ pub fn cli_init_reth_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv
         .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|err| {
             tracing::warn!(
-                ?err,
+                custom.error = ?err,
                 "config file not provided, defaulting to testnet config"
             );
             NodeConfig::testnet()
@@ -269,7 +269,7 @@ pub fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv
         .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
         .unwrap_or_else(|err| {
             tracing::warn!(
-                ?err,
+                custom.error = ?err,
                 "config file not provided, defaulting to testnet config"
             );
             NodeConfig::testnet()

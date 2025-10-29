@@ -138,7 +138,11 @@ pub async fn run_node(
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();
 
-    tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
+    tracing::info!(
+        target = "reth::cli",
+        custom.path = ?db_path,
+        "Opening database"
+    );
     let database =
         RethDbWrapper::new(init_db(db_path.clone(), db_args.database_args())?.with_metrics());
 

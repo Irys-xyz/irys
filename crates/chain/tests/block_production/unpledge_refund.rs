@@ -91,8 +91,8 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     // First, verify the Irys commitment ledger actually contains the unpledge tx id
     let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
     warn!(
-        ?inclusion_commitments,
-        expected_unpledge = ?unpledge_tx.id,
+        custom.inclusion_commitments = ?inclusion_commitments,
+        tx.expected_unpledge = ?unpledge_tx.id,
         "Commitment txs present in inclusion block"
     );
     assert!(
@@ -252,7 +252,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // ---------- Assert (epoch): storage module released for target (if it was assigned) ----------
     let epoch_hashes = assigned_sm_hashes(&peer_node);
-    tracing::error!(hash = ?capacity_pa.partition_hash, "hash unassigned");
+    tracing::error!(custom.part_hash = ?capacity_pa.partition_hash, "hash unassigned");
     assert!(
         !epoch_hashes.contains(&capacity_pa.partition_hash),
         "Target partition must be unassigned from storage modules at epoch boundary"
@@ -830,7 +830,7 @@ pub async fn send_unpledge_all(
         .as_ref()
         .pledge_count(signer.address())
         .await;
-    tracing::error!(?initial_pledge_count);
+    tracing::debug!("initial_pledge_count: {:?}", initial_pledge_count);
     for (idx, target) in assigned_partitions.iter().enumerate() {
         let pledge_count = initial_pledge_count - (idx as u64);
         if pledge_count == 0 {
@@ -840,7 +840,7 @@ pub async fn send_unpledge_all(
             continue;
         };
         let anchor = peer_node.get_anchor().await?;
-        tracing::error!(?pledge_count);
+        tracing::debug!("pledge_count: {:?}", pledge_count);
         let mut unsigned = CommitmentTransaction::new_unpledge(
             &consensus,
             anchor,
@@ -849,7 +849,7 @@ pub async fn send_unpledge_all(
             target.partition_hash().unwrap(),
         )
         .await;
-        tracing::error!(part_hash = ?target.partition_hash());
+        tracing::debug!(custom.part_hash = ?target.partition_hash());
         signer
             .sign_commitment(&mut unsigned)
             .expect("sign multi-unpledge tx");
