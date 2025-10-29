@@ -916,9 +916,9 @@ pub async fn reth_block_is_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
-    reth_adapter: &IrysRethNodeAdapter,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_ema_snapshot: Arc<EmaSnapshot>,
+    current_ema_snapshot: Arc<EmaSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<ExecutionData> {
@@ -1081,10 +1081,10 @@ pub async fn reth_block_is_valid(
         service_senders,
         block,
         db,
-        reth_adapter,
         parent_block,
         parent_epoch_snapshot,
         parent_ema_snapshot,
+        &current_ema_snapshot,
         parent_commitment_snapshot,
         &parent_evm_block,
         block_index,
@@ -1207,10 +1207,10 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     service_senders: &ServiceSenders,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
-    _reth_adapter: &IrysRethNodeAdapter,
     parent_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_ema_snapshot: Arc<EmaSnapshot>,
+    current_ema_for_pricing: &EmaSnapshot,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     parent_evm_block: &Block,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
@@ -1266,9 +1266,14 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
         Vec::new()
     };
 
-    // Calculate PD base fee from parent block
-    let pd_base_fee_per_chunk =
-        compute_base_fee_per_chunk(config, parent_block, &parent_ema_snapshot, parent_evm_block)?;
+    // Calculate PD base fee using parent EMA and current pricing EMA
+    let pd_base_fee_per_chunk = compute_base_fee_per_chunk(
+        config,
+        parent_block,
+        &parent_ema_snapshot,
+        &current_ema_for_pricing.ema_for_public_pricing(),
+        parent_evm_block,
+    )?;
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,

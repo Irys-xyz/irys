@@ -78,6 +78,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
+            ema_calculation: irys_domain::ExponentialMarketAvgCalculation,
             treasury: U256,
         ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
             self.prod
@@ -89,6 +90,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     block_reward,
                     eth_built_payload,
                     prev_block_ema_snapshot,
+                    ema_calculation,
                     treasury,
                 )
                 .await

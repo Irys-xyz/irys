@@ -19,21 +19,21 @@ pub fn compute_base_fee_per_chunk(
     config: &Config,
     parent_block: &IrysBlockHeader,
     parent_ema_snapshot: &EmaSnapshot,
+    current_ema_price: &irys_types::IrysTokenPrice,
     parent_evm_block: &alloy_consensus::Block<
         alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844>,
     >,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-    let current_pd_base_fee_irys =
-        extract_pd_base_fee_from_block(
-            parent_block,
-            parent_evm_block,
-            &config.consensus.programmable_data,
-            config.consensus.chunk_size,
-        )?;
-    let total_pd_chunks =
-        count_pd_chunks_in_block(parent_evm_block);
+    let current_pd_base_fee_irys = extract_pd_base_fee_from_block(
+        parent_block,
+        parent_evm_block,
+        &config.consensus.programmable_data,
+        config.consensus.chunk_size,
+    )?;
+    let total_pd_chunks = count_pd_chunks_in_block(parent_evm_block);
     let pd_base_fee = calculate_pd_base_fee_for_new_block(
         parent_ema_snapshot,
+        current_ema_price,
         total_pd_chunks as u32,
         current_pd_base_fee_irys,
         &config.consensus.programmable_data,
@@ -45,35 +45,26 @@ pub fn compute_base_fee_per_chunk(
 /// Calculate the new PD base fee for a new block based on utilization.
 ///
 /// This function computes the PD (Programmable Data) base fee per chunk by:
-/// 1. Converting from per-chunk Irys to per-chunk USD using the EMA price
+/// 1. Converting from per-chunk Irys to per-chunk USD using the parent block's EMA price
 /// 2. Adjusting the USD fee based on block utilization (target: 50%, range: ±12.5%)
 ///    - The floor is converted from per-MB to per-chunk for comparison
-/// 3. Converting the adjusted per-chunk USD fee back to per-chunk Irys
-///
-/// # Notes
-///
-/// - Uses `prev_block_ema_snapshot.ema_for_public_pricing()` for stable price conversion
-/// - This EMA is from 2 intervals ago, providing predictable pricing for users
-/// - The fee adjustment algorithm targets 50% utilization with ±12.5% adjustments
-///
-/// # Errors
-///
-/// Returns an error if any arithmetic operations fail (overflow/underflow/division by zero)
+/// 3. Converting the adjusted per-chunk USD fee back to per-chunk Irys using the current block's EMA price
 fn calculate_pd_base_fee_for_new_block(
     parent_block_ema_snapshot: &EmaSnapshot,
+    current_block_ema_price: &irys_types::IrysTokenPrice,
     parent_chunks_used_in_block: u32,
     parent_pd_base_fee_irys: Amount<(CostPerChunk, Irys)>,
     pd_config: &ProgrammableDataConfig,
     chunk_size: u64,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
     const MB_SIZE: u64 = 1024 * 1024; // 1 MB in bytes
-    let ema_price = parent_block_ema_snapshot.ema_for_public_pricing();
+    let parent_ema_price = parent_block_ema_snapshot.ema_for_public_pricing();
 
-    // Step 1: Convert per-chunk Irys → per-chunk USD
+    // Step 1: Convert per-chunk Irys → per-chunk USD (using parent EMA)
     // usd_per_chunk = irys_per_chunk * (price / PRECISION_SCALE)
     let current_fee_per_chunk_usd = Amount::new(mul_div(
         parent_pd_base_fee_irys.amount,
-        ema_price.amount,
+        parent_ema_price.amount,
         PRECISION_SCALE,
     )?);
 
@@ -94,12 +85,12 @@ fn calculate_pd_base_fee_for_new_block(
         floor_per_chunk_usd,
     )?;
 
-    // Step 4: Convert per-chunk USD → per-chunk Irys
+    // Step 4: Convert per-chunk USD → per-chunk Irys (using current EMA)
     // irys_per_chunk = usd_per_chunk * (PRECISION_SCALE / price)
     let new_fee_per_chunk_irys = mul_div(
         new_fee_per_chunk_usd.amount,
         PRECISION_SCALE,
-        ema_price.amount,
+        current_block_ema_price.amount,
     )?;
 
     Ok(Amount::new(new_fee_per_chunk_irys))
@@ -173,7 +164,7 @@ fn extract_pd_base_fee_from_block(
 ///
 /// This function iterates through all transactions in the block, detects PD transactions
 /// by their header, and sums up the chunk counts from their access lists.
- fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 {
+fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 {
     use alloy_consensus::Transaction as _;
     use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 
@@ -192,4 +183,3 @@ fn extract_pd_base_fee_from_block(
 
     total_pd_chunks
 }
-

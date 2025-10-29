@@ -492,11 +492,25 @@ pub trait BlockProdStrategy {
 
         let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
 
-        // Calculate PD base fee for the new block
+        // Calculate the new EMA for block header (stored in block, used for next calculations)
+        let ema_calculation = self
+            .get_ema_price(&prev_block_header, &prev_block_ema_snapshot)
+            .await?;
+
+        // Get the EMA price that will be used for public pricing in this new block
+        // This accounts for interval boundary crossings
+        let current_ema_for_pricing = prev_block_ema_snapshot
+            .calculate_public_pricing_ema_for_height(
+                prev_block_header.height + 1,
+                self.inner().config.consensus.ema.price_adjustment_interval,
+            );
+
+        // Calculate PD base fee for the new block using both parent and current pricing EMA
         let pd_base_fee = self.calculate_pd_base_fee_for_new_block(
             &prev_block_header,
             &prev_evm_block,
             &prev_block_ema_snapshot,
+            &current_ema_for_pricing,
         )?;
 
         let (eth_built_payload, final_treasury) = self
@@ -521,6 +535,7 @@ pub trait BlockProdStrategy {
                 block_reward,
                 evm_block,
                 &prev_block_ema_snapshot,
+                ema_calculation,
                 final_treasury,
             )
             .await?;
@@ -858,7 +873,8 @@ pub trait BlockProdStrategy {
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
-        perv_block_ema_snapshot: &EmaSnapshot,
+        _perv_block_ema_snapshot: &EmaSnapshot,
+        ema_calculation: ExponentialMarketAvgCalculation,
         final_treasury: U256,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
         let prev_block_hash = prev_block_header.block_hash;
@@ -926,10 +942,6 @@ pub trait BlockProdStrategy {
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
         };
         steps.push(solution.seed.0);
-
-        let ema_calculation = self
-            .get_ema_price(prev_block_header, perv_block_ema_snapshot)
-            .await?;
 
         // Update the last_epoch_hash field, which tracks the most recent epoch boundary
         //
@@ -1168,18 +1180,20 @@ pub trait BlockProdStrategy {
     ///
     /// - Reads `current_pd_base_fee_irys` directly from parent block's 2nd shadow tx
     /// - Counts PD chunks by iterating through all transactions and detecting PD txs
-    /// - Uses `prev_block_ema_snapshot.ema_for_public_pricing()` for stable price conversion
-    /// - This EMA is from 2 intervals ago, providing predictable pricing for users
+    /// - Uses `prev_block_ema_snapshot.ema_for_public_pricing()` to convert parent Irys fee to USD
+    /// - Uses `current_ema_price` to convert the adjusted USD fee back to Irys
     fn calculate_pd_base_fee_for_new_block(
         &self,
         prev_block_header: &IrysBlockHeader,
         prev_evm_block: &reth_ethereum_primitives::Block,
         prev_block_ema_snapshot: &EmaSnapshot,
+        current_ema_price: &irys_types::IrysTokenPrice,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
         pd_base_fee::compute_base_fee_per_chunk(
             &self.inner().config,
             prev_block_header,
             prev_block_ema_snapshot,
+            current_ema_price,
             prev_evm_block,
         )
     }
