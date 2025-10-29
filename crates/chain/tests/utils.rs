@@ -928,7 +928,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         );
         for attempts in 1..=seconds {
             // Do we have any unconfirmed promotions?
-            let Some(txid) = unconfirmed_promotions.first() else {
+            let Some(txid) = unconfirmed_promotions.last() else {
                 // if not return we are done
                 return Ok(());
             };
