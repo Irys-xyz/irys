@@ -153,7 +153,10 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
         .await;
     assert!(result.is_ok());
 
-    // wait for the first set of chunks chunk to appear in the publish ledger
+    // mine a block
+    node.mine_block().await?;
+
+    // wait for the first set of chunks to appear in the publish ledger
     let result = node.wait_for_chunk(&app, DataLedger::Publish, 0, 20).await;
     assert!(result.is_ok());
     // wait for the second set of chunks to appear in the publish ledger

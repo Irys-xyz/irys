@@ -160,6 +160,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
         .wait_for_ingress_proofs(unconfirmed_promotions, 20)
         .await;
     assert!(result.is_ok());
+    node.mine_block().await?;
 
     // wait for the first set of chunks to appear in the publish ledger
     // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
@@ -176,8 +177,17 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
 
-    let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
-    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
+    let first_tx_id_in_block = block_tx1.data_ledgers[DataLedger::Publish]
+        .tx_ids
+        .0
+        .iter()
+        .copied()
+        .find(|tid| txs.iter().any(|tx| tx.header.id == *tid))
+        .expect("Expected at least one of the test txs to be in the block");
+    let first_tx_index: usize = txs
+        .iter()
+        .position(|tx| tx.header.id == first_tx_id_in_block)
+        .expect("Matching tx not found in txs");
     println!("1:{:?}", block_tx1);
 
     // ==============================
