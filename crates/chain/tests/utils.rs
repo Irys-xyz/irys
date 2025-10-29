@@ -933,20 +933,20 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             };
 
-            // create db read transaction
-            let ro_tx = self
-                .node_ctx
-                .db
-                .as_ref()
-                .tx()
-                .map_err(|e| {
-                    tracing::error!("Failed to create mdbx transaction: {}", e);
-                })
-                .unwrap();
-
-            // Snapshot ingress proofs from DB, then drop the read transaction before awaiting
-            let ingress_proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
-            drop(ro_tx);
+            // Snapshot ingress proofs from DB and drop the read transaction
+            let ingress_proofs = {
+                // create db read transaction
+                let ro_tx = self
+                    .node_ctx
+                    .db
+                    .as_ref()
+                    .tx()
+                    .map_err(|e| {
+                        tracing::error!("Failed to create mdbx transaction: {}", e);
+                    })
+                    .unwrap();
+                walk_all::<IngressProofs, _>(&ro_tx).unwrap()
+            };
 
             // Retrieve the transaction header from mempool or database
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
