@@ -160,6 +160,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
         .wait_for_ingress_proofs(unconfirmed_promotions, 20)
         .await;
     assert!(result.is_ok());
+    node.mine_block().await?;
 
     // wait for the first set of chunks to appear in the publish ledger
     // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
