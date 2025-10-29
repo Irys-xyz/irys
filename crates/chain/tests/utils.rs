@@ -1273,13 +1273,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_hash: EvmBlockHash,
         seconds_to_wait: u64,
     ) -> eyre::Result<EvmBlockHash> {
-        let beginning = Instant::now();
-        let max_duration = Duration::from_secs(seconds_to_wait);
-        for attempt in 0..10 {
-            eyre::ensure!(
-                Instant::now().duration_since(beginning) < max_duration,
-                "timed out"
-            );
+        let deadline = Instant::now() + Duration::from_secs(seconds_to_wait);
+        let mut attempt: u32 = 0;
+
+        loop {
+            if Instant::now() >= deadline {
+                return Err(eyre::eyre!(
+                    "Reth {:?} block did not reach expected hash {:?} within {}s",
+                    tag,
+                    expected_hash,
+                    seconds_to_wait
+                ));
+            }
 
             let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
             match eth_api.block_by_number(tag, false).await {
@@ -1301,14 +1306,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                     tracing::warn!("error polling reth {:?} block: {:?}", tag, err);
                 }
             }
+
             sleep(Duration::from_millis(100)).await;
+            attempt = attempt.saturating_add(1);
         }
-        Err(eyre::eyre!(
-            "Reth {:?} block did not reach expected hash {:?} within {}s",
-            tag,
-            expected_hash,
-            seconds_to_wait
-        ))
     }
 
     /// wait for tx to appear in the mempool or be found in the database
