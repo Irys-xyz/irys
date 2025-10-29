@@ -887,12 +887,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                 unconfirmed_txs.retain(|t| !found_ids.contains(&t.id));
             }
 
-            if unconfirmed_txs.is_empty() {
-                return Ok(());
+            if !unconfirmed_txs.is_empty() {
+                mine_blocks(&self.node_ctx, 1).await.unwrap();
+                sleep(delay).await;
             }
-
-            mine_blocks(&self.node_ctx, 1).await.unwrap();
-            sleep(delay).await;
         }
         Err(eyre::eyre!(
             "Failed waiting for confirmed txs. Waited {} seconds",
