@@ -846,13 +846,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         seconds: usize,
     ) -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
-        for attempt in 1..seconds {
-            // Do we have any unconfirmed tx?
-            let Some(tx) = unconfirmed_txs.first() else {
-                // if not return we are done
+        for attempt in 1..=seconds {
+            if unconfirmed_txs.is_empty() {
                 return Ok(());
-            };
+            }
 
+            // Check all remaining transactions
             let ro_tx = self
                 .node_ctx
                 .db
@@ -862,23 +861,36 @@ impl IrysNodeTest<IrysNodeCtx> {
                     tracing::error!("Failed to create mdbx transaction: {}", e);
                 })
                 .unwrap();
-
-            // Retrieve the transaction header from database
-            if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
-                // the proofs may be added to the tx during promotion
-                // and so we cant do a direct comparison
-                // we can however check some key fields are equal
-                assert_eq!(tx.id, header.id);
-                assert_eq!(tx.anchor, header.anchor);
-                tracing::info!("Transaction was retrieved ok after {} attempts", attempt);
-                unconfirmed_txs.pop();
-            };
+            let mut found_ids: HashSet<IrysTransactionId> = HashSet::new();
+            for tx in unconfirmed_txs.iter() {
+                if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                    // the proofs may be added to the tx during promotion
+                    // and so we cant do a direct comparison
+                    // we can however check some key fields are equal
+                    assert_eq!(tx.id, header.id);
+                    assert_eq!(tx.anchor, header.anchor);
+                    tracing::info!(
+                        "Transaction {:?} was retrieved ok after {} attempts",
+                        tx.id,
+                        attempt
+                    );
+                    found_ids.insert(tx.id);
+                }
+            }
             drop(ro_tx);
-            mine_blocks(&self.node_ctx, 1).await.unwrap();
-            sleep(delay).await;
+
+            // Remove all found transactions
+            if !found_ids.is_empty() {
+                unconfirmed_txs.retain(|t| !found_ids.contains(&t.id));
+            }
+
+            if !unconfirmed_txs.is_empty() {
+                self.mine_block().await?;
+                sleep(delay).await;
+            }
         }
         Err(eyre::eyre!(
-            "Failed waiting for confirmed txs. Waited {} seconds",
+            "Failed waiting for migrated txs. Waited {} seconds",
             seconds,
         ))
     }
