@@ -168,11 +168,10 @@ pub fn routes() -> impl HttpServiceFactory {
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
     info!(custom.port = ?port, "Starting API server");
+    let state = web::Data::new(app_state);
     HttpServer::new(move || {
-        let awc_client = awc::Client::new();
         App::new()
-            .app_data(web::Data::new(app_state.clone()))
-            .app_data(web::Data::new(awc_client))
+            .app_data(state.clone())
             .app_data(
                 JsonConfig::default()
                     .limit(1024 * 1024) // Set JSON payload limit to 1MB
