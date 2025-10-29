@@ -853,18 +853,21 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             };
 
-            let ro_tx = self
-                .node_ctx
-                .db
-                .as_ref()
-                .tx()
-                .map_err(|e| {
-                    tracing::error!("Failed to create mdbx transaction: {}", e);
-                })
-                .unwrap();
+            let maybe_header = {
+                let ro_tx = self
+                    .node_ctx
+                    .db
+                    .as_ref()
+                    .tx()
+                    .map_err(|e| {
+                        tracing::error!("Failed to create mdbx transaction: {}", e);
+                    })
+                    .unwrap();
+                tx_header_by_txid(&ro_tx, &tx.id)
+            };
 
             // Retrieve the transaction header from database
-            if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+            if let Ok(Some(header)) = maybe_header {
                 // the proofs may be added to the tx during promotion
                 // and so we cant do a direct comparison
                 // we can however check some key fields are equal
@@ -873,7 +876,6 @@ impl IrysNodeTest<IrysNodeCtx> {
                 tracing::info!("Transaction was retrieved ok after {} attempts", attempt);
                 unconfirmed_txs.pop();
             };
-            drop(ro_tx);
             mine_blocks(&self.node_ctx, 1).await.unwrap();
             sleep(delay).await;
         }
