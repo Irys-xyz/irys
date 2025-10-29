@@ -848,7 +848,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let delay = Duration::from_secs(1);
         for attempt in 1..=seconds {
             // Do we have any unconfirmed tx?
-            let Some(tx) = unconfirmed_txs.first() else {
+            let Some(tx) = unconfirmed_txs.last() else {
                 // if not return we are done
                 return Ok(());
             };
