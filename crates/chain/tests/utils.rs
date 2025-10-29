@@ -949,16 +949,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             };
 
             // Retrieve the transaction headers for all pending txids in a single batch
-            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::GetDataTxs(
-                    to_check.clone(),
-                    oneshot_tx,
-                ))?;
-            let headers = oneshot_rx.await.unwrap();
+            let headers =
+                {
+                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                    self.node_ctx.service_senders.mempool.send(
+                        MempoolServiceMessage::GetDataTxs(to_check.clone(), oneshot_tx),
+                    )?;
+                    oneshot_rx.await.unwrap()
+                };
 
             // Track which txids have met the required number of proofs
             let mut to_remove: HashSet<H256> = HashSet::new();
