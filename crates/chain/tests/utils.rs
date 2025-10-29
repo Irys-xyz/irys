@@ -852,22 +852,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
 
             // Check all remaining transactions
+            let ro_tx = self
+                .node_ctx
+                .db
+                .as_ref()
+                .tx()
+                .map_err(|e| {
+                    tracing::error!("Failed to create mdbx transaction: {}", e);
+                })
+                .unwrap();
             let mut found_ids: HashSet<IrysTransactionId> = HashSet::new();
             for tx in unconfirmed_txs.iter() {
-                let maybe_header = {
-                    let ro_tx = self
-                        .node_ctx
-                        .db
-                        .as_ref()
-                        .tx()
-                        .map_err(|e| {
-                            tracing::error!("Failed to create mdbx transaction: {}", e);
-                        })
-                        .unwrap();
-                    tx_header_by_txid(&ro_tx, &tx.id)
-                };
-
-                if let Ok(Some(header)) = maybe_header {
+                if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
                     // the proofs may be added to the tx during promotion
                     // and so we cant do a direct comparison
                     // we can however check some key fields are equal
@@ -881,6 +877,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                     found_ids.insert(tx.id);
                 }
             }
+            drop(ro_tx);
 
             // Remove all found transactions
             if !found_ids.is_empty() {
