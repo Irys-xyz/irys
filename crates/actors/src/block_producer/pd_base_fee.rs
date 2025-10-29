@@ -183,3 +183,69 @@ fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 
 
     total_pd_chunks
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use irys_domain::EmaSnapshot;
+    use rust_decimal_macros::dec;
+
+    
+
+    /// Test correct price conversion when EMA prices change.
+    ///
+    /// When parent EMA price differs from current EMA price, the function should:
+    /// 1. Convert parent fee from Irys to USD using parent EMA
+    /// 2. Adjust USD fee based on utilization
+    /// 3. Convert back to Irys using current EMA
+    ///
+    /// This test uses 50% utilization (no adjustment) to isolate the price conversion logic.
+    ///
+    /// At 50% utilization: new_fee_irys = parent_fee_irys × (parent_ema_price / current_ema_price)
+    #[rstest::rstest]
+    #[case(dec!(1.0), dec!(1.0), dec!(1.5))]  // No price change
+    #[case(dec!(2.0), dec!(1.0), dec!(0.75))] // Current price doubles → need fewer tokens
+    #[case(dec!(0.5), dec!(1.0), dec!(3.0))]  // Current price halves → need more tokens
+    fn test_price_conversion_with_changing_ema(
+        #[case] current_ema_price_decimal: rust_decimal::Decimal,
+        #[case] parent_ema_price_decimal: rust_decimal::Decimal,
+        #[case] expected_result_decimal: rust_decimal::Decimal,
+    ) -> eyre::Result<()> {
+        let chunk_size = 256 * 1024;
+        let max_chunks = 100;
+        let chunks_used = 50; // 50% utilization → no fee adjustment
+
+        let parent_ema_price = Amount::token(parent_ema_price_decimal)?;
+        let current_ema_price = Amount::token(current_ema_price_decimal)?;
+        let price_unused_for_calc = Amount::token(dec!(99.0))?;
+
+        let parent_ema_snapshot = EmaSnapshot {
+            ema_price_2_intervals_ago: parent_ema_price,
+            oracle_price_for_current_ema_predecessor: price_unused_for_calc,
+            ema_price_current_interval: price_unused_for_calc,
+            ema_price_1_interval_ago: price_unused_for_calc,
+        };
+
+        let parent_pd_base_fee_irys = Amount::token(dec!(1.5))?;
+
+        let pd_config = ProgrammableDataConfig {
+            cost_per_mb: Amount::token(dec!(0.001))?,
+            base_fee_floor: Amount::token(dec!(0.001))?,
+            max_pd_chunks_per_block: max_chunks,
+        };
+
+        let result = calculate_pd_base_fee_for_new_block(
+            &parent_ema_snapshot,
+            &current_ema_price,
+            chunks_used,
+            parent_pd_base_fee_irys,
+            &pd_config,
+            chunk_size,
+        )?;
+
+        let expected = Amount::token(expected_result_decimal)?;
+        assert_eq!(result, expected);
+
+        Ok(())
+    }
+}

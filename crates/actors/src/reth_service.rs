@@ -427,7 +427,6 @@ pub(crate) mod pd_fee_adjustments {
             let current_base_fee = Amount::token(current_fee_usd)?;
             let pd_config = ProgrammableDataConfig {
                 cost_per_mb: Amount::token(dec!(0.01))?,
-                minimum_tx_cost: Amount::token(dec!(0.01))?,
                 base_fee_floor: Amount::token(dec!(0.01))?,
                 max_pd_chunks_per_block: max_chunks_per_block,
             };
