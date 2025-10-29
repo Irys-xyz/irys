@@ -689,6 +689,10 @@ impl PeerListDataInner {
     }
 
     pub fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
+        debug!(
+            "Decreasing score for peer {:?}, reason: {:?}",
+            mining_addr, reason
+        );
         // Check persistent cache first
         if let Some(peer_item) = self.persistent_peers_cache.get_mut(mining_addr) {
             let was_active = peer_item.reputation_score.is_active() && peer_item.is_online;
@@ -709,10 +713,15 @@ impl PeerListDataInner {
 
             // Don't propagate inactive peers
             if !peer_item.reputation_score.is_active() {
+                debug!(
+                    "Peer's {:?} score dropped below an active threshold, removing from the persistent cache",
+                    mining_addr
+                );
                 self.known_peers_cache.remove(&peer_item.address);
             }
             let now_active = peer_item.reputation_score.is_active() && peer_item.is_online;
             if was_active && !now_active {
+                debug!("Peer {:?} became inactive", mining_addr);
                 let peer_clone = peer_item.clone();
                 self.emit_peer_event(PeerEvent::BecameInactive {
                     mining_addr: *mining_addr,
