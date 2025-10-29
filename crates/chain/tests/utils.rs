@@ -933,9 +933,8 @@ impl IrysNodeTest<IrysNodeCtx> {
                 return Ok(());
             }
 
-            // Snapshot ingress proofs from DB and drop the read transaction
-            let ingress_proofs = {
-                // create db read transaction
+            // Snapshot ingress proofs from DB into a map by data_root and drop the read transaction
+            let ingress_proofs_by_root = {
                 let ro_tx = self
                     .node_ctx
                     .db
@@ -945,7 +944,12 @@ impl IrysNodeTest<IrysNodeCtx> {
                         tracing::error!("Failed to create mdbx transaction: {}", e);
                     })
                     .unwrap();
-                walk_all::<IngressProofs, _>(&ro_tx).unwrap()
+                let proofs = walk_all::<IngressProofs, _>(&ro_tx).unwrap();
+                let mut map: HashMap<_, Vec<_>> = HashMap::new();
+                for (data_root, proof) in proofs {
+                    map.entry(data_root).or_default().push(proof);
+                }
+                map
             };
 
             // Retrieve the transaction headers for all pending txids in a single batch
@@ -964,18 +968,14 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             for (idx, maybe_header) in headers.iter().enumerate() {
                 if let Some(tx_header) = maybe_header {
-                    let tx_proofs: Vec<_> = ingress_proofs
-                        .iter()
-                        .filter(|(data_root, _)| data_root == &tx_header.data_root)
-                        .map(|p| p.1.clone())
-                        .collect();
-
-                    if tx_proofs.len() >= num_proofs {
-                        for ingress_proof in tx_proofs.iter() {
-                            assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                            tracing::info!("proof signer: {}", ingress_proof.address);
+                    if let Some(tx_proofs) = ingress_proofs_by_root.get(&tx_header.data_root) {
+                        if tx_proofs.len() >= num_proofs {
+                            for ingress_proof in tx_proofs.iter() {
+                                assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
+                                tracing::info!("proof signer: {}", ingress_proof.address);
+                            }
+                            to_remove.insert(to_check[idx]);
                         }
-                        to_remove.insert(to_check[idx]);
                     }
                 }
             }
