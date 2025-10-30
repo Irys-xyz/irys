@@ -423,6 +423,17 @@ where
                 "Node: {}: Block {} has an invalid signature",
                 self.gossip_client.mining_address, block_header.block_hash
             );
+
+            debug!(
+                target = "invalid_block_header_json",
+                "Invalid block: {:#}",
+                &serde_json::to_string(&block_header).unwrap_or_else(|e| format!(
+                    // fallback to debug printing the header
+                    "error serializing block header: {}\n{:#}",
+                    &e, &block_header
+                ))
+            );
+
             self.peer_list
                 .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
 
