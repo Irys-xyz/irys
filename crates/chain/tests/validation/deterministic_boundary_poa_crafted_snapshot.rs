@@ -73,6 +73,11 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         signer.sign_transaction(tx_unsigned).expect("sign tx")
     };
     let tx_header: DataTransactionHeader = tx.header.clone();
+    assert_eq!(
+        tx.proofs.len(),
+        1,
+        "1-chunk tx should have exactly one data proof"
+    );
 
     // Merklize a single transaction header to get tx_root and proofs
     let tx_headers = vec![tx_header.clone()];
