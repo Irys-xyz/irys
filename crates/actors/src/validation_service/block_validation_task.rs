@@ -358,6 +358,20 @@ impl BlockValidationTask {
             .get_epoch_snapshot(&block.previous_block_hash)
             .expect("parent block should have an epoch snapshot in the block_tree");
 
+        // Get parent EMA snapshot for PD base fee calculation
+        let parent_ema_snapshot = self
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&block.previous_block_hash)
+            .expect("parent block should have an EMA snapshot in the block_tree");
+
+        // Get current block's EMA snapshot (already exists in block tree at validation time)
+        let current_ema_snapshot = self
+            .block_tree_guard
+            .read()
+            .get_ema_snapshot(&block.block_hash)
+            .expect("current block should have an EMA snapshot in the block_tree");
+
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
 
@@ -367,13 +381,22 @@ impl BlockValidationTask {
                 .read()
                 .get_commitment_snapshot(&block.previous_block_hash)
                 .expect("parent block should have a commitment snapshot in the block_tree");
+            let parent_block = self
+                .block_tree_guard
+                .read()
+                .get_block(&block.previous_block_hash)
+                .map(|header| Arc::new(header.clone()))
+                .expect("parent block should have a commitment snapshot in the block_tree");
             reth_block_is_valid(
                 config,
                 service_senders,
+                &parent_block,
                 block,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
                 parent_epoch_snapshot,
+                parent_ema_snapshot,
+                current_ema_snapshot,
                 parent_commitment_snapshot,
                 block_index,
             )

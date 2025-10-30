@@ -1771,6 +1771,88 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_else(|| eyre::eyre!("Block with hash {} not found", hash))
     }
 
+    /// Create and inject multiple PD (Programmable Data) transactions into the mempool.
+    ///
+    /// Each transaction will have the specified number of chunks with unique offsets.
+    /// Transactions use incrementing nonces starting from 0.
+    ///
+    /// # Arguments
+    /// * `signer` - The account that will sign and pay for the transactions
+    /// * `num_transactions` - Number of PD transactions to create
+    /// * `chunks_per_tx` - Number of chunks per transaction
+    ///
+    /// # Returns
+    /// Vector of transaction hashes for the injected transactions
+    pub async fn create_and_inject_pd_transactions(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        num_transactions: u32,
+        chunks_per_tx: u16,
+    ) -> eyre::Result<Vec<FixedBytes<32>>> {
+        use alloy_consensus::{
+            SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope,
+        };
+        use alloy_eips::Encodable2718 as _;
+        use alloy_network::TxSignerSync as _;
+        use alloy_signer_local::LocalSigner;
+        use irys_reth::pd_tx::{
+            build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1, PdKey,
+        };
+
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let chain_id = self.node_ctx.config.consensus.chain_id;
+        let mut tx_hashes = Vec::new();
+
+        for tx_index in 0..num_transactions {
+            // Each transaction uses different chunk offsets to ensure uniqueness
+            let start_offset = tx_index * chunks_per_tx as u32;
+            let storage_keys = (0..chunks_per_tx).map(|i| PdKey {
+                slot_index_be: [0xff; 26],
+                offset: start_offset + i as u32,
+                chunk_count: 1,
+            });
+            let access_list = build_pd_access_list(storage_keys);
+
+            // Build PD header with high enough max fees to not cap the base fee
+            let header = PdHeaderV1 {
+                max_priority_fee_per_chunk: alloy_primitives::U256::from(1_000_000_000_u64),
+                max_base_fee_per_chunk: alloy_primitives::U256::from(100_000_000_000_u64),
+            };
+            let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+
+            // Create and sign EIP-1559 transaction with incrementing nonce
+            let mut tx = TxEip1559 {
+                access_list,
+                chain_id,
+                gas_limit: 1_000_000,
+                input: calldata,
+                max_fee_per_gas: 20_000_000_000,
+                max_priority_fee_per_gas: 1_000_000_000,
+                nonce: tx_index as u64,
+                to: alloy_primitives::TxKind::Call(Address::random()),
+                value: alloy_primitives::U256::ZERO,
+            };
+            let signature = local_signer
+                .sign_transaction_sync(&mut tx)
+                .expect("PD tx must be signable");
+
+            // Inject transaction into mempool
+            let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+                .encoded_2718()
+                .into();
+            let tx_hash = self
+                .node_ctx
+                .reth_node_adapter
+                .rpc
+                .inject_tx(tx_envelope)
+                .await?;
+
+            tx_hashes.push(tx_hash);
+        }
+
+        Ok(tx_hashes)
+    }
+
     pub async fn stop(self) -> IrysNodeTest<()> {
         self.node_ctx.stop().await;
         let cfg = self.cfg;

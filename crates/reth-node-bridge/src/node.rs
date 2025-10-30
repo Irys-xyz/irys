@@ -157,7 +157,7 @@ pub async fn run_node(
 
     let max_pd_chunks_per_block = node_config
         .consensus_config()
-        .mempool
+        .programmable_data
         .max_pd_chunks_per_block;
 
     let handle = builder

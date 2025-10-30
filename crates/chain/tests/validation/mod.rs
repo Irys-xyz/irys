@@ -2,6 +2,7 @@ mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
+mod pd_base_fee_mismatch;
 mod pd_chunk_limit_per_block;
 mod poa_cases;
 mod unpledge_partition;

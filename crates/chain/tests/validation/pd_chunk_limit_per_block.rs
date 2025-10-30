@@ -21,7 +21,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     genesis_config
         .consensus
         .get_mut()
-        .mempool
+        .programmable_data
         .max_pd_chunks_per_block = genesis_max_accepted_chunks_per_block;
 
     // Create and fund a signer for PD transaction
@@ -43,7 +43,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
             .cfg
             .consensus
             .get_mut()
-            .mempool
+            .programmable_data
             .max_pd_chunks_per_block = peer_max_accepted_chunks_per_block;
         peer_node.start_with_name("peer").await
     };

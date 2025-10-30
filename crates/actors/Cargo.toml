@@ -46,6 +46,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+rust_decimal_macros.workspace = true
 
 [dev-dependencies]
 irys-types = { workspace = true, features = ["test-utils"] }
@@ -58,7 +59,6 @@ rstest.workspace = true
 proptest.workspace = true
 rand.workspace = true
 rust_decimal.workspace = true
-rust_decimal_macros.workspace = true
 tracing-subscriber.workspace = true
 fastrand = "2.0"
 
