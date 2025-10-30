@@ -34,7 +34,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     // Make the test stable and light.
     // - small chunk size
     // - small partition size
-    // - tiny epoch so boundary behavior is easy to reason about (not strictly used here)
+    // - tiny epoch so boundary behavior is easy to reason about
     let mut node_config = NodeConfig::testing();
     node_config.consensus.get_mut().block_migration_depth = 1;
     node_config.consensus.get_mut().chunk_size = CHUNK_SIZE;
@@ -94,8 +94,9 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         tx_path.clone()
     };
 
-    // PoA chunk and partition_chunk_offset will be computed after we migrate the prelude
-    // once we can query actual block bounds from the BlockIndex.
+    // PoA chunk will be computed after the prelude migration once Submit.total_chunks == slot_start.
+    // We do not query get_block_bounds(); the prelude ensures the next block starts at slot_start
+    // so the PoA lands at block-relative offset 0 deterministically.
     let mut partition_chunk_offset: u32 = 0;
 
     // 5) Build two synthetic blocks:
@@ -330,7 +331,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         .partition_assignments
         .get_assignment(partition_hash)
         .expect("partition assignment should exist for partition_hash");
-    // Choose a different slot index deterministically (toggle between 0 and 1)
+    // Choose a different slot index deterministically (advance by +1 from the parent assignment)
     pa.slot_index = Some(pa.slot_index.unwrap_or(0).wrapping_add(1));
     // Replace the assignment in the cloned snapshot
     child_epoch_snapshot
@@ -338,7 +339,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         .data_partitions
         .insert(partition_hash, pa);
 
-    // 8) Child-like epoch snapshot PoA validation MUST fail due to Merkle proof mismatch
+    // 8) Child-like epoch snapshot PoA validation MUST fail (Merkle mismatch or out-of-bounds)
     match poa_is_valid(
         &synthetic_block.poa,
         &block_index_guard,
