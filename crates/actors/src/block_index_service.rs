@@ -76,7 +76,9 @@ impl BlockIndexServiceInner {
         match msg {
             BlockIndexServiceMessage::GetBlockIndexReadGuard { response } => {
                 let guard = BlockIndexReadGuard::new(self.block_index.clone());
-                let _ = response.send(guard);
+                if let Err(_guard) = response.send(guard) {
+                    tracing::warn!("Block index guard response channel was closed by receiver");
+                }
                 Ok(())
             }
             BlockIndexServiceMessage::MigrateBlock {
@@ -95,7 +97,13 @@ impl BlockIndexServiceInner {
                             block_header.block_hash
                         );
                         // notify caller, then exit service by returning Err
-                        let _ = response.send(Err(eyre!(err.to_string())));
+                        if let Err(send_err) = response.send(Err(eyre!(err.to_string()))) {
+                            tracing::warn!(
+                                migration_error = %err,
+                                send_error = ?send_err,
+                                "Failed to send migration error to caller - receiver dropped"
+                            );
+                        }
                         return Err(err);
                     }
                 } else {
@@ -108,12 +116,27 @@ impl BlockIndexServiceInner {
                 // Perform the migration; if it fails, notify caller and exit service
                 match self.migrate_block(&block_header, &all_txs) {
                     Ok(()) => {
-                        let _ = response.send(Ok(()));
+                        if let Err(send_err) = response.send(Ok(())) {
+                            tracing::warn!(
+                                block_height = block_header.height,
+                                block_hash = ?block_header.block_hash,
+                                send_error = ?send_err,
+                                "Failed to send migration success response - receiver dropped"
+                            );
+                        }
                         Ok(())
                     }
                     Err(e) => {
                         // notify caller, then exit service by returning Err
-                        let _ = response.send(Err(eyre!(e.to_string())));
+                        if let Err(send_err) = response.send(Err(eyre!(e.to_string()))) {
+                            tracing::warn!(
+                                block_height = block_header.height,
+                                block_hash = ?block_header.block_hash,
+                                migration_error = %e,
+                                send_error = ?send_err,
+                                "Failed to send migration error to caller - receiver dropped"
+                            );
+                        }
                         Err(e)
                     }
                 }
@@ -125,7 +148,13 @@ impl BlockIndexServiceInner {
                     .map_err(|_| eyre!("block_index read lock poisoned"))?;
                 let block_height = bi.num_blocks().max(1) - 1;
                 let resp = bi.get_item(block_height).cloned();
-                let _ = response.send(resp);
+                if let Err(send_err) = response.send(resp) {
+                    tracing::warn!(
+                        block_height,
+                        send_error = ?send_err,
+                        "Failed to send block index item response - receiver dropped"
+                    );
+                }
                 Ok(())
             }
         }

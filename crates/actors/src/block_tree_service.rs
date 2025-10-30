@@ -209,7 +209,9 @@ impl BlockTreeServiceInner {
         match msg {
             BlockTreeServiceMessage::GetBlockTreeReadGuard { response } => {
                 let guard = BlockTreeReadGuard::new(self.cache.clone());
-                let _ = response.send(guard);
+                if let Err(_guard) = response.send(guard) {
+                    tracing::warn!("Block tree guard response channel was closed by receiver");
+                }
             }
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
@@ -217,8 +219,17 @@ impl BlockTreeServiceInner {
                 skip_vdf_validation: skip_vdf,
                 response,
             } => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
                 let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
-                let _ = response.send(result);
+                if let Err(send_err) = response.send(result) {
+                    tracing::warn!(
+                        block_hash = ?block_hash,
+                        block_height,
+                        send_error = ?send_err,
+                        "Failed to send pre-validation result to caller - receiver dropped"
+                    );
+                }
             }
             BlockTreeServiceMessage::BlockValidationFinished {
                 block_hash,
@@ -527,9 +538,9 @@ impl BlockTreeServiceInner {
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
             // Remove the block
-            let _ = cache
-                .remove_block(&block_hash)
-                .inspect_err(|err| tracing::error!(?err));
+            if let Err(err) = cache.remove_block(&block_hash) {
+                tracing::error!(?err, "Failed to remove block from cache");
+            }
 
             let event = BlockStateUpdated {
                 block_hash,
@@ -537,7 +548,13 @@ impl BlockTreeServiceInner {
                 state,
                 discarded: true,
             };
-            let _ = self.service_senders.block_state_events.send(event);
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::warn!(
+                    block_hash = ?block_hash,
+                    height,
+                    "Failed to broadcast block state update event: {}", e
+                );
+            }
 
             return Ok(());
         }
@@ -801,7 +818,13 @@ impl BlockTreeServiceInner {
             state,
             discarded: false,
         };
-        let _ = self.service_senders.block_state_events.send(event);
+        if let Err(e) = self.service_senders.block_state_events.send(event) {
+            tracing::warn!(
+                block_hash = ?block_hash,
+                height,
+                "Failed to broadcast block state update event: {}", e
+            );
+        }
 
         Ok(())
     }

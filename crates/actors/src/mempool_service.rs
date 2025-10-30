@@ -272,7 +272,9 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::BlockConfirmed(block) => {
-                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
+                    if let Err(e) = self.handle_block_confirmed_message(block).await {
+                        tracing::error!("Failed to handle block confirmed message: {:#}", e);
+                    }
                 }
                 MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                     let response_message = self

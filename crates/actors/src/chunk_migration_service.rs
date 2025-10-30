@@ -193,9 +193,16 @@ impl ChunkMigrationServiceInner {
         }
 
         // forward the finalization message to the cache service for cleanup
-        let _ = service_senders
+        if let Err(e) = service_senders
             .chunk_cache
-            .send(CacheServiceAction::OnBlockMigrated(block_height, None));
+            .send(CacheServiceAction::OnBlockMigrated(block_height, None))
+        {
+            tracing::warn!(
+                block_height,
+                "Failed to send block migrated message to cache service: {}",
+                e
+            );
+        }
 
         Ok(())
     }
@@ -244,7 +251,9 @@ pub fn process_ledger_transactions(
         )?;
 
         for module in storage_modules_guard.read().iter() {
-            let _ = module.sync_pending_chunks();
+            if let Err(e) = module.sync_pending_chunks() {
+                tracing::warn!("Failed to sync pending chunks: {:#}", e);
+            }
         }
 
         prev_chunk_offset += num_chunks_in_tx as u64;
