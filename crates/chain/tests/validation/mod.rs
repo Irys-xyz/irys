@@ -1,8 +1,10 @@
 mod blobs_rejected;
 mod data_tx_pricing;
+mod deterministic_boundary_poa_crafted_snapshot;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
 mod poa_cases;
+mod regression_boundary_poa_parent_snapshot;
 mod unpledge_partition;
 mod unstake_edge_cases;
 

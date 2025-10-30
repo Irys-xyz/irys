@@ -1,7 +1,4 @@
-mod data_poa_boundary_acceptance;
-mod deterministic_boundary_poa_crafted_snapshot;
 mod perm_refund;
-mod regression_boundary_poa_parent_snapshot;
 
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;

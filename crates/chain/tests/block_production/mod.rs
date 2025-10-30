@@ -4,6 +4,7 @@ pub mod block_index;
 pub mod block_production;
 mod block_rebuilding;
 pub mod block_validation;
+mod data_poa_boundary_acceptance;
 mod difficulty_adjustment;
 mod reset_seed;
 pub mod test_double_spend;
