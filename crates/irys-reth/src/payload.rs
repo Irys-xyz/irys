@@ -197,8 +197,6 @@ impl PdChunkBudget {
         tx: &Arc<ValidPoolTransaction<EthPooledTransaction>>,
         chunks: u64,
     ) -> bool {
-        // TODO: We must check users pd max base fee and the expected base fee
-        // for current block, reject the tx if user did not want his tx to be included
         if self.can_fit(chunks) {
             self.used = self.used.saturating_add(chunks);
             self.accounted.insert(*tx.hash(), chunks);

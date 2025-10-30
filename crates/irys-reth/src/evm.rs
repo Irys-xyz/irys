@@ -34,7 +34,8 @@ use std::sync::LazyLock;
 use tracing::{trace, warn};
 
 use super::*;
-use crate::precompile::register_irys_precompiles_if_active;
+use crate::precompiles::pd::context::PdContext;
+use crate::precompiles::pd::precompile::register_irys_precompiles_if_active;
 use crate::shadow_tx::{self, ShadowTransaction};
 
 /// Constants for shadow transaction processing
@@ -171,7 +172,7 @@ where
 /// This factory produces [`IrysBlockExecutor`] instances that can handle both
 /// regular Ethereum transactions and Irys-specific shadow transactions. It wraps
 /// the standard Ethereum block executor factory with Irys-specific configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IrysBlockExecutorFactory {
     inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, IrysEvmFactory>,
 }
@@ -288,13 +289,22 @@ impl ConfigureEvm for IrysEvmConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct IrysEvmFactory {}
+pub struct IrysEvmFactory {
+    context: PdContext,
+}
 
 impl IrysEvmFactory {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>) -> Self {
+        let context = PdContext::new(chunk_provider);
+        Self { context }
+    }
+
+    /// Provides access to the PdContext for test setup.
+    #[cfg(test)]
+    pub fn context(&self) -> &PdContext {
+        &self.context
     }
 }
 
@@ -319,10 +329,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             false,
+            self.context.clone_for_new_evm(),
         );
 
         // Register Irys custom precompiles depending on active hardfork (Frontier+).
-        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id);
+        let pd_context = evm.pd_context().clone();
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
 
         evm
     }
@@ -344,10 +356,12 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             true,
+            self.context.clone_for_new_evm(),
         );
 
         // Register Irys custom precompiles depending on active hardfork (Frontier+).
-        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id);
+        let pd_context = evm.pd_context().clone();
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
 
         evm
     }
@@ -395,6 +409,8 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     >,
     inspect: bool,
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
+    // Shared context for accessing Irys data
+    context: PdContext,
 }
 
 impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
@@ -410,11 +426,13 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             PRECOMPILE,
         >,
         inspect: bool,
+        context: PdContext,
     ) -> Self {
         Self {
             inner: evm,
             inspect,
             state: Default::default(),
+            context,
         }
     }
 
@@ -434,6 +452,11 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     /// Provides a mutable reference to the EVM context.
     pub fn ctx_mut(&mut self) -> &mut EthEvmContext<DB> {
         &mut self.inner.ctx
+    }
+
+    /// Provides a reference to the PD context.
+    pub const fn pd_context(&self) -> &PdContext {
+        &self.context
     }
 }
 
@@ -498,6 +521,15 @@ where
             Either::Left(res) => return Ok(res),
             Either::Right(tx) => tx,
         };
+
+        // Update EVM's PdContext with transaction access_list for PD precompile
+        // Each EVM has its own PdContext (via clone), so this is thread-safe
+        let access_list = tx.access_list.to_vec();
+        self.context.update_access_list(access_list);
+        tracing::debug!(
+            access_list_items = tx.access_list.len(),
+            "Updated PdContext with transaction access_list for this EVM instance"
+        );
 
         // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
         // Layout: [magic][version:u16][borsh header][rest]
@@ -1424,7 +1456,8 @@ mod tests {
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
-        let factory = IrysEvmFactory::new();
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
+        let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
@@ -1461,7 +1494,8 @@ mod tests {
     /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
     #[test]
     fn evm_processes_normal_tx_success() {
-        let factory = IrysEvmFactory::new();
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
+        let factory = IrysEvmFactory::new(mock_chunk_provider);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit
         let mut cfg_env = CfgEnv::default();
