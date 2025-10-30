@@ -1120,12 +1120,29 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    pub async fn mine_block_with_payload(
+        &self,
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+        let poa_solution = solution_context(&self.node_ctx).await?;
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .block_producer
+            .send(BlockProducerCommand::SolutionFound {
+                solution: poa_solution,
+                response: response_tx,
+            })
+            .unwrap();
+        let res = response_rx.await?;
+        let maybe = res?;
+        maybe.ok_or_eyre("block not returned")
+    }
+
     pub async fn mine_block_without_gossip(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
-        self.with_gossip_disabled(mine_block(&self.node_ctx))
-            .await?
-            .ok_or_eyre("block not returned")
+        self.with_gossip_disabled(self.mine_block_with_payload())
+            .await
     }
 
     /// Mine blocks until the next epoch boundary is reached.

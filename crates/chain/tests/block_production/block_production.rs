@@ -80,7 +80,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .post_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
@@ -363,7 +363,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .post_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
 
     // Get the transaction hashes from the block in order
