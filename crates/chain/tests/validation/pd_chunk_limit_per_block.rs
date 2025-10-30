@@ -2,13 +2,13 @@ use crate::utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest};
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
-use alloy_primitives::{TxKind, U256};
+use alloy_primitives::{aliases::U200, TxKind, U256};
 use alloy_signer_local::LocalSigner;
 use irys_reth::pd_tx::{
     build_pd_access_list, detect_and_decode_pd_header, prepend_pd_header_v1_to_calldata,
-    sum_pd_chunks_in_access_list, PdHeaderV1, PdKey,
+    sum_pd_chunks_in_access_list, PdHeaderV1,
 };
-use irys_types::{Address, NodeConfig};
+use irys_types::{range_specifier::ChunkRangeSpecifier, Address, NodeConfig};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result<()> {
@@ -52,8 +52,8 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     let chain_id = genesis_node.node_ctx.config.consensus.chain_id;
 
     // Build access list with 80 chunks (4 keys * 20 chunks each)
-    let storage_keys = (0..4).map(|_i| PdKey {
-        slot_index_be: [0xff; 26],
+    let storage_keys = (0..4).map(|_i| ChunkRangeSpecifier {
+        partition_index: U200::MAX,
         offset: 0,
         chunk_count: 20,
     });

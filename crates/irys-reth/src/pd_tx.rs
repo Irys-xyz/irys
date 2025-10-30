@@ -7,44 +7,17 @@ use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use irys_types::range_specifier::PdAccessListArg;
 use std::io::{Read, Write};
 
-/// PD storage key components extracted from a 32-byte access-list key.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PdKey {
-    pub slot_index_be: [u8; 26],
-    pub offset: u32,
-    pub chunk_count: u16,
-}
-
-/// Encode a PD storage key `<slot_index:26><offset:4><chunk_count:2>` into a 32-byte big-endian word.
-pub fn encode_pd_storage_key(slot_index_be: [u8; 26], offset: u32, chunk_count: u16) -> B256 {
-    let mut buf = [0_u8; 32];
-    buf[0..26].copy_from_slice(&slot_index_be);
-    buf[26..30].copy_from_slice(&offset.to_be_bytes());
-    buf[30..32].copy_from_slice(&chunk_count.to_be_bytes());
-    B256::from(buf)
-}
-
-/// Decode a PD storage key from a 32-byte big-endian word.
-pub fn decode_pd_storage_key(key: B256) -> PdKey {
-    let bytes = key.0;
-    let mut slot = [0_u8; 26];
-    slot.copy_from_slice(&bytes[0..26]);
-    let mut off = [0_u8; 4];
-    off.copy_from_slice(&bytes[26..30]);
-    let mut cnt = [0_u8; 2];
-    cnt.copy_from_slice(&bytes[30..32]);
-    PdKey {
-        slot_index_be: slot,
-        offset: u32::from_be_bytes(off),
-        chunk_count: u16::from_be_bytes(cnt),
-    }
-}
-
-/// Create a PD access list for a list of PD keys, under the PD precompile address.
-pub fn build_pd_access_list(keys: impl IntoIterator<Item = PdKey>) -> AccessList {
-    let storage_keys: Vec<B256> = keys
+/// Create a PD access list for a list of ChunkRangeSpecifiers, under the PD precompile address.
+///
+/// This is the canonical way to build PD access lists for testing and transaction construction.
+/// Uses the `range_specifier` encoding format.
+pub fn build_pd_access_list(
+    specs: impl IntoIterator<Item = irys_types::range_specifier::ChunkRangeSpecifier>,
+) -> AccessList {
+    use irys_types::range_specifier::PdAccessListArgSerde as _;
+    let storage_keys: Vec<B256> = specs
         .into_iter()
-        .map(|k| encode_pd_storage_key(k.slot_index_be, k.offset, k.chunk_count))
+        .map(|spec| B256::from(spec.encode()))
         .collect();
     AccessList::from(vec![AccessListItem {
         address: PD_PRECOMPILE_ADDRESS,
@@ -183,10 +156,24 @@ mod tests {
         Address::repeat_byte(0xff)
     }
 
-    fn pd_key(chunk_count: u16) -> PdKey {
-        PdKey {
-            slot_index_be: [0; 26],
+    fn chunk_spec(chunk_count: u16) -> irys_types::range_specifier::ChunkRangeSpecifier {
+        use alloy_primitives::aliases::U200;
+        irys_types::range_specifier::ChunkRangeSpecifier {
+            partition_index: U200::ZERO,
             offset: 0,
+            chunk_count,
+        }
+    }
+
+    fn chunk_spec_with_params(
+        partition_index: [u8; 25],
+        offset: u32,
+        chunk_count: u16,
+    ) -> irys_types::range_specifier::ChunkRangeSpecifier {
+        use alloy_primitives::aliases::U200;
+        irys_types::range_specifier::ChunkRangeSpecifier {
+            partition_index: U200::from_le_bytes(partition_index),
+            offset,
             chunk_count,
         }
     }
@@ -219,19 +206,20 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_single_key() {
-        let access_list = build_pd_access_list(vec![pd_key(42)]);
+        let access_list = build_pd_access_list(vec![chunk_spec(42)]);
         assert_eq!(sum_pd_chunks_in_access_list(&access_list), 42);
     }
 
     #[test]
     fn test_sum_pd_chunks_multiple_keys() {
-        let access_list = build_pd_access_list(vec![pd_key(10), pd_key(20), pd_key(30)]);
+        let access_list =
+            build_pd_access_list(vec![chunk_spec(10), chunk_spec(20), chunk_spec(30)]);
         assert_eq!(sum_pd_chunks_in_access_list(&access_list), 60);
     }
 
     #[test]
     fn test_sum_pd_chunks_zero_chunks() {
-        let access_list = build_pd_access_list(vec![pd_key(0), pd_key(0)]);
+        let access_list = build_pd_access_list(vec![chunk_spec(0), chunk_spec(0)]);
         assert_eq!(sum_pd_chunks_in_access_list(&access_list), 0);
     }
 
@@ -239,12 +227,14 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_mixed_addresses() {
-        let pd_key = encode_pd_storage_key([3; 26], 123, 50);
+        use irys_types::range_specifier::PdAccessListArgSerde as _;
+        let pd_spec = chunk_spec_with_params([3; 25], 123, 50);
+        let pd_key = B256::from(pd_spec.encode());
         let access_list = AccessList::from(vec![
             AccessListItem {
                 address: other_address(),
                 storage_keys: vec![
-                    encode_pd_storage_key([1; 26], 0, 999), // This should be ignored
+                    B256::from(chunk_spec_with_params([1; 25], 0, 999).encode()), // This should be ignored
                 ],
             },
             AccessListItem {
@@ -254,7 +244,7 @@ mod tests {
             AccessListItem {
                 address: Address::repeat_byte(0xaa),
                 storage_keys: vec![
-                    encode_pd_storage_key([2; 26], 0, 888), // This should be ignored
+                    B256::from(chunk_spec_with_params([2; 25], 0, 888).encode()), // This should be ignored
                 ],
             },
         ]);
@@ -264,17 +254,20 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_multiple_pd_entries() {
+        use irys_types::range_specifier::PdAccessListArgSerde as _;
         let access_list = AccessList::from(vec![
             AccessListItem {
                 address: PD_PRECOMPILE_ADDRESS,
                 storage_keys: vec![
-                    encode_pd_storage_key([1; 26], 0, 10),
-                    encode_pd_storage_key([2; 26], 100, 15),
+                    B256::from(chunk_spec_with_params([1; 25], 0, 10).encode()),
+                    B256::from(chunk_spec_with_params([2; 25], 100, 15).encode()),
                 ],
             },
             AccessListItem {
                 address: PD_PRECOMPILE_ADDRESS,
-                storage_keys: vec![encode_pd_storage_key([3; 26], 200, 20)],
+                storage_keys: vec![B256::from(
+                    chunk_spec_with_params([3; 25], 200, 20).encode(),
+                )],
             },
         ]);
         // All PD entries should be summed: 10 + 15 + 20 = 45
@@ -283,8 +276,9 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_no_deduplication() {
+        use irys_types::range_specifier::PdAccessListArgSerde as _;
         // Same key appears multiple times - should be counted multiple times
-        let duplicate_key = encode_pd_storage_key([5; 26], 42, 25);
+        let duplicate_key = B256::from(chunk_spec_with_params([5; 25], 42, 25).encode());
         let access_list = AccessList::from(vec![AccessListItem {
             address: PD_PRECOMPILE_ADDRESS,
             storage_keys: vec![duplicate_key, duplicate_key, duplicate_key],
@@ -295,14 +289,14 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_large_values() {
-        let access_list = build_pd_access_list(vec![pd_key(u16::MAX), pd_key(u16::MAX)]);
+        let access_list = build_pd_access_list(vec![chunk_spec(u16::MAX), chunk_spec(u16::MAX)]);
         // 65535 * 2 = 131070
         assert_eq!(sum_pd_chunks_in_access_list(&access_list), 131_070);
     }
 
     #[test]
     fn test_sum_pd_chunks_max_single_key() {
-        let access_list = build_pd_access_list(vec![pd_key(u16::MAX)]);
+        let access_list = build_pd_access_list(vec![chunk_spec(u16::MAX)]);
         assert_eq!(sum_pd_chunks_in_access_list(&access_list), 65_535);
     }
 }
