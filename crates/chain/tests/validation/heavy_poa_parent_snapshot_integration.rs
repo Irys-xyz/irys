@@ -30,7 +30,7 @@ use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_types::{irys::IrysSigner, DataLedger, NodeConfig};
 
 #[test_log::test(actix_web::test)]
-async fn regression_boundary_poa_parent_snapshot() -> eyre::Result<()> {
+async fn heavy_poa_parent_snapshot_integration() -> eyre::Result<()> {
     // Small, fast chain; frequent expirations encourage assignment changes across epochs.
     const CHUNK_SIZE: u64 = 32;
     const DATA_SIZE: usize = 1024; // 1 KB (multiple chunks)
