@@ -4,6 +4,7 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Bytes, B256, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
+use irys_types::range_specifier::PdAccessListArg;
 use std::io::{Read, Write};
 
 /// PD storage key components extracted from a 32-byte access-list key.
@@ -52,13 +53,33 @@ pub fn build_pd_access_list(keys: impl IntoIterator<Item = PdKey>) -> AccessList
 }
 
 /// Compute total PD chunks referenced in an access list (simple sum, no deduplication).
+///
+/// This function decodes access list keys using the canonical `range_specifier` encoding.
+/// It handles both ChunkRead and ByteRead access list arguments:
+/// - ChunkRead: Counted as `chunk_count` chunks
+/// - ByteRead: Counted as 0 chunks
+/// - Invalid encodings: Skipped with a warning log
 pub fn sum_pd_chunks_in_access_list(access_list: &AccessList) -> u64 {
     access_list
         .0
         .iter()
         .filter(|item| item.address == PD_PRECOMPILE_ADDRESS)
         .flat_map(|item| item.storage_keys.iter())
-        .map(|key| decode_pd_storage_key(*key).chunk_count as u64)
+        .filter_map(|key| {
+            // Use the canonical precompile decoder from range_specifier.rs
+            match PdAccessListArg::decode(&key.0) {
+                Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec.chunk_count as u64),
+                Ok(PdAccessListArg::ByteRead(_byte_spec)) => {
+                    // ByteRead does not directly contribute to chunk count.
+                    Some(0)
+                }
+                Err(e) => {
+                    // Invalid encoding - log warning and skip
+                    tracing::warn!("Invalid PD access list key encoding, skipping: {}", e);
+                    None
+                }
+            }
+        })
         .sum()
 }
 
