@@ -5,11 +5,12 @@ use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
+use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256,
+    IrysTransactionId, H256, U256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
@@ -58,6 +59,12 @@ impl Inner {
 
         // Validate anchor and compute expiry
         let anchor_height = self.validate_anchor(tx).await?;
+
+        // Validate funding against canonical chain
+        // Note: We do NOT mark tx as invalid on funding failure, allowing
+        // it to be revalidated if the account is funded later
+        self.validate_data_tx_funding(tx)?;
+
         let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
 
         // Validate and parse ledger type
@@ -213,6 +220,56 @@ impl Inner {
     }
 
     // --- Small shared helpers (kept private to this module) ---
+
+    /// Validates that a data transaction has sufficient balance to cover its fees.
+    /// Checks the balance against the canonical chain tip.
+    ///
+    /// IMPORTANT: This function does NOT mark the transaction as invalid if unfunded,
+    /// allowing the transaction to be revalidated later if the account is funded.
+    fn validate_data_tx_funding(
+        &self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        // Fetch balance from canonical chain (None = canonical tip)
+        let balance: U256 = self
+            .reth_node_adapter
+            .rpc
+            .get_balance_irys_canonical_and_pending(tx.signer, None)
+            .map_err(|e| {
+                tracing::error!(
+                    tx.id = %tx.id,
+                    tx.signer = %tx.signer,
+                    tx.error = %e,
+                    "Failed to fetch balance for data tx"
+                );
+                TxIngressError::BalanceFetchError {
+                    address: tx.signer.to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+
+        let required = tx.total_cost();
+
+        if balance < required {
+            tracing::warn!(
+                tx.id = %tx.id,
+                account.balance = %balance,
+                tx.required_balance = %required,
+                tx.signer = %tx.signer,
+                "Insufficient balance for data tx"
+            );
+            return Err(TxIngressError::Unfunded);
+        }
+
+        tracing::debug!(
+            tx.id = %tx.id,
+            account.balance = %balance,
+            tx.required_balance = %required,
+            "Funding validated for data tx"
+        );
+
+        Ok(())
+    }
 
     /// Computes the pre-confirmation expiry height given a resolved anchor height.
     fn compute_expiry_height_from_anchor(&self, anchor_height: u64) -> u64 {
