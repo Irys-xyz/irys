@@ -57,7 +57,7 @@ pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod pd_tx;
-pub mod precompile;
+pub mod precompiles;
 pub mod shadow_tx;
 pub use irys_types::chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
@@ -88,10 +88,20 @@ pub fn compose_shadow_tx(
 }
 
 /// Type configuration for an Irys-Ethereum node.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IrysEthereumNode {
     pub shadow_tx_store: ShadowTxStore,
     pub max_pd_chunks_per_block: u64,
+    pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+}
+
+impl std::fmt::Debug for IrysEthereumNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrysEthereumNode")
+            .field("shadow_tx_store", &self.shadow_tx_store)
+            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .finish()
+    }
 }
 
 impl NodeTypes for IrysEthereumNode {
@@ -126,7 +136,9 @@ impl IrysEthereumNode {
         ComponentsBuilder::default()
             .node_types::<Node>()
             .pool(IrysPoolBuilder::default())
-            .executor(IrysExecutorBuilder)
+            .executor(IrysExecutorBuilder {
+                chunk_provider: self.chunk_provider.clone(),
+            })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 shadow_tx_store: self.shadow_tx_store.clone(),
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
@@ -192,8 +204,18 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 }
 
 /// A regular ethereum evm and executor builder.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct IrysExecutorBuilder;
+#[derive(Clone)]
+pub struct IrysExecutorBuilder {
+    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+}
+
+impl std::fmt::Debug for IrysExecutorBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrysExecutorBuilder")
+            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .finish()
+    }
+}
 
 impl<Types, Node> ExecutorBuilder<Node> for IrysExecutorBuilder
 where
@@ -203,12 +225,11 @@ where
     type EVM = evm::IrysEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        // TODO: figure out if this needs to be EthEvmConfig<IrysEvmFactory> - so far it doesn't seem like it needs to.
         let evm_config = EthEvmConfig::new(ctx.chain_spec())
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new();
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -2477,11 +2498,14 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
+            let mock_chunk_provider =
+                std::sync::Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
             let (nodes, tasks, ..) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
                 payload_attributes,
+                mock_chunk_provider,
             )
             .await?;
 
@@ -3195,6 +3219,7 @@ pub mod test_utils {
     /// - `chain_spec`: Chain spec to use
     /// - `is_dev`: Whether to run in dev mode
     /// - `attributes_generator`: Function to generate payload attributes
+    /// - `chunk_provider`: Implementation of RethChunkProvider to use for all nodes
     ///
     /// # Returns
     /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles
@@ -3205,6 +3230,7 @@ pub mod test_utils {
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
+        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     ) -> eyre::Result<(
         Vec<(NodeHelperType<IrysEthereumNode>, ShadowTxStore)>,
         TaskManager,
@@ -3253,6 +3279,7 @@ pub mod test_utils {
                     shadow_tx_store: shadow_tx_store.clone(),
                     // Use default value for tests
                     max_pd_chunks_per_block: 7_500,
+                    chunk_provider: chunk_provider.clone(),
                 })
                 .launch()
                 .await?;

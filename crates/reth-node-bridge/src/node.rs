@@ -88,6 +88,7 @@ pub async fn run_node(
     latest_block: u64,
     random_ports: bool,
     shadow_tx_store: ShadowTxStore,
+    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
@@ -163,6 +164,7 @@ pub async fn run_node(
         .node(IrysEthereumNode {
             shadow_tx_store: shadow_tx_store.clone(),
             max_pd_chunks_per_block,
+            chunk_provider,
         })
         .launch_with_debug_capabilities()
         .in_current_span()
