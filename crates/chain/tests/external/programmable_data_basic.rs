@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
+use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
@@ -208,7 +208,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    mine_blocks(&node.node_ctx, 10).await?;
+    node.mine_blocks(10).await?;
 
     // sleep so the client has a chance to read the chunks
     sleep(Duration::from_millis(100_000)).await;

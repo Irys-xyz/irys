@@ -2760,17 +2760,6 @@ pub async fn solution_context_with_poa_chunk(
     })
 }
 
-pub async fn mine_blocks(
-    node_ctx: &IrysNodeCtx,
-    blocks: usize,
-) -> eyre::Result<Vec<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-    let mut results = Vec::with_capacity(blocks);
-    for _ in 0..blocks {
-        results.push(mine_block(node_ctx).await?.unwrap());
-    }
-    Ok(results)
-}
-
 pub async fn mine_block(
     node_ctx: &IrysNodeCtx,
 ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {

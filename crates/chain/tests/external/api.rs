@@ -1,4 +1,4 @@
-use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
+use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
@@ -148,7 +148,7 @@ async fn external_api() -> eyre::Result<()> {
     .await?
     .unwrap();
 
-    mine_blocks(&node.node_ctx, 10).await?;
+    node.mine_blocks(10).await?;
 
     // sleep so the client has a chance to read the chunks
     sleep(Duration::from_millis(100_000)).await;
