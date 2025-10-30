@@ -130,8 +130,6 @@ impl EmaSnapshot {
         let crossing_interval_boundary =
             new_block.height % blocks_in_interval == 0 && new_block.height > 0;
 
-        // Use the helper to calculate ema_price_2_intervals_ago
-        // This ensures consistency with external callers of ema_for_public_pricing_in_new_block
         let ema_price_2_intervals_ago =
             self.calculate_public_pricing_ema_for_height(new_block.height, blocks_in_interval);
 
@@ -256,9 +254,6 @@ impl EmaSnapshot {
     }
 
     /// Calculate what ema_price_2_intervals_ago will be for a new block at the given height.
-    ///
-    /// This is the EMA price that will be used for public pricing operations in the new block.
-    /// The calculation accounts for interval boundary crossings where the pricing EMA shifts forward.
     pub fn calculate_public_pricing_ema_for_height(
         &self,
         new_block_height: u64,

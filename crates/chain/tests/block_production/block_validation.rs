@@ -1,6 +1,16 @@
+use crate::utils::solution_context;
 use crate::utils::IrysNodeTest;
 use eyre::Result;
+use irys_actors::{
+    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
+};
+use irys_types::{
+    block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats, IrysBlockHeader,
+};
 use irys_types::{NodeConfig, H256, U256};
+use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
@@ -10,19 +20,6 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     // 0. Create an evil block producer
     // ------------------------------------------------------------------
-    use crate::utils::solution_context;
-    use irys_actors::{
-        async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
-        ProductionStrategy,
-    };
-    use irys_domain::EmaSnapshot;
-    use irys_types::{
-        block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
-        IrysBlockHeader,
-    };
-    use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
-    use std::sync::Arc;
-
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub invalid_timestamp: u128,
@@ -77,7 +74,6 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             _current_timestamp: u128,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
-            prev_block_ema_snapshot: &EmaSnapshot,
             ema_calculation: irys_domain::ExponentialMarketAvgCalculation,
             treasury: U256,
         ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
@@ -89,7 +85,6 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     self.invalid_timestamp,
                     block_reward,
                     eth_built_payload,
-                    prev_block_ema_snapshot,
                     ema_calculation,
                     treasury,
                 )

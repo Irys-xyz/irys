@@ -8,7 +8,7 @@ use reth::primitives::SealedBlock;
 /// Test that PD base fee increases when block utilization exceeds the 50% target.
 ///
 /// This test verifies the dynamic PD base fee adjustment mechanism:
-/// 1. Creates 4 PD transactions, each using 20 chunks (4 × 20 = 80 total chunks = 80% utilization)
+/// 1. Creates 4 PD transactions, each using 20 chunks (4 * 20 = 80 total chunks = 80% utilization)
 /// 2. Mines a block containing all 4 transactions
 /// 3. Verifies the PD base fee in the subsequent block increases according to the formula:
 ///    - Target utilization: 50%
@@ -41,7 +41,7 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     let _ = node.mine_block_without_gossip().await?;
 
     // Create high utilization: inject 4 PD transactions with 20 chunks each
-    // Total: 4 × 20 = 80 chunks = 80% of max_pd_chunks_per_block (100)
+    // Total: 4 * 20 = 80 chunks = 80% of max_pd_chunks_per_block (100)
     let num_transactions = 4;
     let chunks_per_tx = 20;
     let tx_hashes = node
@@ -77,15 +77,12 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
 
     // Exact comparison
     assert_eq!(
-        block3_pd_base_fee,
-        expected_block3_fee,
-        "PD base fee should increase by exactly 7.5% (1.075×) at 80% utilization.\n\
+        block3_pd_base_fee, expected_block3_fee,
+        "PD base fee should increase by exactly 7.5% (1.075*) at 80% utilization.\n\
          Block 2 fee: {}\n\
-         Expected Block 3 fee: {} (block2_fee × 1075 / 1000)\n\
+         Expected Block 3 fee: {} (block2_fee * 1075 / 1000)\n\
          Actual Block 3 fee: {}",
-        block2_pd_base_fee,
-        expected_block3_fee,
-        block3_pd_base_fee
+        block2_pd_base_fee, expected_block3_fee, block3_pd_base_fee
     );
 
     // Also verify the fee actually increased (sanity check)
@@ -132,8 +129,7 @@ fn verify_pd_transactions_included(
         assert!(
             found,
             "PD transaction {} with hash {:?} should be included in block",
-            idx,
-            expected_hash
+            idx, expected_hash
         );
     }
 

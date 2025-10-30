@@ -14,6 +14,8 @@ use irys_types::{
     Config, IrysBlockHeader, ProgrammableDataConfig, U256,
 };
 
+const MB_SIZE: u64 = 1024 * 1024;
+
 pub fn compute_base_fee_per_chunk(
     config: &Config,
     parent_block: &IrysBlockHeader,
@@ -56,10 +58,9 @@ fn calculate_pd_base_fee_for_new_block(
     pd_config: &ProgrammableDataConfig,
     chunk_size: u64,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-    const MB_SIZE: u64 = 1024 * 1024; // 1 MB in bytes
     let parent_ema_price = parent_block_ema_snapshot.ema_for_public_pricing();
 
-    // Step 1: Convert per-chunk Irys → per-chunk USD (using parent EMA)
+    // Step 1: Convert per-chunk Irys -> per-chunk USD (using parent EMA)
     // usd_per_chunk = irys_per_chunk * (price / PRECISION_SCALE)
     let current_fee_per_chunk_usd = Amount::new(mul_div(
         parent_pd_base_fee_irys.amount,
@@ -84,7 +85,7 @@ fn calculate_pd_base_fee_for_new_block(
         floor_per_chunk_usd,
     )?;
 
-    // Step 4: Convert per-chunk USD → per-chunk Irys (using current EMA)
+    // Step 4: Convert per-chunk USD -> per-chunk Irys (using current EMA)
     // irys_per_chunk = usd_per_chunk * (PRECISION_SCALE / price)
     let new_fee_per_chunk_irys = mul_div(
         new_fee_per_chunk_usd.amount,
@@ -111,9 +112,9 @@ fn extract_pd_base_fee_from_block(
     // Special case: Genesis block (height 0) should use the minimum base fee
     // The genesis block doesn't have the standard transaction structure
     // TODO: instead of using the genesis block, we MUST hardcode the block height/timestamp in our hardfork config
+    //       This is just a temp measurement until we hardfork-guard PD functionality
     if irys_block_header.height == 0 {
         // Convert the floor from per-MB to per-chunk
-        const MB_SIZE: u64 = 1024 * 1024;
         let floor_per_chunk_usd = Amount::new(mul_div(
             pd_config.base_fee_floor.amount,
             U256::from(chunk_size),
@@ -198,11 +199,11 @@ mod tests {
     ///
     /// This test uses 50% utilization (no adjustment) to isolate the price conversion logic.
     ///
-    /// At 50% utilization: new_fee_irys = parent_fee_irys × (parent_ema_price / current_ema_price)
+    /// At 50% utilization: new_fee_irys = parent_fee_irys * (parent_ema_price / current_ema_price)
     #[rstest::rstest]
     #[case(dec!(1.0), dec!(1.0), dec!(1.5))] // No price change
-    #[case(dec!(2.0), dec!(1.0), dec!(0.75))] // Current price doubles → need fewer tokens
-    #[case(dec!(0.5), dec!(1.0), dec!(3.0))] // Current price halves → need more tokens
+    #[case(dec!(2.0), dec!(1.0), dec!(0.75))] // Current price doubles -> need fewer tokens
+    #[case(dec!(0.5), dec!(1.0), dec!(3.0))] // Current price halves -> need more tokens
     fn test_price_conversion_with_changing_ema(
         #[case] current_ema_price_decimal: rust_decimal::Decimal,
         #[case] parent_ema_price_decimal: rust_decimal::Decimal,
@@ -210,7 +211,7 @@ mod tests {
     ) -> eyre::Result<()> {
         let chunk_size = 256 * 1024;
         let max_chunks = 100;
-        let chunks_used = 50; // 50% utilization → no fee adjustment
+        let chunks_used = 50; // 50% utilization -> no fee adjustment
 
         let parent_ema_price = Amount::token(parent_ema_price_decimal)?;
         let current_ema_price = Amount::token(current_ema_price_decimal)?;
@@ -332,19 +333,19 @@ pub(crate) mod pd_fee_adjustments {
         #[case(500, 1000, dec!(0.50), dec!(0.50))]
         #[case(3750, 7500, dec!(0.01), dec!(0.01))]
         // Fee converges to floor
-        #[case(0, 100, dec!(0.011), dec!(0.01))] // -12.5% → $0.009625 → floor $0.01
-        #[case(10, 100, dec!(0.0105), dec!(0.01))] // -10% → $0.00945 → floor $0.01
-        #[case(0, 100, dec!(0.02), dec!(0.0175))] // -12.5% → $0.0175 (above floor)
+        #[case(0, 100, dec!(0.011), dec!(0.01))] // -12.5% -> $0.009625 -> floor $0.01
+        #[case(10, 100, dec!(0.0105), dec!(0.01))] // -10% -> $0.00945 -> floor $0.01
+        #[case(0, 100, dec!(0.02), dec!(0.0175))] // -12.5% -> $0.0175 (above floor)
         // Fee increases linearly (>50% utilization)
-        #[case(100, 100, dec!(1.00), dec!(1.125))] // 100% → +12.5% (cap check)
-        #[case(75, 100, dec!(1.00), dec!(1.0625))] // 75% → +6.25%
-        #[case(60, 100, dec!(1.00), dec!(1.025))] // 60% → +2.5%
-        #[case(90, 100, dec!(0.50), dec!(0.55))] // 90% → +10%
+        #[case(100, 100, dec!(1.00), dec!(1.125))] // 100% -> +12.5% (cap check)
+        #[case(75, 100, dec!(1.00), dec!(1.0625))] // 75% -> +6.25%
+        #[case(60, 100, dec!(1.00), dec!(1.025))] // 60% -> +2.5%
+        #[case(90, 100, dec!(0.50), dec!(0.55))] // 90% -> +10%
         // Fee decreases linearly (<50% utilization)
-        #[case(0, 100, dec!(1.00), dec!(0.875))] // 0% → -12.5% (cap check)
-        #[case(25, 100, dec!(1.00), dec!(0.9375))] // 25% → -6.25%
-        #[case(40, 100, dec!(1.00), dec!(0.975))] // 40% → -2.5%
-        #[case(10, 100, dec!(0.50), dec!(0.45))] // 10% → -10%
+        #[case(0, 100, dec!(1.00), dec!(0.875))] // 0% -> -12.5% (cap check)
+        #[case(25, 100, dec!(1.00), dec!(0.9375))] // 25% -> -6.25%
+        #[case(40, 100, dec!(1.00), dec!(0.975))] // 40% -> -2.5%
+        #[case(10, 100, dec!(0.50), dec!(0.45))] // 10% -> -10%
         fn test_calculate_new_base_fee(
             #[case] chunks_used: u32,
             #[case] max_chunks_per_block: u64,

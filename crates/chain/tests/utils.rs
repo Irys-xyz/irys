@@ -1763,11 +1763,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         num_transactions: u32,
         chunks_per_tx: u16,
     ) -> eyre::Result<Vec<FixedBytes<32>>> {
-        use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
+        use alloy_consensus::{
+            SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope,
+        };
         use alloy_eips::Encodable2718 as _;
         use alloy_network::TxSignerSync as _;
         use alloy_signer_local::LocalSigner;
-        use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1, PdKey};
+        use irys_reth::pd_tx::{
+            build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1, PdKey,
+        };
 
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;

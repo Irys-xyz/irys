@@ -534,7 +534,6 @@ pub trait BlockProdStrategy {
                 current_timestamp,
                 block_reward,
                 evm_block,
-                &prev_block_ema_snapshot,
                 ema_calculation,
                 final_treasury,
             )
@@ -873,7 +872,6 @@ pub trait BlockProdStrategy {
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
-        _perv_block_ema_snapshot: &EmaSnapshot,
         ema_calculation: ExponentialMarketAvgCalculation,
         final_treasury: U256,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
