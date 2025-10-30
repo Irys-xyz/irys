@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use alloy_consensus::Transaction as _;
-use irys_actors::reth_ethereum_primitives;
+use irys_actors::{pd_base_fee::PD_BASE_FEE_INDEX, reth_ethereum_primitives};
 use irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{NodeConfig, U256};
 use reth::primitives::SealedBlock;
@@ -148,10 +148,11 @@ fn extract_pd_base_fee_from_block(
     use eyre::OptionExt as _;
 
     // Get the 2nd transaction (index 1) which should be PdBaseFeeUpdate
-    let second_tx =
-        sealed_block.body().transactions.get(1).ok_or_eyre(
-            "Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)",
-        )?;
+    let second_tx = sealed_block
+        .body()
+        .transactions
+        .get(PD_BASE_FEE_INDEX)
+        .ok_or_eyre("Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)")?;
 
     // Decode as shadow transaction
     let shadow_tx = ShadowTransaction::decode(&mut second_tx.input().as_ref())

@@ -15,6 +15,7 @@ use irys_types::{
 };
 
 const MB_SIZE: u64 = 1024 * 1024;
+pub const PD_BASE_FEE_INDEX: usize = 1;
 
 pub fn compute_base_fee_per_chunk(
     config: &Config,
@@ -127,10 +128,11 @@ fn extract_pd_base_fee_from_block(
 
     // Extract current PD base fee from block's 2nd shadow transaction (PdBaseFeeUpdate)
     // The ordering is: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs
-    let second_tx =
-        evm_block.body.transactions.get(1).ok_or_eyre(
-            "Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)",
-        )?;
+    let second_tx = evm_block
+        .body
+        .transactions
+        .get(PD_BASE_FEE_INDEX)
+        .ok_or_eyre("Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)")?;
 
     let shadow_tx = detect_and_decode(second_tx)
         .map_err(|e| eyre!("Failed to decode 2nd transaction as shadow tx: {}", e))?
