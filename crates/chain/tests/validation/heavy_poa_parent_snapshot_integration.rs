@@ -1,4 +1,6 @@
-//! Regression test for boundary PoA snapshot selection (commit 0a69bde6ce44a1bd6cc8baf0c5de7805ec032a9f).
+//! Partial regression test for boundary PoA snapshot selection (commit 0a69bde6ce44a1bd6cc8baf0c5de7805ec032a9f).
+//! Verifies the invariant (PoA succeeds under the parent snapshot and fails under a child snapshot), but it does
+//! not exercise the actual production path that chooses the parent snapshot during boundary block validation.
 //!
 //! Goal:
 //! - Ensure the boundary (first post-epoch) block’s PoA validates against the PARENT epoch snapshot,
