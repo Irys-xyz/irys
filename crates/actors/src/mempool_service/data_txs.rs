@@ -6,11 +6,16 @@ use irys_database::{
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
+use irys_types::storage_pricing::{
+    calculate_perm_fee_from_config, calculate_term_fee,
+    phantoms::Percentage,
+    Decimal,
+};
 use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
-    IrysTransactionId, H256, U256,
+    IrysTokenPrice, IrysTransactionId, H256, U256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
@@ -172,6 +177,11 @@ impl Inner {
             }
         }
 
+        // Validate fees against maximum EMA pricing (Gossip: ±15% tolerance)
+        // If fees are outside the acceptable bounds, mark as invalid to prevent re-processing
+        self.validate_data_tx_ema_pricing(&tx, Decimal::from(15), true)
+            .await?;
+
         // we don't check account balance here - we check it when we build & validate blocks
 
         // Shared post-processing
@@ -212,6 +222,10 @@ impl Inner {
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
+
+        // Validate fees against maximum EMA pricing (API only, strict - no tolerance)
+        self.validate_data_tx_ema_pricing(&tx, Decimal::ZERO, false)
+            .await?;
 
         // we don't check account balance here - we check it when we build & validate blocks
 
@@ -266,6 +280,160 @@ impl Inner {
             account.balance = %balance,
             tx.required_balance = %required,
             "Funding validated for data tx"
+        );
+
+        Ok(())
+    }
+
+    /// Get the maximum EMA price from the canonical tip's snapshot and calculate
+    /// the minimum acceptable price with the given tolerance.
+    ///
+    /// Returns: (max_ema, min_acceptable_ema)
+    /// - max_ema: The highest of the three EMA interval prices
+    /// - min_acceptable_ema: max_ema reduced by tolerance% (or max_ema if tolerance is 0)
+    fn get_pricing_bounds(
+        &self,
+        tolerance_percent: Decimal,
+    ) -> Result<(IrysTokenPrice, IrysTokenPrice), TxIngressError> {
+        let ema_snapshot = {
+            let tree = self.block_tree_read_guard.read();
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block = canonical
+                .last()
+                .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
+            tree.get_ema_snapshot(&last_block.block_hash)
+                .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?
+        };
+
+        // Find MAX of the three EMA prices
+        let max_ema = [
+            ema_snapshot.ema_price_2_intervals_ago,
+            ema_snapshot.ema_price_1_interval_ago,
+            ema_snapshot.ema_price_current_interval,
+        ]
+        .into_iter()
+        .max_by_key(|price| price.amount)
+        .ok_or_else(|| TxIngressError::Other("Failed to find max EMA".to_string()))?;
+
+        // Calculate minimum acceptable price: max_ema * (1 - tolerance%)
+        let min_ema = if tolerance_percent > Decimal::ZERO {
+            let tolerance = irys_types::storage_pricing::Amount::<Percentage>::percentage(tolerance_percent)
+                .map_err(|e| TxIngressError::Other(format!("Invalid tolerance: {}", e)))?;
+            max_ema
+                .sub_multiplier(tolerance)
+                .map_err(|e| TxIngressError::Other(format!("Failed to calculate min EMA: {}", e)))?
+        } else {
+            max_ema // No tolerance for API
+        };
+
+        Ok((max_ema, min_ema))
+    }
+
+    /// Validates data transaction fees against the MAXIMUM of all EMA interval prices.
+    /// Uses MAX(ema_2_intervals_ago, ema_1_interval_ago, ema_current) to ensure
+    /// fees are sufficient regardless of which pricing EMA applies.
+    ///
+    /// # Parameters
+    /// - `tolerance_percent`: Allowed deviation from expected fee (e.g., 15.0 for ±15%)
+    ///   - API uses 0.0 (strict validation)
+    ///   - Gossip uses 15.0 (lenient, to accommodate cross-fork pricing differences)
+    /// - `mark_invalid_on_failure`: Whether to add to invalid tx list on failure (true for Gossip)
+    async fn validate_data_tx_ema_pricing(
+        &mut self,
+        tx: &DataTransactionHeader,
+        tolerance_percent: Decimal,
+        mark_invalid_on_failure: bool,
+    ) -> Result<(), TxIngressError> {
+        let (max_ema, min_ema) = self.get_pricing_bounds(tolerance_percent)?;
+
+        // Calculate expected fees using the MINIMUM acceptable EMA price
+        // This means we calculate fees at (max_ema - tolerance%), making the validation lenient
+        let latest_height = self.get_latest_block_height()?;
+        let next_block_height = latest_height + 1;
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            next_block_height,
+            self.config.consensus.epoch.num_blocks_in_epoch,
+            self.config.consensus.epoch.submit_ledger_epoch_length,
+        );
+
+        let expected_term_fee = calculate_term_fee(
+            tx.data_size,
+            epochs_for_storage,
+            &self.config.consensus,
+            min_ema,
+        )
+        .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))?;
+
+        // Validate term fee
+        if tx.term_fee < expected_term_fee {
+            let err_msg = format!(
+                "Insufficient term fee for max EMA pricing (tolerance={}%)",
+                tolerance_percent
+            );
+
+            if mark_invalid_on_failure {
+                let state = self.mempool_state.write().await;
+                Self::mark_tx_as_invalid(state, tx.id, &err_msg);
+            }
+
+            tracing::warn!(
+                tx.id = %tx.id,
+                tx.term_fee = %tx.term_fee,
+                expected_min = %expected_term_fee,
+                max_ema = %max_ema.amount,
+                min_ema = %min_ema.amount,
+                tolerance = %tolerance_percent,
+                "Data tx insufficient term_fee"
+            );
+
+            return Err(TxIngressError::Other(err_msg));
+        }
+
+        // For Publish ledger, validate perm fee
+        if let Ok(DataLedger::Publish) = DataLedger::try_from(tx.ledger_id) {
+            let perm_fee = tx.perm_fee.ok_or_else(|| {
+                TxIngressError::Other("Publish tx missing perm_fee".to_string())
+            })?;
+
+            let expected_perm_fee = calculate_perm_fee_from_config(
+                tx.data_size,
+                &self.config.consensus,
+                min_ema,
+                expected_term_fee,
+            )
+            .map_err(|e| TxIngressError::Other(format!("Failed to calculate perm fee: {}", e)))?;
+
+            if perm_fee < expected_perm_fee.amount {
+                let err_msg = format!(
+                    "Insufficient perm fee for max EMA pricing (tolerance={}%)",
+                    tolerance_percent
+                );
+
+                if mark_invalid_on_failure {
+                    let state = self.mempool_state.write().await;
+                    Self::mark_tx_as_invalid(state, tx.id, &err_msg);
+                }
+
+                tracing::warn!(
+                    tx.id = %tx.id,
+                    tx.perm_fee = %perm_fee,
+                    expected_min = %expected_perm_fee.amount,
+                    max_ema = %max_ema.amount,
+                    min_ema = %min_ema.amount,
+                    tolerance = %tolerance_percent,
+                    "Data tx insufficient perm_fee"
+                );
+
+                return Err(TxIngressError::Other(err_msg));
+            }
+        }
+
+        tracing::debug!(
+            tx.id = %tx.id,
+            max_ema = %max_ema.amount,
+            min_ema = %min_ema.amount,
+            tolerance = %tolerance_percent,
+            "Data tx EMA pricing validated"
         );
 
         Ok(())
