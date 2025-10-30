@@ -45,7 +45,7 @@ pub fn compute_base_fee_per_chunk(
 ///
 /// This function computes the PD (Programmable Data) base fee per chunk by:
 /// 1. Converting from per-chunk Irys to per-chunk USD using the parent block's EMA price
-/// 2. Adjusting the USD fee based on block utilization (target: 50%, range: ±12.5%)
+/// 2. Adjusting the USD fee based on block utilization (target: 50%, range: +-12.5%)
 ///    - The floor is converted from per-MB to per-chunk for comparison
 /// 3. Converting the adjusted per-chunk USD fee back to per-chunk Irys using the current block's EMA price
 fn calculate_pd_base_fee_for_new_block(
