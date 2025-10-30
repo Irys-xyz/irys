@@ -282,7 +282,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _, outcome) = mine_block_and_wait_for_validation(&node.node_ctx).await?;
+    let (block, _, outcome) = node.mine_block_and_wait_for_validation().await?;
     assert_eq!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)

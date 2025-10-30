@@ -1145,6 +1145,19 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    pub async fn mine_block_and_wait_for_validation(
+        &self,
+    ) -> eyre::Result<(
+        Arc<IrysBlockHeader>,
+        EthBuiltPayload,
+        BlockValidationOutcome,
+    )> {
+        let (block, reth_payload) = self.mine_block_with_payload().await?;
+        let block_hash = &block.block_hash;
+        let res = read_block_from_state(&self.node_ctx, block_hash).await;
+        Ok((block, reth_payload, res))
+    }
+
     /// Mine blocks until the next epoch boundary is reached.
     /// Returns the number of blocks mined and the final height.
     pub async fn mine_until_next_epoch(&self) -> eyre::Result<(usize, u64)> {
@@ -2823,22 +2836,6 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
 pub enum BlockValidationOutcome {
     StoredOnNode(ChainState),
     Discarded,
-}
-
-pub async fn mine_block_and_wait_for_validation(
-    node_ctx: &IrysNodeCtx,
-) -> eyre::Result<(
-    Arc<IrysBlockHeader>,
-    EthBuiltPayload,
-    BlockValidationOutcome,
-)> {
-    let (block, reth_payload) = mine_block(node_ctx)
-        .await?
-        .ok_or_eyre("block not returned")?;
-    let block_hash = &block.block_hash;
-    let res = read_block_from_state(node_ctx, block_hash).await;
-
-    Ok((block, reth_payload, res))
 }
 
 pub async fn read_block_from_state(
