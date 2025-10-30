@@ -2816,24 +2816,6 @@ pub async fn solution_context_with_poa_chunk(
     })
 }
 
-pub async fn mine_block(
-    node_ctx: &IrysNodeCtx,
-) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-    let poa_solution = solution_context(node_ctx).await?;
-
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-    node_ctx
-        .service_senders
-        .block_producer
-        .send(BlockProducerCommand::SolutionFound {
-            solution: poa_solution.clone(),
-            response: response_tx,
-        })
-        .unwrap();
-
-    response_rx.await?
-}
-
 pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext, eyre::Error> {
     // Fetch previous (parent) block difficulty
     // Get parent block directly from in-memory block tree
