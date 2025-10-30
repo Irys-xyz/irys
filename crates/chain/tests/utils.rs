@@ -368,6 +368,32 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
+    /// mines a single block on this node and waits again.
+    /// Designed for use with calls that expect to be able to send and confirm a tx in a single future.
+    pub async fn future_or_mine_on_timeout<F, T>(
+        &self,
+        mut future: F,
+        timeout_duration: Duration,
+    ) -> eyre::Result<T>
+    where
+        F: Future<Output = T> + Unpin,
+    {
+        loop {
+            let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
+            match race {
+                // provided future finished
+                futures::future::Either::Left((res, _)) => return Ok(res),
+                // we need another block
+                futures::future::Either::Right(_) => {
+                    info!("deployment timed out, creating new block..")
+                }
+            };
+            // Mine a single block (with payload) on this node and continue waiting
+            let _ = self.mine_block_with_payload().await?;
+        }
+    }
+
     pub fn testing_peer(&self) -> NodeConfig {
         let node_config = &self.node_ctx.config.node_config;
         // Initialize the peer with a random signer, copying the genesis config
@@ -2875,31 +2901,6 @@ pub async fn read_block_from_state(
         }
     }
     BlockValidationOutcome::Discarded
-}
-
-/// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
-/// triggers the building/mining of a block, and then waits again.
-/// designed for use with calls that expect to be able to send and confirm a tx in a single exposed future
-pub async fn future_or_mine_on_timeout<F, T>(
-    node_ctx: IrysNodeCtx,
-    mut future: F,
-    timeout_duration: Duration,
-) -> eyre::Result<T>
-where
-    F: Future<Output = T> + Unpin,
-{
-    loop {
-        let race = select(&mut future, Box::pin(sleep(timeout_duration))).await;
-        match race {
-            // provided future finished
-            futures::future::Either::Left((res, _)) => return Ok(res),
-            // we need another block
-            futures::future::Either::Right(_) => {
-                info!("deployment timed out, creating new block..")
-            }
-        };
-        mine_block(&node_ctx).await?;
-    }
 }
 
 /// Helper function for testing chunk uploads. Posts a single chunk of transaction data

@@ -35,8 +35,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
-    solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
+    new_stake_tx, read_block_from_state, solution_context, AddTxError, BlockValidationOutcome,
+    IrysNodeTest,
 };
 
 // EVM test constants

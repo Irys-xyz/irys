@@ -1,4 +1,4 @@
-use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
@@ -140,13 +140,10 @@ async fn external_api() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
+    let _start_offset = node
+        .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
+        .await?
+        .unwrap();
 
     node.mine_blocks(10).await?;
 
