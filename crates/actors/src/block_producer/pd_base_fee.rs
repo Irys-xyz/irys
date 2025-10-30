@@ -8,7 +8,7 @@ use irys_domain::EmaSnapshot;
 use irys_types::{
     storage_pricing::{
         mul_div,
-        phantoms::{CostPerChunk, Irys},
+        phantoms::{CostPerChunk, Irys, Usd},
         Amount, PRECISION_SCALE,
     },
     Config, IrysBlockHeader, ProgrammableDataConfig, U256,
@@ -86,14 +86,12 @@ fn calculate_pd_base_fee_for_new_block(
     )?;
 
     // Step 4: Convert per-chunk USD -> per-chunk Irys (using current EMA)
-    // irys_per_chunk = usd_per_chunk * (PRECISION_SCALE / price)
-    let new_fee_per_chunk_irys = mul_div(
-        new_fee_per_chunk_usd.amount,
-        PRECISION_SCALE,
-        current_block_ema_price.amount,
+    let new_fee_per_chunk_irys = convert_per_chunk_usd_to_irys(
+        Amount::new(new_fee_per_chunk_usd.amount),
+        current_block_ema_price,
     )?;
 
-    Ok(Amount::new(new_fee_per_chunk_irys))
+    Ok(new_fee_per_chunk_irys)
 }
 
 /// Extract the current PD base fee from an EVM block's 2nd shadow transaction.
@@ -121,11 +119,10 @@ fn extract_pd_base_fee_from_block(
             U256::from(MB_SIZE),
         )?);
 
-        // For genesis, we return the floor as the initial fee
-        // This will be in USD, so ideally we'd convert to Irys, but since we don't have
-        // an EMA price at genesis, we just return the floor value directly.
-        // The caller will need to handle the USD->Irys conversion if needed.
-        return Ok(floor_per_chunk_usd);
+        // Convert per-chunk USD -> per-chunk Irys using genesis block's EMA price
+        let floor_per_chunk_irys =
+            convert_per_chunk_usd_to_irys(floor_per_chunk_usd, &irys_block_header.ema_irys_price)?;
+        return Ok(floor_per_chunk_irys);
     }
 
     // Extract current PD base fee from block's 2nd shadow transaction (PdBaseFeeUpdate)
@@ -182,6 +179,17 @@ fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 
     }
 
     total_pd_chunks
+}
+
+/// Convert a per-chunk USD amount to per-chunk Irys tokens using a given price.
+///
+/// Formula: irys_amount = usd_amount * (PRECISION_SCALE / price)
+fn convert_per_chunk_usd_to_irys(
+    usd_per_chunk: Amount<(CostPerChunk, Usd)>,
+    irys_price: &irys_types::IrysTokenPrice,
+) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+    let irys_amount = mul_div(usd_per_chunk.amount, PRECISION_SCALE, irys_price.amount)?;
+    Ok(Amount::new(irys_amount))
 }
 
 #[cfg(test)]
