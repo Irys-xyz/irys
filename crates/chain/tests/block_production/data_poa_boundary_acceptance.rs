@@ -12,8 +12,8 @@ use irys_types::{irys::IrysSigner, DataLedger, NodeConfig, U256};
 ///   snapshot at the boundary.
 /// - We set submit_ledger_epoch_length = 1 to encourage slot changes at the boundary, which makes
 ///   correctness dependent on using the PARENT snapshot for PoA validation.
-/// - The test constructs a SolutionContext using a real tx (with tx_path/data_path) so the block
-///   producer builds a data PoA block, not a capacity PoA block.
+/// - The test constructs a SolutionContext using a real tx (with tx_path/data_path), intended to
+///   produce a data PoA block (as opposed to a capacity PoA block).
 #[test_log::test(actix_web::test)]
 async fn data_poa_boundary_acceptance() -> eyre::Result<()> {
     // Small configuration to make epochs quick and slot changes frequent.
@@ -52,7 +52,7 @@ async fn data_poa_boundary_acceptance() -> eyre::Result<()> {
     // Anchor is genesis
     let anchor = node.get_block_by_height(0).await?.block_hash;
 
-    // Post a publish data tx and wait for mempool
+    // Post a data tx and wait for mempool
     let tx = node
         .post_data_tx(anchor, vec![7_u8; DATA_SIZE], &user_signer)
         .await;
