@@ -1,5 +1,8 @@
 use crate::block_pool::BlockPoolError;
-use irys_actors::mempool_service::{IngressProofError, TxIngressError};
+use irys_actors::{
+    mempool_service::{IngressProofError, TxIngressError},
+    ChunkIngressError,
+};
 use irys_types::{CommitmentValidationError, PeerNetworkError};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -152,6 +155,8 @@ pub enum InternalGossipError {
     AlreadyShutdown(String),
     #[error("Failed to perform repair task for reth payloads: {0}")]
     PayloadRepair(BlockPoolError),
+    #[error("Failed to ingress a chunk: {0:?}")]
+    ChunkIngress(ChunkIngressError),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;

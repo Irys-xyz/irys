@@ -107,15 +107,24 @@ where
                     ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
                         InvalidDataError::ChunkInvalidDataSize,
                     )),
-                    ChunkIngressError::PreHeaderOversizedBytes => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedDataPath => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::PreHeaderOffsetExceedsCap => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
+
+                    // ===== Interval data 'errors' (peers should not be punished)
+                    ChunkIngressError::PreHeaderOversizedBytes => {
+                        Err(GossipError::Internal(InternalGossipError::ChunkIngress(
+                            ChunkIngressError::PreHeaderOversizedBytes,
+                        )))
+                    }
+                    ChunkIngressError::PreHeaderOversizedDataPath => {
+                        Err(GossipError::Internal(InternalGossipError::ChunkIngress(
+                            ChunkIngressError::PreHeaderOversizedDataPath,
+                        )))
+                    }
+                    ChunkIngressError::PreHeaderOffsetExceedsCap => {
+                        Err(GossipError::Internal(InternalGossipError::ChunkIngress(
+                            ChunkIngressError::PreHeaderOffsetExceedsCap,
+                        )))
+                    }
+
                     // ===== Internal errors
                     ChunkIngressError::DatabaseError => {
                         Err(GossipError::Internal(InternalGossipError::Database))
