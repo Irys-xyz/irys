@@ -6,9 +6,7 @@ use irys_database::{
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
-use irys_types::storage_pricing::{
-    calculate_perm_fee_from_config, calculate_term_fee,
-};
+use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
 use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
@@ -190,6 +188,10 @@ impl Inner {
         // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
         let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;
 
+        // Validate fees against authoritative EMA pricing (API only)
+        // This provides immediate feedback to API users if their transaction fees are insufficient
+        self.validate_data_tx_ema_pricing(&tx)?;
+
         // Validate funding against canonical chain (API only)
         // Note: We do NOT mark tx as invalid on funding failure, allowing
         // it to be revalidated if the account is funded later
@@ -216,10 +218,6 @@ impl Inner {
             }
         }
 
-        // Validate fees against authoritative EMA pricing (API only)
-        // This provides immediate feedback to API users if their transaction fees are insufficient
-        self.validate_data_tx_ema_pricing(&tx).await?;
-
         // Shared post-processing
         self.postprocess_data_ingress(&tx, expiry_height).await
     }
@@ -231,10 +229,7 @@ impl Inner {
     ///
     /// IMPORTANT: This function does NOT mark the transaction as invalid if unfunded,
     /// allowing the transaction to be revalidated later if the account is funded.
-    fn validate_data_tx_funding(
-        &self,
-        tx: &DataTransactionHeader,
-    ) -> Result<(), TxIngressError> {
+    fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
             .reth_node_adapter
@@ -281,8 +276,8 @@ impl Inner {
     /// This is the price that users should use when calculating their transaction fees.
     ///
     /// Ensures that user-provided fees are >= minimum required based on current EMA pricing.
-    async fn validate_data_tx_ema_pricing(
-        &mut self,
+    fn validate_data_tx_ema_pricing(
+        &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         // Get the authoritative EMA pricing from canonical tip
@@ -333,9 +328,9 @@ impl Inner {
 
         // For Publish ledger, validate perm fee
         if let Ok(DataLedger::Publish) = DataLedger::try_from(tx.ledger_id) {
-            let perm_fee = tx.perm_fee.ok_or_else(|| {
-                TxIngressError::Other("Publish tx missing perm_fee".to_string())
-            })?;
+            let perm_fee = tx
+                .perm_fee
+                .ok_or_else(|| TxIngressError::Other("Publish tx missing perm_fee".to_string()))?;
 
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,

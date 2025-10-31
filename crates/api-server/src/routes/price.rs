@@ -78,14 +78,15 @@ pub async fn get_price(
             let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
             let position_in_interval = next_block_height % price_adjustment_interval;
             let blocks_until_boundary = if position_in_interval == 0 {
-                0  // Exactly at interval boundary
+                0 // Exactly at interval boundary
             } else {
                 price_adjustment_interval - position_in_interval
             };
 
             // Last 25% of interval: use max(current_pricing, next_interval_pricing)
-            let last_quarter_size = (price_adjustment_interval + 3) / 4;  // Ceiling division
-            let in_last_quarter = blocks_until_boundary > 0 && blocks_until_boundary <= last_quarter_size;
+            let last_quarter_size = price_adjustment_interval.div_ceil(4); // Ceiling division
+            let in_last_quarter =
+                blocks_until_boundary > 0 && blocks_until_boundary <= last_quarter_size;
 
             let pricing_ema = if in_last_quarter {
                 // Protect against price increases when interval boundary is crossed
@@ -109,7 +110,6 @@ pub async fn get_price(
             )
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
 
-            // Debug logging for fee calculation
             tracing::debug!(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
                 bytes_to_store,
