@@ -1,11 +1,10 @@
 //! Range offsets are used by PD to figure out what chunks/bytes are required to fulfill a precompile call.
-
-use std::ops::Div as _;
-
 use alloy_primitives::{aliases::U200, B256};
 use eyre::{eyre, OptionExt as _};
 use ruint::Uint;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
+use std::{hash::DefaultHasher, ops::Div as _};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -100,11 +99,26 @@ pub trait PdAccessListArgSerde {
         Self: Sized;
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Hash)]
 pub struct ChunkRangeSpecifier {
     pub partition_index: U200, // 3 64-bit words + 1 8 bit word, 25 bytes
     pub offset: u32,           // offset within the partition (chunks)
     pub chunk_count: u16,      // number of chunks in the range
+}
+
+pub type ChunkRangeId = u64;
+
+impl ChunkRangeSpecifier {
+    /// Generates a unique u64 identifier for this ChunkRangeSpecifier.
+    ///
+    /// Uses DefaultHasher (non-cryptographic) for fast hash computation.
+    /// Suitable for HashMap keys and cache lookups. Deterministic for
+    /// the same input values.
+    pub fn get_id(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 impl PdAccessListArgSerde for ChunkRangeSpecifier {

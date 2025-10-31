@@ -84,6 +84,7 @@ pub use conversions::{parse_address, u256_from_le_bytes, AddressParseError};
 pub use merkle::*;
 pub use nodit::Interval;
 pub use peer_list::*;
+pub use range_specifier::*;
 pub use reth_codecs::Compact;
 pub use rlp::*;
 pub use simple_rng::*;
