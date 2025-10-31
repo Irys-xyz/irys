@@ -64,12 +64,6 @@ impl Inner {
 
         // Validate anchor and compute expiry
         let anchor_height = self.validate_anchor(tx).await?;
-
-        // Validate funding against canonical chain
-        // Note: We do NOT mark tx as invalid on funding failure, allowing
-        // it to be revalidated if the account is funded later
-        self.validate_data_tx_funding(tx)?;
-
         let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
 
         // Validate and parse ledger type
@@ -167,6 +161,8 @@ impl Inner {
         //   EMA/pricing context. To avoid false rejections, we limit validation for Gossip
         //   sources to signature + anchor checks only (performed above), and skip fee structure
         //   checks here.
+        // - Similarly, we skip balance and EMA pricing validation for gossip, as these are
+        //   canonical-chain-specific and may differ across forks.
         match ledger {
             DataLedger::Publish => {
                 // Gossip path: skip API-only checks here
@@ -176,13 +172,6 @@ impl Inner {
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
-
-        // Validate fees against maximum EMA pricing (Gossip: ±15% tolerance)
-        // If fees are outside the acceptable bounds, mark as invalid to prevent re-processing
-        self.validate_data_tx_ema_pricing(&tx, Decimal::from(15), true)
-            .await?;
-
-        // we don't check account balance here - we check it when we build & validate blocks
 
         // Shared post-processing
         self.postprocess_data_ingress(&tx, expiry_height).await
@@ -203,15 +192,21 @@ impl Inner {
         // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
         let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;
 
+        // Validate funding against canonical chain (API only)
+        // Note: We do NOT mark tx as invalid on funding failure, allowing
+        // it to be revalidated if the account is funded later
+        self.validate_data_tx_funding(&tx)?;
+
         // Protocol fee structure checks (API only)
         //
         // Rationale:
-        // - When a user submits a tx via our API, we validate fee structure against our
-        //   canonical view so the user gets immediate feedback if it's malformed/underfunded.
+        // - When a user submits a tx via our API, we validate balance, EMA pricing, and fee
+        //   structure against our canonical view so the user gets immediate feedback if it's
+        //   malformed/underfunded.
         // - When we receive a gossiped tx, it may belong to a different fork with a different
-        //   EMA/pricing context. To avoid false rejections, we limit validation for Gossip
-        //   sources to signature + anchor checks only (performed above), and skip fee structure
-        //   checks here.
+        //   EMA/pricing context or account balance state. To avoid false rejections, we limit
+        //   validation for Gossip sources to signature + anchor checks only (performed above),
+        //   and skip balance/fee checks here.
         match ledger {
             DataLedger::Publish => {
                 // Publish ledger - permanent storage
@@ -224,10 +219,9 @@ impl Inner {
         }
 
         // Validate fees against maximum EMA pricing (API only, strict - no tolerance)
+        // This provides immediate feedback to API users if their transaction fees are insufficient
         self.validate_data_tx_ema_pricing(&tx, Decimal::ZERO, false)
             .await?;
-
-        // we don't check account balance here - we check it when we build & validate blocks
 
         // Shared post-processing
         self.postprocess_data_ingress(&tx, expiry_height).await
