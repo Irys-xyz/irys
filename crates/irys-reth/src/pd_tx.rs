@@ -63,6 +63,15 @@ pub const IRYS_PD_HEADER_MAGIC: &[u8; 12] = b"irys-pd-meta";
 /// PD header version values.
 pub const PD_HEADER_VERSION_V1: u16 = 1;
 
+/// Size of version field in bytes (u16 big-endian).
+const PD_HEADER_VERSION_SIZE: usize = 2;
+
+/// Size of a U256 field in bytes.
+const U256_SIZE: usize = 32;
+
+/// Total size of PdHeaderV1 payload in bytes (2 x U256).
+const PD_HEADER_V1_SIZE: usize = U256_SIZE + U256_SIZE;
+
 /// V1 PD header carrying pricing-related metadata for PD reads.
 /// Manual Borsh impls to keep a stable, fixed-size encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,20 +86,20 @@ pub struct PdHeaderV1 {
 impl BorshSerialize for PdHeaderV1 {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         // U256 be (32 bytes) priority per chunk
-        writer.write_all(&self.max_priority_fee_per_chunk.to_be_bytes::<32>())?;
+        writer.write_all(&self.max_priority_fee_per_chunk.to_be_bytes::<U256_SIZE>())?;
         // U256 be (32 bytes) max base per chunk
-        writer.write_all(&self.max_base_fee_per_chunk.to_be_bytes::<32>())?;
+        writer.write_all(&self.max_base_fee_per_chunk.to_be_bytes::<U256_SIZE>())?;
         Ok(())
     }
 }
 
 impl BorshDeserialize for PdHeaderV1 {
     fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let mut prio_buf = [0_u8; 32];
+        let mut prio_buf = [0_u8; U256_SIZE];
         reader.read_exact(&mut prio_buf)?;
         let max_priority_fee_per_chunk = U256::from_be_bytes(prio_buf);
 
-        let mut base_buf = [0_u8; 32];
+        let mut base_buf = [0_u8; U256_SIZE];
         reader.read_exact(&mut base_buf)?;
         let max_base_fee_per_chunk = U256::from_be_bytes(base_buf);
 
@@ -104,10 +113,12 @@ impl BorshDeserialize for PdHeaderV1 {
 /// Encodes a PD header and prepends it to the provided calldata bytes.
 /// Result layout: [magic][version:u16 be][borsh(header)][rest]
 pub fn prepend_pd_header_v1_to_calldata(header: &PdHeaderV1, rest: &[u8]) -> Bytes {
-    let mut out = Vec::with_capacity(IRYS_PD_HEADER_MAGIC.len() + 2 + 32 + 32 + rest.len());
+    let mut out = Vec::with_capacity(
+        IRYS_PD_HEADER_MAGIC.len() + PD_HEADER_VERSION_SIZE + PD_HEADER_V1_SIZE + rest.len(),
+    );
     out.extend_from_slice(IRYS_PD_HEADER_MAGIC);
     out.extend_from_slice(&PD_HEADER_VERSION_V1.to_be_bytes());
-    let mut buf = Vec::with_capacity(32 + 32);
+    let mut buf = Vec::with_capacity(PD_HEADER_V1_SIZE);
     header
         .serialize(&mut buf)
         .expect("borsh serialize PdHeaderV1");
@@ -122,14 +133,13 @@ pub fn detect_and_decode_pd_header(
     input: &[u8],
 ) -> Result<Option<(PdHeaderV1, usize)>, borsh::io::Error> {
     let magic_len = IRYS_PD_HEADER_MAGIC.len();
-    if input.len() < magic_len + 2 {
+    if input.len() < magic_len + PD_HEADER_VERSION_SIZE {
         return Ok(None);
     }
     if &input[..magic_len] != IRYS_PD_HEADER_MAGIC {
         return Ok(None);
     }
 
-    // parse version (u16 be)
     let ver_bytes = [input[magic_len], input[magic_len + 1]];
     let version = u16::from_be_bytes(ver_bytes);
     if version != PD_HEADER_VERSION_V1 {
@@ -139,8 +149,7 @@ pub fn detect_and_decode_pd_header(
         ));
     }
 
-    // Decode fixed-size V1 header
-    let hdr_start = magic_len + 2;
+    let hdr_start = magic_len + PD_HEADER_VERSION_SIZE;
     let mut rdr = &input[hdr_start..];
     let header = PdHeaderV1::deserialize_reader(&mut rdr)?;
     let consumed = input.len() - rdr.len();
