@@ -193,12 +193,10 @@ pub struct MempoolConfig {
 
     /// Maximum number of pre-header chunks to keep per data root before the header arrives
     /// Limits speculative storage window for out-of-order chunks
-    #[serde(default)]
     pub max_preheader_chunks_per_item: usize,
 
     /// Maximum allowed pre-header data_path bytes for chunk proofs
     /// Mitigates DoS on speculative chunk storage before header arrival
-    #[serde(default)]
     pub max_preheader_data_path_bytes: usize,
 
     /// Maximum number of valid tx txids to keep track of
