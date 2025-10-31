@@ -1145,17 +1145,27 @@ impl BlockTree {
                         for child in children {
                             if let Some(child_entry) = self.blocks.get(&child) {
                                 if !matches!(child_entry.chain_state, ChainState::Onchain) {
-                                    let _ = self
-                                        .remove_block(&child)
-                                        .inspect_err(|err| tracing::error!(custom.error = ?err));
+                                    let child_state = child_entry.chain_state;
+                                    if let Err(err) = self.remove_block(&child) {
+                                        tracing::error!(
+                                            custom.error = ?err,
+                                            child_hash = ?child,
+                                            child_state = ?child_state,
+                                            "Failed to remove non-on-chain child block"
+                                        );
+                                    }
                                 }
                             }
                         }
 
                         // Now remove just this block
-                        let _ = self
-                            .delete_block(&hash)
-                            .inspect_err(|err| tracing::error!(custom.error = ?err));
+                        if let Err(err) = self.delete_block(&hash) {
+                            tracing::error!(
+                                custom.error = ?err,
+                                block_hash = ?hash,
+                                "Failed to delete block"
+                            );
+                        }
                     }
                 }
             }

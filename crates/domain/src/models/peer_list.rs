@@ -543,7 +543,12 @@ impl PeerListDataInner {
 
     /// Helper to emit a peer event to the event bus
     fn emit_peer_event(&self, event: PeerEvent) {
-        let _ = self.peer_events.send(event);
+        if let Err(e) = self.peer_events.send(event) {
+            tracing::debug!(
+                error = ?e,
+                "Failed to broadcast peer event"
+            );
+        }
     }
 
     pub fn add_or_update_peer(
