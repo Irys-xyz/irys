@@ -72,12 +72,40 @@ pub async fn get_price(
 
             drop(tree);
 
+            // Determine pricing EMA based on proximity to interval boundary
+            // When near the end of an interval, use max pricing to ensure transaction
+            // fees remain sufficient even if the transaction is included after the interval rolls over
+            let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
+            let position_in_interval = next_block_height % price_adjustment_interval;
+            let blocks_until_boundary = if position_in_interval == 0 {
+                0  // Exactly at interval boundary
+            } else {
+                price_adjustment_interval - position_in_interval
+            };
+
+            // Last 25% of interval: use max(current_pricing, next_interval_pricing)
+            let last_quarter_size = (price_adjustment_interval + 3) / 4;  // Ceiling division
+            let in_last_quarter = blocks_until_boundary > 0 && blocks_until_boundary <= last_quarter_size;
+
+            let pricing_ema = if in_last_quarter {
+                // Protect against price increases when interval boundary is crossed
+                // Use the higher of current or next interval's pricing
+                if ema.ema_price_1_interval_ago.amount > ema.ema_price_2_intervals_ago.amount {
+                    ema.ema_price_1_interval_ago
+                } else {
+                    ema.ema_price_2_intervals_ago
+                }
+            } else {
+                // Normal case: use standard public pricing (2 intervals ago)
+                ema.ema_for_public_pricing()
+            };
+
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
                 &state.config.consensus,
-                ema.ema_for_public_pricing(),
+                pricing_ema,
             )
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
 
@@ -94,7 +122,7 @@ pub async fn get_price(
             let total_perm_cost = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &state.config.consensus,
-                ema.ema_for_public_pricing(),
+                pricing_ema,
                 term_fee,
             )
             .map_err(|e| ErrorBadRequest(format!("{e:?}")))?;
