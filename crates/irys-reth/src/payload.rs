@@ -439,8 +439,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1, PdKey};
+    use crate::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+    use alloy_primitives::aliases::U200;
     use alloy_primitives::U256;
+    use irys_types::range_specifier::ChunkRangeSpecifier;
     use rand09::{rngs::StdRng, SeedableRng as _};
     use reth_primitives_traits::SignedTransaction;
     use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction as _};
@@ -475,8 +477,8 @@ mod tests {
             max_base_fee_per_chunk: U256::from(1),
         };
         let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
-        let access_list = build_pd_access_list([PdKey {
-            slot_index_be: [0_u8; 26],
+        let access_list = build_pd_access_list([ChunkRangeSpecifier {
+            partition_index: U200::ZERO,
             offset: 0,
             chunk_count,
         }]);

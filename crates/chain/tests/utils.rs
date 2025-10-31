@@ -1796,8 +1796,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         use alloy_network::TxSignerSync as _;
         use alloy_signer_local::LocalSigner;
         use irys_reth::pd_tx::{
-            build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1, PdKey,
+            build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1,
         };
+        use irys_types::range_specifier::ChunkRangeSpecifier;
 
         let local_signer = LocalSigner::from(signer.signer.clone());
         let chain_id = self.node_ctx.config.consensus.chain_id;
@@ -1806,8 +1807,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         for tx_index in 0..num_transactions {
             // Each transaction uses different chunk offsets to ensure uniqueness
             let start_offset = tx_index * chunks_per_tx as u32;
-            let storage_keys = (0..chunks_per_tx).map(|i| PdKey {
-                slot_index_be: [0xff; 26],
+            let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
+                partition_index: alloy_primitives::aliases::U200::from_le_bytes([0xff; 25]),
                 offset: start_offset + i as u32,
                 chunk_count: 1,
             });
