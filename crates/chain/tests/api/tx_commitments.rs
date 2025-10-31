@@ -7,7 +7,7 @@ use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, Address, CommitmentTransaction, CommitmentTransactionV1, CommitmentType,
-    NodeConfig, H256, U256,
+    NodeConfig, H256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -198,21 +198,10 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             data.extend(chunk_data);
         }
 
-        // DATA TX: Create the data transaction from the chunks
-        let mut data_tx = signer1
-            .create_transaction(data, genesis_block.block_hash)
-            .expect("To make a data transaction");
-
-        data_tx.header.perm_fee = Some(U256::from(4_000_000_000_000_u64));
-        data_tx.header.term_fee = U256::from(1_000_000_000_u32);
-
-        // Sign the data transaction
-        let data_tx = signer1
-            .sign_transaction(data_tx)
-            .expect("data tx should be signable");
-
-        // Post the data transaction to the nodes mempool
-        node.post_data_tx_raw(&data_tx.header).await;
+        // DATA TX: Create and post data transaction using proper pricing from API
+        let data_tx = node
+            .post_data_tx(node.get_anchor().await?, data, &signer1)
+            .await;
 
         let res = node.wait_for_mempool(data_tx.header.id, 5).await;
         assert_matches!(res, Ok(()));
