@@ -11,6 +11,8 @@ pub fn load_config() -> eyre::Result<NodeConfig> {
 
     debug!("Loading config from {:?}", &config_path);
     let mut config = match std::fs::read_to_string(&config_path)
+        // TODO: use serde_path_to_error so we can report exactly what paths are problematic (better UX)
+        // see [nextest](https://github.com/nextest-rs/nextest/blob/main/nextest-runner/src/config/core/imp.rs#L832)
         .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
     {
         Ok(cfg) => cfg,

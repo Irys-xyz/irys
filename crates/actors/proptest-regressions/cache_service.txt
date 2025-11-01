@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3c16a1c587d184ab7153c0c45192de59ba07b214a185dab49dd4485f2adbadb0 # shrinks to timestamps = [UnixTimestamp(1577836800), UnixTimestamp(1680972744), UnixTimestamp(1645822637), UnixTimestamp(1636808891), UnixTimestamp(1864380689)]
