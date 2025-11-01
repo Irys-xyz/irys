@@ -67,7 +67,7 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(block::get_block_with_poa),
         )
         .route(
-            "/block_index",
+            "/block-index",
             web::get().to(block_index::block_index_route),
         )
         .route(
