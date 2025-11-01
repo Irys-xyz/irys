@@ -93,12 +93,6 @@ where
                 match error {
                     ChunkIngressError::Critical(err) => {
                         match err {
-                            CriticalChunkIngressError::UnknownTransaction => {
-                                // TODO:
-                                //  I suppose we have to ask the peer for transaction,
-                                //  but what if it doesn't have one?
-                                Ok(())
-                            }
                             // ===== External invalid data errors
                             CriticalChunkIngressError::InvalidProof => Err(
                                 GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),

@@ -68,10 +68,7 @@ pub async fn post_chunk(
                     Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                         .body(format!("Invalid data_size field : {err:?}")))
                 }
-                CriticalChunkIngressError::UnknownTransaction => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                        .body(format!("Unknown transaction: {err:?}")))
-                }
+
                 CriticalChunkIngressError::ServiceUninitialized => {
                     Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                         .body(format!("Internal service error: {err:?}")))
@@ -87,21 +84,20 @@ pub async fn post_chunk(
             },
             ChunkIngressError::Advisory(err) => match err {
                 AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    Ok(HttpResponse::build(StatusCode::OK)
                         .body(format!("Pre-header chunk oversized bytes: {err:?}")))
                 }
                 AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    Ok(HttpResponse::build(StatusCode::OK)
                         .body(format!("Pre-header chunk oversized data_path: {err:?}")))
                 }
                 AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    Ok(HttpResponse::build(StatusCode::OK)
                         .body(format!("Pre-header chunk tx_offset exceeds cap: {err:?}")))
                 }
-                AdvisoryChunkIngressError::Other(err) => {
-                    Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(format!("Internal error: {err:?}")))
-                }
+                AdvisoryChunkIngressError::Other(err) => Ok(
+                    HttpResponse::build(StatusCode::OK).body(format!("Internal error: {err:?}"))
+                ),
             },
         };
     }

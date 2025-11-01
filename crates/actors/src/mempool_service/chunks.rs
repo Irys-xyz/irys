@@ -432,8 +432,6 @@ pub enum CriticalChunkIngressError {
     InvalidProof,
     /// The data hash does not match the chunk data
     InvalidDataHash,
-    /// This chunk is for an unknown transaction
-    UnknownTransaction,
     /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
