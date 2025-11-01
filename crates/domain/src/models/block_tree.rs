@@ -1149,8 +1149,8 @@ impl BlockTree {
                                     if let Err(err) = self.remove_block(&child) {
                                         tracing::error!(
                                             custom.error = ?err,
-                                            child_hash = ?child,
-                                            child_state = ?child_state,
+                                            custom.child_hash = ?child,
+                                            custom.child_state = ?child_state,
                                             "Failed to remove non-on-chain child block"
                                         );
                                     }
@@ -1162,7 +1162,7 @@ impl BlockTree {
                         if let Err(err) = self.delete_block(&hash) {
                             tracing::error!(
                                 custom.error = ?err,
-                                block_hash = ?hash,
+                                block.hash = ?hash,
                                 "Failed to delete block"
                             );
                         }

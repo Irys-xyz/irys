@@ -545,7 +545,7 @@ impl PeerListDataInner {
     fn emit_peer_event(&self, event: PeerEvent) {
         if let Err(e) = self.peer_events.send(event) {
             tracing::debug!(
-                error = ?e,
+                custom.error = ?e,
                 "Failed to broadcast peer event"
             );
         }

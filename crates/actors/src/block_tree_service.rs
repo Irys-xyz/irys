@@ -224,9 +224,9 @@ impl BlockTreeServiceInner {
                 let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
                 if let Err(send_err) = response.send(result) {
                     tracing::warn!(
-                        block_hash = ?block_hash,
-                        block_height,
-                        send_error = ?send_err,
+                        block.hash = ?block_hash,
+                        block.height = block_height,
+                        custom.send_error = ?send_err,
                         "Failed to send pre-validation result to caller - receiver dropped"
                     );
                 }
@@ -550,8 +550,8 @@ impl BlockTreeServiceInner {
             };
             if let Err(e) = self.service_senders.block_state_events.send(event) {
                 tracing::warn!(
-                    block_hash = ?block_hash,
-                    height,
+                    block.hash = ?block_hash,
+                    block.height = height,
                     "Failed to broadcast block state update event: {}", e
                 );
             }
@@ -820,8 +820,8 @@ impl BlockTreeServiceInner {
         };
         if let Err(e) = self.service_senders.block_state_events.send(event) {
             tracing::warn!(
-                block_hash = ?block_hash,
-                height,
+                block.hash = ?block_hash,
+                block.height = height,
                 "Failed to broadcast block state update event: {}", e
             );
         }

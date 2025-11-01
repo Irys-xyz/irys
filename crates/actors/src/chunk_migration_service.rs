@@ -198,7 +198,7 @@ impl ChunkMigrationServiceInner {
             .send(CacheServiceAction::OnBlockMigrated(block_height, None))
         {
             tracing::warn!(
-                block_height,
+                block.height = ?block_height,
                 "Failed to send block migrated message to cache service: {}",
                 e
             );

@@ -99,8 +99,8 @@ impl BlockIndexServiceInner {
                         // notify caller, then exit service by returning Err
                         if let Err(send_err) = response.send(Err(eyre!(err.to_string()))) {
                             tracing::warn!(
-                                migration_error = %err,
-                                send_error = ?send_err,
+                                custom.migration_error = %err,
+                                custom.send_error = ?send_err,
                                 "Failed to send migration error to caller - receiver dropped"
                             );
                         }
@@ -118,9 +118,9 @@ impl BlockIndexServiceInner {
                     Ok(()) => {
                         if let Err(send_err) = response.send(Ok(())) {
                             tracing::warn!(
-                                block_height = block_header.height,
-                                block_hash = ?block_header.block_hash,
-                                send_error = ?send_err,
+                                block.height = block_header.height,
+                                block.hash = ?block_header.block_hash,
+                                custom.send_error = ?send_err,
                                 "Failed to send migration success response - receiver dropped"
                             );
                         }
@@ -130,10 +130,10 @@ impl BlockIndexServiceInner {
                         // notify caller, then exit service by returning Err
                         if let Err(send_err) = response.send(Err(eyre!(e.to_string()))) {
                             tracing::warn!(
-                                block_height = block_header.height,
-                                block_hash = ?block_header.block_hash,
-                                migration_error = %e,
-                                send_error = ?send_err,
+                                block.height = block_header.height,
+                                block.hash = ?block_header.block_hash,
+                                custom.migration_error = %e,
+                                custom.send_error = ?send_err,
                                 "Failed to send migration error to caller - receiver dropped"
                             );
                         }
@@ -150,8 +150,8 @@ impl BlockIndexServiceInner {
                 let resp = bi.get_item(block_height).cloned();
                 if let Err(send_err) = response.send(resp) {
                     tracing::warn!(
-                        block_height,
-                        send_error = ?send_err,
+                        block.height = block_height,
+                        custom.send_error = ?send_err,
                         "Failed to send block index item response - receiver dropped"
                     );
                 }
