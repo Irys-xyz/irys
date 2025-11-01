@@ -1384,7 +1384,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&ledger_item).unwrap();
-        assert!(json.contains(&format!("\"total_chunks\":\"{}\"", u64::MAX)));
+        assert!(json.contains(&format!("\"totalChunks\":\"{}\"", u64::MAX)));
 
         let deserialized: LedgerIndexItem = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.total_chunks, u64::MAX);
