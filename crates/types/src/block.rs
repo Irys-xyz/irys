@@ -943,6 +943,7 @@ pub struct BlockIndexQuery {
 /// tx root for each ledger per block. Enabling lookups to that find the `tx_root`
 /// for a ledger at a particular byte offset in the ledger.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockIndexItem {
     /// The hash of the block
     pub block_hash: H256, // 32 bytes
@@ -955,6 +956,7 @@ pub struct BlockIndexItem {
 /// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
 /// and and the `tx_root` of the ledger in that block.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LedgerIndexItem {
     /// The total number of chunks in this ledger since genesis
     #[serde(with = "string_u64")]
