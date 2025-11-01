@@ -260,11 +260,13 @@ impl Compact for PeerAddress {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AcceptedResponse {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
     pub peers: Vec<PeerAddress>,
+    #[serde(with = "string_u64")]
     pub timestamp: u64,
     pub message: Option<String>,
 }

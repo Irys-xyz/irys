@@ -63,6 +63,8 @@ pub async fn get_full_config(state: web::Data<ApiState>) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(ContentType::json())
         .json(PublicFullConfig {
+            // TODO: we need to change how we serialize some of these fields (u64s need to use the u64_string serializer)
+            // TODO: why not just.. expose the entire consensus config? it's meant to be fully public/shared anyway
             consensus: PublicConsensusConfig {
                 chain_id: config.consensus.chain_id,
                 chunk_size: config.consensus.chunk_size,

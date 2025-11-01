@@ -74,7 +74,7 @@ pub async fn genesis_route(state: web::Data<ApiState>) -> HttpResponse {
     if let Some(hash) = genesis_hash {
         let genesis_info = serde_json::json!({
             "genesis_block_hash": hash,
-            "height": 0
+            "height": "0" // u64
         });
 
         HttpResponse::Ok()

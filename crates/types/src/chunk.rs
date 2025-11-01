@@ -1,5 +1,5 @@
 use crate::{
-    address_base58_stringify, hash_sha256, option_address_base58_stringify,
+    address_base58_stringify, hash_sha256, option_address_base58_stringify, optional_string_u64,
     partition::PartitionHash, string_u64, Base64, LedgerChunkOffset, PartitionChunkOffset, H256,
 };
 use alloy_primitives::Address;
@@ -94,6 +94,7 @@ pub struct PackedChunk {
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
+    #[serde(with = "string_u64")]
     pub data_size: u64,
     /// Raw bytes of the merkle proof that connects the data_root and the
     /// chunk hash
@@ -123,6 +124,7 @@ pub struct PartialChunk {
     /// Total size of the data stored by this data_root. Helps identify if this
     /// is the last chunk in the transactions data, or one that comes before it.
     /// Only the last chunk can be smaller than CHUNK_SIZE.
+    #[serde(with = "optional_string_u64")]
     pub data_size: Option<u64>,
     /// Raw bytes of the merkle proof that connects the data_root and the
     /// chunk hash
