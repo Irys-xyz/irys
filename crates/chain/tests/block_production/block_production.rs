@@ -35,8 +35,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
-    solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
+    new_stake_tx, read_block_from_state, solution_context, AddTxError, BlockValidationOutcome,
+    IrysNodeTest,
 };
 
 // EVM test constants
@@ -80,7 +80,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .post_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
@@ -282,7 +282,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _, outcome) = mine_block_and_wait_for_validation(&node.node_ctx).await?;
+    let (block, _, outcome) = node.mine_block_and_wait_for_validation().await?;
     assert_eq!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
@@ -363,7 +363,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .post_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
 
     // Get the transaction hashes from the block in order
