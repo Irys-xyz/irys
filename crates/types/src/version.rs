@@ -261,12 +261,35 @@ impl Compact for PeerAddress {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptedResponse {
+    // Version contains u64 fields that we can't directy encode as strings
+    #[serde(with = "version_as_string")]
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
     pub peers: Vec<PeerAddress>,
+    #[serde(with = "string_u64")]
     pub timestamp: u64,
     pub message: Option<String>,
+}
+
+mod version_as_string {
+    use super::*;
+    use serde::{Deserializer, Serializer};
+
+    pub(super) fn serialize<S>(version: &Version, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&version.to_string())
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Version, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Version::parse(&s).map_err(serde::de::Error::custom)
+    }
 }
 
 impl Default for AcceptedResponse {

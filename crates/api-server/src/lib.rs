@@ -89,6 +89,7 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
+        // TODO: we only seem to use this route in `RemoteNodeClient::is_ready`
         .route("/genesis", web::get().to(index::genesis_route))
         .route(
             "/network/config",
