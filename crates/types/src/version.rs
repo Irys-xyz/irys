@@ -261,7 +261,7 @@ impl Compact for PeerAddress {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AcceptedResponse {
-    // Version contains u64 fields that we can't directy encode as strings
+    // Version contains u64 fields that we can't directly encode as strings
     #[serde(with = "version_as_string")]
     pub version: Version,
     pub protocol_version: ProtocolVersion,
