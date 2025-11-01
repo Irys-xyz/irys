@@ -1,5 +1,8 @@
 use crate::block_pool::BlockPoolError;
-use irys_actors::mempool_service::{IngressProofError, TxIngressError};
+use irys_actors::{
+    mempool_service::{IngressProofError, TxIngressError},
+    AdvisoryChunkIngressError, ChunkIngressError,
+};
 use irys_types::{CommitmentValidationError, PeerNetworkError};
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
@@ -27,6 +30,8 @@ pub enum GossipError {
     PeerNetwork(PeerNetworkError),
     #[error("Rate limited: too many requests")]
     RateLimited,
+    #[error("Advisory error: {0}")]
+    Advisory(AdvisoryGossipError),
 }
 
 impl From<InternalGossipError> for GossipError {
@@ -152,6 +157,14 @@ pub enum InternalGossipError {
     AlreadyShutdown(String),
     #[error("Failed to perform repair task for reth payloads: {0}")]
     PayloadRepair(BlockPoolError),
+    #[error("Failed to ingress a chunk: {0:?}")]
+    ChunkIngress(ChunkIngressError),
+}
+
+#[derive(Debug, Error, Clone)]
+pub enum AdvisoryGossipError {
+    #[error("Failed to ingress chunk: {0:?}")]
+    ChunkIngress(AdvisoryChunkIngressError),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;

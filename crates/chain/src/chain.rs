@@ -640,7 +640,7 @@ impl IrysNode {
 
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
-
+        let task_executor = task_manager.executor();
         // vdf gets started here...
         // init the services
         let actor_main_thread_handle = Self::init_services_thread(
@@ -655,7 +655,7 @@ impl IrysNode {
             service_set_tx,
             irys_node_ctx_tx,
             &irys_provider,
-            task_manager.executor(),
+            task_executor.clone(),
             self.http_listener,
             irys_db,
             block_index,
@@ -771,8 +771,8 @@ impl IrysNode {
                 .mempool
                 .send(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
-
-            tokio::spawn(async move {
+            // use executor so we get automatic termination when the node starts to shut down
+            task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
 
                 loop {
@@ -792,7 +792,8 @@ impl IrysNode {
                     let pl_info = peer_list
                         .all_peers_sorted_by_score()
                         .into_iter()
-                        .map(|(_, i)| i);
+                        .map(|(_, i)| i)
+                        .collect::<Vec<_>>();
 
                     let mempool = &mempool.read().await;
 

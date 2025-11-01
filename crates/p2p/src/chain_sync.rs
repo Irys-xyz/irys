@@ -39,6 +39,7 @@ pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
         match err {
+            GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", &err)),
             GossipError::Network(msg) => Self::Network(msg),
             GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
             GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
