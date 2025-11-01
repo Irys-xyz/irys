@@ -846,13 +846,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         seconds: usize,
     ) -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
-        for attempt in 1..seconds {
-            // Do we have any unconfirmed tx?
-            let Some(tx) = unconfirmed_txs.first() else {
-                // if not return we are done
+        for attempt in 1..=seconds {
+            if unconfirmed_txs.is_empty() {
                 return Ok(());
-            };
+            }
 
+            // Check all remaining transactions
             let ro_tx = self
                 .node_ctx
                 .db
@@ -862,23 +861,36 @@ impl IrysNodeTest<IrysNodeCtx> {
                     tracing::error!("Failed to create mdbx transaction: {}", e);
                 })
                 .unwrap();
-
-            // Retrieve the transaction header from database
-            if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
-                // the proofs may be added to the tx during promotion
-                // and so we cant do a direct comparison
-                // we can however check some key fields are equal
-                assert_eq!(tx.id, header.id);
-                assert_eq!(tx.anchor, header.anchor);
-                tracing::info!("Transaction was retrieved ok after {} attempts", attempt);
-                unconfirmed_txs.pop();
-            };
+            let mut found_ids: HashSet<IrysTransactionId> = HashSet::new();
+            for tx in unconfirmed_txs.iter() {
+                if let Ok(Some(header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                    // the proofs may be added to the tx during promotion
+                    // and so we cant do a direct comparison
+                    // we can however check some key fields are equal
+                    assert_eq!(tx.id, header.id);
+                    assert_eq!(tx.anchor, header.anchor);
+                    tracing::info!(
+                        "Transaction {:?} was retrieved ok after {} attempts",
+                        tx.id,
+                        attempt
+                    );
+                    found_ids.insert(tx.id);
+                }
+            }
             drop(ro_tx);
-            mine_blocks(&self.node_ctx, 1).await.unwrap();
-            sleep(delay).await;
+
+            // Remove all found transactions
+            if !found_ids.is_empty() {
+                unconfirmed_txs.retain(|t| !found_ids.contains(&t.id));
+            }
+
+            if !unconfirmed_txs.is_empty() {
+                self.mine_block().await?;
+                sleep(delay).await;
+            }
         }
         Err(eyre::eyre!(
-            "Failed waiting for confirmed txs. Waited {} seconds",
+            "Failed waiting for migrated txs. Waited {} seconds",
             seconds,
         ))
     }
@@ -1286,13 +1298,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         expected_hash: EvmBlockHash,
         seconds_to_wait: u64,
     ) -> eyre::Result<EvmBlockHash> {
-        let beginning = Instant::now();
-        let max_duration = Duration::from_secs(seconds_to_wait);
-        for attempt in 0..10 {
-            eyre::ensure!(
-                Instant::now().duration_since(beginning) < max_duration,
-                "timed out"
-            );
+        let deadline = Instant::now() + Duration::from_secs(seconds_to_wait);
+        let mut attempt: u32 = 0;
+
+        loop {
+            if Instant::now() >= deadline {
+                return Err(eyre::eyre!(
+                    "Reth {:?} block did not reach expected hash {:?} within {}s",
+                    tag,
+                    expected_hash,
+                    seconds_to_wait
+                ));
+            }
 
             let eth_api = self.node_ctx.reth_node_adapter.reth_node.inner.eth_api();
             match eth_api.block_by_number(tag, false).await {
@@ -1314,14 +1331,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                     tracing::warn!("error polling reth {:?} block: {:?}", tag, err);
                 }
             }
+
             sleep(Duration::from_millis(100)).await;
+            attempt = attempt.saturating_add(1);
         }
-        Err(eyre::eyre!(
-            "Reth {:?} block did not reach expected hash {:?} within {}s",
-            tag,
-            expected_hash,
-            seconds_to_wait
-        ))
     }
 
     /// wait for tx to appear in the mempool or be found in the database
