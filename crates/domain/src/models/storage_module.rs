@@ -1231,7 +1231,7 @@ impl StorageModule {
 
                 // Sort DataRootInfo entries by start_offset to enable binary search.
                 // Multiple entries can exist for the same data_root it is posted by multiple transactions
-                // but each wil have a unique start_offset in the storage module
+                // but each will have a unique start_offset in the storage module
                 data_root_infos.0.sort_unstable();
 
                 // Binary search to find the DataRootInfo entry that contains our partition_offset.
