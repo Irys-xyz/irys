@@ -319,7 +319,7 @@ pub struct BlockChunkOffset(u64);
     From,
     Into,
 )]
-pub struct RelativeChunkOffset(i32);
+pub struct RelativeChunkOffset(pub i32);
 
 impl Deref for RelativeChunkOffset {
     type Target = i32;

@@ -155,3 +155,65 @@ pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<DataRootInfosByDataRoot>()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::db::IrysDatabaseExt as _;
+    use crate::submodule::tables::DataRootInfos;
+    use crate::submodule::{get_data_root_infos_for_data_root, set_data_root_infos_for_data_root};
+    use crate::{
+        open_or_create_db,
+        submodule::tables::{DataRootInfo, SubmoduleTables},
+    };
+    use irys_types::RelativeChunkOffset;
+    use irys_types::H256;
+    use reth_db::transaction::DbTx as _;
+    use reth_db::Database as _;
+
+    #[test]
+    fn db_compact_dataroot_info() -> eyre::Result<()> {
+        let builder = tempfile::Builder::new()
+            .prefix("irys-datarootinfo-")
+            .rand_bytes(8)
+            .tempdir();
+        let tmpdir = builder
+            .expect("Not able to create a temporary directory.")
+            .keep();
+
+        let db = open_or_create_db(tmpdir, SubmoduleTables::ALL, None)?;
+        let write_tx = db.tx_mut()?;
+        let infos = vec![
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 0,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(-20),
+                data_size: 100,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(10000),
+                data_size: 4000,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(i32::MIN),
+                data_size: u64::MAX,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(i32::MAX),
+                data_size: u64::MAX,
+            },
+        ];
+        let data_root = H256::zero();
+        set_data_root_infos_for_data_root(&write_tx, data_root, DataRootInfos(infos.clone()))?;
+        write_tx.commit()?;
+
+        let infos2 = db
+            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+            .unwrap();
+
+        assert_eq!(infos, infos2.0);
+
+        Ok(())
+    }
+}
