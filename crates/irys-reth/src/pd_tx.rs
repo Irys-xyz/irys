@@ -42,7 +42,9 @@ pub fn sum_pd_chunks_in_access_list(access_list: &AccessList) -> u64 {
             match PdAccessListArg::decode(&key.0) {
                 Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec.chunk_count as u64),
                 Ok(PdAccessListArg::ByteRead(_byte_spec)) => {
-                    // ByteRead does not directly contribute to chunk count.
+                    // ByteRead references chunks already declared in a corresponding ChunkRead entry
+                    // via its index field. Those chunks are counted via the ChunkRead entry to avoid
+                    // double-counting the same chunks for network bandwidth calculations.
                     Some(0)
                 }
                 Err(e) => {
