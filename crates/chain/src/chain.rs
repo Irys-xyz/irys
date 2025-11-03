@@ -149,11 +149,17 @@ impl IrysNodeCtx {
 
     pub async fn stop(self) {
         info!("stop function called, shutting down...");
-        let _ = self.stop_mining();
+        if let Err(e) = self.stop_mining() {
+            error!("Failed to stop mining during shutdown: {:#}", e);
+        }
         debug!("Sending shutdown signal to reth thread");
         // Shutting down reth node will propagate to the main actor thread eventually
-        let _ = self.reth_shutdown_sender.send(()).await;
-        let _ = self.reth_thread_handle.unwrap().join();
+        if let Err(e) = self.reth_shutdown_sender.send(()).await {
+            error!("Failed to send shutdown signal to reth thread: {}", e);
+        }
+        if let Err(e) = self.reth_thread_handle.unwrap().join() {
+            error!("Reth thread panicked or failed: {:?}", e);
+        }
         debug!("Main actor thread and reth thread stopped");
         self.stop_guard.mark_stopped();
     }
@@ -640,7 +646,7 @@ impl IrysNode {
 
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
-
+        let task_executor = task_manager.executor();
         // vdf gets started here...
         // init the services
         let actor_main_thread_handle = Self::init_services_thread(
@@ -655,7 +661,7 @@ impl IrysNode {
             service_set_tx,
             irys_node_ctx_tx,
             &irys_provider,
-            task_manager.executor(),
+            task_executor.clone(),
             self.http_listener,
             irys_db,
             block_index,
@@ -687,6 +693,7 @@ impl IrysNode {
 
         // Log startup information
         info!(
+            target = "started-node",
             "Started node! ({:?})\nMining address: {}\nReth Peer ID: {}\nHTTP: {}:{},\nGossip: {}:{}\nReth peering: {}:{}",
             &node_mode,
             &ctx.config.node_config.miner_address().to_base58(),
@@ -751,6 +758,56 @@ impl IrysNode {
                 .await
                 .context("Unable to automatically stake & pledge")
                 .unwrap()
+            });
+        }
+
+        // spawn a task to periodically log system info, but not in tests
+        #[cfg(not(test))]
+        {
+            let block_index = ctx.block_index_guard.clone();
+            let block_tree = ctx.block_tree_guard.clone();
+            let peer_list = ctx.peer_list.clone();
+            let sync_state = ctx.sync_state.clone();
+            let started_at = ctx.started_at;
+            let mining_address = ctx.config.node_config.miner_address();
+            let chain_id = ctx.config.consensus.chain_id;
+            // let mempool_tx = ctx.service_senders.mempool.clone();
+            let (tx, rx) = oneshot::channel();
+            ctx.service_senders
+                .mempool
+                .send(MempoolServiceMessage::GetState(tx))?;
+            let mempool = rx.await?;
+            // use executor so we get automatic termination when the node starts to shut down
+            task_executor.spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(60));
+
+                loop {
+                    interval.tick().await;
+
+                    let info = irys_api_server::routes::index::get_node_info(
+                        &block_index,
+                        &block_tree,
+                        &peer_list,
+                        &sync_state,
+                        started_at,
+                        mining_address,
+                        chain_id,
+                    )
+                    .await;
+
+                    let pl_info = peer_list
+                        .all_peers_sorted_by_score()
+                        .into_iter()
+                        .map(|(_, i)| i)
+                        .collect::<Vec<_>>();
+
+                    let mempool = &mempool.read().await;
+
+                    info!(
+                    target = "node-state",
+                    "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, &mempool.pending_chunks.len(), &mempool.valid_submit_ledger_tx.len(), &mempool.pending_pledges.len()
+                )
+                }
             });
         }
 
@@ -911,9 +968,9 @@ impl IrysNode {
                         Ok(())
                     };
 
-                    let _res = run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver)
-                        .await
-                        .inspect_err(|e| error!("Reth thread error: {:?}", &e));
+                    if let Err(e) = run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver).await {
+                        error!("Reth thread error: {:?}", e);
+                    }
 
                     debug!("Sending shutdown signal to the main actor thread");
                     match main_actor_thread_shutdown_tx.try_send(()) {
@@ -1071,9 +1128,14 @@ impl IrysNode {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
-        let _ = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+        if let Err(e) = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
             response: oneshot_tx,
-        });
+        }) {
+            error!(
+                "Failed to send GetBlockTreeReadGuard message to block tree service: {}",
+                e
+            );
+        }
         let block_tree_guard = oneshot_rx
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");

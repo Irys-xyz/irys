@@ -259,8 +259,8 @@ impl BlockCacheInner {
             if set_is_empty {
                 self.orphaned_blocks_by_parent.pop(&parent_hash);
             }
-            // Remove any transactions cached for this block
-            let _ = self.txs_by_block.pop(block_hash);
+            // Remove any transactions cached for this block (if present)
+            self.txs_by_block.pop(block_hash);
         }
     }
 

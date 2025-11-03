@@ -5348,7 +5348,6 @@ dependencies = [
  "bytes",
  "eyre",
  "futures",
- "irys-types",
  "lru 0.14.0",
  "reth",
  "reth-basic-payload-builder",

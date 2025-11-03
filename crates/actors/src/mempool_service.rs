@@ -272,7 +272,9 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::BlockConfirmed(block) => {
-                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
+                    if let Err(e) = self.handle_block_confirmed_message(block).await {
+                        tracing::error!("Failed to handle block confirmed message: {:#}", e);
+                    }
                 }
                 MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                     let response_message = self
@@ -1357,7 +1359,12 @@ impl Inner {
 
     // Helper to verify signature
     #[instrument(skip_all, fields(tx.id = %tx.id()))]
-    pub async fn validate_signature<T: irys_types::versioning::Signable + IrysTransactionCommon>(
+    pub async fn validate_signature<
+        T: irys_types::versioning::Signable
+            + IrysTransactionCommon
+            + std::fmt::Debug
+            + serde::Serialize,
+    >(
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
@@ -1382,6 +1389,15 @@ impl Inner {
                 "Tx {} signature is invalid (fingerprint {:?})",
                 &tx.id(),
                 fingerprint
+            );
+            debug!(
+                target = "invalid_tx_header_json",
+                "Invalid tx: {:#}",
+                &serde_json::to_string(&tx).unwrap_or_else(|e| format!(
+                    // fallback to debug printing the header
+                    "error serializing block header: {}\n{:?}",
+                    &e, &tx
+                ))
             );
             Err(TxIngressError::InvalidSignature)
         }
