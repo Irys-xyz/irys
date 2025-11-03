@@ -95,6 +95,13 @@ impl From<TxIngressError> for GossipError {
                     address, reason
                 )))
             }
+            TxIngressError::MempoolFull(reason) => {
+                // Mempool at capacity - treat as internal/temporary issue
+                Self::Internal(InternalGossipError::Unknown(format!(
+                    "Mempool at capacity: {}",
+                    reason
+                )))
+            }
         }
     }
 }
