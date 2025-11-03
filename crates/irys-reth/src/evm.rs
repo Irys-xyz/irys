@@ -1416,6 +1416,8 @@ mod tests {
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
+    use alloy_primitives::aliases::U200;
+    use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
 
     fn tx_request_base() -> alloy_rpc_types::TransactionRequest {
         alloy_rpc_types::TransactionRequest {
@@ -1443,8 +1445,6 @@ mod tests {
 
     /// Helper to build PD access list with N chunks
     fn build_pd_access_list(num_chunks: usize) -> alloy_eips::eip2930::AccessList {
-        use alloy_primitives::aliases::U200;
-        use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
         let keys: Vec<_> = (0..num_chunks)
             .map(|i| {
                 let spec = ChunkRangeSpecifier {
@@ -1588,7 +1588,6 @@ mod tests {
 
         // PD access list: 3 storage keys at PD precompile address
         use crate::test_utils::chunk_spec_with_params;
-        use irys_types::range_specifier::PdAccessListArgSerde as _;
 
         let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
         let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());

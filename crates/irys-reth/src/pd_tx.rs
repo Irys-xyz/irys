@@ -4,7 +4,7 @@ use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Bytes, B256, U256};
 use borsh::{BorshDeserialize, BorshSerialize};
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
-use irys_types::range_specifier::PdAccessListArg;
+use irys_types::range_specifier::{PdAccessListArg, PdAccessListArgSerde as _};
 use std::io::{Read, Write};
 
 /// Create a PD access list for a list of ChunkRangeSpecifiers, under the PD precompile address.
@@ -14,7 +14,6 @@ use std::io::{Read, Write};
 pub fn build_pd_access_list(
     specs: impl IntoIterator<Item = irys_types::range_specifier::ChunkRangeSpecifier>,
 ) -> AccessList {
-    use irys_types::range_specifier::PdAccessListArgSerde as _;
     let storage_keys: Vec<B256> = specs
         .into_iter()
         .map(|spec| B256::from(spec.encode()))
@@ -162,6 +161,7 @@ mod tests {
     use super::*;
     use crate::test_utils::chunk_spec_with_params;
     use alloy_primitives::Address;
+    use irys_types::range_specifier::PdAccessListArgSerde as _;
 
     fn other_address() -> Address {
         Address::repeat_byte(0xff)
@@ -220,7 +220,6 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_mixed_addresses() {
-        use irys_types::range_specifier::PdAccessListArgSerde as _;
         let pd_spec = chunk_spec_with_params([3; 25], 123, 50);
         let pd_key = B256::from(pd_spec.encode());
         let access_list = AccessList::from(vec![
@@ -247,7 +246,6 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_multiple_pd_entries() {
-        use irys_types::range_specifier::PdAccessListArgSerde as _;
         let access_list = AccessList::from(vec![
             AccessListItem {
                 address: PD_PRECOMPILE_ADDRESS,
@@ -269,7 +267,6 @@ mod tests {
 
     #[test]
     fn test_sum_pd_chunks_no_deduplication() {
-        use irys_types::range_specifier::PdAccessListArgSerde as _;
         // Same key appears multiple times - should be counted multiple times
         let duplicate_key = B256::from(chunk_spec_with_params([5; 25], 42, 25).encode());
         let access_list = AccessList::from(vec![AccessListItem {

@@ -2460,6 +2460,7 @@ pub mod test_utils {
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
+    use alloy_primitives::aliases::U200;
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
@@ -3321,7 +3322,6 @@ pub mod test_utils {
         offset: u32,
         chunk_count: u16,
     ) -> irys_types::range_specifier::ChunkRangeSpecifier {
-        use alloy_primitives::aliases::U200;
         irys_types::range_specifier::ChunkRangeSpecifier {
             partition_index: U200::from_le_bytes(partition_index),
             offset,
