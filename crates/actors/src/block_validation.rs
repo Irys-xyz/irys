@@ -2270,7 +2270,8 @@ async fn get_previous_tx_inclusions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .block_tree
-        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })
+        .await?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 

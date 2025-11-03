@@ -1128,9 +1128,12 @@ impl IrysNode {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
-        if let Err(e) = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
-            response: oneshot_tx,
-        }) {
+        if let Err(e) = block_tree_sender
+            .send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+                response: oneshot_tx,
+            })
+            .await
+        {
             error!(
                 "Failed to send GetBlockTreeReadGuard message to block tree service: {}",
                 e

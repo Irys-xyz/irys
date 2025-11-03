@@ -40,7 +40,8 @@ async fn send_block_to_block_tree(
             skip_vdf_validation,
             response: response_tx,
         })
-        .unwrap();
+        .await
+        .expect("failed to send BlockPreValidated to block tree");
 
     response_rx.await.unwrap()
 }

@@ -1,4 +1,4 @@
-use crate::channel_caps::{CAP_BLOCK_INDEX, CAP_PACKING_REQUESTS};
+use crate::channel_caps::{CAP_BLOCK_INDEX, CAP_BLOCK_TREE, CAP_PACKING_REQUESTS};
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
@@ -101,7 +101,7 @@ pub struct ServiceReceivers {
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
-    pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
+    pub block_tree: Receiver<BlockTreeServiceMessage>,
     pub block_index: Receiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
@@ -124,7 +124,7 @@ pub struct ServiceSendersInner {
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
-    pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
+    pub block_tree: Sender<BlockTreeServiceMessage>,
     pub block_index: Sender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
@@ -152,7 +152,7 @@ impl ServiceSendersInner {
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
-            unbounded_channel::<BlockTreeServiceMessage>();
+            channel::<BlockTreeServiceMessage>(CAP_BLOCK_TREE);
         let (block_index_sender, block_index_receiver) =
             channel::<BlockIndexServiceMessage>(CAP_BLOCK_INDEX);
         let (validation_sender, validation_receiver) =

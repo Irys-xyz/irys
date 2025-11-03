@@ -25,7 +25,7 @@ use std::{
     sync::{Arc, RwLock},
     time::SystemTime,
 };
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
+use tokio::sync::{mpsc::Receiver, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -53,7 +53,7 @@ pub enum BlockTreeServiceMessage {
 #[derive(Debug)]
 pub struct BlockTreeService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<BlockTreeServiceMessage>,
+    msg_rx: Receiver<BlockTreeServiceMessage>,
     inner: BlockTreeServiceInner,
 }
 
@@ -100,7 +100,7 @@ pub struct BlockStateUpdated {
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
-        rx: UnboundedReceiver<BlockTreeServiceMessage>,
+        rx: Receiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
         epoch_replay_data: &EpochReplayData,
