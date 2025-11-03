@@ -2630,7 +2630,8 @@ mod tests {
         ));
 
         // Spawn Tokio BlockIndex service
-        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::channel(256);
+        let (block_index_tx, block_index_rx) =
+            tokio::sync::mpsc::channel(crate::channel_caps::CAP_BLOCK_INDEX);
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),

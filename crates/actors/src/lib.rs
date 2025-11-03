@@ -5,6 +5,7 @@ pub mod block_tree_service;
 pub mod block_validation;
 
 pub mod cache_service;
+pub mod channel_caps;
 pub mod chunk_migration_service;
 pub mod commitment_refunds;
 pub mod data_sync_service;

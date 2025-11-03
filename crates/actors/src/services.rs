@@ -1,3 +1,4 @@
+use crate::channel_caps::{CAP_BLOCK_INDEX, CAP_PACKING_REQUESTS};
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
@@ -152,7 +153,8 @@ impl ServiceSendersInner {
             unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
-        let (block_index_sender, block_index_receiver) = channel::<BlockIndexServiceMessage>(256);
+        let (block_index_sender, block_index_receiver) =
+            channel::<BlockIndexServiceMessage>(CAP_BLOCK_INDEX);
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
@@ -169,7 +171,7 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
-        let (packing_sender, packing_receiver) = PackingService::channel(5_000);
+        let (packing_sender, packing_receiver) = PackingService::channel(CAP_PACKING_REQUESTS);
 
         let mining_bus = MiningBus::new(None);
         let senders = Self {
