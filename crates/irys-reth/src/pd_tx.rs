@@ -160,6 +160,7 @@ pub fn detect_and_decode_pd_header(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::chunk_spec_with_params;
     use alloy_primitives::Address;
 
     fn other_address() -> Address {
@@ -167,25 +168,7 @@ mod tests {
     }
 
     fn chunk_spec(chunk_count: u16) -> irys_types::range_specifier::ChunkRangeSpecifier {
-        use alloy_primitives::aliases::U200;
-        irys_types::range_specifier::ChunkRangeSpecifier {
-            partition_index: U200::ZERO,
-            offset: 0,
-            chunk_count,
-        }
-    }
-
-    fn chunk_spec_with_params(
-        partition_index: [u8; 25],
-        offset: u32,
-        chunk_count: u16,
-    ) -> irys_types::range_specifier::ChunkRangeSpecifier {
-        use alloy_primitives::aliases::U200;
-        irys_types::range_specifier::ChunkRangeSpecifier {
-            partition_index: U200::from_le_bytes(partition_index),
-            offset,
-            chunk_count,
-        }
+        chunk_spec_with_params([0; 25], 0, chunk_count)
     }
 
     #[test]

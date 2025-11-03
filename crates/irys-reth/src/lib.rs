@@ -3314,4 +3314,18 @@ pub mod test_utils {
             Wallet::default().with_chain_id(chain_spec.chain().into()),
         ))
     }
+
+    /// Helper to create a ChunkRangeSpecifier with custom parameters for testing
+    pub fn chunk_spec_with_params(
+        partition_index: [u8; 25],
+        offset: u32,
+        chunk_count: u16,
+    ) -> irys_types::range_specifier::ChunkRangeSpecifier {
+        use alloy_primitives::aliases::U200;
+        irys_types::range_specifier::ChunkRangeSpecifier {
+            partition_index: U200::from_le_bytes(partition_index),
+            offset,
+            chunk_count,
+        }
+    }
 }

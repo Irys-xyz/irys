@@ -1587,21 +1587,12 @@ mod tests {
         let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
 
         // PD access list: 3 storage keys at PD precompile address
-        use alloy_primitives::aliases::U200;
-        use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
+        use crate::test_utils::chunk_spec_with_params;
+        use irys_types::range_specifier::PdAccessListArgSerde as _;
 
-        let make_key = |offset: u32| {
-            let spec = ChunkRangeSpecifier {
-                partition_index: U200::ZERO,
-                offset,
-                chunk_count: 1,
-            };
-            B256::from(spec.encode())
-        };
-
-        let key1 = make_key(0);
-        let key2 = make_key(1);
-        let key3 = make_key(2);
+        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
+        let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());
+        let key3 = B256::from(chunk_spec_with_params([0; 25], 2, 1).encode());
         let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
             address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
             storage_keys: vec![key1, key2, key3],
