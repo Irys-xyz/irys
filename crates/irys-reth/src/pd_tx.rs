@@ -39,7 +39,6 @@ pub fn sum_pd_chunks_in_access_list(access_list: &AccessList) -> u64 {
         .filter(|item| item.address == PD_PRECOMPILE_ADDRESS)
         .flat_map(|item| item.storage_keys.iter())
         .filter_map(|key| {
-            // Use the canonical precompile decoder from range_specifier.rs
             match PdAccessListArg::decode(&key.0) {
                 Ok(PdAccessListArg::ChunkRead(spec)) => Some(spec.chunk_count as u64),
                 Ok(PdAccessListArg::ByteRead(_byte_spec)) => {
