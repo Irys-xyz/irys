@@ -1,15 +1,14 @@
 use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
+
 use irys_chain::{
-    peer_utilities::{
-        block_index_endpoint_request, info_endpoint_request, peer_list_endpoint_request,
-    },
+    peer_utilities::{block_index_endpoint_request, info_endpoint_request},
     IrysNodeCtx,
 };
 use irys_database::block_header_by_hash;
 use irys_types::{
     irys::IrysSigner, BlockIndexItem, DataTransaction, IrysTransactionId, NodeConfig, NodeInfo,
-    NodeMode, PeerAddress, SyncMode, H256,
+    NodeMode, SyncMode,
 };
 use reth::rpc::eth::EthApiServer as _;
 use reth_db::Database as _;
@@ -17,7 +16,7 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     reth_tracing::init_test_tracing();
@@ -93,7 +92,7 @@ async fn heavy_test_p2p_reth_gossip() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -170,7 +169,7 @@ async fn heavy_test_p2p_evm_gossip_new_rpc() -> eyre::Result<()> {
 /// 1. spin up a genesis node and two peers. Check that we can sync blocks from the genesis node
 /// 2. check that the blocks are valid, check that peer1, peer2, and genesis are indeed synced
 /// 3. mine further blocks on genesis node, and confirm gossip service syncs them to peers
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     let required_index_blocks_height: usize = 2;
     let max_seconds = 20;
@@ -229,6 +228,8 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
 
     let mut ctx_peer2_node = ctx_genesis_node.testing_peer();
     ctx_peer2_node.node_mode = NodeMode::Peer;
+    ctx_peer2_node.consensus.get_mut().expected_genesis_hash =
+        Some(ctx_genesis_node.node_ctx.genesis_hash);
     ctx_peer2_node.sync_mode = SyncMode::Trusted;
     let ctx_peer2_node = IrysNodeTest::new(ctx_peer2_node.clone())
         .start_with_name("PEER2")
@@ -249,16 +250,27 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     // TEST CASE: check genesis blocks match across the three nodes
     //
     {
-        // TODO: Once we have proper genesis/regular block hash logic (i.e derived from the signature), these H256 values will need to be updated
-        let genesis_genesis_block =
-            block_header_by_hash(&ctx_genesis_node.node_ctx.db.tx()?, &H256::zero(), false)?
-                .unwrap();
+        // Compare actual genesis block headers across nodes using the proper genesis hash
+        let genesis_genesis_block = block_header_by_hash(
+            &ctx_genesis_node.node_ctx.db.tx()?,
+            &ctx_genesis_node.node_ctx.genesis_hash,
+            false,
+        )?
+        .unwrap();
 
-        let peer1_genesis_block =
-            block_header_by_hash(&ctx_peer1_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
+        let peer1_genesis_block = block_header_by_hash(
+            &ctx_peer1_node.node_ctx.db.tx()?,
+            &ctx_peer1_node.node_ctx.genesis_hash,
+            false,
+        )?
+        .unwrap();
 
-        let peer2_genesis_block =
-            block_header_by_hash(&ctx_peer2_node.node_ctx.db.tx()?, &H256::zero(), false)?.unwrap();
+        let peer2_genesis_block = block_header_by_hash(
+            &ctx_peer2_node.node_ctx.db.tx()?,
+            &ctx_peer2_node.node_ctx.genesis_hash,
+            false,
+        )?
+        .unwrap();
 
         assert_eq!(genesis_genesis_block, peer1_genesis_block);
         assert_eq!(genesis_genesis_block, peer2_genesis_block);
@@ -283,34 +295,41 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         )
         .await;
 
+        // Proactively announce peers to each other to converge peer lists deterministically
+        IrysNodeTest::announce_between(&ctx_peer1_node, &ctx_genesis_node)
+            .await
+            .expect("peer1 <-> genesis handshake");
+        IrysNodeTest::announce_between(&ctx_peer2_node, &ctx_genesis_node)
+            .await
+            .expect("peer2 <-> genesis handshake");
+        IrysNodeTest::announce_between(&ctx_peer1_node, &ctx_peer2_node)
+            .await
+            .expect("peer1 <-> peer2");
+
         // Check peer lists - each peer should see the genesis node and the other peer
-        let peer_list_items_1 = poll_peer_list(&ctx_peer1_node, 2).await;
-        let peer_list_items_2 = poll_peer_list(&ctx_peer2_node, 2).await;
 
         // Get the peer addresses for comparison
         let genesis_peer_addr = ctx_genesis_node.node_ctx.config.node_config.peer_address();
         let peer1_peer_addr = ctx_peer1_node.node_ctx.config.node_config.peer_address();
         let peer2_peer_addr = ctx_peer2_node.node_ctx.config.node_config.peer_address();
 
-        // Peer1 should see genesis and peer2
-        assert!(
-            peer_list_items_1.contains(&genesis_peer_addr),
-            "Peer1 should see genesis node"
-        );
-        assert!(
-            peer_list_items_1.contains(&peer2_peer_addr),
-            "Peer1 should see peer2"
-        );
-
-        // Peer2 should see genesis and peer1
-        assert!(
-            peer_list_items_2.contains(&genesis_peer_addr),
-            "Peer2 should see genesis node"
-        );
-        assert!(
-            peer_list_items_2.contains(&peer1_peer_addr),
-            "Peer2 should see peer1"
-        );
+        // Wait until all peers are mutually visible
+        ctx_peer1_node
+            .wait_until_sees_peer(&genesis_peer_addr, 400)
+            .await
+            .expect("Peer1 should see genesis node");
+        ctx_peer1_node
+            .wait_until_sees_peer(&peer2_peer_addr, 400)
+            .await
+            .expect("Peer1 should see peer2");
+        ctx_peer2_node
+            .wait_until_sees_peer(&genesis_peer_addr, 400)
+            .await
+            .expect("Peer2 should see genesis node");
+        ctx_peer2_node
+            .wait_until_sees_peer(&peer1_peer_addr, 400)
+            .await
+            .expect("Peer2 should see peer1");
 
         let result_peer2 = poll_until_fetch_at_block_index_height(
             "peer2".to_owned(),
@@ -320,7 +339,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         )
         .await;
 
-        let mut result_genesis = block_index_endpoint_request(
+        let result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             required_index_blocks_height.try_into()?,
@@ -437,7 +456,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
             .wait_until_block_index_height(genesis_starting_index_height + 1, max_seconds)
             .await?;
 
-        let mut result_genesis = block_index_endpoint_request(
+        let result_genesis = block_index_endpoint_request(
             &local_test_url(&ctx_genesis_node.node_ctx.config.node_config.http.bind_port),
             0,
             genesis_starting_index_height + 1,
@@ -517,7 +536,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
-    match node.create_publish_data_tx(account, data_bytes).await {
+    match node.post_publish_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);
         }
@@ -536,13 +555,12 @@ async fn poll_until_fetch_at_block_index_height(
     node_ctx: &IrysNodeCtx,
     required_blocks_height: u64,
     max_attempts: u64,
-) -> Option<awc::ClientResponse<actix_web::dev::Decompress<actix_http::Payload>>> {
+) -> Option<reqwest::Response> {
     let mut attempts = 0;
-    let mut result_peer = None;
     let max_attempts = max_attempts * 10;
     let url = local_test_url(&node_ctx.config.node_config.http.bind_port);
     loop {
-        let mut response = info_endpoint_request(&url).await;
+        let response = info_endpoint_request(&url).await;
 
         if max_attempts < attempts {
             error!(
@@ -554,7 +572,18 @@ async fn poll_until_fetch_at_block_index_height(
             attempts += 1;
         }
 
-        let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
+        let json_response: NodeInfo = match response.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                debug!(
+                    "{} attempt {}: failed to parse NodeInfo JSON: {}",
+                    node_name, attempts, e
+                );
+                // wait briefly and retry
+                sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
         debug!("Fetched info endpoint response: {:?}", json_response);
         if required_blocks_height > json_response.block_index_height {
             tracing::debug!(
@@ -564,7 +593,7 @@ async fn poll_until_fetch_at_block_index_height(
             //wait one second and try again
             sleep(Duration::from_millis(100)).await;
         } else {
-            result_peer = Some(
+            return Some(
                 block_index_endpoint_request(
                     &local_test_url(&node_ctx.config.node_config.http.bind_port),
                     0,
@@ -572,34 +601,7 @@ async fn poll_until_fetch_at_block_index_height(
                 )
                 .await,
             );
-            break;
         }
     }
-    result_peer
-}
-
-/// poll peer_list_endpoint until timeout or we get the expected result
-async fn poll_peer_list(
-    ctx_node: &IrysNodeTest<IrysNodeCtx>,
-    desired_count_of_items: usize,
-) -> Vec<PeerAddress> {
-    let max_attempts = 200;
-    for _ in 0..max_attempts {
-        sleep(Duration::from_millis(100)).await;
-
-        let mut peer_results_genesis = peer_list_endpoint_request(&local_test_url(
-            &ctx_node.node_ctx.config.node_config.http.bind_port,
-        ))
-        .await;
-
-        let mut peer_list_items = peer_results_genesis
-            .json::<Vec<PeerAddress>>()
-            .await
-            .expect("valid PeerAddress");
-        peer_list_items.sort(); //sort peer list so we have sane comparisons in asserts
-        if peer_list_items.len() == desired_count_of_items {
-            return peer_list_items;
-        }
-    }
-    panic!("never got the desired amount of items")
+    None
 }

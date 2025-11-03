@@ -1,9 +1,8 @@
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
+use actix_web::http::StatusCode;
 use actix_web::test;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
 use irys_packing::{unpack, PackingType, PACKING_TYPE};
 use irys_types::{
     irys::IrysSigner, Base64, DataTransactionHeader, NodeConfig, PackedChunk, TxChunkOffset,
@@ -14,7 +13,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     if PACKING_TYPE == PackingType::CPU {
         api_end_to_end_test(32).await?;
@@ -24,7 +23,7 @@ async fn heavy_api_end_to_end_test_32b() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_api_end_to_end_test_256kb() -> eyre::Result<()> {
     api_end_to_end_test(256 * 1024).await?;
     Ok(())
@@ -46,15 +45,14 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
     let chain_id = config.consensus_config().chain_id;
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    node.node_ctx.start_mining().await?;
+    node.node_ctx.start_mining()?;
 
     let app = node.start_public_api().await;
 
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // Create 2.5 chunks worth of data *  fill the data with random bytes
     let data_size = chunk_size * 2_usize;

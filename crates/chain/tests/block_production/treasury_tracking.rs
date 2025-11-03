@@ -3,12 +3,12 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    CommitmentTransaction, NodeConfig, H256,
+    CommitmentTransaction, NodeConfig,
 };
 use tracing::info;
 
 /// Test that verifies the treasury field is correctly tracked across blocks
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -35,8 +35,10 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 1: Stake commitment
     let stake_tx = {
-        let commitment = CommitmentTransaction::new_stake(&consensus_config, H256::zero());
-        user1_signer.sign_commitment(commitment)?
+        let mut commitment =
+            CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
+        user1_signer.sign_commitment(&mut commitment)?;
+        commitment
     };
     node.post_commitment_tx(&stake_tx).await?;
     node.wait_for_mempool(stake_tx.id, 10).await?;
@@ -44,16 +46,14 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     let block1 = node.get_block_by_height(1).await?;
 
     // Block 2: Pledge commitment
-    let pledge_tx = node
-        .post_pledge_commitment_with_signer(&user1_signer, H256::zero())
-        .await;
+    let pledge_tx = node.post_pledge_commitment_with_signer(&user1_signer).await;
     node.wait_for_mempool(pledge_tx.id, 10).await?;
     node.mine_block().await?;
     let block2 = node.get_block_by_height(2).await?;
 
     // Block 3: Data transaction (1KB)
     let data_tx1 = node
-        .post_data_tx(H256::zero(), vec![1_u8; 1024], &user2_signer)
+        .post_data_tx(node.get_anchor().await?, vec![1_u8; 1024], &user2_signer)
         .await;
     node.wait_for_mempool(data_tx1.header.id, 10).await?;
     node.mine_block().await?;
@@ -61,13 +61,15 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 
     // Block 4: Multiple transactions (stake + 2KB data tx)
     let stake_tx2 = {
-        let commitment = CommitmentTransaction::new_stake(&consensus_config, H256::zero());
-        user2_signer.sign_commitment(commitment)?
+        let mut commitment =
+            CommitmentTransaction::new_stake(&consensus_config, node.get_anchor().await?);
+        user2_signer.sign_commitment(&mut commitment)?;
+        commitment
     };
     node.post_commitment_tx(&stake_tx2).await?;
 
     let data_tx2 = node
-        .post_data_tx(H256::zero(), vec![2_u8; 2048], &user1_signer)
+        .post_data_tx(node.get_anchor().await?, vec![2_u8; 2048], &user1_signer)
         .await;
 
     node.wait_for_mempool(stake_tx2.id, 10).await?;
@@ -170,7 +172,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
 }
 
 /// Test that verifies treasury is correctly initialized from genesis commitments
-#[actix_web::test]
+#[tokio::test]
 async fn test_genesis_treasury_calculation() -> eyre::Result<()> {
     initialize_tracing();
 

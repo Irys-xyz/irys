@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_types::{irys::IrysSigner, CommitmentTransaction, DataLedger, NodeConfig, H256};
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // ===== TEST ENVIRONMENT SETUP =====
     // Default test node config
@@ -25,7 +25,8 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     }
 
     // Then post the tx and wait for it to arrive
-    let anchor = H256::zero(); // Genesis block
+    // Use a valid network anchor instead of H256::zero()
+    let anchor = node.get_anchor().await?;
     let data_tx = node.post_data_tx(anchor, data, &signer).await;
     let tx = data_tx.header.clone();
     let txid = tx.id;
@@ -63,10 +64,10 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 2: post duplicate commitment tx =====
     let consensus = &node.node_ctx.config.consensus;
-    let stake_tx = CommitmentTransaction::new_stake(consensus, H256::default());
+    let mut stake_tx = CommitmentTransaction::new_stake(consensus, node.get_anchor().await?);
 
     // Post the stake commitment and await it in the mempool
-    let stake_tx = signer.sign_commitment(stake_tx).unwrap();
+    signer.sign_commitment(&mut stake_tx).unwrap();
     node.post_commitment_tx(&stake_tx).await?;
     node.wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
         .await?;
@@ -98,14 +99,14 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // ===== TEST CASE 3: post duplicate pledge tx =====
     // Get the CommitmentSnapshot from the latest canonical block
-    let pledge_tx = CommitmentTransaction::new_pledge(
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
         consensus,
         anchor,
         node.node_ctx.mempool_pledge_provider.as_ref(),
         signer.address(),
     )
     .await;
-    let pledge_tx = signer.sign_commitment(pledge_tx).unwrap();
+    signer.sign_commitment(&mut pledge_tx).unwrap();
 
     // Post pledge commitment
     node.post_commitment_tx(&pledge_tx).await?;

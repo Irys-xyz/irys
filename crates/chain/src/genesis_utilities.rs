@@ -1,4 +1,4 @@
-use irys_types::IrysBlockHeader;
+use irys_types::{IrysBlockHeader, IrysBlockHeaderV1};
 use std::{
     fs::{create_dir_all, File},
     io::Write as _,
@@ -42,8 +42,8 @@ pub fn load_genesis_block_from_disk(
 ) -> std::io::Result<Arc<IrysBlockHeader>> {
     let file = File::open(Path::new(&base_directory).join(GENESIS_BLOCK_FILENAME))?;
     let reader = std::io::BufReader::new(file);
-    let genesis: IrysBlockHeader = serde_json::from_reader(reader)
-        .expect("genesis.json should be valid JSON and match IrysBlockHeader");
+    let genesis: IrysBlockHeaderV1 = serde_json::from_reader(reader)
+        .expect("genesis.json should be valid JSON and match IrysBlockHeaderV1");
 
-    Ok(Arc::new(genesis))
+    Ok(Arc::new(IrysBlockHeader::V1(genesis)))
 }

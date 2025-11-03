@@ -10,7 +10,7 @@ use std::ops::{Index, IndexMut};
 /// validation state at any given time.
 /// A slot in a data ledger containing one or more partition hashes
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Hash)]
 pub struct LedgerSlot {
     /// Assigned partition hashes
     pub partitions: Vec<H256>,
@@ -20,14 +20,14 @@ pub struct LedgerSlot {
     pub last_height: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Hash)]
 pub struct ExpiringPartitionInfo {
     pub partition_hash: PartitionHash,
     pub ledger_id: DataLedger,
     pub slot_index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 /// Permanent ledger that persists across epochs
 pub struct PermanentLedger {
     /// Sequential ledger slots containing partition assignments
@@ -37,7 +37,7 @@ pub struct PermanentLedger {
     pub num_partitions_per_slot: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 /// Temporary ledger that exists for a fixed number of epochs
 pub struct TermLedger {
     /// Sequential ledger slots containing partition assignments  
@@ -246,7 +246,7 @@ impl LedgerCore for TermLedger {
 }
 
 /// A container for managing permanent and term ledgers with type-safe access
-/// through the [Ledger] enum.
+/// through the \[Ledger\] enum.
 ///
 /// The permanent and term ledgers are intentionally given different types to
 /// prevent runtime errors:
@@ -257,7 +257,7 @@ impl LedgerCore for TermLedger {
 /// This type separation ensures operations like partition expiration can only
 /// be performed on term ledgers, making any attempt to expire a permanent
 /// ledger partition fail at compile time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash)]
 pub struct Ledgers {
     perm: PermanentLedger,
     term: Vec<TermLedger>,

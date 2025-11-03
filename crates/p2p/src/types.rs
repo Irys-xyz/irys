@@ -1,6 +1,10 @@
 use crate::block_pool::BlockPoolError;
-use irys_actors::mempool_service::{IngressProofError, TxIngressError};
+use irys_actors::{
+    mempool_service::{IngressProofError, TxIngressError},
+    AdvisoryChunkIngressError, ChunkIngressError,
+};
 use irys_types::{CommitmentValidationError, PeerNetworkError};
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use thiserror::Error;
 
@@ -26,6 +30,8 @@ pub enum GossipError {
     PeerNetwork(PeerNetworkError),
     #[error("Rate limited: too many requests")]
     RateLimited,
+    #[error("Advisory error: {0}")]
+    Advisory(AdvisoryGossipError),
 }
 
 impl From<InternalGossipError> for GossipError {
@@ -83,6 +89,12 @@ impl From<TxIngressError> for GossipError {
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Self::CommitmentValidation(commitment_validation_error)
             }
+            TxIngressError::BalanceFetchError { address, reason } => {
+                Self::Internal(InternalGossipError::Unknown(format!(
+                    "Failed to fetch balance for {}: {}",
+                    address, reason
+                )))
+            }
         }
     }
 }
@@ -121,6 +133,8 @@ pub enum InvalidDataError {
     InvalidBlockSignature,
     #[error("Execution payload hash mismatch")]
     ExecutionPayloadHashMismatch,
+    #[error("Invalid execution payload structure")]
+    ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
 }
@@ -143,6 +157,32 @@ pub enum InternalGossipError {
     AlreadyShutdown(String),
     #[error("Failed to perform repair task for reth payloads: {0}")]
     PayloadRepair(BlockPoolError),
+    #[error("Failed to ingress a chunk: {0:?}")]
+    ChunkIngress(ChunkIngressError),
+}
+
+#[derive(Debug, Error, Clone)]
+pub enum AdvisoryGossipError {
+    #[error("Failed to ingress chunk: {0:?}")]
+    ChunkIngress(AdvisoryChunkIngressError),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GossipResponse<T> {
+    Accepted(T),
+    Rejected(RejectionReason),
+}
+
+impl GossipResponse<()> {
+    pub fn rejected_gossip_disabled() -> Self {
+        Self::Rejected(RejectionReason::GossipDisabled)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+pub enum RejectionReason {
+    HandshakeRequired,
+    GossipDisabled,
+}

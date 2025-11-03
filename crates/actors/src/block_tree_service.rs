@@ -1,22 +1,19 @@
 use crate::{
-    block_index_service::BlockIndexService,
+    block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
-    broadcast_mining_service::{BroadcastMiningService, BroadcastPartitionsExpiration},
-    chunk_migration_service::ChunkMigrationService,
+    chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
+    reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationServiceMessage,
-    BlockMigrationMessage, StorageModuleServiceMessage,
+    StorageModuleServiceMessage,
 };
-use actix::prelude::*;
-use eyre::eyre;
 use irys_config::StorageSubmodulesConfig;
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
-    create_epoch_snapshot_for_block, make_block_tree_entry, BlockState, BlockTree, BlockTreeEntry,
-    BlockTreeReadGuard, ChainState, EpochReplayData,
+    create_epoch_snapshot_for_block, forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry,
+    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
     Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
@@ -24,6 +21,7 @@ use irys_types::{
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
+    collections::HashMap,
     sync::{Arc, RwLock},
     time::SystemTime,
 };
@@ -48,9 +46,6 @@ pub enum BlockTreeServiceMessage {
     BlockValidationFinished {
         block_hash: H256,
         validation_result: ValidationResult,
-    },
-    ReloadCacheFromDb {
-        response: oneshot::Sender<eyre::Result<()>>,
     },
 }
 
@@ -77,10 +72,6 @@ pub struct BlockTreeServiceInner {
     pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
-    /// Reth service actor sender
-    pub reth_service_actor: Addr<RethServiceActor>,
-    /// Current actix system
-    pub system: System,
 }
 
 #[derive(Debug, Clone)]
@@ -116,7 +107,6 @@ impl BlockTreeService {
         storage_submodules_config: &StorageSubmodulesConfig,
         config: &Config,
         service_senders: &ServiceSenders,
-        reth_service_actor: Addr<RethServiceActor>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -126,7 +116,6 @@ impl BlockTreeService {
         // Dereference miner_address here, before the closure
         let miner_address = config.node_config.miner_address();
         let service_senders = service_senders.clone();
-        let system = System::current();
         let bi_guard = block_index_guard;
         let epoch_replay_data = (*epoch_replay_data).clone();
         let config = config.clone();
@@ -158,8 +147,6 @@ impl BlockTreeService {
                         block_index_guard: bi_guard,
                         config,
                         service_senders,
-                        reth_service_actor,
-                        system,
                         storage_submodules_config: storage_submodules_config.clone(),
                     },
                 };
@@ -205,7 +192,7 @@ impl BlockTreeService {
             }
         }
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }
@@ -222,7 +209,9 @@ impl BlockTreeServiceInner {
         match msg {
             BlockTreeServiceMessage::GetBlockTreeReadGuard { response } => {
                 let guard = BlockTreeReadGuard::new(self.cache.clone());
-                let _ = response.send(guard);
+                if let Err(_guard) = response.send(guard) {
+                    tracing::warn!("Block tree guard response channel was closed by receiver");
+                }
             }
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
@@ -230,8 +219,17 @@ impl BlockTreeServiceInner {
                 skip_vdf_validation: skip_vdf,
                 response,
             } => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
                 let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
-                let _ = response.send(result);
+                if let Err(send_err) = response.send(result) {
+                    tracing::warn!(
+                        block.hash = ?block_hash,
+                        block.height = block_height,
+                        custom.send_error = ?send_err,
+                        "Failed to send pre-validation result to caller - receiver dropped"
+                    );
+                }
             }
             BlockTreeServiceMessage::BlockValidationFinished {
                 block_hash,
@@ -240,49 +238,7 @@ impl BlockTreeServiceInner {
                 self.on_block_validation_finished(block_hash, validation_result)
                     .await?;
             }
-            BlockTreeServiceMessage::ReloadCacheFromDb { response } => {
-                let res = self.reload_cache_from_db().await;
-                let _ = response.send(res);
-            }
         }
-        Ok(())
-    }
-
-    async fn reload_cache_from_db(&self) -> eyre::Result<()> {
-        let replay_data =
-            EpochReplayData::query_replay_data(&self.db, &self.block_index_guard, &self.config)
-                .await?;
-        debug!("Reloading block tree cache from database");
-        let new_block_tree_cache = BlockTree::restore_from_db(
-            self.block_index_guard.clone(),
-            replay_data,
-            self.db.clone(),
-            &self.storage_submodules_config,
-            self.config.clone(),
-        )?;
-        *self.cache.write().expect("cache write lock poisoned") = new_block_tree_cache;
-
-        //  Notify reth service
-        let tip_hash = {
-            let block_index = self.block_index_guard.read();
-
-            match block_index.get_latest_item() {
-                Some(block_index_item) => block_index_item.block_hash,
-                None => {
-                    // if the block index is empty or out of sync, panic to cause a node restart
-                    panic!("the block index is empty or out of sync");
-                }
-            }
-        };
-
-        self.reth_service_actor
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(tip_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .expect("could not send message to `RethServiceActor`");
-
         Ok(())
     }
 
@@ -291,28 +247,14 @@ impl BlockTreeServiceInner {
     /// This method:
     /// - Resolves the full `IrysBlockHeader` for the provided `block_hash` from the mempool or the database
     /// - Fetches the Submit and Publish data-transaction headers from the mempool
-    /// - Emits a `BlockMigrationMessage` to the `BlockIndexService` and `ChunkMigrationService`
+    /// - Emits a block migration message to the `BlockIndexService` and `ChunkMigrationService`
     ///
     /// Errors
     /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
-    async fn send_block_migration_message(&self, block_hash: BlockHash) -> eyre::Result<()> {
-        // retrieve block header from the mempool or database
-        let block_header = {
-            let (tx_block, rx_block) = oneshot::channel();
-            self.service_senders
-                .mempool
-                .send(MempoolServiceMessage::GetBlockHeader(
-                    block_hash, false, tx_block,
-                ))?;
-            match rx_block.await? {
-                Some(h) => h,
-                None => self
-                    .db
-                    .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-                    .ok_or_else(|| eyre!("No block header found for hash {}", block_hash,))?,
-            }
-        };
-
+    async fn send_block_migration_message(
+        &self,
+        block_header: Arc<IrysBlockHeader>,
+    ) -> eyre::Result<()> {
         let submit_txs = self
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
             .await?;
@@ -320,51 +262,80 @@ impl BlockTreeServiceInner {
             .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
             .await?;
 
+        // TODO: Migrate block_index to use the HashMap so we don't have to close these headers
         let mut all_txs = vec![];
-        all_txs.extend(publish_txs);
-        all_txs.extend(submit_txs);
+        all_txs.extend(publish_txs.clone());
+        all_txs.extend(submit_txs.clone());
+
+        let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
+        all_txs_map.insert(DataLedger::Submit, submit_txs);
+        all_txs_map.insert(DataLedger::Publish, publish_txs);
 
         info!(
             "Migrating to block_index - hash: {} height: {}",
             &block_header.block_hash, &block_header.height
         );
 
-        // HACK
-        System::set_current(self.system.clone());
+        let arc_block = block_header;
+        let arc_all_txs = Arc::new(all_txs);
 
-        let chunk_migration = ChunkMigrationService::from_registry();
-        let block_index = BlockIndexService::from_registry();
-        let block_finalized_message = BlockMigrationMessage {
-            block_header: Arc::new(block_header),
-            all_txs: Arc::new(all_txs),
-        };
+        // Let block_index know about the migrated block
+        let (tx, rx) = oneshot::channel();
+        self.service_senders
+            .block_index
+            .send(BlockIndexServiceMessage::MigrateBlock {
+                block_header: arc_block.clone(),
+                all_txs: arc_all_txs.clone(),
+                response: tx,
+            })?;
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
+            .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
 
-        block_index.do_send(block_finalized_message.clone());
-        chunk_migration.do_send(block_finalized_message);
+        // Let the chunk_migration_service know about the block migration
+        self.service_senders
+            .chunk_migration
+            .send(ChunkMigrationServiceMessage::BlockMigrated(
+                arc_block,
+                Arc::new(all_txs_map),
+            ))
+            .map_err(|e| eyre::eyre!("Failed to send BlockMigrated message: {}", e))?;
+
         Ok(())
     }
 
-    fn notify_services_of_block_confirmation(
-        &self,
-        tip_hash: BlockHash,
-        confirmed_block: &Arc<IrysBlockHeader>,
-    ) {
+    async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
+        let tip_block = &markers.head;
         debug!(
-            "confirming irys block evm_block_hash: {} ({})",
-            &confirmed_block.evm_block_hash, &confirmed_block.height
+            fcu.head = %tip_block.block_hash,
+            fcu.migration = %markers.migration_block.block_hash,
+            fcu.prune = %markers.prune_block.block_hash,
+            "broadcasting canonical chain update",
         );
-        self.reth_service_actor
-            .try_send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Irys(tip_hash),
-                confirmed_hash: Some(BlockHashType::Evm(confirmed_block.evm_block_hash)),
-                finalized_hash: None,
+
+        let (tx, rx) = oneshot::channel();
+
+        self.service_senders
+            .reth_service
+            .send(RethServiceMessage::ForkChoice {
+                update: ForkChoiceUpdateMessage {
+                    head_hash: markers.head.block_hash,
+                    confirmed_hash: markers.migration_block.block_hash,
+                    finalized_hash: markers.prune_block.block_hash,
+                },
+                response: tx,
             })
             .expect("Unable to send confirmation FCU message to reth");
+
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed waiting for Reth FCU ack: {e}"))
+    }
+
+    fn emit_block_confirmed(&self, markers: &ForkChoiceMarkers) {
+        let tip_block = Arc::clone(&markers.head);
         self.service_senders
             .mempool
-            .send(MempoolServiceMessage::BlockConfirmed(
-                confirmed_block.clone(),
-            ))
+            .send(MempoolServiceMessage::BlockConfirmed(tip_block))
             .expect("mempool service has unexpectedly become unreachable");
     }
 
@@ -372,96 +343,52 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn try_notify_services_of_block_migration(&self, arc_block: &Arc<IrysBlockHeader>) {
-        let migrated_hash = {
-            let binding = self.cache.clone();
-            let cache = binding
-                .write()
-                .expect("block tree cache write lock poisoned");
-            let migration_depth = self.config.consensus.block_migration_depth as usize;
+    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) {
+        let block_hash = block.block_hash;
+        let migration_height = block.height;
 
-            // Skip if block isn't deep enough for migration
-            if arc_block.height <= migration_depth as u64 {
-                return;
-            }
-
-            let (longest_chain, _) = cache.get_canonical_chain();
-            if longest_chain.len() <= migration_depth {
-                return;
-            }
-
-            // Find block to migrate
-            let Some(current_index) = longest_chain
-                .iter()
-                .position(|x| x.block_hash == arc_block.block_hash)
-            else {
-                info!(
-                    "Validated block not in longest chain, block {} height: {}, skipping migration",
-                    arc_block.block_hash, arc_block.height
-                );
-                return;
-            };
-
-            if current_index < migration_depth {
-                return; // Block already migrated
-            }
-
-            let migrate_index = current_index - migration_depth;
-            let migrated_hash = longest_chain[migrate_index].block_hash;
-            let migration_height = longest_chain[migrate_index].height;
-
-            // Verify block isn't already migrated
-            let binding = self.block_index_guard.clone();
+        // Check if the block is already in the block index
+        let binding = self.block_index_guard.clone();
+        {
             let bi = binding.read();
             if bi.num_blocks() > migration_height {
                 if let Some(migrated) = bi.get_item(migration_height) {
-                    if migrated.block_hash == migrated_hash {
-                        // Already finalized in index, nothing to do
+                    if migrated.block_hash == block_hash {
+                        // Already indexed, nothing to do.
                         return;
-                    } else {
-                        // panic and hope a node restart solves this problem
-                        panic!(
-                            "Block tree and index out of sync at height {} (index has {}, expected {})",
-                            migration_height, migrated.block_hash, migrated_hash
-                        );
                     }
+                    panic!(
+                        "Block tree and index out of sync at height {} (index has {}, expected {})",
+                        migration_height, migrated.block_hash, block_hash
+                    );
                 } else {
-                    // panic and hope a node restart solves this problem
                     panic!(
                         "Block index missing item at height {} while migrating {}",
-                        migration_height, migrated_hash
+                        migration_height, block_hash
                     );
                 }
             }
-
-            match cache.get_block(&migrated_hash) {
-                Some(block) => {
-                    let mut block = block.clone();
-                    block.poa.chunk = None;
-                    let migrated_block = Arc::new(block);
-                    // Broadcast BlockMigratedEvent event using the shared sender
-                    let block_migrated_event = BlockMigratedEvent {
-                        block: migrated_block,
-                    };
-                    if let Err(e) = self
-                        .service_senders
-                        .block_migrated_events
-                        .send(block_migrated_event)
-                    {
-                        debug!("No reorg subscribers: {:?}", e);
-                    }
-                }
-                None => error!("migrated block {} not found in block_tree", migrated_hash),
-            }
-
-            debug!(?migrated_hash, ?migration_height, "migrating irys block");
-
-            migrated_hash
-        }; // RwLockWriteGuard is dropped here, before the await
-
-        if let Err(e) = self.send_block_migration_message(migrated_hash).await {
-            error!("Unable to send block migration message: {:?}", e);
         }
+
+        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block");
+
+        // NOTE: order of events is very important! block migration event
+        // writes chunks to db, which is expected by `send_block_migration_message`.
+        let block_migrated_event = BlockMigratedEvent {
+            block: Arc::clone(block),
+        };
+        if let Err(e) = self
+            .service_senders
+            .block_migrated_events
+            .send(block_migrated_event)
+        {
+            debug!("No reorg subscribers: {:?}", e);
+        }
+
+        self.send_block_migration_message(Arc::clone(block))
+            .await
+            .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
+            .unwrap();
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -493,7 +420,10 @@ impl BlockTreeServiceInner {
 
         // Create epoch snapshot for this block
         let arc_epoch_snapshot =
-            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus);
+            create_epoch_snapshot_for_block(&block, parent_block_entry, &self.config.consensus)
+                .map_err(|x| PreValidationError::InvalidEpochSnapshot {
+                    error: x.to_string(),
+                })?;
 
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
@@ -518,7 +448,13 @@ impl BlockTreeServiceInner {
         );
 
         if add_result.is_ok() {
-            // Schedule validation and mark as scheduled
+            // Mark as scheduled and schedule validation
+            if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
+                error!("Unable to mark block as ValidationScheduled: {:?}", err);
+                return Err(PreValidationError::UpdateCacheForScheduledValidationError(
+                    *block_hash,
+                ));
+            }
             self.service_senders
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
@@ -526,13 +462,6 @@ impl BlockTreeServiceInner {
                     skip_vdf_validation: skip_vdf,
                 })
                 .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
-
-            if cache
-                .mark_block_as_validation_scheduled(block_hash)
-                .is_err()
-            {
-                error!("Unable to mark block as ValidationScheduled");
-            }
 
             debug!(
                 "scheduling block for validation: {} height: {}",
@@ -584,13 +513,19 @@ impl BlockTreeServiceInner {
         );
 
         if validation_result == ValidationResult::Invalid {
-            error!(block_hash = %block_hash,"invalid block");
+            error!(
+                block.hash = %block_hash,
+                "invalid block"
+            );
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(block_hash = %block_hash,"invalid block");
+            error!(
+                block.hash = %block_hash,
+                "invalid block"
+            );
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());
@@ -603,9 +538,9 @@ impl BlockTreeServiceInner {
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
             // Remove the block
-            let _ = cache
-                .remove_block(&block_hash)
-                .inspect_err(|err| tracing::error!(?err));
+            if let Err(err) = cache.remove_block(&block_hash) {
+                tracing::error!(?err, "Failed to remove block from cache");
+            }
 
             let event = BlockStateUpdated {
                 block_hash,
@@ -613,14 +548,18 @@ impl BlockTreeServiceInner {
                 state,
                 discarded: true,
             };
-            let _ = self.service_senders.block_state_events.send(event);
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::warn!(
+                    block.hash = ?block_hash,
+                    block.height = height,
+                    "Failed to broadcast block state update event: {}", e
+                );
+            }
 
             return Ok(());
         }
 
-        let state;
-
-        let (arc_block, epoch_block, reorg_event, finalized_at_prune_depth) = {
+        let (arc_block, epoch_block, reorg_event, tip_changed, state, new_canonical_markers) = {
             let binding = self.cache.clone();
             let mut cache = binding.write().expect("cache write lock poisoned");
 
@@ -630,7 +569,8 @@ impl BlockTreeServiceInner {
             let old_tip = cache.tip;
             let old_tip_block = cache
                 .get_block(&old_tip)
-                .unwrap_or_else(|| panic!("old tip block {old_tip} not found in cache"))
+                .ok_or_else(|| eyre::eyre!("old tip block {old_tip} not found in cache"))?
+                // todo: expensive clone here
                 .clone();
 
             // Mark block as validated in cache, this will update the canonical chain
@@ -669,25 +609,24 @@ impl BlockTreeServiceInner {
                 .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
             let arc_block = Arc::new(block_entry.block.clone());
 
-            // Now do mutable operations
-            let mark_tip_result = if cache.mark_tip(&block_hash).is_ok() {
+            let tip_changed = cache.mark_tip(&block_hash)?;
+
+            let (epoch_block, reorg_event, fcu_markers) = if tip_changed {
+                let block_index_read = self.block_index_guard.read();
+                let markers = ForkChoiceMarkers::from_block_tree(
+                    &cache,
+                    &block_index_read,
+                    &self.db,
+                    self.config.consensus.block_migration_depth as usize,
+                    self.config.consensus.block_tree_depth as usize,
+                )?;
+                let new_fcu_markers = Some(markers);
+
                 // Prune the cache after tip changes.
                 //
                 // Subtract 1 to ensure we keep exactly `depth` blocks.
                 // The cache.prune() implementation does not count `tip` into the depth
                 // equation, so it's always tip + `depth` that's kept around
-                // Before pruning, compute which block reaches prune depth behind the new tip
-                let finalized_at_prune_depth = {
-                    let (longest_chain, _) = cache.get_canonical_chain();
-                    let prune_depth = self.config.consensus.block_tree_depth as usize;
-                    if longest_chain.len() > prune_depth {
-                        let idx = longest_chain.len() - 1 - prune_depth;
-                        Some(longest_chain[idx].block_hash)
-                    } else {
-                        None
-                    }
-                };
-
                 cache.prune(self.config.consensus.block_tree_depth.saturating_sub(1));
 
                 if is_reorg {
@@ -794,12 +733,7 @@ impl BlockTreeServiceInner {
                         .find(|bh| self.is_epoch_block(bh))
                         .cloned();
 
-                    (
-                        arc_block,
-                        new_epoch_block,
-                        Some(event),
-                        finalized_at_prune_depth,
-                    )
+                    (new_epoch_block, Some(event), new_fcu_markers)
                 } else {
                     // =====================================
                     // NORMAL CHAIN EXTENSION
@@ -816,24 +750,31 @@ impl BlockTreeServiceInner {
                         None
                     };
 
-                    (arc_block, new_epoch_block, None, finalized_at_prune_depth)
+                    (new_epoch_block, None, new_fcu_markers)
                 }
             } else {
-                (arc_block, None, None, None)
+                (None, None, None)
             };
 
-            state = cache
+            let state = cache
                 .get_block_and_status(&block_hash)
                 .map(|(_, state)| *state)
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
-            mark_tip_result
+            (
+                arc_block,
+                epoch_block,
+                reorg_event,
+                tip_changed,
+                state,
+                fcu_markers,
+            )
         }; // RwLockWriteGuard is dropped here, before the await
 
         // Send epoch events which require a Read lock
         if let Some(epoch_block) = epoch_block {
             // Send the epoch events
-            self.send_epoch_events(&epoch_block);
+            self.send_epoch_events(&epoch_block)?;
         }
 
         // Now that the epoch events are sent, let the node know about the reorg
@@ -844,22 +785,32 @@ impl BlockTreeServiceInner {
             }
         }
 
-        // Send finalization update for block at prune depth, if any
-        if let Some(finalized_hash) = finalized_at_prune_depth {
-            self.reth_service_actor
-                .try_send(ForkChoiceUpdateMessage {
-                    head_hash: BlockHashType::Irys(block_hash),
-                    confirmed_hash: None,
-                    finalized_hash: Some(BlockHashType::Irys(finalized_hash)),
-                })
-                .expect("Unable to send finalization message to reth");
+        if let Some(markers) = &new_canonical_markers {
+            self.emit_fcu(markers).await?;
+            self.emit_block_confirmed(markers);
+            // Handle block migration (move chunks to disk and add to block_index)
+            if tip_changed {
+                self.migrate_block(&markers.migration_block).await;
+            }
         }
 
-        self.notify_services_of_block_confirmation(block_hash, &arc_block);
-
-        // Handle block migration (move chunks to disk and add to block_index)
-        self.try_notify_services_of_block_migration(&arc_block)
-            .await;
+        // Broadcast difficulty update to miners if tip difficulty changed from parent
+        let parent_diff_changed = tip_changed && {
+            let cache = self.cache.read().expect("cache read lock poisoned");
+            let parent_block = cache
+                .get_block(&arc_block.previous_block_hash)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "parent block {} not found in cache while broadcasting difficulty update",
+                        arc_block.previous_block_hash
+                    )
+                });
+            parent_block.diff != arc_block.diff
+        };
+        if parent_diff_changed {
+            self.service_senders
+                .send_mining_difficulty(BroadcastDifficultyUpdate(arc_block.clone()));
+        }
 
         let event = BlockStateUpdated {
             block_hash,
@@ -867,29 +818,35 @@ impl BlockTreeServiceInner {
             state,
             discarded: false,
         };
-        let _ = self.service_senders.block_state_events.send(event);
+        if let Err(e) = self.service_senders.block_state_events.send(event) {
+            tracing::warn!(
+                block.hash = ?block_hash,
+                block.height = height,
+                "Failed to broadcast block state update event: {}", e
+            );
+        }
 
         Ok(())
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height % self.config.consensus.epoch.num_blocks_in_epoch == 0
+        block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) {
+    fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Get the epoch snapshot
+        let block_hash = epoch_block.block_hash();
         let epoch_snapshot = self
             .cache
             .read()
             .expect("cache read lock poisoned")
-            .get_epoch_snapshot(&epoch_block.block_hash);
-
-        let epoch_snapshot = epoch_snapshot.unwrap_or_else(|| {
-            panic!(
-                "Epoch block {} should have a snapshot in cache",
-                epoch_block.block_hash
-            )
-        });
+            .get_epoch_snapshot(&block_hash)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "epoch block should have a snapshot in cache {:?}",
+                    block_hash
+                )
+            })?;
 
         // Check for partitions expired at this epoch boundary
         if let Some(expired_partition_infos) = &epoch_snapshot.expired_partition_infos {
@@ -898,12 +855,11 @@ impl BlockTreeServiceInner {
                 .map(|i| i.partition_hash)
                 .collect();
 
-            // Let the mining actors know about expired partitions
-            System::set_current(self.system.clone());
-            let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-            mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
-                expired_partition_hashes,
-            )));
+            // Let miners know about expired partitions
+            self.service_senders
+                .send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
+                    expired_partition_hashes,
+                )));
 
             // Let the cache service know some term ledger slots expired
             if let Err(e) = self.service_senders.chunk_cache.send(
@@ -918,14 +874,13 @@ impl BlockTreeServiceInner {
 
         // Let the node know about any newly assigned partition hashes to local storage modules
         let storage_module_infos = epoch_snapshot.map_storage_modules_to_partition_assignments();
-        if let Err(e) = self.service_senders.storage_modules.send(
+        self.service_senders.storage_modules.send(
             StorageModuleServiceMessage::PartitionAssignmentsUpdated {
                 storage_module_infos: storage_module_infos.into(),
                 update_height: epoch_block.height,
             },
-        ) {
-            error!("Failed to send partition assignments update: {}", e);
-        }
+        )?;
+        Ok(())
     }
 
     /// Fetches full transaction headers from mempool using the txids from a ledger in a block

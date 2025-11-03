@@ -1,18 +1,25 @@
+mod blobs_rejected;
 mod data_tx_pricing;
+mod invalid_perm_fee_refund;
+mod mempool_gossip_shape;
+mod poa_cases;
+mod unpledge_partition;
+mod unstake_edge_cases;
 
 use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, block_tree_service::BlockTreeServiceMessage,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    block_tree_service::BlockTreeServiceMessage, block_validation::PreValidationError,
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, H256List, IrysBlockHeader, NodeConfig,
-    SystemTransactionLedger, H256,
+    CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
+    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
@@ -21,7 +28,7 @@ async fn send_block_to_block_tree(
     block: Arc<IrysBlockHeader>,
     commitment_txs: Vec<CommitmentTransaction>,
     skip_vdf_validation: bool,
-) -> eyre::Result<()> {
+) -> Result<(), PreValidationError> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     node_ctx
@@ -32,20 +39,19 @@ async fn send_block_to_block_tree(
             commitment_txs: Arc::new(commitment_txs),
             skip_vdf_validation,
             response: response_tx,
-        })?;
+        })
+        .unwrap();
 
-    response_rx.await??;
-    Ok(())
+    response_rx.await.unwrap()
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
 // The assertion will fail (block will be discarded) because stake commitments must have exact stake_value
 // from the consensus config.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
-    use irys_primitives::CommitmentType;
-    use irys_types::{H256List, SystemTransactionLedger, U256};
+    use irys_types::CommitmentType;
+    use irys_types::U256;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -60,32 +66,23 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.invalid_stake.id]),
-                }],
-                vec![self.invalid_stake.clone()],
-                vec![],
-                PublishLedgerWithTxs {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let invalid_stake = self.invalid_stake.clone();
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![invalid_stake.clone()],
+                commitment_txs_to_bill: vec![invalid_stake],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
-            ))
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
         }
     }
 
@@ -112,7 +109,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     invalid_pledge.value = U256::from(1_000_000); // Invalid!
 
     // Sign the commitment
-    let invalid_pledge = test_signer.sign_commitment(invalid_pledge)?;
+    test_signer.sign_commitment(&mut invalid_pledge)?;
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -123,7 +120,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -147,11 +144,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // This test creates a malicious block producer that includes a pledge commitment with invalid value.
 // The assertion will fail (block will be discarded) because pledge commitments must have value
 // calculated using calculate_pledge_value_at_count().
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
-    use irys_primitives::CommitmentType;
-    use irys_types::{H256List, SystemTransactionLedger, U256};
+    use irys_types::CommitmentType;
+    use irys_types::U256;
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -166,32 +162,23 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.invalid_pledge.id]),
-                }],
-                vec![self.invalid_pledge.clone()],
-                vec![],
-                PublishLedgerWithTxs {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let invalid_pledge = self.invalid_pledge.clone();
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![invalid_pledge.clone()],
+                commitment_txs_to_bill: vec![invalid_pledge],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
-            ))
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
         }
     }
 
@@ -219,7 +206,9 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     invalid_pledge.value = U256::from(1_000_000); // Invalid! Should use calculate_pledge_value_at_count
 
     // Sign the commitment
-    let invalid_pledge = genesis_config.signer().sign_commitment(invalid_pledge)?;
+    genesis_config
+        .signer()
+        .sign_commitment(&mut invalid_pledge)?;
 
     // Create block with evil strategy
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -230,7 +219,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -253,11 +242,8 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
 
 // This test creates a malicious block producer that includes commitments in wrong order.
 // The assertion will fail (block will be discarded) because stake commitments must come before pledge commitments.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
-    use irys_types::{H256List, SystemTransactionLedger};
-
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub commitments: Vec<CommitmentTransaction>,
@@ -272,32 +258,23 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.commitments[0].id, self.commitments[1].id]),
-                }],
-                self.commitments.clone(),
-                vec![],
-                PublishLedgerWithTxs {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let commitments = self.commitments.clone();
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: commitments.clone(),
+                commitment_txs_to_bill: commitments,
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
-            ))
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
         }
     }
 
@@ -315,21 +292,22 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 
     // Create a stake commitment
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut stake = CommitmentTransaction::new_stake(consensus_config, H256::zero());
+    let mut stake =
+        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     stake.signer = test_signer.address();
     stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
-    let stake = test_signer.sign_commitment(stake)?;
+    test_signer.sign_commitment(&mut stake)?;
 
     // Create a pledge commitment
     let _pledge_count = 0;
-    let pledge = CommitmentTransaction::new_pledge(
+    let mut pledge = CommitmentTransaction::new_pledge(
         consensus_config,
-        H256::zero(),
+        genesis_node.get_anchor().await?,
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
         test_signer.address(),
     )
     .await;
-    let pledge = test_signer.sign_commitment(pledge)?;
+    test_signer.sign_commitment(&mut pledge)?;
 
     // Create block with commitments in WRONG order (pledge before stake)
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -340,7 +318,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     };
 
     let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -373,7 +351,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
 // This test creates a malicious block producer that includes wrong commitments in an epoch block.
 // The assertion will fail (block will be discarded) because epoch blocks must contain exactly
 // the commitments from the parent's snapshot.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -389,32 +367,22 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![self.wrong_commitment.id]),
-                }],
-                vec![self.wrong_commitment.clone()],
-                vec![],
-                PublishLedgerWithTxs {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![self.wrong_commitment.clone()],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
-            ))
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
         }
     }
 
@@ -433,9 +401,10 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 
     // Create a different commitment that's NOT in the snapshot
     let consensus_config = &genesis_node.node_ctx.config.consensus;
-    let mut wrong_commitment = CommitmentTransaction::new_stake(consensus_config, H256::zero());
+    let mut wrong_commitment =
+        CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
     wrong_commitment.signer = test_signer.address();
-    let wrong_commitment = test_signer.sign_commitment(wrong_commitment)?;
+    test_signer.sign_commitment(&mut wrong_commitment)?;
     genesis_node.mine_block().await?;
 
     // Now mine block 2 (epoch block) with wrong commitment
@@ -447,7 +416,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     };
 
     let (block, _adj_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -459,16 +428,19 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     );
 
     // Send block directly to block tree service for validation
-    send_block_to_block_tree(
+    let err = send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
         vec![wrong_commitment],
         false,
     )
-    .await?;
+    .await
+    .unwrap_err();
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert!(matches!(
+        err,
+        PreValidationError::InvalidEpochSnapshot { .. }
+    ));
 
     genesis_node.stop().await;
 
@@ -478,7 +450,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
 // This test ensures that blocks with incorrect `last_epoch_hash` are rejected during validation.
 // Firstly verify rejection of malformed/incorrect last_epoch_hash
 // Secondly verify the first-after-epoch rule
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> {
     let num_blocks_in_epoch = 4;
     let seconds_to_wait = 20;
@@ -499,7 +471,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -534,7 +506,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     let (block_after_epoch, _adjustment_stats2, _eth_payload2) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -588,14 +560,206 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
     Ok(())
 }
 
+// This test creates a malicious block producer that includes duplicate ingress proof signers for the same data root.
+// The assertion will fail (block will be discarded) because each address can only provide one proof per data root.
+#[test_log::test(tokio::test)]
+async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Result<()> {
+    use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
+    use irys_types::{
+        ingress::{generate_ingress_proof, CachedIngressProof},
+        IngressProofsList, U256,
+    };
+    use reth_db::{transaction::DbTxMut as _, Database as _};
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub data_tx: DataTransactionHeader,
+        pub duplicate_proofs: Vec<CachedIngressProof>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            // Create publish ledger with duplicate proofs from the same signer for one transaction
+            // This tests that each transaction must have unique signers
+            let proofs = IngressProofsList(
+                self.duplicate_proofs
+                    .iter()
+                    .map(|p| p.proof.clone())
+                    .collect(),
+            );
+
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![self.data_tx.clone()],
+                    proofs: Some(proofs),
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
+        }
+    }
+
+    // Configure a test network
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 256;
+    // Set to expect 2 proofs per transaction so we can test duplicate signers
+    genesis_config
+        .consensus
+        .get_mut()
+        .number_of_ingress_proofs_total = 2;
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Create test data
+    let chunk_size = 256_usize;
+    let data_bytes = vec![0_u8; chunk_size * 2];
+    let chunks: Vec<Vec<u8>> = data_bytes.chunks(chunk_size).map(Vec::from).collect();
+
+    // Generate data root
+    let leaves =
+        irys_types::generate_leaves(vec![data_bytes.clone()].into_iter().map(Ok), chunk_size)?;
+    let root = irys_types::generate_data_root(leaves)?;
+    let data_root = H256(root.id);
+
+    // Create data transaction header
+    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+        id: H256::random(),
+        anchor: H256::zero(),
+        signer: test_signer.address(),
+        data_root,
+        data_size: data_bytes.len() as u64,
+        header_size: 0,
+        term_fee: U256::from(1000),
+        perm_fee: Some(U256::from(1000)), // Increased to cover 2 ingress proofs + base storage
+        ledger_id: 0,
+        bundle_format: Some(0),
+        chain_id: 1,
+        promoted_height: Some(1),
+        signature: Default::default(),
+    });
+
+    // Generate two ingress proofs from the SAME signer (duplicate!)
+    let chain_id = 1_u64;
+    let proof1 = generate_ingress_proof(
+        &test_signer,
+        data_root,
+        chunks.clone().into_iter().map(Ok),
+        chain_id,
+    )?;
+
+    // IMPORTANT: Create a second proof with the same signer but make it slightly different
+    // so it's not an identical proof (which might be filtered out elsewhere)
+    // We'll use the same data but the proof generation creates a different proof hash
+    let proof2 = generate_ingress_proof(
+        &test_signer,
+        data_root,
+        chunks.into_iter().map(Ok),
+        chain_id,
+    )?;
+
+    // Verify both proofs have the same data_root and can recover the same signer
+    assert_eq!(proof1.data_root, data_root);
+    assert_eq!(proof2.data_root, data_root);
+    assert_eq!(proof1.recover_signer()?, test_signer.address());
+    assert_eq!(proof2.recover_signer()?, test_signer.address());
+
+    // Create cached proofs with the same address (duplicate signers!)
+    let duplicate_proofs = vec![
+        CachedIngressProof {
+            address: test_signer.address(),
+            proof: proof1,
+        },
+        CachedIngressProof {
+            address: test_signer.address(), // Same address!
+            proof: proof2,
+        },
+    ];
+
+    // First, add the data transaction and ingress proofs to the database so discovery can find them
+    genesis_node.node_ctx.db.update(|tx| {
+        use irys_database::tables::{
+            CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,
+        };
+
+        // Store the data transaction
+        tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
+
+        // Store the ingress proofs (with duplicates from same address)
+        for cached_proof in &duplicate_proofs {
+            tx.put::<IngressProofs>(data_root, CompactCachedIngressProof(cached_proof.clone()))?;
+        }
+
+        Ok::<_, eyre::Report>(())
+    })??;
+
+    // Create block with evil strategy
+    let block_prod_strategy = EvilBlockProdStrategy {
+        data_tx: data_tx.clone(),
+        duplicate_proofs,
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Send block to discovery service for prevalidation
+    let block_discovery = BlockDiscoveryFacadeImpl::new(
+        genesis_node
+            .node_ctx
+            .service_senders
+            .block_discovery
+            .clone(),
+    );
+
+    // This should fail during prevalidation due to duplicate signers
+    let result = block_discovery.handle_block(block.clone(), false).await;
+
+    // Assert that the block was rejected due to duplicate ingress proof signers
+    assert!(
+        result.is_err(),
+        "Expected block to be rejected but it succeeded"
+    );
+    let err_msg = format!("{:?}", result.unwrap_err());
+    assert!(
+        err_msg.contains("DuplicateIngressProofSigner"),
+        "Expected DuplicateIngressProofSigner error, got: {}",
+        err_msg
+    );
+
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
 // This test creates a malicious block producer that omits expected commitments from an epoch block.
 // The assertion will fail (block will be discarded) because epoch blocks must contain all
 // commitments from the parent's snapshot.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<()> {
-    use irys_database::SystemLedger;
-    use irys_types::{H256List, SystemTransactionLedger};
-
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
     }
@@ -609,32 +773,22 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
-        ) -> eyre::Result<(
-            Vec<SystemTransactionLedger>,
-            Vec<CommitmentTransaction>,
-            Vec<DataTransactionHeader>,
-            PublishLedgerWithTxs,
-            std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
-        )> {
-            Ok((
-                vec![SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: H256List(vec![]),
-                }],
-                vec![],
-                vec![],
-                PublishLedgerWithTxs {
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
                     txs: vec![],
                     proofs: None,
                 },
-                std::collections::BTreeMap::new(),
-            ))
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
         }
     }
 
@@ -668,7 +822,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -680,11 +834,13 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     );
     dbg!(&block);
 
-    // Send block directly to block tree service for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
-
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    let err = send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        PreValidationError::InvalidEpochSnapshot { .. }
+    ));
 
     genesis_node.stop().await;
 

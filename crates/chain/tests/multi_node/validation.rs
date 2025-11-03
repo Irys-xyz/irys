@@ -2,19 +2,18 @@ use std::sync::Arc;
 
 use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
 use irys_actors::{
-    async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader,
-    NodeConfig, U256,
+    storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256,
 };
 use reth::payload::EthBuiltPayload;
 
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
 // block must match.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -30,32 +29,21 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
-
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    submit_txs,
-                    data_txs_with_proofs,
+                    mempool,
                     // NOTE: Point of error - trying to give yourself extra funds in the evm state
                     invalid_reward_amount,
                     timestamp_ms,
-                    expired_ledger_fees,
+                    solution_hash,
                 )
                 .await
         }
@@ -108,7 +96,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
 // setting it to a valid reth block hash, but not the one that was intended to be used.
 // The block will be discarded because the system will detect that the reth block hash does not match the one that's been provided.
 // (note: the fail in question happens because each evm block hash contains "parent beacon block" hash as part of the seed)
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 2;
@@ -172,7 +160,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
 // This test adds an extra transaction to the EVM block that isn't included in the Irys block's transaction list.
 // The assertion will fail (block will be discarded) because during validation, the system will detect
 // that the EVM block contains transactions not accounted for in the Irys block, breaking the 1:1 mapping requirement.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -189,32 +177,21 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
-            let mut submit_txs = submit_txs.to_vec();
-            submit_txs.push(self.extra_tx.clone());
-
+            let mut tampered_mempool = mempool.clone();
+            tampered_mempool.submit_txs.push(self.extra_tx.clone());
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    &submit_txs,
-                    data_txs_with_proofs,
+                    &tampered_mempool,
                     reward_amount,
                     timestamp_ms,
-                    expired_ledger_fees,
+                    solution_hash,
                 )
                 .await
         }
@@ -236,7 +213,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .testing_peer_with_assignments(&peer_signer)
         .await?;
     let extra_tx = peer_node
-        .create_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
+        .post_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
         .await?;
 
     // produce an invalid block
@@ -270,7 +247,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
 // This test reverses the order of transactions when creating the EVM block compared to their order in the Irys block.
 // The assertion will fail (block will be discarded) because transaction ordering must be preserved between
 // the Irys and EVM blocks to ensure deterministic state transitions and proper validation.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -286,36 +263,25 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
-            let mut submit_txs = submit_txs.to_vec();
             // NOTE: We reverse the order of txs, this means
             // that during validation the irys block txs will not match the
             // reth block txs
-            assert_eq!(submit_txs.len(), 2);
-            submit_txs.reverse();
-
+            let mut tampered_mempool = mempool.clone();
+            assert_eq!(tampered_mempool.submit_txs.len(), 2);
+            tampered_mempool.submit_txs.reverse();
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    &submit_txs,
-                    data_txs_with_proofs,
+                    &tampered_mempool,
                     reward_amount,
                     timestamp_ms,
-                    expired_ledger_fees,
+                    solution_hash,
                 )
                 .await
         }
@@ -337,10 +303,10 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .testing_peer_with_assignments(&peer_signer)
         .await?;
     let _extra_tx_a = peer_node
-        .create_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
+        .post_publish_data_tx(&peer_signer, "Hello, world!".as_bytes().to_vec())
         .await?;
     let _extra_tx_b = peer_node
-        .create_publish_data_tx(&peer_signer, "Hello, Irys!".as_bytes().to_vec())
+        .post_publish_data_tx(&peer_signer, "Hello, Irys!".as_bytes().to_vec())
         .await?;
 
     // produce an invalid block

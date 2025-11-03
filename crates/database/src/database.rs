@@ -5,14 +5,15 @@ use crate::db_cache::{
 };
 use crate::tables::{
     CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
-    IrysBlockHeaders, IrysCommitments, IrysPoAChunks, IrysTxHeaders, Metadata, PeerListItems,
+    IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnpackedChunk, MEGABYTE,
+    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
+    MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -39,7 +40,8 @@ pub fn open_or_create_db<P: AsRef<Path>, T: TableSet + TableInfo>(
         DatabaseArguments::new(ClientVersion::default())
             .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
             // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
-            .with_growth_step((10 * MEGABYTE).into()),
+            .with_growth_step((10 * MEGABYTE).into())
+            .with_shrink_threshold((20 * MEGABYTE).try_into()?),
     );
 
     // Register the prometheus recorder before creating the database,
@@ -94,9 +96,9 @@ pub fn block_header_by_hash<T: DbTx>(
     Ok(block)
 }
 
-/// Inserts a [`DataTransactionHeader`] into [`IrysTxHeaders`]
+/// Inserts a [`DataTransactionHeader`] into [`IrysDataTxHeaders`]
 pub fn insert_tx_header<T: DbTxMut>(tx: &T, tx_header: &DataTransactionHeader) -> eyre::Result<()> {
-    Ok(tx.put::<IrysTxHeaders>(tx_header.id, tx_header.clone().into())?)
+    Ok(tx.put::<IrysDataTxHeaders>(tx_header.id, tx_header.clone().into())?)
 }
 
 /// Gets a [`DataTransactionHeader`] by it's [`IrysTransactionId`]
@@ -105,7 +107,7 @@ pub fn tx_header_by_txid<T: DbTx>(
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
     Ok(tx
-        .get::<IrysTxHeaders>(*txid)?
+        .get::<IrysDataTxHeaders>(*txid)?
         .map(DataTransactionHeader::from))
 }
 
@@ -127,11 +129,12 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
-/// Takes an [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
+/// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
     tx_header: &DataTransactionHeader,
+    block_header: Option<&IrysBlockHeader>,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     let key = tx_header.data_root;
 
@@ -139,14 +142,33 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     let result = tx.get::<CachedDataRoots>(key)?;
 
     // Create or update the CachedDataRoot
-    let mut cached_data_root = result.unwrap_or_else(|| CachedDataRoot {
-        data_size: tx_header.data_size,
-        txid_set: vec![tx_header.id],
-    });
+    let mut cached_data_root = match result {
+        Some(existing) => existing,
+        None => CachedDataRoot {
+            data_size: tx_header.data_size,
+            txid_set: vec![tx_header.id],
+            block_set: vec![],
+            expiry_height: None,
+            cached_at: UnixTimestamp::now()
+                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
+        },
+    };
 
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
         cached_data_root.txid_set.push(tx_header.id);
+    }
+
+    // If the entry exists and a block header reference was provided, add the block hash reference if necessary
+    if let Some(block_header) = block_header {
+        if !cached_data_root
+            .block_set
+            .contains(&block_header.block_hash)
+        {
+            cached_data_root.block_set.push(block_header.block_hash);
+        }
+        // Clear any pre-confirmation expiry once the data_root is included in a block
+        cached_data_root.expiry_height = None;
     }
 
     // Update the database with the modified or new entry
@@ -165,7 +187,7 @@ pub fn cached_data_root_by_data_root<T: DbTx>(
 
 type IsDuplicate = bool;
 
-/// Caches a [`Chunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
+/// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
@@ -191,7 +213,7 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
     Ok(false)
 }
 
-/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxRelativeChunkOffset`]
+/// Retrieves a cached chunk ([`CachedChunkIndexMetadata`]) from the [`CachedChunksIndex`] using its parent [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_meta_by_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
@@ -204,7 +226,7 @@ pub fn cached_chunk_meta_by_offset<T: DbTx>(
         .filter(|result| result.index == chunk_offset)
         .map(|index_entry| index_entry.meta))
 }
-/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxRelativeChunkOffset`]
+/// Retrieves a cached chunk ([`(CachedChunkIndexMetadata, CachedChunk)`]) from the cache ([`CachedChunks`] and [`CachedChunksIndex`]) using its parent  [`DataRoot`] and [`TxChunkOffset`]
 pub fn cached_chunk_by_chunk_offset<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
@@ -349,7 +371,7 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader::default();
+        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1::default());
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -360,12 +382,11 @@ mod tests {
         assert_eq!(result, Some(tx_header));
 
         // Write a commitment tx
-        let commitment_tx = CommitmentTransaction {
+        let commitment_tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
             // Override some defaults to insure deserialization is working
             id: H256::from([10_u8; 32]),
-            version: 1,
             ..Default::default()
-        };
+        });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 
         // Read a commitment tx

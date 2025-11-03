@@ -106,13 +106,14 @@ async fn create_pledge_commitment_transaction(
     config: &Config,
     provider: &impl PledgeDataProvider,
 ) -> CommitmentTransaction {
-    let pledge_commitment =
+    let mut pledge_commitment =
         CommitmentTransaction::new_pledge(&config.consensus, anchor, provider, signer.address())
             .await;
 
     signer
-        .sign_commitment(pledge_commitment)
-        .expect("commitment transaction to be signable")
+        .sign_commitment(&mut pledge_commitment)
+        .expect("commitment transaction to be signable");
+    pledge_commitment
 }
 
 /// Generates commitment transactions for genesis block
@@ -128,7 +129,7 @@ async fn create_pledge_commitment_transaction(
 /// A vector of commitment transactions (one stake + multiple pledges)
 ///
 /// # Note
-/// This function has the same configuration dependency as [`EpochServiceActor::map_storage_modules_to_partition_assignments`].
+/// This function has the same configuration dependency as EpochSnapshot::map_storage_modules_to_partition_assignments.
 /// When updating configuration related to StorageModule/submodule functionality, both functions
 /// will need corresponding updates.
 ///
@@ -149,13 +150,13 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     let signer = config.irys_signer();
 
     // Create a stake commitment tx for the genesis block producer.
-    let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
+    let mut stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
-    let stake_tx = signer
-        .sign_commitment(stake_commitment)
+    signer
+        .sign_commitment(&mut stake_commitment)
         .expect("commitment transaction to be signable");
 
-    let mut commitments = vec![stake_tx.clone()];
+    let mut commitments = vec![stake_commitment.clone()];
 
     // Gap in configuration vs. functionality: StorageModules can compose multiple
     // submodules for a single partition, but the config doesn't yet express this
@@ -164,7 +165,7 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     // When the configuration catches up to the StorageModule functionality,
     // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
     // will have to be updated.
-    let mut anchor = stake_tx.id;
+    let mut anchor = stake_commitment.id;
     for i in 0..num_submodules {
         let pledge_tx =
             create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
@@ -275,14 +276,15 @@ pub async fn add_test_commitments_for_signer(
     let mut anchor = H256::random();
     if block_header.is_genesis() {
         // Create a stake commitment tx for the genesis block producer.
-        let stake_commitment = CommitmentTransaction::new_stake(&config.consensus, H256::default());
+        let mut stake_commitment =
+            CommitmentTransaction::new_stake(&config.consensus, H256::default());
 
-        let stake_tx = signer
-            .sign_commitment(stake_commitment)
+        signer
+            .sign_commitment(&mut stake_commitment)
             .expect("commitment transaction to be signable");
 
-        anchor = stake_tx.id;
-        commitments.push(stake_tx);
+        anchor = stake_commitment.id;
+        commitments.push(stake_commitment);
     }
 
     for i in 0..(pledge_count as usize) {

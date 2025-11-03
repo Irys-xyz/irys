@@ -1,4 +1,4 @@
-use crate::db_cache::{DataRootLRUEntry, GlobalChunkOffset, PartitionHashes};
+use crate::db_cache::{GlobalChunkOffset, PartitionHashes};
 use crate::metadata::MetadataKey;
 use crate::submodule::tables::RelativeStartOffsets;
 use crate::{
@@ -6,8 +6,9 @@ use crate::{
     submodule::tables::{ChunkOffsets, ChunkPathHashes},
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Address, Base64, CommitmentTransaction, PeerListItem};
-use irys_types::{ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader, H256};
+use irys_types::{Address, Base64, PeerListItem};
+use irys_types::{ChunkPathHash, DataRoot, H256};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
 use reth_db::{TableType, TableViewer};
@@ -15,13 +16,13 @@ use reth_db_api::table::{Compress, Decompress};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Adds wrapper structs for some primitive types so they can use `StructFlags` from Compact, when
-/// used as pure table values.
+/// Adds wrapper structs for some primitive types so they can derive `Compact` and be used
+/// directly as table values.
 #[macro_export]
 macro_rules! add_wrapper_struct {
 	($(($name:tt, $wrapper:tt)),+) => {
         $(
-            /// Wrapper struct so it can use StructFlags from Compact, when used as pure table values.
+            /// Wrapper struct enabling `Compact` derivation so it can be used directly as a table value.
             #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
             #[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
             pub struct $wrapper(pub $name);
@@ -92,7 +93,6 @@ impl_compression_for_compact!(
     ChunkPathHashes,
     PartitionHashes,
     RelativeStartOffsets,
-    DataRootLRUEntry,
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof
@@ -104,7 +104,7 @@ use reth_db::table::TableInfo;
 tables! {
 IrysTables;
 
-/// Stores the header hashes belonging to the canonical chain.
+/// Stores block headers keyed by their hash (canonical chain).
 table IrysBlockHeaders {
     type Key = H256;
     type Value = CompactIrysBlockHeader;
@@ -116,8 +116,8 @@ table IrysPoAChunks {
     type Value = CompactBase64;
 }
 
-/// Stores the tx header headers that have been confirmed
-table IrysTxHeaders {
+/// Stores confirmed transaction headers
+table IrysDataTxHeaders {
     type Key = H256;
     type Value = CompactTxHeader;
 }
@@ -134,50 +134,31 @@ table CachedDataRoots {
     type Value = CachedDataRoot;
 }
 
-/// Index mapping a data root to a set of ordered-by-index index entries, which contain the chunk path hash ('chunk id')
+/// Index mapping a DataRoot to a set of ordered-by-index index entries, which contain the ChunkPathHash ('chunk id')
 table CachedChunksIndex {
     type Key = DataRoot;
     type Value = CachedChunkIndexEntry;
     type SubKey = u32;
 }
 
-/// Table mapping a chunk path hash to a cached chunk (with data)
+/// Maps a ChunkPathHash to the cached chunk metadata and optionally its data
 table CachedChunks {
     type Key = ChunkPathHash;
     type Value = CachedChunk;
 }
 
-/// Indexes Ingress proofs by their data_root
+/// Indexes ingress proofs by DataRoot and Address
 table IngressProofs {
     type Key = DataRoot;
     type Value = CompactCachedIngressProof;
     type SubKey = Address;
 }
 
-/// Maps an ingress proof (by data_root) to the latest possible height it could be used at, given known transactions.
-/// this value is updated every time we receive a valid to-be-promoted transaction to (<height of anchor block> + ANCHOR_EXPIRY_DEPTH)
-/// and is pruned if value > <current_height>
-table DataRootLRU {
-    type Key = DataRoot;
-    type Value = DataRootLRUEntry;
-}
 
-/// Maps a global (perm) chunk offset to the last block height it was used by a transaction
-/// this acts as an LRU cache for PD chunks, to reduce the bandwidth requirements for frequently used chunks
-table ProgrammableDataLRU {
-    type Key = GlobalChunkOffset;
-    type Value = u64;
-}
-
-/// Maps a global offset to a cached chunk
-table ProgrammableDataCache {
-    type Key = GlobalChunkOffset;
-    type Value = CachedChunk;
-}
 
 /// Tracks the peer list of known peers as well as their reputation score.
 /// While the node maintains connections to a subset of these peers - the
-/// ones with high reputation - the PeerListEntries contain all the peers
+/// ones with high reputation - the PeerListItems contain all the peers
 /// that the node is aware of and is periodically updated via peer discovery
 table PeerListItems {
     type Key = Address;

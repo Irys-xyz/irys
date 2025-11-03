@@ -80,7 +80,7 @@ impl RethBlockProvider {
             .inner
             .provider()
             .find_block_by_hash(evm_block_hash, reth::providers::BlockSource::Any)
-            .inspect_err(|err| tracing::error!(?err))
+            .inspect_err(|err| tracing::error!(custom.error = ?err))
             .ok()??;
 
         Some(evm_block)

@@ -16,7 +16,6 @@ use std::{sync::Arc, time::SystemTime};
 use alloy_consensus::TxEip1559;
 use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_primitives::{TxKind, U256};
-use borsh::BorshSerialize as _;
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -63,11 +62,13 @@ use crate::{
     payload_service_builder::IyrsPayloadServiceBuilder,
 };
 
+pub mod chainspec;
 pub mod evm;
 pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
 pub mod shadow_tx;
+pub use chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 
 #[must_use]
@@ -76,19 +77,14 @@ pub fn compose_shadow_tx(
     shadow_tx: &ShadowTransaction,
     max_priority_fee_per_gas: u128,
 ) -> TxEip1559 {
-    // allocating additional 512 bytes for the shadow tx borsh buffer, misc optimisation
-    let mut shadow_tx_buf = Vec::with_capacity(IRYS_SHADOW_EXEC.len() + 512);
-    shadow_tx_buf.extend_from_slice(IRYS_SHADOW_EXEC);
-    shadow_tx
-        .serialize(&mut shadow_tx_buf)
-        .expect("borsh serialization should not fail");
+    let shadow_tx_buf = crate::shadow_tx::encode_prefixed_input(shadow_tx);
     TxEip1559 {
         access_list: AccessList::default(),
         chain_id,
         // TODO: now that we control the EVM (muhahaha), we can _probably_ bypass these gas validations
         // large enough to not be rejected by the payload builder
         gas_limit: MINIMUM_GAS_LIMIT,
-        input: shadow_tx_buf.into(),
+        input: shadow_tx_buf,
         // large enough to not be rejected by the payload builder
         max_fee_per_gas: DEFAULT_TX_FEE_CAP_WEI,
         // Use the provided priority fee
@@ -339,6 +335,50 @@ pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
 }
 
+impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
+where
+    Tx: EthPoolTransaction,
+{
+    /// Irys-specific prefilter to reject transactions we never accept in the mempool.
+    ///
+    /// Returns `Ok(tx)` if the tx should continue to normal eth validation,
+    /// or `Err(outcome)` if the tx is invalid for Irys-specific reasons.
+    #[expect(clippy::result_large_err, reason = "to comply with reth api")]
+    fn prefilter_tx(&self, tx: Tx) -> Result<Tx, TransactionValidationOutcome<Tx>> {
+        let input = tx.input();
+        let to = tx.to();
+
+        match crate::shadow_tx::detect_and_decode_from_parts(to, input) {
+            Ok(Some(_)) | Err(_) => {
+                tracing::trace!(
+                    shadow_tx.sender = ?tx.sender(),
+                    shadow_tx.hash = ?tx.hash(),
+                    "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
+                );
+                return Err(TransactionValidationOutcome::Invalid(
+                    tx,
+                    reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                        InvalidTransactionError::SignerAccountHasBytecode,
+                    ),
+                ));
+            }
+            Ok(None) => {}
+        }
+
+        // once we support blobs, we can start accepting eip4844 txs
+        if tx.is_eip4844() {
+            return Err(TransactionValidationOutcome::Invalid(
+                tx,
+                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                    InvalidTransactionError::Eip4844Disabled,
+                ),
+            ));
+        }
+
+        Ok(tx)
+    }
+}
+
 impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
 where
     Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
@@ -351,28 +391,26 @@ where
         origin: TransactionOrigin,
         transaction: Self::Transaction,
     ) -> TransactionValidationOutcome<Self::Transaction> {
-        let input = transaction.input();
-        if !input.starts_with(IRYS_SHADOW_EXEC) {
-            tracing::trace!(hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
-            return self.eth_tx_validator.validate_one(origin, transaction);
-        }
+        let transaction = match self.prefilter_tx(transaction) {
+            Ok(tx) => tx,
+            Err(outcome) => return outcome,
+        };
 
-        tracing::trace!("shadow txs submitted to the pool. Not supported. Most likely via gossip from another node post-block confirmation");
-        // Even though we reject shadow txs from the pool, attempt to decode to verify structure
-        let _ = ShadowTransaction::decode(&mut &input[..]);
-        TransactionValidationOutcome::Invalid(
-            transaction,
-            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                InvalidTransactionError::SignerAccountHasBytecode,
-            ),
-        )
+        tracing::trace!(shadow_tx.hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
+        self.eth_tx_validator.validate_one(origin, transaction)
     }
 
     async fn validate_transactions(
         &self,
         transactions: Vec<(TransactionOrigin, Self::Transaction)>,
     ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        self.eth_tx_validator.validate_all(transactions)
+        transactions
+            .into_iter()
+            .map(|(origin, tx)| match self.prefilter_tx(tx) {
+                Ok(tx) => self.eth_tx_validator.validate_one(origin, tx),
+                Err(outcome) => outcome,
+            })
+            .collect()
     }
 
     fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
@@ -420,8 +458,8 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::shadow_tx::{
-        BalanceDecrement, BalanceIncrement, BlockRewardIncrement, ShadowTransaction,
-        TransactionPacket, BLOCK_REWARD_ID, UNSTAKE_ID,
+        BalanceDecrement, BlockRewardIncrement, ShadowTransaction, TransactionPacket,
+        BLOCK_REWARD_ID, UNSTAKE_ID,
     };
     use crate::test_utils::*;
     use crate::test_utils::{
@@ -431,6 +469,7 @@ mod tests {
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
     use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
+    use alloy_primitives::Bytes;
     use alloy_primitives::Signature;
     use alloy_primitives::{Address, B256};
     use alloy_rpc_types_engine::ForkchoiceState;
@@ -440,7 +479,7 @@ mod tests {
         providers::{AccountReader as _, BlockHashReader as _, BlockNumReader as _},
         rpc::server_types::eth::EthApiError,
     };
-    use reth_e2e_test_utils::wallet::Wallet;
+    use reth_e2e_test_utils::{transaction::TransactionTestContext, wallet::Wallet};
 
     use reth_transaction_pool::{PoolTransaction as _, TransactionPool as _};
     use std::sync::Mutex;
@@ -471,6 +510,33 @@ mod tests {
 
         let tx_res = node.rpc.inject_tx(tx).await;
         assert!(matches!(tx_res, Err(EthApiError::PoolError(_))));
+        Ok(())
+    }
+
+    /// Ensures the mempool rejects EIP-4844 (blob) transactions outright.
+    ///
+    /// We keep Cancun active but disable blobs. Any EIP-4844 envelope should be rejected
+    /// via the mempool validator before deeper validation occurs.
+    #[test_log::test(tokio::test)]
+    async fn eip4844_txs_are_rejected_by_mempool() -> eyre::Result<()> {
+        // setup
+        let ctx = TestContext::new().await?;
+        let ((node, _shadow_tx_rx), _ctx) = ctx.get_single_node()?;
+        let local_signer = PrivateKeySigner::random();
+        let envelope: Bytes = TransactionTestContext::tx_with_blobs_bytes(1, local_signer)
+            .await
+            .expect("constructing a valid EIP-4844 tx should succeed");
+
+        // inject the tx via RPC
+        let res = node.rpc.inject_tx(envelope).await;
+        dbg!(&res);
+
+        // mempool rejects EIP-4844
+        assert!(
+            matches!(res, Err(EthApiError::PoolError(_))),
+            "expected pool error for EIP-4844"
+        );
+
         Ok(())
     }
 
@@ -568,9 +634,10 @@ mod tests {
         let amount = U256::from(7000000000000000000_u64);
         let shadow_tx = compose_shadow_tx(
             1,
-            &ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
-                amount,
-            })),
+            &ShadowTransaction::new_v1(
+                TransactionPacket::BlockReward(BlockRewardIncrement { amount }),
+                alloy_primitives::FixedBytes::ZERO,
+            ),
             0, // Block rewards must have 0 priority fee
         );
         let shadow_tx = sign_tx(shadow_tx, &ctx.block_producer_a).await;
@@ -780,6 +847,8 @@ mod tests {
     // test decrementing when account does not exist (expect that even receipt not created)
     #[test_log::test(tokio::test)]
     async fn test_decrement_nonexistent_account() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -795,17 +864,19 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create and submit a shadow transaction trying to decrement balance of non-existent account
-        let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-            amount: U256::ONE,
-            target: nonexistent_address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let shadow_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: U256::ONE,
+                target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
-        // Submit a normal transaction to ensure block is produced
-        let normal_tx_hash = create_and_submit_normal_tx(
+        // Submit a normal transaction to ensure there's something in the mempool
+        let _normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
             U256::from(1000),
@@ -815,29 +886,51 @@ mod tests {
         )
         .await?;
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
+        // Attempt to produce a new block - this should fail because the shadow transaction
+        // tries to deduct priority fees from a non-existent account
 
-        // // Verify the shadow transaction is NOT included
-        assert_txs_not_in_block(
-            &block_payload,
-            &shadow_tx_hashes,
-            "Shadow transaction for non-existent account should not be included in block",
-        );
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![shadow_tx]);
 
-        // Verify the normal transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &[normal_tx_hash],
-            "Normal transaction should be included in block",
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err("Block production should have failed due to non-existent account");
+
+        let error_msg = format!("{err:?}");
+        assert!(
+            error_msg.contains("Shadow transaction priority fee failed"),
+            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
         );
 
         Ok(())
     }
 
-    // test decrementing when account exists but not enough balance (expect failed tx receipt)
+    // test decrementing when account exists but not enough balance (expect block production failure)
     #[test_log::test(tokio::test)]
     async fn test_decrement_insufficient_balance() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -849,33 +942,56 @@ mod tests {
         );
 
         // Create a shadow tx that tries to decrement more than the balance
-        let decrement_amount = funded_balance + U256::ONE;
-        let shadow_tx = ShadowTransaction::new_v1(TransactionPacket::Stake(BalanceDecrement {
-            amount: decrement_amount,
-            target: ctx.normal_signer.address(),
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        // This should cause block production to fail entirely
+        let decrement_amount = funded_balance + U256::from(DEFAULT_PRIORITY_FEE) + U256::ONE;
+        let shadow_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Stake(BalanceDecrement {
+                amount: decrement_amount,
+                target: ctx.normal_signer.address(),
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let shadow_tx =
             sign_shadow_tx(shadow_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let shadow_tx_hashes = vec![*shadow_tx.hash()];
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![shadow_tx]).await?;
+        // Attempt to produce a new block - this should fail because the shadow transaction
+        // tries to decrement more than the available balance
 
-        // Verify the shadow transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &shadow_tx_hashes,
-            "Shadow transaction should be included in block",
-        );
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![shadow_tx]);
 
-        // Verify the receipt for the shadow tx is a revert/failure
-        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
-        let receipts = block_execution.receipts;
-        let receipt = &receipts[1][0];
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err("Block production should have failed due to insufficient balance");
+
+        let error_msg = format!("{err:?}");
         assert!(
-            !receipt.success,
-            "Expected a revert/failure receipt for shadow tx with insufficient balance"
+            error_msg.contains("insufficient balance")
+                || error_msg.contains("Shadow transaction failed")
+                || error_msg.contains("EVM"),
+            "Expected shadow transaction insufficient balance failure, got: {error_msg}"
         );
 
         Ok(())
@@ -1235,6 +1351,190 @@ mod tests {
         Ok(())
     }
 
+    /// Tests state rollback functionality on safe block reorgs.
+    ///
+    /// This test verifies that when a forkchoice update rolls back to an earlier safe block,
+    /// the state is correctly reverted and subsequent blocks can be built on the rolled-back state.
+    ///
+    /// Test scenario:
+    /// 1. Build 4 blocks with block rewards (balance +4)
+    /// 2. Verify state after 4 blocks: balance = initial + 4
+    /// 3. Roll back to block 1 via forkchoice update (safe/finalized = block 1)
+    /// 4. Build a new fork block (block 2) on top of the rolled-back state
+    /// 5. Verify final state: balance = initial + 2, nonce = 1 (reflecting the rollback and new block)
+    #[test_log::test(tokio::test)]
+    async fn rollback_state_on_confirmed_blocks() -> eyre::Result<()> {
+        // Setup custom parent tracker for forkchoice updates
+        let parent_tracker = Arc::new(Mutex::new(B256::ZERO));
+
+        // Create context with custom attributes that can track parent block
+        let payload_attributes = {
+            let parent_tracker = parent_tracker.clone();
+            move |timestamp: u64, beneficiary: Address| {
+                let parent = *parent_tracker.lock().unwrap();
+                let mut attrs = eth_payload_attributes_with_parent(timestamp, parent);
+                attrs.suggested_fee_recipient = beneficiary;
+                attrs
+            }
+        };
+
+        let ctx = TestContext::new_with_custom_attributes(payload_attributes).await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Initial setup and baseline measurements
+        let initial_balance = get_balance(&node.inner, ctx.block_producer_a.address());
+        let mut parent_blockhash = ctx.genesis_blockhash;
+        let mut block_hashes = vec![parent_blockhash];
+
+        // Phase 1: Build 4 blocks with shadow transactions
+        tracing::info!("Phase 1: Building 4 blocks with block rewards");
+        for block_number in 1..=4 {
+            // Create block reward transaction
+            let block_reward_tx = block_reward();
+            let block_reward_tx = sign_shadow_tx(block_reward_tx, &ctx.block_producer_a, 0) // Block rewards must have 0 priority fee
+                .await?;
+
+            // Mine the block
+            let payload =
+                mine_block_and_validate(&mut node, &shadow_tx_store, vec![block_reward_tx], &[])
+                    .await?;
+            parent_blockhash = payload.block().hash();
+            block_hashes.push(parent_blockhash);
+
+            tracing::info!("Built block {}: {}", block_number, parent_blockhash);
+        }
+
+        // Phase 2: Verify state after 4 blocks
+        tracing::info!("Phase 2: Verifying state after building 4 blocks");
+        let best_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
+        assert_eq!(best_block, 4, "Should be at block 4");
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
+        assert_balance_change(
+            &node,
+            ctx.block_producer_a.address(),
+            initial_balance,
+            U256::from(4), // 4 block rewards only
+            true,
+            "Balance should reflect 4 block rewards",
+        );
+        assert_nonce(
+            &node,
+            ctx.block_producer_a.address(),
+            0,
+            "Nonce should be 0",
+        );
+
+        // Phase 3: Roll back to block 1 (safe/finalized)
+        tracing::info!("Phase 3: Rolling back to block 1 via forkchoice update");
+        let rollback_target = block_hashes[1]; // Block 1
+        node.inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: rollback_target,
+                    safe_block_hash: block_hashes[0],
+                    finalized_block_hash: block_hashes[0],
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        // Allow time for rollback message to propagate. Reth does not immediately rewind the
+        // canonical head when supplied an older forkchoice head; the actual tip moves once a new
+        // payload becomes canonical. We only assert on the final forkchoice state after building
+        // the replacement block below.
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Phase 4: Build new fork block on rolled-back state
+        tracing::info!("Phase 4: Building new fork block on rolled-back state");
+        let fork_block_number = 2; // Building block 2 on top of block 1
+                                   // Update parent tracker for payload attributes
+        *parent_tracker.lock().unwrap() = rollback_target;
+        let fork_reward_tx = block_reward();
+        let fork_reward_tx = sign_shadow_tx(fork_reward_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
+        let fork_payload = prepare_block(&mut node, &shadow_tx_store, vec![fork_reward_tx]).await?;
+        let fork_block_hash = fork_payload.block().hash();
+
+        tracing::info!(
+            "Built fork block {}: {}",
+            fork_block_number,
+            fork_block_hash
+        );
+
+        // Phase 5: Finalize the new fork
+        tracing::info!("Phase 5: Finalizing the new fork");
+        node.inner
+            .add_ons_handle
+            .beacon_engine_handle
+            .fork_choice_updated(
+                ForkchoiceState {
+                    head_block_hash: fork_block_hash,
+                    safe_block_hash: fork_block_hash,
+                    finalized_block_hash: fork_block_hash,
+                },
+                None,
+                EngineApiMessageVersion::default(),
+            )
+            .await?;
+
+        // Allow time for finalization to process
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Phase 6: Verify final state after rollback and fork
+        tracing::info!("Phase 6: Verifying final state after rollback and fork");
+        let final_best_block = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .best_block_number()
+            .unwrap();
+        let final_best_hash = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .block_hash(final_best_block)
+            .unwrap()
+            .unwrap();
+
+        // Assertions for final state
+        assert_eq!(
+            fork_block_hash, final_best_hash,
+            "Fork block should be the canonical head"
+        );
+        assert_eq!(
+            final_best_block, fork_block_number,
+            "Should be at fork block number"
+        );
+        // Each block reward transaction gives 1 wei to producer A (beneficiary for node 0)
+        assert_balance_change(
+            &node,
+            ctx.block_producer_a.address(),
+            initial_balance,
+            U256::from(2), // 2 block rewards only
+            true,
+            "Balance should reflect rollback to block 1 + new fork block reward",
+        );
+        assert_nonce(
+            &node,
+            ctx.block_producer_a.address(),
+            0,
+            "Nonce always be 0",
+        );
+
+        tracing::info!("Rollback test completed successfully");
+        Ok(())
+    }
+
     /// Tests that shadow transactions never enter the transaction pool when rolling back state to a past block.
     ///
     /// Test scenario:
@@ -1329,8 +1629,7 @@ mod tests {
             );
             assert!(
                 pool_txs.is_empty(),
-                "Transaction pool should be empty during rollback, but contains: {:?}",
-                pool_txs
+                "Transaction pool should be empty during rollback, but contains: {pool_txs:?}"
             );
         }
 
@@ -1367,8 +1666,7 @@ mod tests {
 
         assert!(
             final_pool_txs.is_empty(),
-            "Transaction pool should remain empty after attempted shadow tx submission, but contains: {:?}",
-            final_pool_txs
+            "Transaction pool should remain empty after attempted shadow tx submission, but contains: {final_pool_txs:?}"
         );
 
         Ok(())
@@ -1510,11 +1808,14 @@ mod tests {
 
         // Create pledge transaction with a smaller amount to ensure it's less than initial balance
         let pledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
-        let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
-            amount: pledge_amount,
-            target: target_address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let pledge_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: pledge_amount,
+                target: target_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let pledge_tx = sign_shadow_tx(pledge_tx, &ctx.normal_signer, DEFAULT_PRIORITY_FEE).await?;
         let pledge_tx_hash = *pledge_tx.hash();
 
@@ -1537,9 +1838,9 @@ mod tests {
         Ok(())
     }
 
-    /// Test unpledge transaction (balance increment)
+    /// Test unpledge transaction (priority-fee-only at inclusion)
     #[test_log::test(tokio::test)]
-    async fn test_unpledge_balance_increment() -> eyre::Result<()> {
+    async fn test_unpledge_fee_only() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -1552,15 +1853,8 @@ mod tests {
             "Target account should have initial balance"
         );
 
-        // Now create unpledge transaction
-        let unpledge_amount = U256::from(1_000_000_000_000_000_u64); // 0.001 IRYS
-        let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
-                amount: unpledge_amount,
-                target: target_address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-        ));
+        // Create unpledge transaction: fee-only via priority fee
+        let unpledge_tx = unpledge(target_address);
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
         let unpledge_tx_hash = *unpledge_tx.hash();
@@ -1571,14 +1865,62 @@ mod tests {
         // Verify transaction is included in block
         assert_txs_in_block(&block_payload, &[unpledge_tx_hash], "Unpledge transaction");
 
-        // Verify balance increased
+        // Verify balance decreased by exactly the priority fee
         assert_balance_change(
             &node,
             target_address,
             balance_after_initial_funding,
-            unpledge_amount - U256::from(DEFAULT_PRIORITY_FEE),
-            true,
-            "Target balance should increase after unpledge",
+            U256::from(DEFAULT_PRIORITY_FEE),
+            false,
+            "Target balance should decrease by priority fee only on unpledge",
+        );
+
+        Ok(())
+    }
+
+    /// Test unstake-debit transaction (priority-fee-only at inclusion)
+    #[test_log::test(tokio::test)]
+    async fn test_unstake_debit_fee_only() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
+
+        let balance_after_initial_funding = get_balance(&node.inner, target_address);
+        assert!(
+            balance_after_initial_funding > U256::ZERO,
+            "Target account should have initial balance"
+        );
+
+        // Create unstake-debit transaction: fee-only via priority fee
+        let unstake_debit_tx = unstake_debit(target_address);
+        let unstake_debit_tx = sign_shadow_tx(
+            unstake_debit_tx,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+        let unstake_debit_tx_hash = *unstake_debit_tx.hash();
+
+        // Mine block with unstake-debit transaction
+        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unstake_debit_tx]).await?;
+
+        // Verify transaction is included in block
+        assert_txs_in_block(
+            &block_payload,
+            &[unstake_debit_tx_hash],
+            "UnstakeDebit transaction",
+        );
+
+        // Verify balance decreased by exactly the priority fee
+        assert_balance_change(
+            &node,
+            target_address,
+            balance_after_initial_funding,
+            U256::from(DEFAULT_PRIORITY_FEE),
+            false,
+            "Target balance should decrease by priority fee only on UnstakeDebit",
         );
 
         Ok(())
@@ -1642,17 +1984,16 @@ mod tests {
         for (i, expected_hash) in expected_tx_hashes.iter().enumerate() {
             assert_eq!(
                 block_tx_hashes[i], *expected_hash,
-                "Transaction at position {} should match submitted order",
-                i
+                "Transaction at position {i} should match submitted order"
             );
         }
 
         // Calculate expected final balance accounting for priority fees
         // Each transaction costs DEFAULT_PRIORITY_FEE
-        // Net operation: 2 pledge decrements (-2 wei) + 1 unpledge increment (+1 wei) = -1 wei
+        // Net operation: 2 pledge decrements (-2 wei) + 1 unpledge no-op (0 wei) = -2 wei
         // Total priority fees: 3 * DEFAULT_PRIORITY_FEE
         let total_priority_fees = U256::from(DEFAULT_PRIORITY_FEE) * U256::from(3);
-        let net_operation_change = U256::ONE; // Net decrease of 1 wei from operations
+        let net_operation_change = U256::from(2_u64); // Net decrease of 2 wei from operations
         let expected_final_balance = initial_balance - net_operation_change - total_priority_fees;
 
         let final_balance = get_balance(&node.inner, target_address);
@@ -1664,9 +2005,64 @@ mod tests {
         Ok(())
     }
 
-    /// Test unpledge on non-existent account is rejected
+    /// Test pledge + unpledge_refund balances with zero-priority-fee refund
+    #[test_log::test(tokio::test)]
+    async fn test_pledge_unpledge_refund_balances() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+
+        // Use a funded account
+        let target_address = ctx.normal_signer.address();
+        let initial_balance = get_balance(&node.inner, target_address);
+
+        // Create transactions: pledge, pledge, unpledge_refund(1 wei)
+        let pledge_tx1 = pledge(target_address);
+        let pledge_tx1 =
+            sign_shadow_tx(pledge_tx1, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let pledge_tx2 = pledge(target_address);
+        let pledge_tx2 =
+            sign_shadow_tx(pledge_tx2, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        let refund_tx = unpledge_refund(target_address, U256::ONE);
+        let refund_tx = sign_shadow_tx(refund_tx, &ctx.block_producer_a, 0).await?; // zero-priority fee on refunds
+
+        let expected_tx_hashes = vec![*pledge_tx1.hash(), *pledge_tx2.hash(), *refund_tx.hash()];
+
+        // Mine block with all transactions
+        let block_payload = mine_block(
+            &mut node,
+            &shadow_tx_store,
+            vec![pledge_tx1, pledge_tx2, refund_tx],
+        )
+        .await?;
+
+        // Verify all transactions are included in block in correct order
+        assert_txs_in_block(
+            &block_payload,
+            &expected_tx_hashes,
+            "Pledge/UnpledgeRefund transactions",
+        );
+
+        // Calculate expected final balance
+        // Operation effect: -1 (pledge) -1 (pledge) +1 (refund) = -1 wei
+        // Priority fees: 2 * DEFAULT_PRIORITY_FEE (refund has zero priority fee)
+        let total_priority_fees = U256::from(DEFAULT_PRIORITY_FEE) * U256::from(2);
+        let net_operation_change = U256::ONE; // net -1 wei
+        let expected_final_balance = initial_balance - net_operation_change - total_priority_fees;
+
+        let final_balance = get_balance(&node.inner, target_address);
+        assert_eq!(
+            final_balance, expected_final_balance,
+            "Final balance should reflect pledge/refund operations plus priority fees"
+        );
+
+        Ok(())
+    }
+
+    /// Test unpledge on non-existent account fails block production
     #[test_log::test(tokio::test)]
     async fn test_unpledge_nonexistent_account() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -1681,56 +2077,48 @@ mod tests {
             .unwrap();
         assert!(account.is_none(), "Test account should not exist");
 
-        // Create unpledge transaction for non-existent account
-        let unpledge_amount = U256::from(1_000_000_000_000_000_000_u64); // 1 IRYS
-        let unpledge_tx = ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(BalanceIncrement {
-                amount: unpledge_amount,
-                target: nonexistent_address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            }),
-        ));
+        // Create unpledge transaction for non-existent account (priority-fee debit should fail)
+        let unpledge_tx = unpledge(nonexistent_address);
         let unpledge_tx =
             sign_shadow_tx(unpledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let unpledge_tx_hash = *unpledge_tx.hash();
 
-        // Submit a normal transaction to ensure block is produced
-        let normal_tx_hash = create_and_submit_normal_tx(
-            &mut node,
-            0,
-            U256::from(1000),
-            1_000_000_000_u128,
-            Address::random(),
-            &ctx.normal_signer,
-        )
-        .await?;
+        // Attempt to produce a new block - this should fail because the unpledge transaction
+        // tries to deduct priority fees from a non-existent account
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![unpledge_tx]).await?;
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![unpledge_tx]);
 
-        // Verify the unpledge transaction is NOT included (rejected due to non-existent account)
-        assert_txs_not_in_block(
-            &block_payload,
-            &[unpledge_tx_hash],
-            "Unpledge transaction for non-existent account should not be included in block",
-        );
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
 
-        // Verify the normal transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &[normal_tx_hash],
-            "Normal transaction should be included in block",
-        );
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        // Verify the account still doesn't exist
-        let final_account = node
-            .inner
-            .provider
-            .basic_account(&nonexistent_address)
-            .unwrap();
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err(
+                "Block production should have failed due to non-existent account for unpledge",
+            );
+
+        let error_msg = format!("{err:?}");
         assert!(
-            final_account.is_none(),
-            "Non-existent account should remain non-existent after rejected unpledge"
+            error_msg.contains("Shadow transaction priority fee failed"),
+            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
         );
 
         Ok(())
@@ -1739,6 +2127,8 @@ mod tests {
     /// Test pledge on non-existent account fails
     #[test_log::test(tokio::test)]
     async fn test_pledge_nonexistent_account() -> eyre::Result<()> {
+        use crate::payload::DeterministicShadowTxKey;
+
         let ctx = TestContext::new().await?;
         let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
 
@@ -1754,17 +2144,19 @@ mod tests {
         assert!(account.is_none(), "Test account should not exist");
 
         // Create pledge transaction for non-existent account
-        let pledge_tx = ShadowTransaction::new_v1(TransactionPacket::Pledge(BalanceDecrement {
-            amount: U256::ONE,
-            target: nonexistent_address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }));
+        let pledge_tx = ShadowTransaction::new_v1(
+            TransactionPacket::Pledge(BalanceDecrement {
+                amount: U256::ONE,
+                target: nonexistent_address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let pledge_tx =
             sign_shadow_tx(pledge_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        let pledge_tx_hash = *pledge_tx.hash();
 
-        // Submit a normal transaction to ensure block is produced
-        let normal_tx_hash = create_and_submit_normal_tx(
+        // Submit a normal transaction to ensure there's something in the mempool
+        let _normal_tx_hash = create_and_submit_normal_tx(
             &mut node,
             0,
             U256::from(1000),
@@ -1774,21 +2166,43 @@ mod tests {
         )
         .await?;
 
-        // Produce a new block
-        let block_payload = mine_block(&mut node, &shadow_tx_store, vec![pledge_tx]).await?;
+        // Attempt to produce a new block - this should fail because the pledge transaction
+        // tries to deduct priority fees from a non-existent account
 
-        // Verify the pledge transaction is NOT included
-        assert_txs_not_in_block(
-            &block_payload,
-            &[pledge_tx_hash],
-            "Pledge transaction for non-existent account should not be included in block",
-        );
+        // Set up the payload attributes
+        node.payload.timestamp += 1;
+        let attributes = (node.payload.attributes_generator)(node.payload.timestamp);
+        let key = DeterministicShadowTxKey::new(attributes.payload_id());
+        shadow_tx_store.set_shadow_txs(key, vec![pledge_tx]);
 
-        // Verify the normal transaction IS included
-        assert_txs_in_block(
-            &block_payload,
-            &[normal_tx_hash],
-            "Normal transaction should be included in block",
+        // Send the payload - this will trigger block building
+        node.payload
+            .payload_builder
+            .send_new_payload(attributes.clone())
+            .await
+            .unwrap()?;
+
+        // Wait briefly for the payload builder to process
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Try to get the payload - this should return an error
+        let result = node
+            .payload
+            .payload_builder
+            .best_payload(attributes.payload_id())
+            .await;
+
+        // Verify the payload build failed with an error
+        let err = result
+            .expect("Expected Some result from best_payload")
+            .expect_err(
+                "Block production should have failed due to non-existent account for pledge",
+            );
+
+        let error_msg = format!("{err:?}");
+        assert!(
+            error_msg.contains("Shadow transaction priority fee failed"),
+            "Expected shadow transaction priority fee failure for non-existent account, got: {error_msg}"
         );
 
         Ok(())
@@ -1806,10 +2220,12 @@ mod tests {
 
         // Fund the target account first to ensure it can pay priority fees
         let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
-        let fund_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+        let fund_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
-            }));
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
 
@@ -1866,10 +2282,12 @@ mod tests {
 
         // Fund the target account first to ensure it can pay priority fees
         let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
-        let fund_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+        let fund_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
-            }));
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
 
@@ -2093,10 +2511,12 @@ mod tests {
 
         // Fund the target account first
         let funding_amount = U256::from(1_000_000_000_000_u128); // 1000 Gwei
-        let fund_tx =
-            ShadowTransaction::new_v1(TransactionPacket::BlockReward(BlockRewardIncrement {
+        let fund_tx = ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(BlockRewardIncrement {
                 amount: funding_amount,
-            }));
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        );
         let fund_tx = sign_shadow_tx(fund_tx, &ctx.block_producer_a, 0).await?; // Block rewards must have 0 priority fee
         mine_block(&mut node, &shadow_tx_store, vec![fund_tx]).await?;
 
@@ -2157,9 +2577,9 @@ mod tests {
         );
 
         // Verify target balance changed correctly
-        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +1 (unpledge) -1 (storage) = -1 wei
+        // Net operations: -1 (stake) +1 (unstake) -1 (pledge) +0 (unpledge) -1 (storage) = -2 wei
         // Plus paying all the priority fees: -15 Gwei
-        let net_operations = U256::from(1); // Net decrease of 1 wei from operations
+        let net_operations = U256::from(2); // Net decrease of 2 wei from operations
         let total_decrease = net_operations + total_expected_fee;
         assert_balance_change(
             &node,
@@ -2450,9 +2870,7 @@ pub mod test_utils {
         for tx_hash in expected_txs {
             assert!(
                 block_txs.contains(tx_hash),
-                "{}: Transaction {:?} not found in block",
-                message,
-                tx_hash
+                "{message}: Transaction {tx_hash:?} not found in block"
             );
         }
     }
@@ -2474,9 +2892,7 @@ pub mod test_utils {
         for tx_hash in excluded_txs {
             assert!(
                 !block_txs.contains(tx_hash),
-                "{}: Transaction {:?} should not be in block",
-                message,
-                tx_hash
+                "{message}: Transaction {tx_hash:?} should not be in block"
             );
         }
     }
@@ -2509,9 +2925,7 @@ pub mod test_utils {
 
         assert!(
             last_shadow_tx_pos < first_normal_tx_pos,
-            "Shadow transactions should appear before normal transactions. Last shadow: {}, First normal: {}",
-            last_shadow_tx_pos,
-            first_normal_tx_pos
+            "Shadow transactions should appear before normal transactions. Last shadow: {last_shadow_tx_pos}, First normal: {first_normal_tx_pos}"
         );
     }
 
@@ -2534,8 +2948,7 @@ pub mod test_utils {
 
         assert_eq!(
             final_balance, expected_balance,
-            "{}: Expected balance {}, got {}",
-            message, expected_balance, final_balance
+            "{message}: Expected balance {expected_balance}, got {final_balance}"
         );
     }
 
@@ -2549,8 +2962,7 @@ pub mod test_utils {
         let actual_nonce = get_nonce(&node.inner, address);
         assert_eq!(
             actual_nonce, expected_nonce,
-            "{}: Expected nonce {}, got {}",
-            message, expected_nonce, actual_nonce
+            "{message}: Expected nonce {expected_nonce}, got {actual_nonce}"
         );
     }
 
@@ -2602,7 +3014,7 @@ pub mod test_utils {
             STORAGE_FEES_ID => storage_fees(address),
             PLEDGE_ID => pledge(address),
             UNPLEDGE_ID => unpledge(address),
-            _ => panic!("Unknown shadow transaction type: {}", tx_type),
+            _ => panic!("Unknown shadow transaction type: {tx_type}"),
         }
     }
 
@@ -2657,12 +3069,15 @@ pub mod test_utils {
             for shadow_tx in shadow_txs_raw {
                 // Use the shadow tx directly since metadata fields are removed
                 let updated_shadow_tx = match &shadow_tx {
-                    ShadowTransaction::V1 { packet } => ShadowTransaction::new_v1(packet.clone()),
+                    ShadowTransaction::V1 {
+                        packet,
+                        solution_hash,
+                    } => ShadowTransaction::new_v1(packet.clone(), *solution_hash),
                 };
 
                 // Block rewards must have 0 priority fee, others can use default
                 let priority_fee = match &shadow_tx {
-                    ShadowTransaction::V1 { packet } => match packet {
+                    ShadowTransaction::V1 { packet, .. } => match packet {
                         TransactionPacket::BlockReward(_) => 0,
                         _ => DEFAULT_PRIORITY_FEE,
                     },
@@ -2681,60 +3096,92 @@ pub mod test_utils {
 
     /// Compose a shadow tx for unstaking.
     pub fn unstake(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Unstake(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(shadow_tx::BalanceIncrement {
+        ShadowTransaction::new_v1(
+            TransactionPacket::UnstakeRefund(shadow_tx::BalanceIncrement {
                 amount: U256::ONE,
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
-        ))
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unstake-debit (fee-only via priority fee).
+    pub fn unstake_debit(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::UnstakeDebit(shadow_tx::UnstakeDebit {
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
     }
 
     /// Compose a shadow tx for block reward.
     pub fn block_reward() -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::BlockReward(
-            shadow_tx::BlockRewardIncrement { amount: U256::ONE },
-        ))
+        ShadowTransaction::new_v1(
+            TransactionPacket::BlockReward(shadow_tx::BlockRewardIncrement { amount: U256::ONE }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
     }
 
     /// Compose a shadow tx for staking.
     pub fn stake(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Stake(shadow_tx::BalanceDecrement {
-            amount: U256::ONE,
-            target: address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }))
-    }
-
-    /// Compose a shadow tx for storage fees.
-    pub fn storage_fees(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::StorageFees(
-            shadow_tx::BalanceDecrement {
-                amount: U256::ONE,
-                target: address,
-                irys_ref: alloy_primitives::FixedBytes::ZERO,
-            },
-        ))
-    }
-
-    /// Compose a shadow tx for pledge.
-    pub fn pledge(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Pledge(shadow_tx::BalanceDecrement {
-            amount: U256::ONE,
-            target: address,
-            irys_ref: alloy_primitives::FixedBytes::ZERO,
-        }))
-    }
-
-    /// Compose a shadow tx for unpledge.
-    pub fn unpledge(address: Address) -> ShadowTransaction {
-        ShadowTransaction::new_v1(TransactionPacket::Unpledge(
-            shadow_tx::EitherIncrementOrDecrement::BalanceIncrement(shadow_tx::BalanceIncrement {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Stake(shadow_tx::BalanceDecrement {
                 amount: U256::ONE,
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
-        ))
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for storage fees.
+    pub fn storage_fees(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::StorageFees(shadow_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for pledge.
+    pub fn pledge(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Pledge(shadow_tx::BalanceDecrement {
+                amount: U256::ONE,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unpledge (fee-only via priority fee).
+    pub fn unpledge(address: Address) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::Unpledge(shadow_tx::UnpledgeDebit {
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for unpledge refund (epoch-only; zero priority fee expected).
+    pub fn unpledge_refund(address: Address, amount: U256) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::UnpledgeRefund(shadow_tx::BalanceIncrement {
+                amount,
+                target: address,
+                irys_ref: alloy_primitives::FixedBytes::ZERO,
+            }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
     }
 
     /// Assert that a log topic is present in block execution receipts at least `desired_repetitions` times.

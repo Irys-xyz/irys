@@ -7,6 +7,7 @@ use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58 as _};
 use derive_more::Deref;
+use eyre::eyre;
 use eyre::Error;
 use rand::RngCore as _;
 use reth_codecs::Compact;
@@ -43,7 +44,7 @@ pub mod u64_stringify {
 
         // Parse string back to u128
         s.parse::<u64>()
-            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {}", e)))
+            .map_err(|e| serde::de::Error::custom(format!("Failed to parse u64: {e}")))
     }
 }
 
@@ -195,19 +196,19 @@ impl Decode for U256 {
     }
 }
 
+// NOTE: RLP has specific standards for encoding numbers
+// so we defer to the correct impl used by alloy's U256
 impl Encodable for U256 {
     #[inline]
     fn encode(&self, out: &mut dyn bytes::BufMut) {
-        let mut buffer = [0_u8; 32];
-        self.to_big_endian(&mut buffer);
-        buffer.encode(out);
+        let int: alloy_primitives::U256 = (*self).into();
+        int.encode(out);
     }
 }
 
 impl Decodable for U256 {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let res = <[u8; 32]>::decode(buf)?;
-        Ok(Self::from_big_endian(&res))
+        alloy_primitives::U256::decode(buf).map(Into::into)
     }
 }
 
@@ -239,6 +240,7 @@ impl Compact for U256 {
 pub use crate::h256::H256;
 
 impl H256 {
+    /// Decodes a H256 from a string. This will panic if the input is malformed!
     pub fn from_base58(string: &str) -> Self {
         let decoded = string.from_base58().expect("to parse base58 string");
         let array: [u8; 32] = decoded.as_slice()[..32]
@@ -246,6 +248,14 @@ impl H256 {
             .expect("Decoded base58 string should have at least 32 bytes");
 
         Self(array)
+    }
+
+    pub fn from_base58_result(string: &str) -> eyre::Result<Self> {
+        let decoded = string
+            .from_base58()
+            .map_err(|e| eyre!("Invalid base58 string: {:?}", &e))?;
+        let array: [u8; 32] = decoded.as_slice()[..32].try_into()?; // shouldn't happen
+        Ok(Self(array))
     }
 }
 
@@ -266,7 +276,8 @@ impl Encode for H256 {
 
 impl Decode for H256 {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        Ok(Self::from_slice(value))
+        let arr: [u8; 32] = value.try_into().map_err(|_| DatabaseError::Decode)?;
+        Ok(Self(arr))
     }
 }
 
@@ -339,7 +350,7 @@ pub mod address_base58_stringify {
 
         // Decode the base58 string into bytes
         let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
+            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {e:?}")))?;
 
         // Ensure the byte array is exactly 20 bytes
         if bytes.len() != 20 {
@@ -490,9 +501,15 @@ pub trait DecodeHash: Sized {
 
 impl DecodeHash for H256 {
     fn from(base58_string: &str) -> Result<Self, String> {
-        FromBase58::from_base58(base58_string)
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .map(|bytes| Self::from_slice(bytes.as_slice()))
+        let bytes = FromBase58::from_base58(base58_string)
+            .map_err(|e| format!("Failed to decode from base58 {e:?}"))?;
+        let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            format!(
+                "Invalid H256 length: expected 32 bytes, got {}",
+                bytes.len()
+            )
+        })?;
+        Ok(Self(arr))
     }
 
     fn empty() -> Self {
@@ -751,6 +768,25 @@ impl<'de> Deserialize<'de> for H256List {
 // Uint <-> string HTTP/JSON serialization/deserialization
 //------------------------------------------------------------------------------
 
+/// Module containing serialization/deserialization for usize to/from a string
+pub mod string_usize {
+    use super::*;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        string_or_number_to_int(deserializer)
+    }
+
+    pub fn serialize<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
 /// Module containing serialization/deserialization for u64 to/from a string
 pub mod string_u64 {
     use super::*;
@@ -770,7 +806,7 @@ pub mod string_u64 {
     }
 }
 
-/// Module containing serialization/deserialization for Option<u64> to/from a string
+/// Module containing serialization/deserialization for `Option<u64>` to/from a string
 pub mod optional_string_u64 {
     use super::*;
 
@@ -809,6 +845,8 @@ pub mod string_u128 {
         serializer.serialize_str(&value.to_string())
     }
 }
+
+// note: U256 doesn't have a string_ serialisation mod, as it doesn't need one
 
 fn string_or_number_to_int<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
@@ -874,6 +912,42 @@ mod tests {
 
         // Assert
         assert_eq!(data, decoded);
+    }
+
+    #[test]
+    fn test_option_u256_rlp() {
+        #[derive(Debug, Eq, PartialEq, RlpEncodable, RlpDecodable)]
+        #[rlp(trailing)]
+        struct Test {
+            a: U256,
+            b: Option<U256>,
+        }
+
+        let data1 = Test {
+            a: U256::from(42_u64),
+            b: Some(U256::zero()),
+        };
+
+        let data2 = Test {
+            a: U256::from(42_u64),
+            b: None,
+        };
+
+        let mut buffer1 = vec![];
+        data1.encode(&mut buffer1);
+        let decoded = Test::decode(&mut &buffer1[..]).unwrap();
+        // Some(0) is decoded as None
+        assert_ne!(data1, decoded);
+
+        let mut buffer2 = vec![];
+        data2.encode(&mut buffer2);
+        // unequal(!) encodings
+        // note: why? seems like if we serialise a Some value it gets an additional trailing `128` on the binary
+        // note: if we really needed to have `0`, we could modify the encoding u256 uses to treat 0 as a different value
+        assert_ne!(buffer1, buffer2);
+        let decoded2 = Test::decode(&mut &buffer2[..]).unwrap();
+        // but decodes "correctly"
+        assert_eq!(decoded2, data2);
     }
 
     #[test]

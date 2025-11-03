@@ -5,13 +5,15 @@ pub mod facade;
 pub mod ingress_proofs;
 pub mod lifecycle;
 pub mod pledge_provider;
+pub mod types;
 
 pub use chunks::*;
 pub use facade::*;
+pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
-use crate::block_validation::calculate_perm_storage_total_fee;
+use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -19,27 +21,32 @@ use eyre::{eyre, OptionExt as _};
 use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
-use irys_database::{cached_data_root_by_data_root, ingress_proofs_by_data_root, SystemLedger};
-use irys_domain::{
-    get_atomic_file, BlockTreeReadGuard, CommitmentSnapshotStatus, StorageModulesReadGuard,
+use irys_database::{
+    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
 };
-use irys_primitives::CommitmentType;
+use irys_domain::{
+    get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
+    StorageModulesReadGuard,
+};
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
+use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
+use irys_types::CommitmentType;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
 };
 use irys_types::{
     storage_pricing::{
+        calculate_term_fee,
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, Base64, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{IngressProofsList, TokioServiceHandle};
+use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
@@ -56,9 +63,110 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::broadcast;
-use tokio::sync::{mpsc::UnboundedReceiver, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+
+/// Public helper to validate that a commitment transaction is sufficiently funded.
+/// Checks the current balance of the signer via the provided reth adapter and ensures it
+/// covers the total cost (value + fee) of the transaction.
+#[inline]
+pub fn validate_funding(
+    reth_adapter: &IrysRethNodeAdapter,
+    commitment_tx: &irys_types::CommitmentTransaction,
+    parent_evm_block_id: Option<BlockId>,
+) -> Result<(), TxIngressError> {
+    // Fetch the current balance of the signer
+    let balance: irys_types::U256 = reth_adapter
+        .rpc
+        .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
+        .map_err(|e| {
+            tracing::error!(
+                tx.id = %commitment_tx.id,
+                tx.signer = %commitment_tx.signer,
+                tx.error = %e,
+                "Failed to fetch balance for commitment tx"
+            );
+            TxIngressError::BalanceFetchError {
+                address: commitment_tx.signer.to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+    let required = commitment_tx.total_cost();
+
+    if balance < required {
+        tracing::warn!(
+            tx.id = %commitment_tx.id,
+            account.balance = %balance,
+            tx.required_balance = %required,
+            tx.signer = %commitment_tx.signer,
+            "Insufficient balance for commitment tx"
+        );
+        return Err(TxIngressError::Unfunded);
+    }
+
+    tracing::debug!(
+        tx.id = %commitment_tx.id,
+        account.balance = %balance,
+        tx.required_balance = %required,
+        "Funding validated for commitment tx"
+    );
+
+    Ok(())
+}
+
+/// Public helper to validate a commitment transaction's basic invariants used during
+/// block discovery and mempool selection:
+/// - fee must meet minimum requirements
+/// - account must have enough funds at the specified EVM block state (Pass None for new incoming
+///   transactions - this will validate against the current canonical tip)
+/// - value must match the commitment type rules
+#[inline]
+pub fn validate_commitment_transaction(
+    reth_adapter: &IrysRethNodeAdapter,
+    consensus: &irys_types::ConsensusConfig,
+    commitment_tx: &irys_types::CommitmentTransaction,
+    parent_evm_block_id: Option<BlockId>,
+) -> Result<(), TxIngressError> {
+    debug!(
+        tx.id = ?commitment_tx.id,
+        tx.signer = ?commitment_tx.signer,
+        "Validating commitment transaction"
+    );
+    // Fee
+    commitment_tx.validate_fee(consensus).map_err(|e| {
+        warn!(
+            tx.id = ?commitment_tx.id,
+            tx.signer = ?commitment_tx.signer,
+            tx.error = ?e,
+            "Commitment tx fee validation failed"
+        );
+        TxIngressError::from(e)
+    })?;
+
+    // Funding
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
+        warn!(
+            tx.id = ?commitment_tx.id,
+            tx.signer = ?commitment_tx.signer,
+            tx.error = ?e,
+            "Commitment tx funding validation failed"
+        );
+        e
+    })?;
+
+    // Value
+    commitment_tx.validate_value(consensus).map_err(|e| {
+        warn!(
+            tx.id = ?commitment_tx.id,
+            tx.signer = ?commitment_tx.signer,
+            tx.error = ?e,
+            "Commitment tx value validation failed"
+        );
+        TxIngressError::from(e)
+    })?;
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct Inner {
@@ -75,6 +183,7 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
+    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -87,14 +196,12 @@ pub enum MempoolServiceMessage {
         UnpackedChunk,
         oneshot::Sender<Result<(), ChunkIngressError>>,
     ),
+    IngestChunkFireAndForget(UnpackedChunk),
     IngestIngressProof(IngressProof, oneshot::Sender<Result<(), IngressProofError>>),
-    /// Ingress Pre-validated Block
-    IngestBlocks {
-        prevalidated_blocks: Vec<Arc<IrysBlockHeader>>,
-    },
+
     /// Confirm commitment tx exists in mempool
-    CommitmentTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// Ingress CommitmentTransaction into the mempool
+    CommitmentTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
+    /// Ingress CommitmentTransaction into the mempool (from API)
     ///
     /// This function performs a series of checks and validations:
     /// - Skips the transaction if it is already known to be invalid or previously processed
@@ -103,14 +210,24 @@ pub enum MempoolServiceMessage {
     /// - Processes any pending pledge transactions that depended on this commitment
     /// - Gossips the transaction to peers if accepted
     /// - Caches the transaction for unstaked signers to be reprocessed later
-    IngestCommitmentTx(
+    IngestCommitmentTxFromApi(
+        CommitmentTransaction,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// Ingress CommitmentTransaction into the mempool (from Gossip)
+    IngestCommitmentTxFromGossip(
         CommitmentTransaction,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
     /// Confirm data tx exists in mempool or database
-    DataTxExists(H256, oneshot::Sender<Result<bool, TxReadError>>),
-    /// validate and process an incoming DataTransactionHeader
-    IngestDataTx(
+    DataTxExists(H256, oneshot::Sender<Result<TxKnownStatus, TxReadError>>),
+    /// validate and process an incoming DataTransactionHeader (from API)
+    IngestDataTxFromApi(
+        DataTransactionHeader,
+        oneshot::Sender<Result<(), TxIngressError>>,
+    ),
+    /// validate and process an incoming DataTransactionHeader (from Gossip)
+    IngestDataTxFromGossip(
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
@@ -130,10 +247,13 @@ pub enum MempoolServiceMessage {
     ),
     /// Get block header from the mempool cache
     GetBlockHeader(H256, bool, oneshot::Sender<Option<IrysBlockHeader>>),
-    InsertPoAChunk(H256, Base64, oneshot::Sender<()>),
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
+    UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
+    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
+    /// Get overall mempool status and metrics
+    GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
 }
 
 impl Inner {
@@ -152,18 +272,21 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::BlockConfirmed(block) => {
-                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
+                    if let Err(e) = self.handle_block_confirmed_message(block).await {
+                        tracing::error!("Failed to handle block confirmed message: {:#}", e);
+                    }
                 }
-                MempoolServiceMessage::IngestBlocks {
-                    prevalidated_blocks,
-                } => {
-                    let _unused_response_message = self
-                        .handle_ingress_blocks_message(prevalidated_blocks)
-                        .await;
-                }
-                MempoolServiceMessage::IngestCommitmentTx(commitment_tx, response) => {
+                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
                     let response_message = self
-                        .handle_ingress_commitment_tx_message(commitment_tx)
+                        .handle_ingress_commitment_tx_message_api(commitment_tx)
+                        .await;
+                    if let Err(e) = response.send(response_message) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+                    let response_message = self
+                        .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                         .await;
                     if let Err(e) = response.send(response_message) {
                         tracing::error!("response.send() error: {:?}", e);
@@ -173,8 +296,17 @@ impl Inner {
                     let response_value: Result<(), ChunkIngressError> =
                         self.handle_chunk_ingress_message(chunk).await;
                     if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
+                        tracing::error!(
+                            "handle_chunk_ingress_message response.send() error: {:?}",
+                            e
+                        );
                     };
+                }
+                MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
+                    let result = self.handle_chunk_ingress_message(chunk).await;
+                    if let Err(e) = result {
+                        tracing::error!("handle_chunk_ingress_message error: {:?}", e);
+                    }
                 }
                 MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
                     let response_value = self.handle_get_best_mempool_txs(block_id).await;
@@ -214,26 +346,26 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::IngestDataTx(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message(tx).await;
+                MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message_api(tx).await;
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::InsertPoAChunk(block_hash, chunk_data, response) => {
-                    self.mempool_state
-                        .write()
-                        .await
-                        .prevalidated_blocks_poa
-                        .insert(block_hash, chunk_data);
-                    if let Err(e) = response.send(()) {
+                MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
+                    let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+                    if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+
                 MempoolServiceMessage::GetState(response) => {
-                    let _ = response
+                    if let Err(e) = response
                         .send(Arc::clone(&self.mempool_state))
-                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e));
+                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
+                    {
+                        tracing::error!("response.send() error: {:?}", e);
+                    }
                 }
                 MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
                     let response_value = self.handle_ingest_ingress_proof(ingress_proof);
@@ -247,8 +379,50 @@ impl Inner {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
+                MempoolServiceMessage::GetMempoolStatus(response) => {
+                    let response_value = self.handle_get_mempool_status().await;
+                    if let Err(e) = response.send(response_value) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
+                    self.stake_and_pledge_whitelist.extend(new_entries);
+                    if let Err(e) = response.send(()) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
+                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
+                    let whitelist = self.stake_and_pledge_whitelist.clone();
+                    if let Err(e) = tx.send(whitelist) {
+                        tracing::error!("response.send() error: {:?}", e);
+                    };
+                }
             }
             Ok(())
+        })
+    }
+
+    async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
+        let state = self.mempool_state.read().await;
+
+        // Calculate total data size
+        let data_tx_total_size: u64 = state
+            .valid_submit_ledger_tx
+            .values()
+            .map(|tx| tx.data_size)
+            .sum();
+
+        let mempool_config = &self.config.node_config.consensus_config().mempool;
+
+        Ok(MempoolStatus {
+            data_tx_count: state.valid_submit_ledger_tx.len(),
+            commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
+            pending_chunks_count: state.pending_chunks.len(),
+            pending_pledges_count: state.pending_pledges.len(),
+            recent_valid_tx_count: state.recent_valid_tx.len(),
+            recent_invalid_tx_count: state.recent_invalid_tx.len(),
+            data_tx_total_size,
+            config: mempool_config.clone(),
         })
     }
 
@@ -286,7 +460,7 @@ impl Inner {
         }
     }
 
-    #[instrument(skip(self), fields(parent_block_id = ?parent_evm_block_id), err)]
+    #[instrument(skip(self), fields(parent_block.id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
         &mut self,
         parent_evm_block_id: Option<BlockId>,
@@ -354,8 +528,8 @@ impl Inner {
             // pledge commitments when their associated stake commitment is unfunded
             if !has_funds {
                 debug!(
-                    signer = ?signer,
-                    balance = ?balance,
+                    tx.signer = ?signer,
+                    account.balance = ?balance,
                     "Transaction funding check failed"
                 );
                 unfunded_address.insert(signer);
@@ -395,9 +569,9 @@ impl Inner {
         };
 
         info!(
-            head_height = last_block.height,
-            block_hash = ?last_block.block_hash,
-            chain_length = canonical.len(),
+            chain.head_height = last_block.height,
+            chain.head_hash = ?last_block.block_hash,
+            chain.canonical_length = canonical.len(),
             "Starting mempool transaction selection"
         );
 
@@ -417,16 +591,7 @@ impl Inner {
         let mut sorted_commitments = mempool_state_guard
             .valid_commitment_tx
             .values()
-            .flat_map(|txs| {
-                txs.iter()
-                    .filter(|tx| {
-                        matches!(
-                            tx.commitment_type,
-                            CommitmentType::Stake | CommitmentType::Pledge { .. }
-                        )
-                    })
-                    .cloned()
-            })
+            .flat_map(|txs| txs.iter().cloned())
             .collect::<Vec<_>>();
 
         // Sort all commitments according to our priority rules
@@ -438,16 +603,22 @@ impl Inner {
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
                 debug!(
-                    tx_id = ?tx.id,
-                    commitment_type = ?tx.commitment_type,
-                    signer = ?tx.signer,
+                    tx.id = ?tx.id,
+                    tx.commitment_type = ?tx.commitment_type,
+                    tx.signer = ?tx.signer,
                     "Skipping already confirmed commitment transaction"
                 );
                 continue;
             }
 
-            // Check funding before simulation
-            if !check_funding(tx) {
+            // Full validation (fee, funding at parent block, value) before simulation
+            if let Err(error) = validate_commitment_transaction(
+                &self.reth_node_adapter,
+                &self.config.consensus,
+                tx,
+                parent_evm_block_id,
+            ) {
+                tracing::warn!(tx.error = ?error, "rejecting commitment tx");
                 continue;
             }
 
@@ -462,9 +633,9 @@ impl Inner {
             if matches!(tx.commitment_type, CommitmentType::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer);
                 debug!(
-                    tx_id = ?tx.id,
-                    signer = ?tx.signer,
-                    is_staked = is_staked,
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer,
+                    tx.is_staked = is_staked,
                     "Checking stake status for commitment tx"
                 );
                 if is_staked {
@@ -479,9 +650,9 @@ impl Inner {
                 // skip commitments that would not be accepted
                 if simulation != CommitmentSnapshotStatus::Accepted {
                     warn!(
-                        commitment_type = ?tx.commitment_type,
-                        tx_id = ?tx.id,
-                        simulation_status = ?simulation,
+                        tx.commitment_type = ?tx.commitment_type,
+                        tx.id = ?tx.id,
+                        tx.simulation_status = ?simulation,
                         "Commitment tx rejected by simulation"
                     );
                     continue;
@@ -489,12 +660,12 @@ impl Inner {
             }
 
             debug!(
-                tx_id = ?tx.id,
-                commitment_type = ?tx.commitment_type,
-                signer = ?tx.signer,
-                fee = ?tx.total_cost(),
-                selected_count = commitment_tx.len() + 1,
-                max_commitments,
+                tx.id = ?tx.id,
+                tx.commitment_type = ?tx.commitment_type,
+                tx.signer = ?tx.signer,
+                tx.fee = ?tx.total_cost(),
+                tx.selected_count = commitment_tx.len() + 1,
+                tx.max_commitments = max_commitments,
                 "Adding commitment transaction to block"
             );
             commitment_tx.push(tx.clone());
@@ -520,10 +691,10 @@ impl Inner {
                         }
                     });
             info!(
-                selected_commitments = commitment_tx.len(),
-                stake_txs = commitment_summary.0,
-                pledge_txs = commitment_summary.1,
-                max_allowed = max_commitments,
+                commitment_selection.selected_commitments = commitment_tx.len(),
+                commitment_selection.stake_txs = commitment_summary.0,
+                commitment_selection.pledge_txs = commitment_summary.1,
+                commitment_selection.max_allowed = max_commitments,
                 "Completed commitment transaction selection"
             );
         }
@@ -541,7 +712,7 @@ impl Inner {
 
         // Apply block size constraint and funding checks to data transactions
         let mut submit_tx = Vec::new();
-        let max_data_txs = self
+        let max_data_txs: usize = self
             .config
             .node_config
             .consensus_config()
@@ -556,8 +727,8 @@ impl Inner {
             // Validate fees based on ledger type
             let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
                 trace!(
-                    tx_id = ?tx.id,
-                    ledger_id = tx.ledger_id,
+                    tx.id = ?tx.id,
+                    tx.ledger_id = tx.ledger_id,
                     "Skipping tx: invalid ledger ID"
                 );
                 continue;
@@ -583,9 +754,9 @@ impl Inner {
                     // Validate term fee
                     if tx.term_fee < expected_term_fee {
                         trace!(
-                            tx_id = ?tx.id,
-                            actual_term_fee = ?tx.term_fee,
-                            expected_term_fee = ?expected_term_fee,
+                            tx.id = ?tx.id,
+                            tx.actual_term_fee = ?tx.term_fee,
+                            tx.expected_term_fee = ?expected_term_fee,
                             "Skipping Publish tx: insufficient term_fee"
                         );
                         continue;
@@ -595,8 +766,8 @@ impl Inner {
                     let Some(perm_fee) = tx.perm_fee else {
                         // Missing perm_fee for Publish ledger transaction is invalid
                         warn!(
-                            tx_id = ?tx.id,
-                            signer = ?tx.signer,
+                            tx.id = ?tx.id,
+                            tx.signer = ?tx.signer,
                             "Invalid Publish tx: missing perm_fee"
                         );
                         // todo: add to list of invalid txs because all publish txs must have perm fee present
@@ -604,10 +775,38 @@ impl Inner {
                     };
                     if perm_fee < expected_perm_fee.amount {
                         trace!(
-                            tx_id = ?tx.id,
-                            actual_perm_fee = ?perm_fee,
-                            expected_perm_fee = ?expected_perm_fee.amount,
+                            tx.id = ?tx.id,
+                            tx.actual_perm_fee = ?perm_fee,
+                            tx.expected_perm_fee = ?expected_perm_fee.amount,
                             "Skipping Publish tx: insufficient perm_fee"
+                        );
+                        continue;
+                    }
+
+                    // Mirror API-only structural checks to filter gossip txs that would fail API validation
+                    if TermFeeCharges::new(tx.term_fee, &self.config.node_config.consensus_config())
+                        .is_err()
+                    {
+                        trace!(
+                            tx.id = ?tx.id,
+                            tx.term_fee = ?tx.term_fee,
+                            "Skipping Publish tx: invalid term fee structure"
+                        );
+                        continue;
+                    }
+
+                    if PublishFeeCharges::new(
+                        perm_fee,
+                        tx.term_fee,
+                        &self.config.node_config.consensus_config(),
+                    )
+                    .is_err()
+                    {
+                        trace!(
+                            tx.id = ?tx.id,
+                            tx.perm_fee = ?perm_fee,
+                            tx.term_fee = ?tx.term_fee,
+                            "Skipping Publish tx: invalid perm fee structure"
                         );
                         continue;
                     }
@@ -625,18 +824,18 @@ impl Inner {
             }
 
             trace!(
-                tx_id = ?tx.id,
-                signer = ?tx.signer(),
-                fee = ?tx.total_cost(),
+                tx.id = ?tx.id,
+                tx.signer = ?tx.signer(),
+                tx.fee = ?tx.total_cost(),
                 "Checking funding for data transaction"
             );
             if check_funding(&tx) {
                 trace!(
-                    tx_id = ?tx.id,
-                    signer = ?tx.signer(),
-                    fee = ?tx.total_cost(),
-                    selected_count = submit_tx.len() + 1,
-                    max_data_txs,
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.selected_count = submit_tx.len() + 1,
+                    tx.max_data_txs = max_data_txs,
                     "Data transaction passed funding check"
                 );
                 submit_tx.push(tx);
@@ -645,17 +844,19 @@ impl Inner {
                 }
             } else {
                 trace!(
-                    tx_id = ?tx.id,
-                    signer = ?tx.signer(),
-                    fee = ?tx.total_cost(),
-                    reason = "insufficient_funds",
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.validation_failed_reason = "insufficient_funds",
                     "Data transaction failed funding check"
                 );
             }
         }
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
-        let publish_txs_and_proofs = self.get_publish_txs_and_proofs().await?;
+        let publish_txs_and_proofs = self
+            .get_publish_txs_and_proofs(&canonical, &submit_tx)
+            .await?;
 
         // Calculate total fees and log final summary
         let total_fee_collected: U256 = submit_tx
@@ -670,11 +871,11 @@ impl Inner {
             );
 
         info!(
-            commitment_txs = commitment_tx.len(),
-            data_txs = submit_tx.len(),
-            publish_txs = publish_txs_and_proofs.txs.len(),
-            total_fee_collected = ?total_fee_collected,
-            unfunded_addresses = unfunded_address.len(),
+            mempool_selected.commitment_txs = commitment_tx.len(),
+            mempool_selected.data_txs = submit_tx.len(),
+            mempool_selected.publish_txs = publish_txs_and_proofs.txs.len(),
+            mempool_selected.total_fee_collected = ?total_fee_collected,
+            mempool_selected.unfunded_addresses = unfunded_address.len(),
             "Mempool transaction selection completed"
         );
 
@@ -688,14 +889,14 @@ impl Inner {
             let rejection_rate = ((total_available - total_selected) * 100) / total_available;
             if rejection_rate > REJECTION_RATE_THRESHOLD {
                 warn!(
-                    rejection_rate = rejection_rate,
-                    total_available,
-                    total_selected,
-                    commitments_available = total_commitments_available,
-                    commitments_selected = commitment_tx.len(),
-                    data_available = total_data_available,
-                    data_selected = submit_tx.len(),
-                    unfunded_addresses = unfunded_address.len(),
+                    mempool_selected.rejection_rate = rejection_rate,
+                    mempool_selected.total_available = total_available,
+                    mempool_selected.total_selected = total_selected,
+                    mempool_selected.commitments_available = total_commitments_available,
+                    mempool_selected.commitments_selected = commitment_tx.len(),
+                    mempool_selected.data_available = total_data_available,
+                    mempool_selected.data_selected = submit_tx.len(),
+                    mempool_selected.unfunded_addresses = unfunded_address.len(),
                     "High transaction rejection rate detected"
                 );
             }
@@ -709,7 +910,11 @@ impl Inner {
         })
     }
 
-    pub async fn get_publish_txs_and_proofs(&self) -> Result<PublishLedgerWithTxs, eyre::Error> {
+    pub async fn get_publish_txs_and_proofs(
+        &self,
+        canonical: &[BlockTreeEntry],
+        submit_tx: &[DataTransactionHeader],
+    ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
@@ -733,18 +938,21 @@ impl Inner {
 
             let mut publish_txids: Vec<H256> = Vec::new();
 
-            // Loop tough all the data_roots with ingress proofs and find corresponding transaction ids
+            // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
             for data_root in ingress_proofs.keys() {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
                     let txids = cached_data_root.txid_set;
-                    debug!(tx_ids = ?txids, "Publish candidates");
+                    debug!(tx.ids = ?txids, "Publish candidates");
                     publish_txids.extend(txids)
                 }
             }
 
-            // Loop though all the pending tx to see which haven't been promoted
+            // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
+
+            // Note: get_data_tx_in_parallel_inner() read from both the mempool and
+            //       db as publishing can happen to a tx that is no longer in the mempool
             // TODO: improve this
             let mut tx_headers = get_data_tx_in_parallel_inner(
                 publish_txids,
@@ -760,12 +968,19 @@ impl Inner {
             .await
             .unwrap_or(vec![]);
 
-            // so the resulting publish_txs & proofs are sorted
+            // Sort the resulting publish_txs & proofs
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
+
+            // reduce down the canonical chain to the txs in the submit ledger
+            let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {
+                acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
+                acc
+            });
+            let ro_tx = self.irys_db.tx()?;
 
             for tx_header in &tx_headers {
                 debug!(
-                    "Processing candidate tx {} {:#?}",
+                    "Processing publish candidate tx {} {:#?}",
                     &tx_header.id, &tx_header
                 );
                 let is_promoted = tx_header.promoted_height.is_some();
@@ -776,41 +991,167 @@ impl Inner {
                         "Publish candidate {} is already promoted? {}",
                         &tx_header.id, &is_promoted
                     );
-                } else {
-                    // If it's not promoted, validate the proofs
-
-                    // Get the proofs for this tx
-                    let proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
-
-                    let mut tx_proofs = Vec::new();
-
-                    // Check for the correct number of ingress proofs
-                    if (proofs.len() as u64) < self.config.consensus.number_of_ingress_proofs_total
-                    {
-                        // Not enough ingress proofs to promote this tx
-                        info!(
-                            "Not promoting tx {} - insufficient proofs (got {} wanted {})",
-                            &tx_header.id,
-                            &proofs.len(),
-                            self.config.consensus.number_of_ingress_proofs_total
-                        );
-                        continue;
-                    } else {
-                        // Collect enough ingress proofs for promotion, but no more
-                        for i in 0..self.config.consensus.number_of_ingress_proofs_total {
-                            tx_proofs.push(proofs[i as usize].1.proof.clone());
+                    continue;
+                }
+                // check for previous submit inclusion
+                // we do this by checking if the tx is in the block tree or database.
+                // if it is, we know it could've only gotten there by being included in the submit ledger.
+                // if it's not, we also check if the submit ledger for this block contains the tx (single-block promotion). if it does, we also promote it.
+                if !submit_txs_from_canonical.contains(&tx_header.id) {
+                    // check for single-block promotion
+                    if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
+                        // check database
+                        if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
+                            // no previous inclusion
+                            warn!(
+                                "Unable to find previous submit inclusion for publish candidate {}",
+                                &tx_header.id
+                            );
+                            continue;
                         }
-
-                        // Update the lists for the publish ledger txid and tx_proofs share an index
-                        publish_txs.push(tx_header.clone());
-                        publish_proofs.append(&mut tx_proofs);
                     }
                 }
+
+                // If it's not promoted, validate the proofs
+
+                // Get all the proofs for this tx
+                let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+
+                // Check for minimum number of ingress proofs
+                let total_miners = self
+                    .block_tree_read_guard
+                    .read()
+                    .canonical_epoch_snapshot()
+                    .commitment_state
+                    .stake_commitments
+                    .len();
+
+                // Take the smallest value, the configured total proofs count or the number
+                // of staked miners that can produce a valid proof.
+                let proofs_per_tx = std::cmp::min(
+                    self.config.consensus.number_of_ingress_proofs_total as usize,
+                    total_miners,
+                );
+
+                if all_proofs.len() < proofs_per_tx {
+                    info!(
+                        "Not promoting tx {} - insufficient proofs (got {} wanted {})",
+                        &tx_header.id,
+                        &all_proofs.len(),
+                        proofs_per_tx
+                    );
+                    continue;
+                }
+
+                // Convert to IngressProof vector for assignment checking
+                let all_tx_proofs: Vec<IngressProof> = all_proofs
+                    .iter()
+                    .map(|(_, proof_entry)| proof_entry.proof.clone())
+                    .collect();
+
+                // Get assigned and unassigned proofs using the existing utility function
+                let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
+                    &all_tx_proofs,
+                    tx_header,
+                    |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
+                    &self.block_tree_read_guard,
+                    &self.irys_db,
+                    &self.config,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            "Failed to get assigned proofs for tx {}: {}",
+                            &tx_header.id, e
+                        );
+                        continue;
+                    }
+                };
+
+                // Calculate expected assigned proofs, clamping to available miners
+                let mut expected_assigned_proofs =
+                    self.config
+                        .consensus
+                        .number_of_ingress_proofs_from_assignees as usize;
+
+                if assigned_miners < expected_assigned_proofs {
+                    warn!(
+                        "Clamping expected_assigned_proofs from {} to {} for tx {}",
+                        expected_assigned_proofs, assigned_miners, &tx_header.id
+                    );
+                    expected_assigned_proofs = assigned_miners;
+                }
+
+                // Check if we have enough assigned proofs
+                if assigned_proofs.len() < expected_assigned_proofs {
+                    info!(
+                        "Not promoting tx {} - insufficient assigned proofs (got {} wanted {})",
+                        &tx_header.id,
+                        assigned_proofs.len(),
+                        expected_assigned_proofs
+                    );
+                    continue;
+                }
+
+                // Separate assigned and unassigned proofs
+                let assigned_proof_set: HashSet<_> = assigned_proofs
+                    .iter()
+                    .map(|p| &p.proof.0) // Use signature as unique identifier
+                    .collect();
+
+                let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
+                    .iter()
+                    .filter(|p| !assigned_proof_set.contains(&p.proof.0))
+                    .cloned()
+                    .collect();
+
+                // Build the final proof list
+                let mut final_proofs = Vec::new();
+
+                // First, add assigned proofs up to the total network limit
+                // Use all available assigned proofs, but don't exceed the network total
+                let total_network_limit =
+                    self.config.consensus.number_of_ingress_proofs_total as usize;
+                let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
+                final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
+
+                // Then fill remaining slots with unassigned proofs if needed
+                let remaining_slots = total_network_limit - final_proofs.len();
+                if remaining_slots > 0 {
+                    let unassigned_to_use = std::cmp::min(unassigned_proofs.len(), remaining_slots);
+                    final_proofs.extend_from_slice(&unassigned_proofs[..unassigned_to_use]);
+                }
+
+                // Final check - do we have enough total proofs?
+                if final_proofs.len()
+                    < self.config.consensus.number_of_ingress_proofs_total as usize
+                {
+                    info!(
+                            "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                            &tx_header.id,
+                            final_proofs.len(),
+                            self.config.consensus.number_of_ingress_proofs_total
+                        );
+                    continue;
+                }
+
+                // Success - add this transaction and its proofs
+                publish_txs.push(tx_header.clone());
+                publish_proofs.extend(final_proofs.clone()); // Clone to avoid moving final_proofs
+
+                info!(
+                    "Promoting tx {} with {} assigned proofs and {} total proofs",
+                    &tx_header.id,
+                    assigned_to_use, // Show actual assigned proofs used (capped by network limit)
+                    final_proofs.len()
+                );
             }
         }
 
         let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
-        debug!(?txs, "Publish transactions");
+        debug!(tx.ids = ?txs, "Publish transactions");
 
         debug!("Processing Publish transactions {:#?}", &publish_txs);
 
@@ -825,23 +1166,21 @@ impl Inner {
     }
 
     /// return block header from mempool, if found
+    /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
+    #[expect(clippy::unused_async)]
     pub async fn handle_get_block_header_message(
         &self,
         block_hash: H256,
         include_chunk: bool,
     ) -> Option<IrysBlockHeader> {
-        let guard = self.mempool_state.read().await;
+        let guard = self.block_tree_read_guard.read();
+        let mut block = guard.get_block(&block_hash).cloned();
 
-        //read block from mempool
-        let mut block = guard.prevalidated_blocks.get(&block_hash).cloned();
-
-        // retrieve poa from mempool and include in returned block
-        if include_chunk {
+        if !include_chunk {
             if let Some(ref mut b) = block {
-                b.poa.chunk = guard.prevalidated_blocks_poa.get(&block_hash).cloned();
+                b.poa.chunk = None
             }
         }
-
         block
     }
 
@@ -853,15 +1192,7 @@ impl Inner {
     ) -> Result<u64, TxIngressError> {
         // check the mempool, then block tree, then DB
         Ok(
-            if let Some(hdr) = self
-                .mempool_state
-                .read()
-                .await
-                .prevalidated_blocks
-                .get(&anchor)
-            {
-                hdr.height
-            } else if let Some(height) = {
+            if let Some(height) = {
                 // in a block so rust doesn't complain about it being held across an await point
                 // I suspect if let Some desugars to something that lint doesn't like
                 let guard = self.block_tree_read_guard.read();
@@ -883,10 +1214,10 @@ impl Inner {
 
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
-    // if the anchor is valid, returns the tx back with the height that made the anchor canonical (i.e the block height)
-    #[instrument(skip_all, fields(tx_id = %tx.id(), anchor = %tx.anchor()))]
+    // if the anchor is valid, returns anchor block height
+    #[instrument(skip_all, fields(tx.id = %tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_anchor(
-        &mut self,
+        &self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
         let tx_id = tx.id();
@@ -916,26 +1247,6 @@ impl Inner {
             );
 
             return Err(TxIngressError::InvalidAnchor);
-        }
-    }
-
-    /// ingest a block into the mempool
-    async fn handle_ingress_blocks_message(&self, prevalidated_blocks: Vec<Arc<IrysBlockHeader>>) {
-        let mut mempool_state_guard = self.mempool_state.write().await;
-        for block in prevalidated_blocks {
-            // insert poa into mempool
-            if let Some(chunk) = &block.poa.chunk {
-                mempool_state_guard
-                    .prevalidated_blocks_poa
-                    .insert(block.block_hash, chunk.clone());
-            };
-
-            // insert block into mempool without poa
-            let mut block_without_chunk = (*block).clone();
-            block_without_chunk.poa.chunk = None;
-            mempool_state_guard
-                .prevalidated_blocks
-                .insert(block.block_hash, (block_without_chunk).clone());
         }
     }
 
@@ -994,21 +1305,33 @@ impl Inner {
                 .await;
 
         for (_txid, commitment_tx) in recovered.commitment_txs {
-            let _ = self
-                .handle_ingress_commitment_tx_message(commitment_tx)
+            if let Err(e) = self
+                .handle_ingress_commitment_tx_message_gossip(commitment_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Commitment tx ingress error during mempool restore from disk")
-                });
+                })
+            {
+                tracing::warn!(
+                    "Commitment tx ingress error during mempool restore from disk: {:?}",
+                    e
+                );
+            }
         }
 
         for (_txid, storage_tx) in recovered.storage_txs {
-            let _ = self
-                .handle_data_tx_ingress_message(storage_tx)
+            if let Err(e) = self
+                .handle_data_tx_ingress_message_gossip(storage_tx)
                 .await
                 .inspect_err(|_| {
                     tracing::warn!("Storage tx ingress error during mempool restore from disk")
-                });
+                })
+            {
+                tracing::warn!(
+                    "Storage tx ingress error during mempool restore from disk: {:?}",
+                    e
+                );
+            }
         }
 
         self.wipe_blacklists().await;
@@ -1019,6 +1342,7 @@ impl Inner {
     pub async fn wipe_blacklists(&mut self) {
         let mut write = self.mempool_state.write().await;
         write.recent_invalid_tx.clear();
+        write.recent_invalid_payload_fingerprints.clear();
     }
 
     /// Helper that opens a read-only database transaction from the Irys mempool state.
@@ -1034,29 +1358,47 @@ impl Inner {
     }
 
     // Helper to verify signature
-    #[instrument(skip_all, fields(tx_id = %tx.id()))]
-    pub async fn validate_signature<T: IrysTransactionCommon>(
+    #[instrument(skip_all, fields(tx.id = %tx.id()))]
+    pub async fn validate_signature<
+        T: irys_types::versioning::Signable
+            + IrysTransactionCommon
+            + std::fmt::Debug
+            + serde::Serialize,
+    >(
         &mut self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
-            info!("Tx {} signature is valid", &tx.id());
+            info!(
+                "Tx {} signature is valid for signer {}",
+                &tx.id(),
+                &tx.signer()
+            );
             Ok(())
         } else {
-            let mempool_state = &self.mempool_state;
-
-            // TODO: we need to use the hash of the *entire* tx struct (including ID and signature)
-            // to prevent malformed txs from poisoning legitimate transactions
-
-            // re-derive the tx_id to ensure we don't get poisoned
-            // let tx_id = H256::from(alloy_primitives::keccak256(tx.signature().as_bytes()).0);
-
-            mempool_state
+            // Record invalid payload fingerprint derived from both the signature and the
+            // signing preimage (prehash). This avoids poisoning legitimate transactions that
+            // share the same signature bytes but differ in signed content.
+            let fingerprint = tx.fingerprint();
+            self.mempool_state
                 .write()
                 .await
-                .recent_invalid_tx
-                .put(tx.id(), ());
-            warn!("Tx {} signature is invalid", &tx.id());
+                .recent_invalid_payload_fingerprints
+                .put(fingerprint, ());
+            warn!(
+                "Tx {} signature is invalid (fingerprint {:?})",
+                &tx.id(),
+                fingerprint
+            );
+            debug!(
+                target = "invalid_tx_header_json",
+                "Invalid tx: {:#}",
+                &serde_json::to_string(&tx).unwrap_or_else(|e| format!(
+                    // fallback to debug printing the header
+                    "error serializing block header: {}\n{:?}",
+                    &e, &tx
+                ))
+            );
             Err(TxIngressError::InvalidSignature)
         }
     }
@@ -1101,15 +1443,31 @@ impl Inner {
     }
 
     /// Calculate the expected term fee for temporary storage
-    /// This matches the calculation in the pricing API
-    /// TODO: THIS IS JUST PLACEHOLDER IMPLEMENTATION - should be updated with proper fee calculation
+    /// This matches the calculation in the pricing API and uses dynamic epoch count
     pub fn calculate_term_storage_fee(
         &self,
-        _bytes_to_store: u64,
-        _ema: &Arc<irys_domain::EmaSnapshot>,
+        bytes_to_store: u64,
+        ema: &Arc<irys_domain::EmaSnapshot>,
     ) -> Result<U256, TxIngressError> {
-        // Placeholder implementation matching price.rs
-        Ok(U256::from(1_000_000_000))
+        // Get the latest block height to calculate next block's expires
+        let latest_height = self.get_latest_block_height()?;
+        let next_block_height = latest_height + 1;
+
+        // Calculate expires for the next block using the shared utility
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            next_block_height,
+            self.config.consensus.epoch.num_blocks_in_epoch,
+            self.config.consensus.epoch.submit_ledger_epoch_length,
+        );
+
+        // Calculate term fee using the storage pricing module
+        calculate_term_fee(
+            bytes_to_store,
+            epochs_for_storage,
+            &self.config.consensus,
+            ema.ema_for_public_pricing(),
+        )
+        .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
 }
 
@@ -1121,14 +1479,16 @@ pub struct MempoolState {
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
     /// The miner's signer instance, used to sign ingress proofs
     pub recent_invalid_tx: LruCache<H256, ()>,
+    /// Tracks recent invalid payload fingerprints (e.g., keccak(prehash + signature)) for signature-invalid payloads
+    /// Prevents poisoning legitimate txids via mismatched id/signature pairs
+    pub recent_invalid_payload_fingerprints: LruCache<H256, ()>,
     /// Tracks recent valid txids from either data or commitment
     pub recent_valid_tx: LruCache<H256, ()>,
+    /// Tracks recently processed chunk hashes to prevent re-gossip
+    pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
-    /// pre-validated blocks that have passed pre-validation in discovery service
-    pub prevalidated_blocks: HashMap<H256, IrysBlockHeader>,
-    pub prevalidated_blocks_poa: HashMap<H256, Base64>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
@@ -1137,12 +1497,14 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
-        prevalidated_blocks: HashMap::new(),
-        prevalidated_blocks_poa: HashMap::new(),
         valid_submit_ledger_tx: BTreeMap::new(),
         valid_commitment_tx: BTreeMap::new(),
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
+        recent_invalid_payload_fingerprints: LruCache::new(
+            NonZeroUsize::new(config.max_invalid_items).unwrap(),
+        ),
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
+        recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
     }
@@ -1204,6 +1566,9 @@ pub enum TxIngressError {
     /// Commitment transaction validation error
     #[error("Commitment validation failed: {0}")]
     CommitmentValidationError(#[from] CommitmentValidationError),
+    /// Failed to fetch account balance from RPC
+    #[error("Failed to fetch balance for address {address}: {reason}")]
+    BalanceFetchError { address: String, reason: String },
 }
 
 impl TxIngressError {
@@ -1274,12 +1639,16 @@ impl MempoolService {
 
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
-        let mempool_config = &config.consensus.mempool;
+        let mempool_config = &config.mempool;
         let mempool_state = create_state(mempool_config);
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
+        let initial_stake_and_pledge_whitelist = config
+            .node_config
+            .initial_stake_and_pledge_whitelist
+            .clone();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -1288,6 +1657,9 @@ impl MempoolService {
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
                 );
+
+                let mut stake_and_pledge_whitelist = HashSet::new();
+                stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
@@ -1304,6 +1676,7 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
+                        stake_and_pledge_whitelist,
                     },
                 };
                 mempool_service
@@ -1365,7 +1738,7 @@ impl MempoolService {
             }
         }
 
-        tracing::debug!(amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }

@@ -13,9 +13,24 @@ use serde::{Deserialize, Serialize};
 use std::{fmt::Display, str::FromStr};
 use tokio::sync::oneshot;
 
+pub async fn get_block_with_poa(
+    state: web::Data<ApiState>,
+    path: web::Path<String>,
+) -> Result<Json<CombinedBlockHeader>, ApiError> {
+    get_block(state, path, true).await
+}
+
+pub async fn get_block_without_poa(
+    state: web::Data<ApiState>,
+    path: web::Path<String>,
+) -> Result<Json<CombinedBlockHeader>, ApiError> {
+    get_block(state, path, false).await
+}
+
 pub async fn get_block(
     state: web::Data<ApiState>,
     path: web::Path<String>,
+    with_poa: bool,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let tag_param = BlockParam::from_str(&path).map_err(|_| ApiError::ErrNoId {
         id: path.to_string(),
@@ -54,24 +69,27 @@ pub async fn get_block(
                 .map(|b| b.block_hash)?
         }
         BlockParam::Finalized | BlockParam::Pending => {
-            return Err(ApiError::Internal {
-                err: String::from("Unsupported tag"),
+            return Err(ApiError::NotImplemented {
+                feature: format!("Block tag '{tag_param}' is not yet supported"),
             });
         }
         BlockParam::Hash(hash) => hash,
     };
-    get_block_by_hash(&state, block_hash).await
+    get_block_by_hash(&state, block_hash, with_poa).await
 }
 
 async fn get_block_by_hash(
     state: &web::Data<ApiState>,
     block_hash: H256,
+    with_poa: bool,
 ) -> Result<Json<CombinedBlockHeader>, ApiError> {
     let irys_header = {
         let (tx, rx) = oneshot::channel();
         state
             .mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, true, tx))
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block_hash, with_poa, tx,
+            ))
             .expect("expected send to mempool to succeed");
         let mempool_response = rx.await.map_err(|e| {
             tracing::error!("Mempool response error: {}", e);
@@ -83,7 +101,7 @@ async fn get_block_by_hash(
             Some(h) => h,
             None => state
                 .db
-                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, true))
+                .view_eyre(|tx| block_header_by_hash(tx, &block_hash, with_poa))
                 .map_err(|e| {
                     tracing::error!("DB error when reading block header: {}", e);
                     ApiError::Internal {
@@ -133,7 +151,7 @@ async fn get_block_by_hash(
     Ok(web::Json(cbh))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum BlockParam {
     Latest,
@@ -156,7 +174,18 @@ impl FromStr for BlockParam {
                     return Ok(Self::BlockHeight(block_height));
                 }
                 match s.from_base58() {
-                    Ok(v) => Ok(Self::Hash(H256::from_slice(v.as_slice()))),
+                    Ok(v) => {
+                        let arr: [u8; 32] = match v.as_slice().try_into() {
+                            Ok(arr) => arr,
+                            Err(_) => {
+                                return Err(format!(
+                                    "Invalid block tag parameter: expected 32 bytes, got {}",
+                                    v.len()
+                                ));
+                            }
+                        };
+                        Ok(Self::Hash(H256(arr)))
+                    }
                     Err(_) => Err("Invalid block tag parameter".to_string()),
                 }
             }
@@ -170,7 +199,7 @@ impl Display for BlockParam {
             Self::Latest => write!(f, "latest"),
             Self::Pending => write!(f, "pending"),
             Self::Finalized => write!(f, "finalized"),
-            Self::BlockHeight(height) => write!(f, "{}", height),
+            Self::BlockHeight(height) => write!(f, "{height}"),
             Self::Hash(hash) => write!(f, "{}", hash.0.to_base58()),
         }
     }
@@ -196,7 +225,7 @@ impl Display for BlockParam {
 //     use tempfile::tempdir;
 
 //     #[ignore = "broken due to reth provider/block tree dependency"]
-//     #[actix_web::test]
+//     #[tokio::test]
 //     async fn test_get_block() -> eyre::Result<()> {
 //         //std::env::set_var("RUST_LOG", "debug");
 //         let _ = env_logger::try_init();
@@ -268,7 +297,7 @@ impl Display for BlockParam {
 //     }
 
 //     #[ignore = "broken due to reth provider/block tree dependency"]
-//     #[actix_web::test]
+//     #[tokio::test]
 //     async fn test_get_non_existent_block() -> Result<(), Error> {
 //         let path = tempdir().unwrap();
 //         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();

@@ -9,8 +9,8 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 //==============================================================================
 // IrysSignature
 //------------------------------------------------------------------------------
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary)]
-/// Wrapper newtype around [`Signature`], with enforced [`Parity::NonEip155`] parity
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary, Hash)]
+/// Wrapper newtype around [`Signature`], with enforced boolean parity
 pub struct IrysSignature(Signature);
 
 // TODO: eventually implement ERC-2098 to save a byte
@@ -30,11 +30,15 @@ impl IrysSignature {
         self.0
     }
 
-    /// Validates this signature by performing signer recovery  
+    /// Validates this signature by performing signer recovery
     /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
     pub fn validate_signature(&self, prehash: [u8; 32], expected_address: Address) -> bool {
-        recover_signer(&self.0, prehash.into())
+        self.recover_signer(prehash)
             .is_ok_and(|recovered_address| expected_address == recovered_address)
+    }
+
+    pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<Address> {
+        Ok(recover_signer(&self.0, prehash.into())?)
     }
 }
 
@@ -111,8 +115,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
 
         // Decode the base58 string into bytes
         let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| format!("Failed to decode from base58 {:?}", e))
-            .expect("base58 should prase");
+            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
 
         // Ensure the byte array is exactly 65 bytes (r, s, and v values of the signature)
         if bytes.len() != 65 {
@@ -183,10 +186,10 @@ mod tests {
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
     // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0xe735ff5a5e0eefdf5c5298f919ff5b94f35804f44c5db842db078dcbc7b5d499544cfbf8ffcb4113dea13433d5a739f354cb4551cf5384c9e9bb290d39d39b891b";
-    // BS58 (JSON, hence the escaped quotes) encoded signature
+    const SIG_HEX: &str = "0x2b80b5cb509d4a1b7cad4f68c44cc13b2e985c7101fe5a38668bcfeb1e79f01351e2c570ba367698228b52785b0375e3579d7a9ceef995116a25c565efa820281c";
+    // Base58 encoding of the signature (for version=1 signing preimage)
     const SIG_BS58: &str =
-        "\"MQQ4dsjqX4iU5F34h6SSLKE1YVHV9Hk2XBnJCprchLdmG71dq1nZStc12oMc7bHjnFo6emHQ1oDpnkCZQEShGDQwL\"";
+        "4qfCDRG4yFjuFebpicpPk4baWjw7gtHWoBb9S3HRzLY942sQmwv216dGWPXABWN9s2n8hy1XiLNu1VmarHLDUe8VH";
 
     // spellchecker:on
 
@@ -200,22 +203,22 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = DataTransactionHeader {
+        let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: Address::ZERO,
             data_root: H256::from([3_u8; 32]),
-            data_size: 1024,
+            data_size: 242,
             header_size: 0,
-            term_fee: U256::from(100_u64),
-            perm_fee: Some(U256::from(1_u64)),
+            term_fee: U256::from(99_u64),
+            perm_fee: Some(U256::from(98_u64)),
             ledger_id: 0,
-            bundle_format: Some(0),
+            bundle_format: None,
             chain_id: testing_config.chain_id,
-            version: 0,
             promoted_height: None,
             signature: Default::default(),
-        };
+        });
+
         let transaction = DataTransaction {
             header: original_header,
             ..Default::default()
@@ -235,24 +238,24 @@ mod tests {
 
         assert_eq!(transaction.header.signature, signature2);
 
-        // serde-json
+        // serde-json base58 roundtrip
         let ser = serde_json::to_string(&transaction.header.signature)?;
         let de_ser: IrysSignature = serde_json::from_str(&ser)?;
         assert_eq!(transaction.header.signature, de_ser);
 
-        // assert parity against hardcoded signatures
-        assert_eq!(SIG_BS58, ser);
-        let decoded_js_sig = Signature::try_from(&hex::decode(SIG_HEX)?[..])?;
+        // Verify base58 encoding matches expected (parity check with JS client)
+        assert_eq!(ser, format!("\"{}\"", SIG_BS58));
+
+        // assert parity against regenerated hex
+        let decoded_js_sig = Signature::try_from(&hex::decode(&SIG_HEX[2..])?[..])?;
 
         let d2 = hex::encode(transaction.header.signature.as_bytes());
-        println!("{}", d2);
-
-        // let d2 = hex::encode(transaction.header.signature.as_bytes());
+        // println!("{}", &d2);
         // assert_eq!(
         //     transaction.header.signature,
         //     Signature::try_from(&hex::decode(&d2)?[..])?.into()
         // );
-        // assert_eq!(SIG_HEX, format!("0x{}", d2));
+        assert_eq!(SIG_HEX, format!("0x{}", d2));
 
         assert_eq!(transaction.header.signature, decoded_js_sig.into());
 

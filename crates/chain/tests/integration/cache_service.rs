@@ -1,8 +1,7 @@
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{
     get_cache_size,
@@ -16,7 +15,7 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tracing::info;
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
@@ -35,25 +34,24 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         (
             main_address,
             GenesisAccount {
-                balance: U256::from(690000000000000000_u128),
+                balance: U256::from(1000000000000000000_u128),
                 ..Default::default()
             },
         ),
         (
             account1.address(),
             GenesisAccount {
-                balance: U256::from(420000000000000_u128),
+                balance: U256::from(100000000000000000_u128),
                 ..Default::default()
             },
         ),
     ]);
     let node = IrysNodeTest::new_genesis(config).start().await;
 
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let http_url = format!(
         "http://127.0.0.1:{}",
@@ -62,14 +60,14 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     let response = client
         .get(format!("{}/v1/info", http_url))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     // mine block 1 and confirm height is exactly what we need
@@ -103,10 +101,11 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     // post data tx
     let resp = client
         .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
+        .json(&tx.header)
+        .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     node.mine_block().await?;
     assert_eq!(node.get_canonical_chain_height().await, 2_u64);
@@ -132,11 +131,12 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         // Make a POST request with JSON payload
         let resp = client
             .post(format!("{}/v1/chunk", http_url))
-            .send_json(&chunk)
+            .json(&chunk)
+            .send()
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
     // confirm that we have the right number of CachedChunks in mdbx table
@@ -211,7 +211,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(chunk_res.status(), StatusCode::OK);
+    assert_eq!(chunk_res.status(), reqwest::StatusCode::OK);
 
     node.stop().await;
 

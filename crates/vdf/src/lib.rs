@@ -277,7 +277,7 @@ pub trait MiningBroadcaster {
 /// (this is particularly notable on Heterogenous CPUs, with some higher and some lower performance cores)
 pub fn calibrate_vdf(runs: u64) -> u64 {
     // let precision_perc = 0.05;
-    let mut config = irys_types::ConsensusConfig::testing().vdf;
+    let mut config = irys_types::NodeConfig::testing().vdf();
     let target_secs = Duration::from_secs(1).as_secs_f64();
 
     let mut seed: H256 = H256::zero();
@@ -342,13 +342,13 @@ pub fn calibrate_vdf(runs: u64) -> u64 {
 mod tests {
     use super::*;
     use base58::FromBase58 as _;
-    use irys_types::ConsensusConfig;
+
     use tracing::debug;
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block() {
         // step: 44398 output: 0x893d
-        let testing_config = ConsensusConfig::testing();
+        let testing_config = irys_types::NodeConfig::testing();
         let vdf_info = VDFLimiterInfo {
             output: to_hash("Vk8iBZReeugJi3iJNNKX6ty9soW1t3N9dxoFPMTDdye"),
             global_step_number: 44398,
@@ -389,7 +389,7 @@ mod tests {
             next_vdf_difficulty: None,
         };
 
-        let mut config = testing_config.vdf;
+        let mut config = testing_config.vdf();
         config.sha_1s_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
@@ -419,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_before_reset() {
-        let testing_config = ConsensusConfig::testing();
+        let testing_config = irys_types::NodeConfig::testing();
         // step: 44398 output: 0x893d
         // spellchecker:off
         let vdf_info = VDFLimiterInfo {
@@ -463,7 +463,7 @@ mod tests {
         };
         // spellchecker:on
 
-        let mut config = testing_config.vdf;
+        let mut config = testing_config.vdf();
         config.sha_1s_difficulty = 100_000;
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
@@ -486,8 +486,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_checkpoints_for_single_step_block_after_reset() {
-        let mut testing_config = ConsensusConfig::testing();
-        testing_config.vdf.sha_1s_difficulty = 100_000;
+        let mut testing_config = irys_types::NodeConfig::testing();
+        testing_config.consensus.get_mut().vdf.sha_1s_difficulty = 100_000;
 
         // step: 44398 output: 0x893d
         let vdf_info = VDFLimiterInfo {
@@ -532,7 +532,7 @@ mod tests {
 
         debug!("{:?}", vdf_info);
 
-        let config = testing_config.vdf;
+        let config = testing_config.vdf();
 
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
@@ -541,8 +541,8 @@ mod tests {
     // one special case that do not apply reset seed
     #[tokio::test]
     async fn test_checkpoints_for_single_step_one() {
-        let mut testing_config = ConsensusConfig::testing();
-        testing_config.vdf.sha_1s_difficulty = 100_000;
+        let mut testing_config = irys_types::NodeConfig::testing();
+        testing_config.consensus.get_mut().vdf.sha_1s_difficulty = 100_000;
 
         // spellchecker:off
         let vdf_info = VDFLimiterInfo {
@@ -601,7 +601,7 @@ mod tests {
         };
         // spellchecker:on
 
-        let config = testing_config.vdf;
+        let config = testing_config.vdf();
         let x = last_step_checkpoints_is_valid(&vdf_info, &config).await;
         assert!(x.is_ok());
 

@@ -1,6 +1,7 @@
 use crate::utils::{AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
 use irys_chain::IrysNodeCtx;
+use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, BlockHash, ConsensusConfig, ConsensusOptions, DataTransaction,
     IrysBlockHeader, IrysTransactionId, NodeConfig, NodeMode, SyncMode,
@@ -18,9 +19,11 @@ use tracing::{debug, warn};
 ///    - seed = previous block's next_seed
 /// 3. Verifies non-reset blocks maintain seed continuity
 /// 4. Spins up a peer node to verify reset seeds propagate correctly during sync
-#[test_log::test(actix_web::test)]
+#[tokio::test]
 async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_verified_by_the_peer(
 ) -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
     let max_seconds = 20;
     let reset_frequency = 48; // Reset every 48 VDF steps
     let min_resets_required = 3; // Need at least 2 resets to verify behavior (genesis + 2 new ones)
@@ -107,6 +110,8 @@ async fn slow_heavy_reset_seeds_should_be_correctly_applied_by_the_miner_and_ver
     // Setting up mode to full validation sync to check that the reset seed is applied correctly
     //  and all blocks are validated successfully
     ctx_peer1_node.node_mode = NodeMode::Peer;
+    ctx_peer1_node.consensus.get_mut().expected_genesis_hash =
+        Some(ctx_genesis_node.node_ctx.genesis_hash);
     ctx_peer1_node.sync_mode = SyncMode::Full;
     let ctx_peer1_node = IrysNodeTest::new(ctx_peer1_node.clone())
         .start_with_name("PEER1")
@@ -141,7 +146,7 @@ async fn generate_test_transaction_and_add_to_block(
 ) -> HashMap<IrysTransactionId, irys_types::DataTransaction> {
     let data_bytes = "Test transaction!".as_bytes().to_vec();
     let mut irys_txs: HashMap<IrysTransactionId, DataTransaction> = HashMap::new();
-    match node.create_publish_data_tx(account, data_bytes).await {
+    match node.post_publish_data_tx(account, data_bytes).await {
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);
         }

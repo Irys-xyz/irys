@@ -19,12 +19,11 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
-use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
+use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
-    recall_recall_range_is_valid, shadow_transactions_are_valid,
+    recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
 };
-use crate::validation_service::active_validations::BlockPriorityMeta;
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
@@ -44,53 +43,59 @@ enum ParentValidationResult {
 
 /// Handles the execution of a single block validation task
 #[derive(Clone)]
-pub(crate) struct BlockValidationTask {
+pub(super) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
-    pub priority: BlockPriorityMeta,
     pub skip_vdf_validation: bool,
 }
 
-impl Ord for BlockValidationTask {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.priority.cmp(&other.priority)
+impl PartialEq for BlockValidationTask {
+    fn eq(&self, other: &Self) -> bool {
+        self.block.block_hash == other.block.block_hash
     }
 }
+
+impl Eq for BlockValidationTask {}
+
+impl std::hash::Hash for BlockValidationTask {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write(self.block.block_hash.as_bytes());
+    }
+}
+
 impl PartialOrd for BlockValidationTask {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl PartialEq for BlockValidationTask {
-    fn eq(&self, other: &Self) -> bool {
-        self.priority == other.priority // captures the block, so this should be good enough
+impl Ord for BlockValidationTask {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Ordering is handled by ValidationPriority, this is
+        // just to satisfy PriorityQueue requirement for the value to be Ord
+        self.block.block_hash.cmp(&other.block.block_hash)
     }
 }
 
-impl Eq for BlockValidationTask {}
-
 impl BlockValidationTask {
-    pub(crate) fn new(
+    pub(super) fn new(
         block: Arc<IrysBlockHeader>,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
-        meta: BlockPriorityMeta,
         skip_vdf_validation: bool,
     ) -> Self {
         Self {
             block,
             service_inner,
             block_tree_guard,
-            priority: meta,
             skip_vdf_validation,
         }
     }
 
     /// Execute the concurrent validation task
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_concurrent(self) {
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    pub async fn execute_concurrent(self) -> ValidationResult {
         let validation_result = self
             .validate_block()
             .await
@@ -101,7 +106,8 @@ impl BlockValidationTask {
             match self.wait_for_parent_validation().await {
                 ParentValidationResult::Cancelled => {
                     // Task was cancelled due to height difference
-                    return;
+                    // Return invalid to prevent this block from being accepted
+                    return ValidationResult::Invalid;
                 }
                 ParentValidationResult::Ready => {
                     // Parent is ready, continue to report validation result
@@ -109,24 +115,28 @@ impl BlockValidationTask {
             }
         }
 
-        // Notify the block tree service
-        self.send_validation_result(validation_result);
+        validation_result
     }
 
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
-    pub(crate) async fn execute_vdf(self, cancel: Arc<AtomicU8>) -> VdfValidationResult {
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    pub(crate) async fn execute_vdf(
+        self,
+        cancel: Arc<AtomicU8>,
+        vdf_notify: Arc<tokio::sync::Notify>,
+    ) -> VdfValidationResult {
         let inner = Arc::clone(&self.service_inner);
         let block = Arc::clone(&self.block);
         let skip_validation = self.skip_vdf_validation;
-
         // run the VDF validation
         // we use a task here as it'll drive the future more consistently than `poll_immediate`
         let cancel2 = Arc::clone(&cancel);
         let res = tokio::spawn(
             async move {
-                inner
+                let result = inner
                     .ensure_vdf_is_valid(&block, cancel2, skip_validation)
-                    .await
+                    .await;
+                vdf_notify.notify_one(); // Signal completion
+                result
             }
             .in_current_span(),
         )
@@ -145,41 +155,87 @@ impl BlockValidationTask {
                     VdfValidationResult::Invalid(e)
                 }
             });
-        debug!("Finished validating with result {:?}", &mapped_res);
+        debug!(
+            vdf.validation_result = ?mapped_res,
+            "Finished validating"
+        );
         mapped_res
     }
 
     /// Wait for parent validation to complete
     /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
-    #[tracing::instrument(skip_all, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
+        // Subscribe to block state updates
+        let mut block_state_rx = self
+            .service_inner
+            .service_senders
+            .subscribe_block_state_updates();
+
         loop {
-            // Check if block height is too far behind canonical tip
+            // 1. Check cancellation condition first
             if self.should_exit_due_to_height_diff() {
-                let _span = tracing::debug_span!("height_diff_exit", block_hash = %self.block.block_hash, block_height = %self.block.height).entered();
-                debug!("exiting validation task - block too far behind canonical tip");
+                let block_tree = self.block_tree_guard.read();
+                let tip_hash = block_tree.tip;
+                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
+                    let height_diff = tip_block.height.saturating_sub(self.block.height);
+                    warn!(
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        block.height_diff= height_diff,
+                        config.threshold = self.service_inner.config.consensus.block_tree_depth,
+                        "Cancelling validation: block too far behind tip"
+                    );
+                }
                 return ParentValidationResult::Cancelled;
             }
 
-            let Some(parent_chain_state) = self.get_parent_chain_state(&parent_hash) else {
-                warn!("validated a valid block that is not inside the block tree");
-                break;
-            };
+            // 2. Check parent state (single check per iteration)
+            match self.get_parent_chain_state(&parent_hash) {
+                None => {
+                    // Parent doesn't exist in tree - this is an error condition
+                    error!(
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        "CRITICAL: Parent block not found"
+                    );
+                    return ParentValidationResult::Cancelled;
+                }
+                Some(parent_state) if self.is_parent_ready(&parent_state) => {
+                    debug!("Parent validation complete");
+                    return ParentValidationResult::Ready;
+                }
+                Some(_) => {
+                    // Parent exists but not ready, wait for updates
+                }
+            }
 
-            if self.is_parent_ready(&parent_chain_state) {
-                // Parent is ready, we can proceed
-                break;
-            } else {
-                // Parent not ready, yield and try again when polled later
-                debug!("Waiting for parent...");
-                tokio::task::yield_now().await;
-                continue;
+            // 3. Wait for relevant state changes
+            debug!(block.parent_hash = %parent_hash, "Waiting for parent validation");
+            match block_state_rx.recv().await {
+                Ok(event) if event.block_hash == parent_hash => {
+                    // Parent state changed, loop back to check
+                    continue;
+                }
+                Ok(_) => {
+                    // Not our parent, continue waiting
+                    continue;
+                }
+                Err(_) => {
+                    // Channel closed - treat as error
+                    error!(
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        "Block state channel closed while waiting for parent"
+                    );
+                    return ParentValidationResult::Cancelled;
+                }
             }
         }
-
-        ParentValidationResult::Ready
     }
 
     /// Check if the block should exit due to height difference from canonical tip
@@ -213,20 +269,8 @@ impl BlockValidationTask {
         )
     }
 
-    /// Send the validation result to the block tree service
-    pub(crate) fn send_validation_result(&self, validation_result: ValidationResult) {
-        if let Err(e) = self.service_inner.service_senders.block_tree.send(
-            BlockTreeServiceMessage::BlockValidationFinished {
-                block_hash: self.block.block_hash,
-                validation_result,
-            },
-        ) {
-            error!(?e, "Failed to send validation result to block tree service");
-        }
-    }
-
     /// Perform block validation
-    #[tracing::instrument(skip_all, err, fields(block_hash = %self.block.block_hash, block_height = %self.block.height))]
+    #[tracing::instrument(skip_all, err, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     async fn validate_block(&self) -> eyre::Result<ValidationResult> {
         let skip_vdf_validation = self.skip_vdf_validation;
         let poa = self.block.poa.clone();
@@ -241,17 +285,21 @@ impl BlockValidationTask {
                 &self.service_inner.vdf_state,
             )
             .await
-            .inspect_err(|err| tracing::error!(?err, "recall range validation failed"))
+            .inspect_err(|err| tracing::error!(
+                custom.error = ?err,
+                "recall range validation failed"
+            ))
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         }
-        .instrument(tracing::info_span!("recall_range_validation", block_hash = %self.block.block_hash, block_height = %self.block.height));
+        .instrument(tracing::info_span!("recall_range_validation", block.hash = %self.block.block_hash, block.height = %self.block.height));
 
-        let epoch_snapshot = self
+        let parent_epoch_snapshot = self
             .block_tree_guard
             .read()
-            .get_epoch_snapshot(&block.block_hash)
-            .expect("block should have an epoch snapshot in the block_tree");
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .expect("parent block should have an epoch snapshot in the block_tree");
+        tracing::info!("Using parent epoch snapshot for PoA validation");
 
         // POA validation
         let poa_task = {
@@ -261,20 +309,27 @@ impl BlockValidationTask {
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
-                    debug!("Skipping POA validation due to skip_vdf_validation flag for block {block_hash:?}");
+                    debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
                     return Ok(ValidationResult::Valid);
                 }
                 poa_is_valid(
                     &poa,
                     &block_index_guard,
-                    &epoch_snapshot,
+                    &parent_epoch_snapshot,
                     &consensus_config,
                     &miner_address,
                 )
-                .inspect_err(|err| tracing::error!(?err, "poa validation failed"))
+                .inspect_err(|err| tracing::error!(
+                    custom.error = ?err,
+                    "poa validation failed"
+                ))
                 .map(|()| ValidationResult::Valid)
             })
-            .instrument(tracing::info_span!("poa_validation", block_hash = %block_hash, block_height = %block_height))
+            .instrument(tracing::info_span!(
+                "poa_validation",
+                block.hash = %block_hash,
+                block.height = %block_height
+            ))
         };
 
         let poa_task = async move {
@@ -283,13 +338,16 @@ impl BlockValidationTask {
             match res {
                 Ok(res) => res.unwrap_or(ValidationResult::Invalid),
                 Err(err) => {
-                    tracing::error!(?err, "poa task panicked");
+                    tracing::error!(
+                        custom.error = ?err,
+                        "poa task panicked"
+                    );
                     ValidationResult::Invalid
                 }
             }
         };
 
-        // Shadow transaction validation
+        // Shadow transaction validation (pure validation, no reth submission)
         let config = &self.service_inner.config;
         let service_senders = &self.service_inner.service_senders;
 
@@ -304,24 +362,36 @@ impl BlockValidationTask {
         let block_index = self.service_inner.block_index_guard.inner();
 
         let shadow_tx_task = async move {
+            let parent_commitment_snapshot = self
+                .block_tree_guard
+                .read()
+                .get_commitment_snapshot(&block.previous_block_hash)
+                .expect("parent block should have a commitment snapshot in the block_tree");
             shadow_transactions_are_valid(
                 config,
                 service_senders,
                 block,
-                &self.service_inner.reth_node_adapter,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
                 parent_epoch_snapshot,
+                parent_commitment_snapshot,
                 block_index,
             )
-            .instrument(tracing::info_span!("shadow_tx_validation", block_hash = %self.block.block_hash, block_height = %self.block.height))
+            .instrument(tracing::info_span!(
+                "shadow_tx_validation",
+                block.hash = %self.block.block_hash,
+                block.height = %self.block.height
+            ))
             .await
-            .inspect_err(|err| tracing::error!(?err, "shadow transaction validation failed"))
-            .map(|()| ValidationResult::Valid)
-            .unwrap_or(ValidationResult::Invalid)
+            .inspect_err(|err| {
+                tracing::error!(
+                    custom.error = ?err,
+                    "shadow transaction validation failed"
+                )
+            })
         };
 
-        let vdf_reset_frequency = self.service_inner.config.consensus.vdf.reset_frequency as u64;
+        let vdf_reset_frequency = self.service_inner.config.vdf.reset_frequency as u64;
         let seeds_validation_task = async move {
             let binding = self.block_tree_guard.read();
             let previous_block = binding
@@ -341,7 +411,12 @@ impl BlockValidationTask {
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await
-            .inspect_err(|err| tracing::error!(?err, "commitment ordering validation failed"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    custom.error = ?err,
+                    "commitment ordering validation failed"
+                )
+            })
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };
@@ -355,9 +430,18 @@ impl BlockValidationTask {
                 &self.service_inner.db,
                 &self.block_tree_guard,
             )
-            .instrument(tracing::info_span!("data_txs_validation", block_hash = %self.priority.block.block_hash, block_height = %self.priority.block.height))
+            .instrument(tracing::info_span!(
+                "data_txs_validation",
+                block.hash = %self.block.block_hash,
+                block.height = %self.block.height
+            ))
             .await
-            .inspect_err(|err| tracing::error!(?err, "data transaction validation failed"))
+            .inspect_err(|err| {
+                tracing::error!(
+                    custom.error = ?err,
+                    "data transaction validation failed"
+                )
+            })
             .map(|()| ValidationResult::Valid)
             .unwrap_or(ValidationResult::Invalid)
         };
@@ -379,10 +463,18 @@ impl BlockValidationTask {
             data_txs_validation_task
         );
 
+        // Check shadow_tx_result first to extract ExecutionData
+        let execution_data = match shadow_tx_result {
+            Ok(data) => data,
+            Err(_) => {
+                tracing::debug!("Shadow transaction validation failed, not submitting to reth");
+                return Ok(ValidationResult::Invalid);
+            }
+        };
+
         match (
             recall_result,
             poa_result,
-            shadow_tx_result,
             seeds_validation_result,
             commitment_ordering_result,
             data_txs_result,
@@ -393,13 +485,35 @@ impl BlockValidationTask {
                 ValidationResult::Valid,
                 ValidationResult::Valid,
                 ValidationResult::Valid,
-                ValidationResult::Valid,
             ) => {
-                tracing::debug!("block validation successful");
-                Ok(ValidationResult::Valid)
+                tracing::debug!("All consensus validations successful, submitting to reth");
+
+                // All consensus layer validations passed, now submit to execution layer
+                let reth_result = submit_payload_to_reth(
+                    &self.block,
+                    &self.service_inner.reth_node_adapter,
+                    execution_data,
+                )
+                .instrument(tracing::info_span!(
+                    "reth_submission",
+                    block.hash = %self.block.block_hash,
+                    block.height = %self.block.height
+                ))
+                .await;
+
+                match reth_result {
+                    Ok(()) => {
+                        tracing::debug!("Reth execution layer validation successful");
+                        Ok(ValidationResult::Valid)
+                    }
+                    Err(err) => {
+                        tracing::error!(custom.error = ?err, "Reth execution layer validation failed");
+                        Ok(ValidationResult::Invalid)
+                    }
+                }
             }
             _ => {
-                tracing::debug!("block validation failed");
+                tracing::debug!("Consensus validation failed, not submitting to reth");
                 Ok(ValidationResult::Invalid)
             }
         }

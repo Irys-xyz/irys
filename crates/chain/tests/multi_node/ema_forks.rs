@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_types::{storage_pricing::Amount, NodeConfig, OracleConfig};
 use rust_decimal_macros::dec;
 use std::sync::Arc;
+use tracing::warn;
 
 // Test verifies that EMA (Exponential Moving Average) price snapshots diverge correctly across chain forks.
 // Setup:
@@ -12,7 +13,7 @@ use std::sync::Arc;
 // Action: Both nodes mine blocks independently creating a fork, then node_2's longer chain is gossiped.
 // Assert: EMA snapshots differ after the price adjustment interval during the fork.
 // Assert: After convergence, both nodes have identical chains with matching EMA snapshots.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
     // setup
     const PRICE_ADJUSTMENT_INTERVAL: u64 = 2;
@@ -39,16 +40,18 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     let mut peer_config = node_1.testing_peer_with_signer(&peer_signer);
-    peer_config.oracle = OracleConfig::Mock {
+    peer_config.oracles = vec![OracleConfig::Mock {
         initial_price: Amount::token(dec!(1.01)).unwrap(),
         incremental_change: Amount::token(dec!(0.005)).unwrap(),
         smoothing_interval: 3,
-    };
+        poll_interval_ms: 500,
+    }];
 
     let node_2 = node_1
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
         .await?;
 
+    warn!("Disabling gossip to create independent forks");
     node_1.gossip_disable();
     node_2.gossip_disable();
 

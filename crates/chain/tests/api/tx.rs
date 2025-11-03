@@ -1,19 +1,19 @@
 //! endpoint tests
 use crate::utils::IrysNodeTest;
-use actix_http::StatusCode;
+use actix_web::http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IrysTransactionResponse,
-    NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
+    IrysTransactionResponse, NodeConfig, H256,
 };
 use reth_db::Database as _;
 use tokio::time::Duration;
 use tracing::{error, info};
 
-#[actix_web::test]
+#[tokio::test]
 async fn test_get_tx() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let signer = IrysSigner::random_signer(&config.consensus_config());
@@ -25,23 +25,22 @@ async fn test_get_tx() -> eyre::Result<()> {
         },
     )]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
-    node.node_ctx.start_mining().await.unwrap();
+    node.node_ctx.start_mining().unwrap();
     let db = node.node_ctx.db.clone();
 
-    let storage_tx = DataTransactionHeader {
+    let storage_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
         ..Default::default()
-    };
+    });
     info!("Generated storage_tx.id: {}", storage_tx.id);
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut commitment_tx = CommitmentTransaction::new_stake(consensus, H256::default());
+    let mut commitment_tx = CommitmentTransaction::new_stake(consensus, node.get_anchor().await?);
     commitment_tx.id = H256::random();
     info!("Generated commitment_tx.id: {}", commitment_tx.id);
 

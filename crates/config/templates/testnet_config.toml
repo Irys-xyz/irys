@@ -1,8 +1,9 @@
 node_mode = "Peer"
 sync_mode = "Full"
-base_directory = ""
+base_directory = ".irys"
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
 trusted_peers = []
+initial_stake_and_pledge_whitelist = []
 reward_address = "0x0000000000000000000000000000000000000000"
 stake_pledge_drives = false
 genesis_peer_discovery_timeout_millis = 10000
@@ -34,28 +35,59 @@ num_writes_before_sync = 1
 max_storage_throughput_bps = 1047961600
 bandwidth_adjustment_interval = "1s"
 chunk_request_timeout = "15s"
-
 max_pending_chunk_requests = 100
-[packing]
+
+[packing.local]
 cpu_packing_concurrency = 4
 gpu_packing_batch_size = 1024
 
 [cache]
 cache_clean_lag = 2
 
-[oracle]
-type = "mock"
-initial_price = 1.0
-incremental_change = 0.00000000000001
-smoothing_interval = 15
+[cache.eviction_strategy]
+type = "size_based"
+max_cache_size_bytes = 10737418240  # 10 GB
+
+[[oracles]]
+type = "coingecko"
+api_key = "provide-coingecko-api-key"
+# Coin ids are listed at https://docs.coingecko.com/reference/coins-list
+# Or in this official spreadsheet https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
+coin_id = "irys"
+# Set to true when using a CoinGecko demo API key (see https://docs.coingecko.com/v3.0.1/reference/introduction)
+demo_api_key = true
+# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+poll_interval_ms = 300000
+
+[[oracles]]
+type = "coinmarketcap"
+api_key = "provide-coinmarketcap-api-key"
+# CoinMarketCap ids can be found via https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
+id = "1"
+# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+poll_interval_ms = 300000
+
+[mempool]
+max_pending_pledge_items = 100
+max_pledges_per_item = 100
+max_pending_chunk_items = 30
+max_chunks_per_item = 500
+max_valid_items = 10000
+max_invalid_items = 10000
+max_valid_chunks = 10000
+
+[vdf]
+parallel_verification_thread_limit = 4
 
 
 [consensus.Custom]
 chain_id = 1270
 token_price_safe_range = 1.0
-genesis_price = 1.0
-annual_cost_per_gb = 0.01
-decay_rate = 0.01
+# Replace with the actual genesis hash of the network you're joining
+expected_genesis_hash = "11111111111111111111111111111111"
+# Storage economics: Based on 0.01 USD/GB/year target
+annual_cost_per_gb = 0.01                   # $0.01 USD/GB/year
+decay_rate = 0.01                           # 1% annual decay per year
 chunk_size = 262144
 block_migration_depth = 6
 block_tree_depth = 50
@@ -65,11 +97,13 @@ num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
 number_of_ingress_proofs_total = 1
 number_of_ingress_proofs_from_assignees = 0
+# Target storage duration in years
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
 pledge_base_value = 950.0
 pledge_decay = 0.9
 immediate_tx_inclusion_reward_percent = 0.01
+minimum_term_fee_usd = 0.01                  # $0.01 USD minimum for term storage
 
 [consensus.Custom.genesis]
 timestamp_millis = 0
@@ -77,6 +111,7 @@ miner_address = "0x0000000000000000000000000000000000000000"
 reward_address = "0x0000000000000000000000000000000000000000"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
+genesis_price = 1.0
 # Optional: if omitted, defaults to vdf_seed
 # vdf_next_seed = "22222222222222222222222222222222"
 
@@ -107,12 +142,6 @@ balance = "0x152cf4e72a974f1c0000"
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
 anchor_expiry_depth = 20
-max_pending_pledge_items = 100
-max_pledges_per_item = 100
-max_pending_chunk_items = 30
-max_chunks_per_item = 500
-max_valid_items = 10000
-max_invalid_items = 10000
 commitment_fee = 100
 
 [consensus.Custom.difficulty_adjustment]
@@ -123,9 +152,8 @@ min_difficulty_adjustment_factor = "0.25"
 
 [consensus.Custom.vdf]
 reset_frequency = 600
-parallel_verification_thread_limit = 4
 num_checkpoints_in_vdf_step = 25
-max_allowed_vdf_fork_steps = 60000
+max_allowed_vdf_fork_steps = 64840
 sha_1s_difficulty = 1800000
 
 [consensus.Custom.block_reward_config]

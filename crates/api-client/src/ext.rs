@@ -1,7 +1,7 @@
 use crate::{ApiClient, IrysApiClient, Method};
 use eyre::OptionExt as _;
 pub use irys_api_server::routes::block::BlockParam;
-use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo};
+use irys_api_server::routes::{anchor::AnchorResponse, price::PriceInfo, tx::PromotionStatus};
 pub use irys_types::CombinedBlockHeader;
 use irys_types::{
     Base64, BlockHash, ChunkFormat, DataLedger, DataRoot, DataTransaction, TxChunkOffset,
@@ -72,22 +72,9 @@ impl ApiClientExt for IrysApiClient {
     }
 
     async fn upload_chunks(&self, peer: SocketAddr, tx: &DataTransaction) -> eyre::Result<()> {
-        // TODO: find a better version
-        let data = match &tx.data {
-            Some(d) => d,
-            None => eyre::bail!("missing required tx data"),
-        };
-
-        for (idx, chunk) in tx.chunks.iter().enumerate() {
-            let unpacked_chunk = UnpackedChunk {
-                data_root: tx.header.data_root,
-                data_size: tx.header.data_size,
-                data_path: Base64(tx.proofs[idx].proof.clone()),
-                bytes: Base64(data.0[chunk.min_byte_range..chunk.max_byte_range].to_vec()),
-                tx_offset: TxChunkOffset::from(idx as u32),
-            };
+        for chunk in tx.data_chunks()? {
             let _response = self
-                .make_request::<(), _>(peer, Method::POST, "/chunk", Some(&unpacked_chunk))
+                .make_request::<(), _>(peer, Method::POST, "/chunk", Some(&chunk))
                 .await?;
         }
 
@@ -127,14 +114,16 @@ impl ApiClientExt for IrysApiClient {
         attempts: u64,
     ) -> eyre::Result<()> {
         for _i in 0..attempts {
-            if self
-                .make_request::<bool, _>(
+            let status = self
+                .make_request::<PromotionStatus, _>(
                     peer,
                     Method::GET,
-                    format!("/tx/{}/is_promoted", &tx_id).as_str(),
+                    format!("/tx/{}/promotion_status", &tx_id).as_str(),
                     None::<&()>,
                 )
-                .await?
+                .await?;
+            if status
+                .map(|s| s.promotion_height.is_some())
                 .unwrap_or(false)
             {
                 return Ok(());

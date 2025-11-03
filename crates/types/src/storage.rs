@@ -6,7 +6,7 @@ use std::{
 
 use crate::{ConsensusConfig, RelativeChunkOffset};
 use derive_more::{Add, Div, From, Into, Mul, Sub};
-use nodit::{
+pub use nodit::{
     interval::{ie, ii},
     DiscreteFinite, InclusiveInterval, Interval,
 };
@@ -38,7 +38,7 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
     Into,
     Hash,
 )]
-pub struct PartitionChunkOffset(u32);
+pub struct PartitionChunkOffset(pub u32);
 
 #[macro_export]
 macro_rules! partition_chunk_offset_ii {
@@ -53,7 +53,7 @@ macro_rules! partition_chunk_offset_ii {
 #[macro_export]
 macro_rules! partition_chunk_offset_ie {
     ($start:expr, $end:expr) => {
-        ie(
+        $crate::storage::ie(
             PartitionChunkOffset::from($start),
             PartitionChunkOffset::from($end),
         )
@@ -171,7 +171,7 @@ impl TryFrom<PartitionChunkOffset> for usize {
     }
 }
 /// Partition relative chunk interval/ranges
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartitionChunkRange(pub Interval<PartitionChunkOffset>);
 
 impl Deref for PartitionChunkRange {
@@ -331,7 +331,7 @@ macro_rules! ledger_chunk_offset_ii {
 #[macro_export]
 macro_rules! ledger_chunk_offset_ie {
     ($start:expr, $end:expr) => {
-        ie(
+        $crate::storage::ie(
             LedgerChunkOffset::from($start),
             LedgerChunkOffset::from($end),
         )
@@ -356,7 +356,7 @@ impl From<Interval<LedgerChunkOffset>> for LedgerChunkRange {
     }
 }
 
-/// Add impl Into<Interval<u64>> for owned conversion
+/// Add impl `Into<Interval<u64>>` for owned conversion
 impl From<LedgerChunkRange> for Interval<LedgerChunkOffset> {
     fn from(range: LedgerChunkRange) -> Self {
         range.0

@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # TODO: figure out how to templatize these service configs
+  irys-1:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile
+      # Builds for Apple Silicon by default on Apple; comment out to let Docker auto-select
+      # platforms: ["linux/arm64"]
+    platform: linux/arm64
+    container_name: irys-1
+    restart: unless-stopped
+    init: true
+    networks:
+      app_network:
+        ipv4_address: 172.20.0.2
+    ports:
+      - "8080:8080" # host port : container port
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./configs/irys-1.toml:/app/config.toml:ro
+    # for ufw/iptables
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --max-time 2 http://localhost:8080 >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    command: []
+
+  irys-2:
+    build:
+      context: ..
+      dockerfile: ./docker/Dockerfile
+      # platforms: ["linux/arm64"]
+    platform: linux/arm64
+    container_name: irys-2
+    restart: unless-stopped
+    init: true
+    depends_on:
+      irys-1:
+        condition: service_healthy
+    networks:
+      app_network:
+        ipv4_address: 172.20.0.3
+    ports:
+      - "8081:8080" # host port : container port
+    environment:
+      - RUST_LOG=debug
+    volumes:
+      - ./configs/irys-2.toml:/app/config.toml:ro
+    # for ufw/iptables
+    cap_add:
+      - NET_ADMIN
+    command: []
+
+networks:
+  app_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16

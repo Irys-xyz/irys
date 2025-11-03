@@ -1,4 +1,3 @@
-use actix_rt::Arbiter;
 use futures::future::{BoxFuture, FutureExt as _};
 use std::fmt;
 use std::future::Future;
@@ -7,7 +6,7 @@ use std::thread::{self, JoinHandle};
 use tokio::task::JoinHandle as TokioJoinHandle;
 
 enum ServiceSetState {
-    Polling(Vec<ArbiterEnum>),
+    Polling(Vec<TokioServiceHandle>),
     ShuttingDown(BoxFuture<'static, ()>),
 }
 
@@ -17,7 +16,7 @@ pub struct ServiceSet {
 }
 
 impl ServiceSet {
-    pub fn new(services: Vec<ArbiterEnum>) -> Self {
+    pub fn new(services: Vec<TokioServiceHandle>) -> Self {
         Self {
             state: ServiceSetState::Polling(services),
         }
@@ -75,22 +74,11 @@ impl fmt::Debug for ServiceSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.state {
             ServiceSetState::Polling(services) => {
-                let mut actix_count = 0;
-                let mut tokio_count = 0;
-
-                for service in services {
-                    match service {
-                        ArbiterEnum::ActixArbiter { .. } => actix_count += 1,
-                        ArbiterEnum::TokioService(_) => tokio_count += 1,
-                    }
-                }
-
                 write!(
                     f,
-                    "ServiceSet {{ total: {}, actix: {}, tokio: {}, state: polling }}",
+                    "ServiceSet {{ total: {}, tokio: {}, state: polling }}",
                     services.len(),
-                    actix_count,
-                    tokio_count
+                    services.len()
                 )
             }
             ServiceSetState::ShuttingDown(_) => {
@@ -169,121 +157,42 @@ pub struct TokioServiceHandle {
     pub shutdown_signal: reth::tasks::shutdown::Signal,
 }
 
-#[derive(Debug)]
-pub enum ArbiterEnum {
-    ActixArbiter { arbiter: ArbiterHandle },
-    TokioService(TokioServiceHandle),
-}
-
-impl ArbiterEnum {
-    pub fn new_tokio_service(
-        name: String,
-        handle: TokioJoinHandle<()>,
-        shutdown_signal: reth::tasks::shutdown::Signal,
-    ) -> Self {
-        Self::TokioService(TokioServiceHandle {
-            name,
-            handle,
-            shutdown_signal,
-        })
-    }
-
+impl TokioServiceHandle {
     pub fn name(&self) -> &str {
-        match self {
-            Self::ActixArbiter { arbiter } => &arbiter.name,
-            Self::TokioService(service) => &service.name,
-        }
+        &self.name
     }
 
     pub async fn stop_and_join(self) {
-        match self {
-            Self::ActixArbiter { arbiter } => {
-                arbiter.stop_and_join();
-            }
-            Self::TokioService(service) => {
-                // Fire the shutdown signal
-                service.shutdown_signal.fire();
+        // Fire the shutdown signal
+        self.shutdown_signal.fire();
 
-                // Wait for the task to complete
-                match service.handle.await {
-                    Ok(()) => {
-                        tracing::debug!("Tokio service '{}' shut down successfully", service.name)
-                    }
-                    Err(e) => {
-                        tracing::error!("Tokio service '{}' panicked: {:?}", service.name, e)
-                    }
-                }
+        // Wait for the task to complete
+        match self.handle.await {
+            Ok(()) => {
+                tracing::debug!("Tokio service '{}' shut down successfully", self.name)
+            }
+            Err(e) => {
+                tracing::error!("Tokio service '{}' panicked: {:?}", self.name, e)
             }
         }
     }
-
-    pub fn is_tokio_service(&self) -> bool {
-        matches!(self, Self::TokioService(_))
-    }
 }
 
-impl Future for ArbiterEnum {
+impl Future for TokioServiceHandle {
     type Output = eyre::Result<()>;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Self::Output> {
-        match self.get_mut() {
-            Self::ActixArbiter { .. } => {
-                // Actix arbiters don't support polling for completion
-                // They need to be explicitly stopped
-                std::task::Poll::Pending
+        // Poll the tokio join handle
+        let this = self.get_mut();
+        match this.handle.poll_unpin(cx) {
+            std::task::Poll::Ready(res) => {
+                std::task::Poll::Ready(res.map_err(|err| eyre::Report::new(err)))
             }
-            Self::TokioService(service) => {
-                // Poll the tokio join handle
-                match service.handle.poll_unpin(cx) {
-                    std::task::Poll::Ready(res) => {
-                        std::task::Poll::Ready(res.map_err(|err| eyre::Report::new(err)))
-                    }
-                    std::task::Poll::Pending => std::task::Poll::Pending,
-                }
-            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
-    }
-}
-
-#[derive(Debug)]
-pub struct ArbiterHandle {
-    inner: Arc<Mutex<Option<Arbiter>>>,
-    pub name: String,
-}
-
-impl Clone for ArbiterHandle {
-    fn clone(&self) -> Self {
-        Self {
-            name: self.name.clone(),
-            inner: Arc::clone(&self.inner),
-        }
-    }
-}
-
-impl ArbiterHandle {
-    pub fn new(value: Arbiter, name: String) -> Self {
-        Self {
-            name,
-            inner: Arc::new(Mutex::new(Some(value))),
-        }
-    }
-
-    pub fn take(&self) -> Arbiter {
-        let mut guard = self.inner.lock().unwrap();
-        if let Some(value) = guard.take() {
-            value
-        } else {
-            panic!("Value already consumed");
-        }
-    }
-
-    pub fn stop_and_join(self) {
-        let arbiter = self.take();
-        arbiter.stop();
-        arbiter.join().unwrap();
     }
 }
 
@@ -334,7 +243,7 @@ mod tests {
     fn create_controllable_service<F>(
         name: String,
         on_exit_behavior: F,
-    ) -> (ArbiterEnum, oneshot::Sender<()>)
+    ) -> (TokioServiceHandle, oneshot::Sender<()>)
     where
         F: FnOnce() + Send + 'static,
     {
@@ -356,13 +265,17 @@ mod tests {
         });
 
         (
-            ArbiterEnum::new_tokio_service(name, handle, shutdown_tx),
+            TokioServiceHandle {
+                name,
+                handle,
+                shutdown_signal: shutdown_tx,
+            },
             exit_tx,
         )
     }
 
     /// Creates a service that runs until shutdown signal
-    fn create_long_running_service<F>(name: String, on_shutdown_behavior: F) -> ArbiterEnum
+    fn create_long_running_service<F>(name: String, on_shutdown_behavior: F) -> TokioServiceHandle
     where
         F: FnOnce() + Send + 'static,
     {
@@ -376,11 +289,15 @@ mod tests {
             on_shutdown_behavior();
         });
 
-        ArbiterEnum::new_tokio_service(name, handle, shutdown_tx)
+        TokioServiceHandle {
+            name,
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
     /// Creates a service that panics when triggered
-    fn create_panicking_service(name: String) -> (ArbiterEnum, oneshot::Sender<()>) {
+    fn create_panicking_service(name: String) -> (TokioServiceHandle, oneshot::Sender<()>) {
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let (panic_tx, panic_rx) = oneshot::channel();
 
@@ -396,7 +313,11 @@ mod tests {
         });
 
         (
-            ArbiterEnum::new_tokio_service(name, handle, shutdown_tx),
+            TokioServiceHandle {
+                name,
+                handle,
+                shutdown_signal: shutdown_tx,
+            },
             panic_tx,
         )
     }
@@ -427,7 +348,7 @@ mod tests {
         for i in 1..=2 {
             let count_clone = shutdown_count.clone();
             services.push(create_long_running_service(
-                format!("service_{}", i),
+                format!("service_{i}"),
                 move || {
                     count_clone.fetch_add(1, Ordering::SeqCst);
                 },
@@ -460,7 +381,7 @@ mod tests {
         for i in 1..=2 {
             let count_clone = shutdown_count.clone();
             services.push(create_long_running_service(
-                format!("normal_service_{}", i),
+                format!("normal_service_{i}"),
                 move || {
                     count_clone.fetch_add(1, Ordering::SeqCst);
                 },
@@ -495,7 +416,7 @@ mod tests {
         // Create services that record their shutdown order
         for i in 0..3 {
             let tx_clone = tx.clone();
-            let name = format!("service_{}", i);
+            let name = format!("service_{i}");
             let name_for_closure = name.clone();
 
             services.push(create_long_running_service(name, move || {

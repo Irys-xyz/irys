@@ -1,4 +1,8 @@
-use crate::{decode_address, encode_address, Arbitrary, IrysSignature, RethPeerInfo, H256};
+use crate::address_base58_stringify;
+use crate::{
+    decode_address, encode_address, serialization::string_u64, serialization::string_usize,
+    Arbitrary, IrysSignature, RethPeerInfo, H256,
+};
 use alloy_primitives::{keccak256, Address};
 use bytes::Buf as _;
 use reth_codecs::Compact;
@@ -330,18 +334,31 @@ pub enum RejectionReason {
 pub struct NodeInfo {
     pub version: String,
     pub peer_count: usize,
+    #[serde(with = "string_u64")]
     pub chain_id: u64,
+    #[serde(with = "string_u64")]
     pub height: u64,
     pub block_hash: H256,
+    #[serde(with = "string_u64")]
     pub block_index_height: u64,
-    pub blocks: u64,
+    pub block_index_hash: H256,
+    #[serde(with = "string_u64")]
+    pub pending_blocks: u64,
     pub is_syncing: bool,
+    #[serde(with = "string_usize")]
     pub current_sync_height: usize,
+    #[serde(with = "string_u64")]
+    pub uptime_secs: u64,
+    #[serde(with = "address_base58_stringify")]
+    pub mining_address: Address,
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Config, IrysSignature, NodeConfig, VersionRequest};
+    use super::NodeInfo;
+    use crate::Address;
+    use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
+    use serde_json;
 
     #[test]
     fn should_sign_and_verify_signature() {
@@ -361,5 +378,82 @@ mod tests {
             !version_request.verify_signature(),
             "Signature should be invalid after reset"
         );
+    }
+
+    #[test]
+    fn test_large_u64_serialization() {
+        let large_value = u64::MAX;
+        let node_info = NodeInfo {
+            version: "1.0.0".to_string(),
+            peer_count: 10,
+            chain_id: large_value,
+            height: large_value,
+            block_hash: H256::zero(),
+            block_index_height: large_value,
+            block_index_hash: H256::zero(),
+            pending_blocks: large_value,
+            is_syncing: false,
+            current_sync_height: 0,
+            uptime_secs: 0,
+            mining_address: Address::ZERO,
+        };
+
+        let json = serde_json::to_string(&node_info).unwrap();
+
+        // Verify all u64 fields are serialized as strings
+        assert!(json.contains(&format!("\"chainId\":\"{}\"", large_value)));
+        assert!(json.contains(&format!("\"height\":\"{}\"", large_value)));
+        assert!(json.contains(&format!("\"blockIndexHeight\":\"{}\"", large_value)));
+        assert!(json.contains(&format!("\"pendingBlocks\":\"{}\"", large_value)));
+
+        // Verify no numeric serialization for large values
+        assert!(!json.contains(&format!("\"chainId\":{}", large_value)));
+
+        // Verify deserialization
+        let deserialized: NodeInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.chain_id, large_value);
+        assert_eq!(deserialized.height, large_value);
+    }
+
+    // Test JavaScript parsing would  work, this tries to simulate what would happen in a JavaScript environment
+    #[test]
+    fn test_javascript_max_safe_integer() {
+        const JS_MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1; // 2^53 - 1
+        let above_safe_limit = JS_MAX_SAFE_INTEGER + 1;
+
+        let node_info = NodeInfo {
+            height: above_safe_limit,
+            chain_id: above_safe_limit,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&node_info).unwrap();
+
+        // Should be string, not number
+        assert!(json.contains(&format!("\"height\":\"{}\"", above_safe_limit)));
+        assert!(json.contains(&format!("\"chainId\":\"{}\"", above_safe_limit)));
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        if let Some(height_str) = parsed.get("height").and_then(|v| v.as_str()) {
+            let parsed_height: u64 = height_str.parse().unwrap();
+            assert_eq!(parsed_height, above_safe_limit);
+        } else {
+            panic!("height should be serialized as string");
+        }
+    }
+
+    #[test]
+    fn test_info_serde_roundtrip() -> eyre::Result<()> {
+        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111"}"#;
+        // Test that we can still deserialize old numeric format for small values
+        // TODO: remove this at some point?
+        let node_info: NodeInfo = serde_json::from_str(old_json)?;
+        assert_eq!(node_info.chain_id, 12345);
+        assert_eq!(node_info.height, 67890);
+
+        // this should ensure that we don't break U64 as string serialisation
+        let reenc_node_info = serde_json::to_string(&node_info)?;
+        assert_eq!(old_json, reenc_node_info.as_str());
+        Ok(())
     }
 }

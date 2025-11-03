@@ -3,7 +3,7 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_types::{IrysBlockHeader, NodeConfig},
+    irys_types::{IrysBlockHeader, IrysBlockHeaderV1, NodeConfig},
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -16,14 +16,22 @@ pub enum BlockStatus {
     /// The block is still in the tree. It might or might not
     /// be in the block index.
     ProcessedButCanBeReorganized,
-
     /// The block is in the index, but the tree has already pruned it.
     Finalized,
+    /// The block is part of a fork that has been pruned from the main chain.
+    PartOfAPrunedFork,
 }
 
 impl BlockStatus {
     pub fn is_processed(&self) -> bool {
-        matches!(self, Self::Finalized | Self::ProcessedButCanBeReorganized)
+        matches!(
+            self,
+            Self::Finalized | Self::ProcessedButCanBeReorganized | Self::PartOfAPrunedFork
+        )
+    }
+
+    pub fn is_a_part_of_pruned_fork(&self) -> bool {
+        matches!(self, Self::PartOfAPrunedFork)
     }
 }
 
@@ -78,8 +86,7 @@ impl BlockStatusProvider {
                 // Block is in the block index, it has been migrated
                 return BlockStatus::Finalized;
             } else {
-                // TODO: this should be an explicit STOP, as we can't process a fork block that has a migrated height
-                return BlockStatus::Finalized;
+                return BlockStatus::PartOfAPrunedFork;
             }
         }
 
@@ -251,28 +258,32 @@ impl BlockStatusProvider {
         starting_block: Option<&IrysBlockHeader>,
     ) -> Vec<IrysBlockHeader> {
         let first_block = starting_block
-            .map(|parent| IrysBlockHeader {
-                block_hash: BlockHash::random(),
-                height: parent.height + 1,
-                previous_block_hash: parent.block_hash,
-                ..IrysBlockHeader::new_mock_header()
+            .map(|parent| {
+                IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                    block_hash: BlockHash::random(),
+                    height: parent.height + 1,
+                    previous_block_hash: parent.block_hash,
+                    ..IrysBlockHeaderV1::new_mock_header()
+                })
             })
-            .unwrap_or_else(|| IrysBlockHeader {
-                block_hash: BlockHash::random(),
-                height: 1,
-                ..IrysBlockHeader::new_mock_header()
+            .unwrap_or_else(|| {
+                IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                    block_hash: BlockHash::random(),
+                    height: 1,
+                    ..IrysBlockHeaderV1::new_mock_header()
+                })
             });
 
         let mut blocks = vec![first_block];
 
         for _ in 1..num_blocks {
             let prev_block = blocks.last().expect("to have at least one block");
-            let block = IrysBlockHeader {
+            let block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
                 block_hash: BlockHash::random(),
                 height: prev_block.height + 1,
                 previous_block_hash: prev_block.block_hash,
-                ..IrysBlockHeader::new_mock_header()
-            };
+                ..IrysBlockHeaderV1::new_mock_header()
+            });
             blocks.push(block);
         }
 

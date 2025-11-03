@@ -1,4 +1,3 @@
-use actix_http::StatusCode;
 use alloy_core::primitives::aliases::U200;
 use alloy_core::primitives::U256;
 use alloy_eips::eip2930::AccessListItem;
@@ -14,11 +13,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, info};
 
-use irys_actors::packing::wait_for_packing;
 use irys_api_server::routes::tx::TxOffset;
-use irys_primitives::precompile::IrysPrecompileOffsets;
-use irys_primitives::range_specifier::ChunkRangeSpecifier;
-use irys_primitives::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
+use irys_types::precompile::IrysPrecompileOffsets;
+use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
@@ -36,7 +34,7 @@ const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db90
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[ignore]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     let mut testing_config = NodeConfig::testing();
     testing_config.consensus.get_mut().chunk_size = 32;
@@ -71,11 +69,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         ),
     ]);
     let node = IrysNodeTest::new_genesis(testing_config).start().await;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // let signer: PrivateKeySigner = config.mining_signer.signer.into();
     // let wallet = EthereumWallet::from(signer.clone());
@@ -121,7 +118,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     // Waiting for the server to start
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -132,7 +129,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     let message = "Hirys, world!";
@@ -158,11 +155,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
     // post tx header
     let resp = client
         .post(format!("{}/v1/tx", http_url))
-        .send_json(&tx.header)
+        .json(&tx.header)
+        .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
     let id: String = tx.header.id.to_string();
     let mut tx_header_fut = Box::pin(async {
@@ -175,12 +173,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
                 .send()
                 .await;
 
-            let Some(mut response) = response.ok() else {
+            let Some(response) = response.ok() else {
                 sleep(delay).await;
                 continue;
             };
 
-            if response.status() == StatusCode::OK {
+            if response.status() == reqwest::StatusCode::OK {
                 let result: DataTransactionHeader = response.json().await.unwrap();
                 assert_eq!(&tx.header, &result);
                 info!("Transaction was retrieved ok after {} attempts", attempt);
@@ -219,11 +217,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
         let resp = client
             .post(format!("{}/v1/chunk", http_url))
-            .send_json(&chunk)
+            .json(&chunk)
+            .send()
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
     // wait for the chunks to migrate
@@ -239,12 +238,12 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
                 .send()
                 .await;
 
-            let Some(mut response) = response.ok() else {
+            let Some(response) = response.ok() else {
                 sleep(delay).await;
                 continue;
             };
 
-            if response.status() == StatusCode::OK {
+            if response.status() == reqwest::StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

@@ -1,24 +1,24 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
-use irys_types::{NodeConfig, U256};
+use irys_types::{NodeConfig, H256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
 /// too far in the future, the node rejects it during block prevalidation.
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     // 0. Create an evil block producer
     // ------------------------------------------------------------------
     use crate::utils::solution_context;
     use irys_actors::{
-        async_trait, reth_ethereum_primitives, shadow_tx_generator::PublishLedgerWithTxs,
-        BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+        async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
+        ProductionStrategy,
     };
     use irys_domain::EmaSnapshot;
     use irys_types::{
         block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
-        CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, SystemTransactionLedger,
+        IrysBlockHeader,
     };
     use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
     use std::sync::Arc;
@@ -47,40 +47,28 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             perv_evm_block: &reth_ethereum_primitives::Block,
-            commitment_txs_to_bill: &[CommitmentTransaction],
-            submit_txs: &[DataTransactionHeader],
-            data_txs_with_proofs: &mut PublishLedgerWithTxs,
+            mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
-            expired_ledger_fees: std::collections::BTreeMap<
-                irys_types::Address,
-                (
-                    irys_types::U256,
-                    irys_actors::shadow_tx_generator::RollingHash,
-                ),
-            >,
+            solution_hash: H256,
         ) -> eyre::Result<(EthBuiltPayload, U256)> {
             self.prod
                 .create_evm_block(
                     prev_block_header,
                     perv_evm_block,
-                    commitment_txs_to_bill,
-                    submit_txs,
-                    data_txs_with_proofs,
+                    mempool,
                     reward_amount,
                     self.invalid_timestamp,
-                    expired_ledger_fees,
+                    solution_hash,
                 )
                 .await
         }
 
         async fn produce_block_without_broadcasting(
             &self,
-            solution: SolutionContext,
+            solution: &SolutionContext,
             prev_block_header: &IrysBlockHeader,
-            submit_txs: Vec<DataTransactionHeader>,
-            publish_txs: PublishLedgerWithTxs,
-            system_transaction_ledger: Vec<SystemTransactionLedger>,
+            mempool_bundle: irys_actors::block_producer::MempoolTxsBundle,
             _current_timestamp: u128,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
@@ -91,9 +79,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                 .produce_block_without_broadcasting(
                     solution,
                     prev_block_header,
-                    submit_txs,
-                    publish_txs,
-                    system_transaction_ledger,
+                    mempool_bundle,
                     self.invalid_timestamp,
                     block_reward,
                     eth_built_payload,
@@ -135,7 +121,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     };
 
     let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
@@ -193,7 +179,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     use crate::utils::solution_context;
     use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
@@ -210,7 +196,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
     let (block, _adjustment_stats, _eth_payload) = prod
-        .fully_produce_new_block_without_gossip(solution_context(&genesis_node.node_ctx).await?)
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 

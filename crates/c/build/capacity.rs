@@ -26,7 +26,12 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
 
     cc.flag("-fPIC");
     cc.flag("-g0");
-    cc.flag("-march=native");
+    let nix_disables_native = env::var("NIX_ENFORCE_NO_NATIVE")
+        .map(|v| v != "0")
+        .unwrap_or(false);
+    if !nix_disables_native {
+        cc.flag_if_supported("-march=native");
+    }
     cc.file(c_src.join("capacity_single.c"));
     cc.compile("capacity_single");
 }
@@ -59,7 +64,6 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     cc.flag("-std=c++17");
     cc.flag("-Xcompiler");
     cc.flag("-fPIC");
-    cc.flag("-ccbin=/usr/bin/gcc-13");
     cc.flag("-DCAP_IMPL_CUDA");
 
     let ossl = pkg_config::probe_library("openssl").expect("unable to find openssl");

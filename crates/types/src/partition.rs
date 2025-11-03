@@ -1,4 +1,3 @@
-use actix::MessageResponse;
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
@@ -9,16 +8,7 @@ pub type PartitionHash = H256;
 
 /// Temporary struct tracking partition assignments to miners - will be moved to database
 #[derive(
-    Debug,
-    PartialEq,
-    Eq,
-    Serialize,
-    Deserialize,
-    MessageResponse,
-    Clone,
-    Copy,
-    RlpDecodable,
-    RlpEncodable,
+    Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, RlpDecodable, RlpEncodable, Hash,
 )]
 #[rlp(trailing)]
 pub struct PartitionAssignment {

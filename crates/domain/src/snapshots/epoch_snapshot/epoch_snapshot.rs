@@ -3,8 +3,7 @@ use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FIL
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{data_ledger::*, SystemLedger};
-use irys_primitives::CommitmentStatus;
-use irys_storage::ie;
+use irys_types::CommitmentStatus;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -67,16 +66,44 @@ impl Default for EpochSnapshot {
 }
 
 /// Reasons why the EpochSnapshot functions might fail
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EpochSnapshotError {
     /// Catchall error until more detailed errors are added
+    #[error("internal epoch snapshot error")]
     InternalError,
     /// Attempted to do epoch tasks on a block that was not an epoch block
+    #[error("target block is not an epoch boundary")]
     NotAnEpochBlock,
     /// Provided an incorrect previous epoch block
+    #[error("provided previous epoch block does not match snapshot history")]
     IncorrectPreviousEpochBlock,
     /// Validation of commitments failed
+    #[error("validation of epoch commitments failed")]
     InvalidCommitments,
+    /// Unpledge targeted partition not found in assignments
+    #[error("unpledge target partition {partition_hash:?} for signer {signer:?} not found in assignments")]
+    UnpledgeTargetNotFound {
+        partition_hash: H256,
+        signer: Address,
+    },
+    /// Unpledge signer does not match assignment owner
+    #[error(
+        "unpledge signer mismatch for partition {partition_hash:?}: expected {expected:?}, got {actual:?}"
+    )]
+    UnpledgeSignerMismatch {
+        partition_hash: H256,
+        expected: Address,
+        actual: Address,
+    },
+    /// Inconsistent state: partition appears in both capacity and data maps
+    #[error("partition {partition_hash:?} present in both capacity and data assignments")]
+    UnpledgeTargetInBothMaps { partition_hash: H256 },
+    /// Unstake signer does not have an active stake
+    #[error("unstake signer {signer:?} is not currently staked")]
+    UnstakeSignerNotStaked { signer: Address },
+    /// Unstake attempted while pledges still active
+    #[error("unstake for signer {signer:?} has active pledges: {remaining}")]
+    UnstakeHasActivePledges { signer: Address, remaining: u64 },
 }
 
 impl EpochSnapshot {
@@ -212,6 +239,9 @@ impl EpochSnapshot {
     }
 
     /// Main worker function
+    #[tracing::instrument(skip_all, err, fields(
+        block.hash = ?new_epoch_block.block_hash
+    ))]
     pub fn perform_epoch_tasks(
         &mut self,
         previous_epoch_block: &Option<IrysBlockHeader>,
@@ -245,15 +275,15 @@ impl EpochSnapshot {
             .map_err(|_| EpochSnapshotError::InvalidCommitments)?;
 
         debug!(
-            height = new_epoch_block.height,
-            block_hash = %new_epoch_block.block_hash,
+            block.height = new_epoch_block.height,
+            block.hash = %new_epoch_block.block_hash,
             "\u{001b}[32mProcessing epoch block\u{001b}[0m"
         );
 
         self.epoch_block = new_epoch_block.clone();
         self.previous_epoch_block = previous_epoch_block.clone();
 
-        self.compute_commitment_state(new_epoch_commitments);
+        self.compute_commitment_state(&new_epoch_commitments);
 
         self.try_genesis_init(new_epoch_block);
 
@@ -261,12 +291,54 @@ impl EpochSnapshot {
 
         self.expire_term_ledger_slots(new_epoch_block);
 
+        self.apply_unpledges(&new_epoch_commitments)?;
+
+        self.apply_unstakes(&new_epoch_commitments)?;
+
         self.backfill_missing_partitions();
 
         self.allocate_additional_capacity();
 
         self.assign_partition_hashes_to_pledges();
 
+        Ok(())
+    }
+
+    /// Applies unstake operations found in a set of epoch commitments.
+    ///
+    /// Behavior:
+    /// - For each Unstake commitment, verify the signer has no remaining pledges
+    ///   (after unpledges were applied). If any remain, return an error to invalidate the epoch.
+    /// - Remove the signer's stake from the commitment state; failure to find a stake is an error.
+    pub fn apply_unstakes(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> Result<(), EpochSnapshotError> {
+        for commitment in commitments {
+            let irys_types::CommitmentType::Unstake = &commitment.commitment_type else {
+                continue;
+            };
+            let signer = commitment.signer;
+
+            // Effective pledges after unpledges applied
+            let remaining = self
+                .commitment_state
+                .pledge_commitments
+                .get(&signer)
+                .map(|v| v.len() as u64)
+                .unwrap_or(0);
+            if remaining > 0 {
+                return Err(EpochSnapshotError::UnstakeHasActivePledges { signer, remaining });
+            }
+
+            // Remove stake entry; error if not found
+            let existed = self.commitment_state.stake_commitments.remove(&signer);
+            if existed.is_none() {
+                return Err(EpochSnapshotError::UnstakeSignerNotStaked { signer });
+            }
+
+            debug!(tx.signer = %signer, "unstake_applied");
+        }
         Ok(())
     }
 
@@ -503,11 +575,24 @@ impl EpochSnapshot {
         // Every ledger needs at least one slot filled with data partitions
         let min_count = DataLedger::ALL.len() as u64 * config.num_partitions_per_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
-        let log_10 = (base_count as f64).log10();
-        let trunc = truncate_to_3_decimals(log_10);
-        let scaled = truncate_to_3_decimals(trunc * config.epoch.capacity_scalar as f64);
 
-        truncate_to_3_decimals(scaled).ceil() as u64
+        // Deterministic computation using rug with fixed precision and explicit rounding
+        let p: u32 = 128;
+        let base_f = rug::Float::with_val(p, base_count);
+        let log10 = rug::Float::with_val(p, base_f.log10());
+        let trunc = rug_truncate_to_3_decimals(&log10);
+
+        let scalar = rug::Float::with_val(p, config.epoch.capacity_scalar);
+        let scaled = rug::Float::with_val(p, trunc * scalar);
+        let scaled_trunc = rug_truncate_to_3_decimals(&scaled);
+
+        // Deterministic ceil to integer, then convert to u64
+        let (ceil_int, _) = scaled_trunc
+            .to_integer_round(rug::float::Round::Up)
+            .expect("value must be finite (not NaN/Inf)");
+        ceil_int
+            .to_u64()
+            .expect("ceiled value must be in 0..=u64::MAX")
     }
 
     /// Adds new capacity partition hashes to the protocols pool of active partition hashes. This
@@ -620,7 +705,7 @@ impl EpochSnapshot {
         // there are 2 or 10 partition replicas of each slot across the network.
         let max_ledger_capacity = num_slots * num_chunks_in_partition;
 
-        let ledger_size = new_epoch_block.data_ledgers[ledger].max_chunk_offset;
+        let ledger_size = new_epoch_block.data_ledgers[ledger].total_chunks;
 
         // STRATEGY 1: Threshold-based capacity expansion
         // Add slots when utilization reaches within half partition of max capacity
@@ -637,7 +722,7 @@ impl EpochSnapshot {
         if new_epoch_block.height >= self.config.consensus.epoch.num_blocks_in_epoch {
             let previous_ledger_size = previous_epoch_block
                 .as_ref()
-                .map_or(0, |prev| prev.data_ledgers[ledger].max_chunk_offset);
+                .map_or(0, |prev| prev.data_ledgers[ledger].total_chunks);
 
             let data_added = ledger_size - previous_ledger_size;
 
@@ -655,19 +740,18 @@ impl EpochSnapshot {
     /// This function processes stake and pledge commitments to build a complete
     /// commitment state representation. It validates that all commitment references
     /// in the ledger have corresponding transaction data.
-    ///
-    /// TODO: Support unpledging and unstaking
-    pub fn compute_commitment_state(&mut self, commitments: Vec<CommitmentTransaction>) {
+    pub fn compute_commitment_state(&mut self, commitments: &[CommitmentTransaction]) {
         // Categorize commitments by their type for separate processing
-        let mut stake_commitments: Vec<CommitmentTransaction> = Vec::new();
-        let mut pledge_commitments: Vec<CommitmentTransaction> = Vec::new();
-        for commitment_tx in commitments {
+        let mut stake_commitments: Vec<&CommitmentTransaction> = Vec::new();
+        let mut pledge_commitments: Vec<&CommitmentTransaction> = Vec::new();
+        for commitment_tx in commitments.iter() {
             match commitment_tx.commitment_type {
-                irys_primitives::CommitmentType::Stake => stake_commitments.push(commitment_tx),
-                irys_primitives::CommitmentType::Pledge { .. } => {
-                    pledge_commitments.push(commitment_tx)
-                }
-                _ => unimplemented!(),
+                irys_types::CommitmentType::Stake => stake_commitments.push(commitment_tx),
+                irys_types::CommitmentType::Pledge { .. } => pledge_commitments.push(commitment_tx),
+                // Unpledges are handled by `apply_unpledges()` during epoch processing
+                irys_types::CommitmentType::Unpledge { .. } => {}
+                // Unstakes are applied in `apply_unstakes()` after pledges have been processed
+                irys_types::CommitmentType::Unstake => {}
             }
         }
 
@@ -718,6 +802,102 @@ impl EpochSnapshot {
                 .or_default()
                 .push(value);
         }
+    }
+
+    /// Applies unpledge operations found in a set of epoch commitments.
+    ///
+    /// Behavior:
+    /// - If the targeted partition is in `data_partitions`, remove it from the ledger slot
+    ///   and from `data_partitions`, then add the partition hash to `unassigned_partitions`.
+    /// - If the targeted partition is in `capacity_partitions`, remove it from that map and
+    ///   add it to `unassigned_partitions`.
+    /// - In all cases the partition remains in `all_active_partitions` (global ordering).
+    /// - If the signer does not own the targeted partition return `UnpledgeSignerMismatch`.
+    /// - If the targeted partition is not found in either map return `UnpledgeTargetNotFound`.
+    /// - Remove the matching pledge entry (by `partition_hash`) from `commitment_state` when present.
+    pub fn apply_unpledges(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> Result<(), EpochSnapshotError> {
+        for commitment in commitments {
+            let irys_types::CommitmentType::Unpledge { partition_hash, .. } =
+                &commitment.commitment_type
+            else {
+                continue;
+            };
+            let signer = commitment.signer;
+            let ph: irys_types::H256 = (*partition_hash).into();
+
+            let cap_present = self.partition_assignments.capacity_partitions.remove(&ph);
+            let data_present = self.partition_assignments.data_partitions.remove(&ph);
+            let partition_miner_address = match (data_present, cap_present) {
+                (None, None) => {
+                    warn!(
+                        tx.partition_hash = %ph,
+                        tx.signer = %signer,
+                        "unpledge_target_not_found"
+                    );
+                    return Err(EpochSnapshotError::UnpledgeTargetNotFound {
+                        partition_hash: ph,
+                        signer,
+                    });
+                }
+                (None, Some(capacity_partition)) => {
+                    // no extra special handling
+                    capacity_partition.miner_address
+                }
+                (Some(data_partition), None) => {
+                    let ledger: DataLedger =
+                        DataLedger::try_from(data_partition.ledger_id.unwrap())
+                            .expect("valid ledger id");
+                    let slot_index = data_partition
+                        .slot_index
+                        .expect("data partitions must have slot index present");
+                    self.ledgers
+                        .remove_partition_from_slot(ledger, slot_index, &ph);
+                    data_partition.miner_address
+                }
+                (Some(_), Some(_)) => {
+                    warn!(tx.partition_hash = %ph, "unpledge_target_in_both_maps");
+                    return Err(EpochSnapshotError::UnpledgeTargetInBothMaps {
+                        partition_hash: ph,
+                    });
+                }
+            };
+            if partition_miner_address != signer {
+                // note: this should never happen as commitment_snapshot should validate the ownership beforehand
+                return Err(EpochSnapshotError::UnpledgeSignerMismatch {
+                    partition_hash: ph,
+                    expected: partition_miner_address,
+                    actual: signer,
+                });
+            }
+
+            // Make available for reassignment
+            self.add_to_unassigned_if_absent(ph);
+
+            // Remove pledge entry by targeted partition hash (best-effort)
+            if let Some(entries) = self.commitment_state.pledge_commitments.get_mut(&signer) {
+                if let Some(pos) = entries.iter().position(|e| e.partition_hash == Some(ph)) {
+                    entries.remove(pos);
+                }
+            }
+
+            debug!(
+                tx.partition_hash = %ph,
+                tx.signer = %signer,
+                "unpledge_retired_to_unassigned"
+            );
+        }
+        Ok(())
+    }
+
+    /// Adds a partition hash to `unassigned_partitions`.
+    fn add_to_unassigned_if_absent(&mut self, partition_hash: H256) {
+        if self.unassigned_partitions.contains(&partition_hash) {
+            return;
+        }
+        self.unassigned_partitions.push(partition_hash);
     }
 
     /// Assigns partition hashes to unassigned pledge commitments
@@ -864,7 +1044,7 @@ impl EpochSnapshot {
     /// within each category, ensuring consistent mapping across node restarts.
     ///
     /// # Note
-    /// This function has the same configuration dependency as [`system_ledger::get_genesis_commitments()`].
+    /// This function has the same configuration dependency as [`irys_database::system_ledger::get_genesis_commitments`].
     /// When updating configuration related to StorageModule/submodule functionality, both functions
     /// will need corresponding updates.
     ///
@@ -1068,6 +1248,30 @@ impl EpochSnapshot {
     pub fn is_staked(&self, miner_address: Address) -> bool {
         self.commitment_state.is_staked(miner_address)
     }
+
+    // NON CANONICAL HASH
+    // SHOULD BE USED FOR DEBUGGING ONLY
+    pub fn get_hash(&self) -> String {
+        let mut hasher = std::hash::DefaultHasher::new();
+        use std::hash::Hash as _;
+        self.ledgers.hash(&mut hasher);
+        self.partition_assignments.hash(&mut hasher);
+        self.all_active_partitions.hash(&mut hasher);
+        self.unassigned_partitions.hash(&mut hasher);
+        self.commitment_state.hash(&mut hasher);
+        self.previous_epoch_block
+            .as_ref()
+            .map(|blk| blk.block_hash)
+            .unwrap_or(H256::zero())
+            .hash(&mut hasher);
+        self.expired_partition_infos.hash(&mut hasher);
+        self.epoch_height.hash(&mut hasher);
+        use std::hash::Hasher as _;
+
+        let res = hasher.finish();
+        use base58::ToBase58 as _;
+        res.to_le_bytes().to_base58()
+    }
 }
 
 /// SHA256 hash the message parameter
@@ -1078,8 +1282,33 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
     Ok(result)
 }
 
-fn truncate_to_3_decimals(value: f64) -> f64 {
-    (value * 1000.0).trunc() / 1000.0
+/// Truncate a `rug::Float` value to exactly 3 decimal places deterministically.
+///
+/// Implementation details:
+/// - Uses the input's precision (`value.prec()`) to construct all intermediates,
+///   ensuring we don't accidentally lower precision during scaling.
+/// - Multiplies by 1000 to shift the third decimal place to the integer part.
+/// - Applies `Round::Down` (i.e., truncation toward negative infinity) to get the integer,
+///   which matches our previous "truncate" semantics and is deterministic across platforms.
+/// - Divides by 1000 to shift back to the original scale.
+///
+/// Why not round? We deliberately do not use rounding here because the capacity
+/// computation must be stable at 3-decimal granularity and avoid cross-platform
+/// f64 rounding/ULP differences. Truncation via MPFR (`rug`) with explicit
+/// `Round::Down` guarantees the same result on all platforms for the same input
+/// and precision.
+fn rug_truncate_to_3_decimals(value: &rug::Float) -> rug::Float {
+    // Preserve the input's precision for all intermediate calculations
+    let p = value.prec();
+
+    // Multiply by 1000 to bring 3 decimal places into the integer domain without allocating a Float
+
+    // Multiply and then truncate toward -inf to implement "truncate" semantics
+    let tmp = rug::Float::with_val(p, value * 1000);
+    let (int, _) = tmp.to_integer_round(rug::float::Round::Down).unwrap();
+
+    // Scale back down to 3-decimal fixed point
+    rug::Float::with_val(p, int) / 1000
 }
 
 #[cfg(test)]
@@ -1128,7 +1357,7 @@ mod tests {
         // correct capacity formula (4 slots * 10 chunks), this is below the
         // allocation threshold and should trigger two additional slots.
         for offset in 1..=34 {
-            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            header.data_ledgers[DataLedger::Submit].total_chunks = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 0, "offset: {:?}", offset);
@@ -1138,7 +1367,7 @@ mod tests {
         // correct capacity formula (4 slots * 10 chunks), this is above the
         // allocation threshold and should trigger two additional slots.
         for offset in 35..=40 {
-            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            header.data_ledgers[DataLedger::Submit].total_chunks = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
@@ -1147,7 +1376,7 @@ mod tests {
         // and test for more than 40 chunks
         // should produce the same result as 35..=40 as new slots are capped at 2 using the Threshold-based capacity expansion
         for offset in 41..=99 {
-            header.data_ledgers[DataLedger::Submit].max_chunk_offset = offset;
+            header.data_ledgers[DataLedger::Submit].total_chunks = offset;
             let slots_to_add =
                 snapshot.calculate_additional_slots(&None, &header, DataLedger::Submit);
             assert_eq!(slots_to_add, 2, "offset: {:?}", offset);
@@ -1199,6 +1428,181 @@ mod tests {
                     .expect_err("Expected error for the wrong commitment ids")
                     .to_string();
             assert_eq!(err_str, "Missing commitment transaction 8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR for block 11111111111111111111111111111111");
+        }
+    }
+
+    mod unpledge_processing {
+        use super::*;
+        use irys_types::CommitmentStatus;
+        use irys_types::{transaction::CommitmentType, U256};
+
+        fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {
+            let mut snapshot = EpochSnapshot::default();
+            let miner = snapshot.config.node_config.miner_address();
+
+            // Add the partition to the appropriate assignment map
+            let assignment = PartitionAssignment {
+                partition_hash: ph,
+                miner_address: miner,
+                ledger_id: if is_data {
+                    Some(DataLedger::Publish as u32)
+                } else {
+                    None
+                },
+                slot_index: if is_data { Some(0) } else { None },
+            };
+
+            if is_data {
+                // Ensure a slot exists and the ledger contains the partition
+                snapshot.ledgers[DataLedger::Publish].allocate_slots(1, snapshot.epoch_height);
+                snapshot
+                    .ledgers
+                    .push_partition_to_slot(DataLedger::Publish, 0, ph);
+                snapshot
+                    .partition_assignments
+                    .data_partitions
+                    .insert(ph, assignment);
+            } else {
+                snapshot
+                    .partition_assignments
+                    .capacity_partitions
+                    .insert(ph, assignment);
+            }
+
+            // Track as active
+            snapshot.all_active_partitions.push(ph);
+
+            // Seed a pledge entry tied to the partition hash
+            let pledge_entry = CommitmentStateEntry {
+                id: H256::zero(),
+                commitment_status: CommitmentStatus::Active,
+                partition_hash: Some(ph),
+                signer: miner,
+                amount: U256::zero(),
+            };
+            snapshot
+                .commitment_state
+                .pledge_commitments
+                .entry(miner)
+                .or_default()
+                .push(pledge_entry);
+
+            snapshot
+        }
+
+        fn make_unpledge_tx(
+            config: &ConsensusConfig,
+            signer: Address,
+            ph: H256,
+        ) -> CommitmentTransaction {
+            let mut tx = CommitmentTransaction::new(config);
+            tx.signer = signer;
+            tx.commitment_type = CommitmentType::Unpledge {
+                pledge_count_before_executing: 1,
+                partition_hash: ph.into(),
+            };
+            tx
+        }
+
+        #[test]
+        fn unpledge_removes_capacity_partition_and_pledge() {
+            let ph = H256::random();
+            let mut snapshot = setup_snapshot_with_assignment(ph, false);
+            let signer = snapshot.config.node_config.miner_address();
+            let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
+
+            snapshot.apply_unpledges(&[tx]).unwrap();
+
+            // Removed from capacity map
+            assert!(!snapshot
+                .partition_assignments
+                .capacity_partitions
+                .contains_key(&ph));
+
+            // Still present in active set
+            assert!(snapshot.all_active_partitions.contains(&ph));
+
+            // Added to unassigned list
+            assert!(snapshot.unassigned_partitions.contains(&ph));
+
+            // Removed pledge entry
+            let entries = snapshot
+                .commitment_state
+                .pledge_commitments
+                .get(&signer)
+                .unwrap();
+            assert!(entries.is_empty());
+        }
+
+        #[test]
+        fn unpledge_removes_data_partition_and_pledge() {
+            let ph = H256::random();
+            let mut snapshot = setup_snapshot_with_assignment(ph, true);
+            let signer = snapshot.config.node_config.miner_address();
+            let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
+
+            snapshot.apply_unpledges(&[tx]).unwrap();
+
+            // Removed from data map
+            assert!(!snapshot
+                .partition_assignments
+                .data_partitions
+                .contains_key(&ph));
+
+            // Still present in active set
+            assert!(snapshot.all_active_partitions.contains(&ph));
+
+            // Removed from the ledger slot
+            let slots = snapshot.ledgers.get_slots(DataLedger::Publish);
+            let slot0 = &slots[0];
+            assert!(!slot0.partitions.contains(&ph));
+
+            // Added to unassigned list
+            assert!(snapshot.unassigned_partitions.contains(&ph));
+
+            // Removed pledge entry
+            let entries = snapshot
+                .commitment_state
+                .pledge_commitments
+                .get(&signer)
+                .unwrap();
+            assert!(entries.is_empty());
+        }
+
+        #[test]
+        fn unpledge_target_not_found_returns_error() {
+            let ph = H256::random();
+            let mut snapshot = EpochSnapshot::default();
+            let signer = snapshot.config.node_config.miner_address();
+            let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
+
+            // Should return an error and not add to unassigned
+            let res = snapshot.apply_unpledges(&[tx]);
+            assert!(res.is_err());
+            assert!(!snapshot.unassigned_partitions.contains(&ph));
+        }
+
+        #[test]
+        fn unpledge_duplicate_in_same_epoch_is_not_duplicated() {
+            let ph = H256::random();
+            let mut snapshot = setup_snapshot_with_assignment(ph, false);
+            let signer = snapshot.config.node_config.miner_address();
+            let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
+
+            // First application succeeds
+            snapshot.apply_unpledges(&[tx.clone()]).unwrap();
+
+            // Second application errors (target not found anymore)
+            let res = snapshot.apply_unpledges(&[tx]);
+            assert!(res.is_err());
+
+            // Only one entry in unassigned
+            let count = snapshot
+                .unassigned_partitions
+                .iter()
+                .filter(|h| **h == ph)
+                .count();
+            assert_eq!(count, 1);
         }
     }
 }

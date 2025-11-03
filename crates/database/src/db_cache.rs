@@ -2,7 +2,8 @@ use alloy_primitives::aliases::U232;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use irys_types::{
-    partition::PartitionHash, Base64, ChunkPathHash, Compact, TxChunkOffset, UnpackedChunk, H256,
+    partition::PartitionHash, Base64, ChunkPathHash, Compact, TxChunkOffset, UnixTimestamp,
+    UnpackedChunk, H256,
 };
 use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
@@ -12,14 +13,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 /// partition hashes
-/// TODO: use a custom Compact as the default for Vec<T> sucks (make a custom one using const generics so we can optimize for fixed-size types?)
+/// TODO: use a custom Compact as the default for `Vec<T>` sucks (make a custom one using const generics so we can optimize for fixed-size types?)
 pub struct PartitionHashes(pub Vec<PartitionHash>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 pub struct DataRootLRUEntry {
     /// The last block height this data_root was used
     pub last_height: u64,
-    pub ingress_proof: bool, // TODO: use bitflags
 }
 
 // """constrained""" by PD: maximum addressable partitions: u200, with a u32 chunk offset
@@ -83,6 +83,19 @@ pub struct CachedDataRoot {
 
     /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
+
+    /// Block hashes for blocks containing transactions with this `data_root`
+    pub block_set: Vec<H256>,
+
+    /// Optional expiry height (e.g. anchor_height + anchor_expiry_depth) used for pruning while unconfirmed.
+    /// If None, pruning falls back to block inclusion history.
+    #[serde(default)]
+    pub expiry_height: Option<u64>,
+
+    /// Unix timestamp (seconds) when this data root was first cached
+    /// Used for FIFO eviction strategies (both time-based and size-based)
+    #[serde(default)]
+    pub cached_at: UnixTimestamp,
 }
 
 #[derive(Clone, Debug, Eq, Default, PartialEq, Serialize, Deserialize, Arbitrary, Compact)]

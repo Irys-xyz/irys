@@ -1,22 +1,14 @@
-use actix::{actors::mocker::Mocker, Arbiter, SystemRegistry};
-use actix::{Actor as _, SystemService as _};
-use irys_actors::block_index_service::{BlockIndexService, GetBlockIndexGuardMessage};
-use irys_actors::broadcast_mining_service::{
-    BroadcastMiningService, BroadcastPartitionsExpiration,
-};
 use irys_actors::{
     block_producer::BlockProducerCommand,
-    mining::PartitionMiningActor,
-    packing::{PackingActor, PackingRequest},
+    mining_bus::BroadcastPartitionsExpiration,
+    partition_mining_service::{PartitionMiningService, PartitionMiningServiceInner},
     services::ServiceSenders,
-    BlockMigrationMessage,
 };
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{
     add_genesis_commitments, add_test_commitments, add_test_commitments_for_signer,
 };
 use irys_domain::{BlockIndex, EpochBlockData, EpochSnapshot, StorageModule, StorageModuleVec};
-use irys_storage::ie;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::PartitionChunkRange;
@@ -29,11 +21,10 @@ use irys_types::{H256List, NodeConfig};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
-use std::{any::Any, sync::atomic::AtomicU64, time::Duration};
-use tokio::time::sleep;
-use tracing::{debug, error, info};
+use std::{sync::atomic::AtomicU64, time::Duration};
+use tracing::{debug, error};
 
-#[actix::test]
+#[tokio::test]
 async fn genesis_test() {
     // setup temp dir
     let mut config = NodeConfig::testing();
@@ -49,21 +40,13 @@ async fn genesis_test() {
         add_genesis_commitments(&mut genesis_block, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    // Create epoch service with random miner address
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
-
-    let block_index_actor = BlockIndexService::new(block_index, &config.consensus).start();
-    SystemRegistry::set(block_index_actor);
-
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone()).unwrap();
 
     let epoch_snapshot = EpochSnapshot::new(
         &storage_submodules_config,
         genesis_block.clone(),
-        commitments.clone(),
+        commitments,
         &config,
     );
     let miner_address = config.node_config.miner_address();
@@ -178,7 +161,7 @@ async fn genesis_test() {
     // println!("{:#?}", infos);
 }
 
-#[actix::test]
+#[tokio::test]
 async fn add_slots_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("add_slots_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -220,12 +203,12 @@ async fn add_slots_test() {
     );
 
     let mut mock_header = IrysBlockHeader::new_mock_header();
-    mock_header.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+    mock_header.data_ledgers[DataLedger::Submit].total_chunks = 0;
 
     // Now create a new epoch block & give the Submit ledger enough size to add one slot
     let mut new_epoch_block = mock_header.clone();
     new_epoch_block.height = num_blocks_in_epoch;
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition / 2;
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = num_chunks_in_partition / 2;
 
     // Post the new epoch block to the service and let it perform_epoch_tasks()
     let _ = epoch_snapshot.perform_epoch_tasks(
@@ -251,9 +234,9 @@ async fn add_slots_test() {
     new_epoch_block.height = num_blocks_in_epoch * 2;
 
     // Increase the Submit ledger by 3 slots  and the Publish ledger by 2 slots
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
         (num_chunks_in_partition as f64 * 2.5) as u64;
-    new_epoch_block.data_ledgers[DataLedger::Publish as usize].max_chunk_offset =
+    new_epoch_block.data_ledgers[DataLedger::Publish as usize].total_chunks =
         (num_chunks_in_partition as f64 * 0.75) as u64;
 
     let _ = epoch_snapshot.perform_epoch_tasks(&previous_epoch_block, &new_epoch_block, Vec::new());
@@ -268,7 +251,7 @@ async fn add_slots_test() {
     println!("Ledger State: {:#?}", epoch_snapshot.ledgers);
 }
 
-#[actix::test]
+#[tokio::test]
 async fn unique_addresses_per_slot_test() {
     std::env::set_var("RUST_LOG", "debug");
 
@@ -372,7 +355,7 @@ async fn unique_addresses_per_slot_test() {
     assert!(submit_addresses_set.contains(&signer2.address()));
 }
 
-#[actix::test]
+#[tokio::test]
 async fn capacity_projection_tests() {
     let max_data_parts = 1000;
     let config = ConsensusConfig::testing();
@@ -388,7 +371,35 @@ async fn capacity_projection_tests() {
     }
 }
 
-#[actix::test]
+#[tokio::test]
+/*
+Summary:
+Verify that when a Submit ledger slot expires at an epoch boundary,
+miners reset their storage modules and a repacking request is enqueued
+for the full partition, and that ledger slot/partition assignments are
+updated consistently.
+
+High-level steps:
+1) Configure a minimal consensus and build an EpochSnapshot with initial
+   Publish/Submit slots and capacity partitions. Map local
+   StorageModuleInfos to StorageModule instances for the miner.
+2) Spawn a Tokio PartitionMiningService per storage module.
+   Subscribe to the MiningBus via ServiceSenders; publish events
+   using ServiceSenders send_* helpers. No Actix registry is involved.
+3) Wire a packing channel in ServiceSenders and forward the first
+   PackingRequest into a oneshot receiver for assertions.
+4) Drive epoch transitions by repeatedly calling perform_epoch_tasks
+   with synthetic epoch blocks (tweaking Submit ledger chunk totals as
+   needed). In each iteration, broadcast any expired partitions reported
+   by the snapshot to the miners.
+5) Assert:
+   - A PackingRequest arrives targeting the Submit partition and the
+     full partition range.
+   - Submit slot 0 is marked expired and emptied; new Submit slots are
+     added and assigned; Publish still has one slot.
+   - Partition assignments for Publish and Submit slots are internally
+     consistent with the ledger state.
+*/
 async fn partition_expiration_and_repacking_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("partition_expiration_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -444,63 +455,59 @@ async fn partition_expiration_and_repacking_test() {
         storage_modules.push(arc_module.clone());
     }
 
-    let rwlock: RwLock<Option<PackingRequest>> = RwLock::new(None);
-    let arc_rwlock = Arc::new(rwlock);
-    let closure_arc = arc_rwlock.clone();
-
     // Create ServiceSenders for testing
     let (service_senders, mut receivers) = ServiceSenders::new();
+    // Spawn a task that will await the first packing request from the internal receiver
+    let mut packing_rx = receivers.packing;
+
+    // Wire a Tokio packing handle that captures a single request via oneshot
+    let (_tx_packing, _rx_packing) =
+        tokio::sync::mpsc::channel::<irys_actors::packing_service::PackingRequest>(1);
+    let (pack_req_tx, pack_req_rx) =
+        tokio::sync::oneshot::channel::<irys_actors::packing_service::PackingRequest>();
+
+    tokio::spawn(async move {
+        if let Some(packing_req) = packing_rx.recv().await {
+            pack_req_tx.send(packing_req).expect("pack_req_rx dropped");
+        }
+    });
 
     // Spawn a task to handle block producer commands
     tokio::spawn(async move {
         while let Some(cmd) = receivers.block_producer.recv().await {
             if let BlockProducerCommand::SolutionFound { response, .. } = cmd {
                 // Return Ok(None) for the test
-                let _ = response.send(Ok(None));
+                response
+                    .send(Ok(None))
+                    .expect("block producer response receiver dropped");
             }
         }
     });
 
-    let packing = Mocker::<PackingActor>::mock(Box::new(move |msg, _ctx| {
-        let packing_req = *msg.downcast::<PackingRequest>().unwrap();
-        debug!("Packing request arrived ...");
-
-        {
-            let mut lck = closure_arc.write().unwrap();
-            lck.replace(packing_req);
-        }
-
-        debug!("Packing request result pushed ...");
-        Box::new(Some(())) as Box<dyn Any>
-    }));
-
     let vdf_steps_guard = VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(10, 0, None))));
 
-    let packing_addr = packing.start();
-    let mut part_actors = Vec::new();
+    let mut mining_service_handles = Vec::new();
+    let mut mining_service_controllers = Vec::new();
 
     let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
+    let should_mine = true;
     for sm in &storage_modules {
-        let partition_mining_actor = PartitionMiningActor::new(
+        let inner = PartitionMiningServiceInner::new(
             &config,
             service_senders.clone(),
-            packing_addr.clone().recipient(),
             sm.clone(),
-            true, // do not start mining automatically
+            should_mine,
             vdf_steps_guard.clone(),
             atomic_global_step_number.clone(),
             U256::zero(),
-            None,
         );
 
-        let part_arbiter = Arbiter::new();
-        let partition_address =
-            PartitionMiningActor::start_in_arbiter(&part_arbiter.handle(), |_| {
-                partition_mining_actor
-            });
+        let (controller, handle) =
+            PartitionMiningService::spawn_service(inner, tokio::runtime::Handle::current());
         debug!("starting miner partition hash {:?}", sm.partition_hash());
-        part_actors.push(partition_address);
+        mining_service_controllers.push(controller);
+        mining_service_handles.push(handle);
     }
 
     let assign_submit_partition_hash = {
@@ -557,18 +564,18 @@ async fn partition_expiration_and_repacking_test() {
         new_epoch_block.height = num_blocks_in_epoch + num_blocks_in_epoch * i;
 
         if i == 3 {
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
                 num_chunks_in_partition / 3;
         }
 
         if i == 5 {
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
                 num_chunks_in_partition / 2;
         }
 
         debug!(
             "Epoch Block: Submit.max_chunk_offset = {}",
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks
         );
 
         let result =
@@ -587,8 +594,7 @@ async fn partition_expiration_and_repacking_test() {
                 infos.iter().map(|info| info.partition_hash).collect()
             });
 
-        let mining_broadcaster_addr = BroadcastMiningService::from_registry();
-        mining_broadcaster_addr.do_send(BroadcastPartitionsExpiration(H256List(
+        service_senders.send_partitions_expiration(BroadcastPartitionsExpiration(H256List(
             expired_partition_hashes,
         )));
 
@@ -597,29 +603,11 @@ async fn partition_expiration_and_repacking_test() {
         debug!("{:#?}", epoch_snapshot.ledgers);
     }
 
-    // busypoll the solution context rwlock
-    let mut max_pools = 10;
-    let pack_req = 'outer: loop {
-        if max_pools == 0 {
-            panic!("Max. retries reached");
-        } else {
-            max_pools -= 1;
-        }
-        match arc_rwlock.try_read() {
-            Ok(lck) => {
-                if lck.is_none() {
-                    debug!("Packing request not ready waiting!");
-                } else {
-                    debug!("Packing request received ready!");
-                    break 'outer lck.as_ref().unwrap().clone();
-                }
-            }
-            Err(err) => {
-                debug!("Packing request read error {:?}", err);
-            }
-        }
-        sleep(Duration::from_millis(50)).await;
-    };
+    // wait for packing request with a short timeout instead of busy-polling
+    let pack_req = tokio::time::timeout(Duration::from_secs(3), pack_req_rx)
+        .await
+        .expect("timed out waiting for packing request")
+        .expect("packing request sender dropped");
 
     // check a new slots is inserted with a partition assigned to it, and slot 0 expired and its partition was removed
     let (publish_partition, submit_partition, submit_partition2) = {
@@ -741,18 +729,18 @@ async fn partition_expiration_and_repacking_test() {
     }
 
     assert_eq!(
-        pack_req.storage_module.partition_hash(),
+        pack_req.storage_module().partition_hash(),
         Some(submit_partition_hash),
         "Partition hashes should be equal"
     );
     assert_eq!(
-        pack_req.chunk_range,
+        *pack_req.chunk_range(),
         PartitionChunkRange(partition_chunk_offset_ie!(0, chunk_count as u32)),
         "The whole partition should be repacked"
     );
 }
 
-#[actix::test]
+#[tokio::test]
 async fn epoch_blocks_reinitialization_test() {
     let tmp_dir = setup_tracing_and_temp_dir(Some("epoch_block_reinitialization_test"), false);
     let base_path = tmp_dir.path().to_path_buf();
@@ -768,12 +756,15 @@ async fn epoch_blocks_reinitialization_test() {
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
-    let block_index: Arc<RwLock<BlockIndex>> = Arc::new(RwLock::new(
-        BlockIndex::new(&config.node_config).await.unwrap(),
-    ));
-
-    let block_index_actor = BlockIndexService::new(block_index.clone(), &config.consensus).start();
-    SystemRegistry::set(block_index_actor.clone());
+    let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
+    let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
+        block_index_rx,
+        Arc::new(RwLock::new(
+            BlockIndex::new(&config.node_config).await.unwrap(),
+        )),
+        &config.consensus,
+        tokio::runtime::Handle::current(),
+    );
 
     // Initialize genesis block at height 0
     let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -799,14 +790,19 @@ async fn epoch_blocks_reinitialization_test() {
 
     genesis_block.block_hash = H256::from_slice(&[0; 32]);
 
-    let msg = BlockMigrationMessage {
-        block_header: Arc::new(genesis_block.clone()),
-        all_txs: Arc::new(vec![]),
-    };
-    match block_index_actor.send(msg).await {
-        Ok(_) => info!("Genesis block indexed"),
-        Err(_) => panic!("Failed to index genesis block"),
-    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    block_index_tx
+        .send(
+            irys_actors::block_index_service::BlockIndexServiceMessage::MigrateBlock {
+                block_header: Arc::new(genesis_block.clone()),
+                all_txs: Arc::new(vec![]),
+                response: tx,
+            },
+        )
+        .expect("send migrate block");
+    rx.await
+        .expect("Failed to receive migration result")
+        .expect("Failed to index genesis block");
 
     {
         let mut storage_modules: StorageModuleVec = Vec::new();
@@ -836,7 +832,7 @@ async fn epoch_blocks_reinitialization_test() {
 
     // Now create a new epoch block & give the Submit ledger enough size to add a slot
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = 0;
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = 0;
 
     let mut epoch_block_data: Vec<EpochBlockData> = Vec::new();
     let epochs_in_term = config.consensus.epoch.submit_ledger_epoch_length;
@@ -848,7 +844,7 @@ async fn epoch_blocks_reinitialization_test() {
 
         // For the second to last epoch block in the term, have it resize the submit ledger
         if i == epochs_in_term - 1 {
-            new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset =
+            new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks =
                 num_chunks_in_partition / 2;
         }
 
@@ -895,10 +891,15 @@ async fn epoch_blocks_reinitialization_test() {
 
     // partitions_guard.read().print_assignments();
 
-    let block_index_guard = block_index_actor
-        .send(GetBlockIndexGuardMessage)
-        .await
-        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    block_index_tx
+        .send(
+            irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard {
+                response: tx,
+            },
+        )
+        .expect("send get block index guard");
+    let block_index_guard = rx.await.unwrap();
 
     debug!(
         "num blocks in block_index: {}",
@@ -935,7 +936,7 @@ async fn epoch_blocks_reinitialization_test() {
     }
 }
 
-#[actix::test]
+#[tokio::test]
 async fn partitions_assignment_determinism_test() {
     std::env::set_var("RUST_LOG", "debug");
     let tmp_dir = setup_tracing_and_temp_dir(Some("partitions_assignment_determinism_test"), false);
@@ -998,8 +999,8 @@ async fn partitions_assignment_determinism_test() {
     let total_epoch_messages = 6;
     let mut epoch_num = 1;
     let mut new_epoch_block = IrysBlockHeader::new_mock_header();
-    new_epoch_block.data_ledgers[DataLedger::Submit].max_chunk_offset = num_chunks_in_partition;
-    new_epoch_block.data_ledgers[DataLedger::Publish].max_chunk_offset = num_chunks_in_partition;
+    new_epoch_block.data_ledgers[DataLedger::Submit].total_chunks = num_chunks_in_partition;
+    new_epoch_block.data_ledgers[DataLedger::Publish].total_chunks = num_chunks_in_partition;
 
     let mut previous_epoch_block = genesis_block.clone();
 

@@ -212,6 +212,11 @@ pub fn validate_path(
     // Proof nodes (including leaf nodes) always contain their right bound
     let right_bound = leaf_proof.offset() as u128;
 
+    // Ensure the provided target_offset lies within the computed [left_bound, right_bound]
+    if !(left_bound..=right_bound).contains(&target_offset) {
+        return Err(eyre!("Invalid target_offset: out of bounds"));
+    }
+
     Ok(ValidatePathResult {
         leaf_hash: leaf_proof.data_hash,
         left_bound,
@@ -397,8 +402,8 @@ pub fn generate_leaves_from_chunks(
 
 /// Generates data chunks from which the calculation of root id starts, including the provided address to interleave into the leaf data hash for ingress proofs
 /// and_regular can be set to re-use the chunk iterator to produce the "standard" leaves, as well as the ingress proof specific ones for when we validate ingress proofs
-pub fn generate_ingress_leaves(
-    chunks: impl Iterator<Item = eyre::Result<ChunkBytes>>,
+pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
+    chunks: impl Iterator<Item = eyre::Result<C>>,
     address: Address,
     and_regular: bool,
 ) -> Result<(Vec<Node>, Option<Vec<Node>>), Error> {
@@ -407,9 +412,9 @@ pub fn generate_ingress_leaves(
     let mut min_byte_range = 0;
     for chunk in chunks {
         let chunk = chunk?;
-        let chunk = chunk.as_ref(); // double-binding required
-        let data_hash = hash_ingress_sha256(chunk, address);
-        let max_byte_range = min_byte_range + chunk.len();
+        let bytes = chunk.as_ref();
+        let data_hash = hash_ingress_sha256(bytes, address);
+        let max_byte_range = min_byte_range + bytes.len();
         let offset = max_byte_range.to_note_vec();
         let id = hash_all_sha256(vec![&data_hash, &offset]);
 
@@ -423,7 +428,7 @@ pub fn generate_ingress_leaves(
         });
 
         if and_regular {
-            let data_hash = hash_sha256(chunk);
+            let data_hash = hash_sha256(bytes);
             let id = hash_all_sha256(vec![&data_hash, &offset]);
             regular_leaves.push(Node {
                 id,
@@ -435,7 +440,7 @@ pub fn generate_ingress_leaves(
             });
         }
 
-        min_byte_range += &chunk.len();
+        min_byte_range += bytes.len();
     }
     Ok((leaves, and_regular.then_some(regular_leaves)))
 }
@@ -471,8 +476,9 @@ pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<V
 
 /// Hashes together a single branch node from a pair of child nodes.
 pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
-    let max_byte_range = left.max_byte_range.to_note_vec();
-    let id = hash_all_sha256(vec![&left.id, &right.id, &max_byte_range]);
+    // pivot = left child’s exclusive upper bound used in branch hashing
+    let pivot_note = left.max_byte_range.to_note_vec();
+    let id = hash_all_sha256(vec![&left.id, &right.id, &pivot_note]);
     Ok(Node {
         id,
         data_hash: None,
@@ -676,6 +682,112 @@ mod tests {
         assert_eq!(
             &err_text,
             "Invalid proof buffer: length 31 is less than the minimum required length 64"
+        );
+    }
+
+    #[test]
+    fn validate_path_accepts_in_bounds_edges() {
+        // Build a simple two-leaf tree: left size = 5 bytes, right size = 7 bytes
+        // So the branch pivot is 5, and the right leaf's right_bound is 12.
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeave {
+                data_root: H256([9_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeave {
+                data_root: H256([8_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+        let root = generate_data_root(leaves).expect("expected root");
+        let root_id = root.id;
+        let proofs = resolve_proofs(root, None).expect("expected proofs");
+        assert_eq!(proofs.len(), 2, "expected one proof per leaf");
+
+        // Classify the two leaf proofs by their leaf offsets (min = left, max = right)
+        let leaf_infos: Vec<(&Proof, usize)> = proofs
+            .iter()
+            .map(|p| {
+                let lp = get_leaf_proof(&Base64(p.proof.clone())).expect("expected LeafProof");
+                (p, lp.offset())
+            })
+            .collect();
+        assert_eq!(leaf_infos.len(), 2, "expected one proof per leaf");
+        let (left_proof, left_offset, right_proof, right_offset) =
+            if leaf_infos[0].1 <= leaf_infos[1].1 {
+                (
+                    leaf_infos[0].0,
+                    leaf_infos[0].1,
+                    leaf_infos[1].0,
+                    leaf_infos[1].1,
+                )
+            } else {
+                (
+                    leaf_infos[1].0,
+                    leaf_infos[1].1,
+                    leaf_infos[0].0,
+                    leaf_infos[0].1,
+                )
+            };
+
+        // Validate left leaf with an in-bounds target (e.g. 0)
+        let left_encoded = Base64(left_proof.proof.clone());
+        let left_result =
+            validate_path(root_id, &left_encoded, 0).expect("left leaf should validate at 0");
+        assert_eq!(left_result.left_bound, 0);
+        assert_eq!(left_result.right_bound, left_offset as u128);
+
+        // Validate right leaf at both inclusive bounds: left_offset and right_offset
+        let right_encoded = Base64(right_proof.proof.clone());
+
+        let at_left_edge = validate_path(root_id, &right_encoded, left_offset as u128)
+            .expect("right leaf at left_offset");
+        assert_eq!(at_left_edge.left_bound, left_offset as u128);
+        assert_eq!(at_left_edge.right_bound, right_offset as u128);
+
+        let at_right_edge = validate_path(root_id, &right_encoded, right_offset as u128)
+            .expect("right leaf at right_bound");
+        assert_eq!(at_right_edge.left_bound, left_offset as u128);
+        assert_eq!(at_right_edge.right_bound, right_offset as u128);
+    }
+
+    #[test]
+    fn validate_path_rejects_above_right_bound() {
+        // Same two-leaf setup as previous test
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeave {
+                data_root: H256([7_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeave {
+                data_root: H256([6_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+        let root = generate_data_root(leaves).expect("expected root");
+        let root_id = root.id;
+        let proofs = resolve_proofs(root, None).expect("expected proofs");
+
+        // Pick the right (max offset) leaf proof and compute an out-of-bounds target (right_bound + 1)
+        let (right_proof, right_bound) = proofs
+            .iter()
+            .map(|p| {
+                let lp = get_leaf_proof(&Base64(p.proof.clone())).expect("LeafProof");
+                (p, lp.offset())
+            })
+            .max_by_key(|(_, off)| *off)
+            .expect("expected right proof");
+        let encoded = Base64(right_proof.proof.clone());
+        let oob_target = (right_bound as u128) + 1;
+
+        let err = validate_path(root_id, &encoded, oob_target)
+            .expect_err("target above right_bound must be rejected")
+            .to_string();
+        assert!(
+            err.contains("Invalid target_offset: out of bounds"),
+            "expected 'Invalid target_offset: out of bounds', got: {err}"
         );
     }
 }

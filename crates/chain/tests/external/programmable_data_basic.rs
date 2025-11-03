@@ -1,4 +1,3 @@
-use actix_http::StatusCode;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
@@ -6,10 +5,10 @@ use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
 use irys_actors::mempool_service::MempoolServiceMessage;
-use irys_actors::packing::wait_for_packing;
+
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
-use irys_primitives::precompile::IrysPrecompileOffsets;
+use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::{irys::IrysSigner, Address, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx as _;
@@ -32,7 +31,7 @@ const DEV_PRIVATE_KEY: &str = "db793353b633df950842415065f769699541160845d73db90
 const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
 #[ignore]
-#[actix_web::test]
+#[tokio::test]
 /// This test is the counterpart test to the programmable data basic test in the JS Client https://github.com/Irys-xyz/irys-js
 /// It waits for a valid storage tx header & chunks, mines and confirms it, then mines a couple more blocks, which will include the programmable data EVM tx.
 /// we then halt so the client has time to make the getStorage call and read the contract state.
@@ -70,12 +69,11 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     ]);
 
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
-    node.node_ctx.stop_mining().await?;
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await?;
+    node.node_ctx.stop_mining()?;
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     // let signer: PrivateKeySigner = config.mining_signer.signer.into();
     // let wallet = EthereumWallet::from(signer.clone());
@@ -121,7 +119,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     // server should be running
     // check with request to `/v1/info`
-    let client = awc::Client::default();
+    let client = reqwest::Client::new();
 
     let response = client
         .get(format!("{}/v1/info", http_url))
@@ -129,7 +127,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
     info!("HTTP server started");
 
     info!("waiting for tx header...");
@@ -182,7 +180,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
         let delay = Duration::from_secs(1);
 
         for attempt in 1..20 {
-            let mut response = client
+            let response = client
                 .get(format!(
                     "{}/v1/tx/{}/local/data_start_offset",
                     http_url, &id
@@ -191,7 +189,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
                 .await
                 .unwrap();
 
-            if response.status() == StatusCode::OK {
+            if response.status() == reqwest::StatusCode::OK {
                 let res: TxOffset = response.json().await.unwrap();
                 debug!("start offset: {:?}", &res);
                 info!("Transaction was retrieved ok after {} attempts", attempt);

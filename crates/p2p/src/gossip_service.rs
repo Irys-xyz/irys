@@ -25,17 +25,14 @@ use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
-use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage};
-use rand::prelude::SliceRandom as _;
+use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tokio::sync::mpsc::{channel, error::SendError, Receiver, Sender};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, error, info, warn, Span};
-
-const MAX_PEERS_PER_BROADCAST: usize = 5;
-const BROADCAST_INTERVAL: Duration = Duration::from_secs(1);
+use tokio::sync::mpsc::{
+    channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
+};
+use tracing::{debug, info, warn, Span};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -104,6 +101,7 @@ pub struct P2PService {
     broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
     client: GossipClient,
     pub sync_state: ChainSyncState,
+    gossip_cfg: P2PGossipConfig,
 }
 
 impl P2PService {
@@ -134,6 +132,7 @@ impl P2PService {
             cache,
             broadcast_data_receiver: Some(broadcast_data_receiver),
             sync_state: ChainSyncState::new(true, false),
+            gossip_cfg: P2PGossipConfig::default(),
         }
     }
 
@@ -178,7 +177,7 @@ impl P2PService {
             self.sync_state.clone(),
             block_status_provider,
             execution_payload_provider.clone(),
-            config,
+            config.clone(),
             service_senders,
         );
 
@@ -208,8 +207,18 @@ impl P2PService {
                     InternalGossipError::BroadcastReceiverShutdown,
                 ))?;
 
-        let broadcast_task_handle =
-            spawn_broadcast_task(mempool_data_receiver, self, task_executor, peer_list);
+        // Load gossip config from NodeConfig
+        self.gossip_cfg = config.node_config.p2p_gossip;
+
+        // Wrap the service in an Arc so we can spawn a detached broadcast per message
+        let service_arc = Arc::new(self);
+
+        let broadcast_task_handle = spawn_broadcast_task(
+            mempool_data_receiver,
+            Arc::clone(&service_arc),
+            task_executor,
+            peer_list,
+        );
 
         let gossip_service_handle =
             spawn_watcher_task(server, server_handle, broadcast_task_handle, task_executor);
@@ -236,18 +245,22 @@ impl P2PService {
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
 
-        // Get all active peers except the source
-        let mut peers = peer_list.top_active_peers(None, None);
+        // Get all peers sorted by score, so we broadcast to the best ones first, but try to
+        // reach to all peers eventually.
+        // TODO: we need to make an algorithm that doesn't try to reach all peers every time,
+        //  but rather a random subset of them. We should take n top peers, and add some
+        //  randomly selected peers from the rest of the list.
+        let mut peers = peer_list.all_peers_sorted_by_score();
 
-        debug!(
-            "Node {:?}: Peers selected for broadcast: {:?}",
-            self.client.mining_address, peers
-        );
-
-        peers.shuffle(&mut rand::thread_rng());
+        if peers.is_empty() {
+            debug!(
+                "Node {:?}: No peers to broadcast to",
+                self.client.mining_address
+            );
+        }
 
         while !peers.is_empty() {
-            // Remove peers that seen the data since the last iteration
+            // Remove peers that have seen the data since the last iteration
             let peers_that_seen_data = self.cache.peers_that_have_seen(&key)?;
             peers.retain(|(peer_miner_address, _peer)| {
                 !peers_that_seen_data.contains(peer_miner_address)
@@ -261,40 +274,29 @@ impl P2PService {
                 break;
             }
 
-            let n = std::cmp::min(MAX_PEERS_PER_BROADCAST, peers.len());
-            let maybe_selected_peers = peers.get(0..n);
+            let n = std::cmp::min(self.gossip_cfg.broadcast_batch_size, peers.len());
+            let selected_peers = peers.drain(0..n);
 
-            if let Some(selected_peers) = maybe_selected_peers {
-                debug!(
-                    "Node {:?}: Peers selected for the current broadcast step: {:?}",
-                    self.client.mining_address, selected_peers
+            debug!(
+                "Node {:?}: Peers selected for the current broadcast step: {:?}",
+                self.client.mining_address, selected_peers
+            );
+            // Send data to selected peers
+            for (peer_miner_address, peer_entry) in selected_peers {
+                self.client.send_data_and_update_the_score_detached(
+                    (&peer_miner_address, &peer_entry),
+                    Arc::clone(&broadcast_data),
+                    peer_list,
+                    Arc::clone(&self.cache),
+                    key,
                 );
-                // Send data to selected peers
-                for (peer_miner_address, peer_entry) in selected_peers {
-                    self.client.send_data_and_update_the_score_detached(
-                        (peer_miner_address, peer_entry),
-                        Arc::clone(&broadcast_data),
-                        peer_list,
-                    );
-
-                    // Record as seen anyway, so we don't rebroadcast to them
-                    if let Err(error) = self.cache.record_seen(*peer_miner_address, key) {
-                        error!(
-                            "Failed to record data in cache for peer {}: {}",
-                            peer_miner_address, error
-                        );
-                    }
-                }
-            } else {
-                debug!(
-                    "Node {:?}, No peers selected for the current broadcast step",
-                    self.client.mining_address
-                );
-                break;
             }
-
-            tokio::time::sleep(BROADCAST_INTERVAL).await;
         }
+
+        tokio::time::sleep(Duration::from_millis(
+            self.gossip_cfg.broadcast_batch_throttle_interval,
+        ))
+        .await;
 
         debug!("Node {:?}: Broadcast finished", self.client.mining_address);
         Ok(())
@@ -303,7 +305,7 @@ impl P2PService {
 
 fn spawn_broadcast_task(
     mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
-    service: P2PService,
+    service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,
 ) -> ServiceHandleWithShutdownSignal {
@@ -316,9 +318,14 @@ fn spawn_broadcast_task(
                     maybe_data = mempool_data_receiver.recv() => {
                         match maybe_data {
                             Some(broadcast_message) => {
-                                if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
-                                    warn!("Failed to broadcast data: {}", error);
-                                };
+                                // For each incoming message, spawn a detached task so broadcasts don't block each other
+                                let service = std::sync::Arc::clone(&service);
+                                let peer_list = peer_list.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = service.broadcast_data(broadcast_message, &peer_list).await {
+                                        warn!("Failed to broadcast data: {}", error);
+                                    }
+                                });
                             },
                             None => break, // channel closed
                         }

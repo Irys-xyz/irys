@@ -1,17 +1,19 @@
 //! endpoint tests
 use crate::{
     api::{
-        block_index_endpoint_request, chunk_endpoint_request, info_endpoint_request,
-        network_config_endpoint_request, peer_list_endpoint_request, version_endpoint_request,
+        block_index_endpoint_request, chunk_endpoint_request, client_request,
+        info_endpoint_request, network_config_endpoint_request, peer_list_endpoint_request,
+        version_endpoint_request,
     },
     utils::IrysNodeTest,
 };
-use actix_web::{http::header::ContentType, HttpMessage as _};
+use actix_web::http::header::ContentType;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{BlockIndexItem, NodeInfo};
+use irys_types::{BlockIndexItem, IrysBlockHeader, NodeInfo};
+use reqwest::StatusCode;
 use tracing::info;
 
-#[actix::test]
+#[tokio::test]
 async fn heavy_external_api() -> eyre::Result<()> {
     initialize_tracing();
 
@@ -32,57 +34,100 @@ async fn heavy_external_api() -> eyre::Result<()> {
     //assert_eq!(_response.content_type(), ContentType::json());
 
     let mut _response = network_config_endpoint_request(&address).await;
-    assert_eq!(_response.status(), 200);
-    assert_eq!(_response.content_type(), ContentType::json().to_string());
+    assert_eq!(_response.status(), StatusCode::OK);
+    assert_eq!(
+        _response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
 
     let mut _response = peer_list_endpoint_request(&address).await;
-    assert_eq!(_response.status(), 200);
-    assert_eq!(_response.content_type(), ContentType::json().to_string());
+    assert_eq!(_response.status(), StatusCode::OK);
+    assert_eq!(
+        _response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
 
     // FIXME: Test to be updated with future endpoint work
     let mut _response = version_endpoint_request(&address).await;
     //assert_eq!(response.status(), 200);
     //assert_eq!(response.content_type(), ContentType::json());
 
-    let mut response = info_endpoint_request(&address).await;
+    let response = info_endpoint_request(&address).await;
 
-    assert_eq!(response.status(), 200);
+    assert_eq!(response.status(), StatusCode::OK);
     info!("HTTP server started");
 
     // confirm we are receiving the correct content type
-    assert_eq!(response.content_type(), ContentType::json().to_string());
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        &ContentType::json().to_string()
+    );
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
 
     assert_eq!(json_response.block_index_height, 0);
 
-    // advance enough blocks to cause 1 block to migrate from mempool to index
-    ctx.mine_blocks(block_migration_depth as usize + 1).await?;
+    // advance enough blocks to cause 2 blocks to migrate from mempool to index
+    ctx.mine_blocks(block_migration_depth as usize + 2).await?;
 
-    // wait for 1 block in the index
-    if let Err(e) = ctx.wait_until_block_index_height(1, 10).await {
+    // wait for 2 blocks in the index
+    if let Err(e) = ctx.wait_until_block_index_height(2, 10).await {
         panic!("Error waiting for block height on chain. Error: {:?}", e);
     }
 
-    let mut response = info_endpoint_request(&address).await;
+    let response = info_endpoint_request(&address).await;
 
     // deserialize the response into NodeInfo struct
     let json_response: NodeInfo = response.json().await.expect("valid NodeInfo");
 
-    // check the api endpoint again, and it should now show 1 block in the index
-    assert_eq!(json_response.block_index_height, 1);
+    // The block index is 0-based, so the total number of entries is height + 1.
+    let total_entries = json_response.block_index_height + 1;
 
-    // tests should check total number of json objects returned are equal to the number requested.
-    // Ideally should also check that the expected fields of those objects are present.
+    // check the api endpoint again, and it should now show 2 blocks are in the index
+    assert_eq!(json_response.block_index_height, 2);
+
+    // For this endpoint:
+    // - height is the start index (0-based), inclusive
+    // - limit == 0 means "use default limit", which is large enough to include all
+    //   remaining items from height onward, so expected = total_entries - height
+    // - otherwise, expected = min(limit, total_entries - height)
+    fn expected_count(total_entries: u64, height: u64, limit: u64) -> u64 {
+        let remaining = total_entries.saturating_sub(height);
+        if limit == 0 {
+            remaining
+        } else {
+            remaining.min(limit)
+        }
+    }
+
+    let response = client_request(&format!("{}/v1/block/1", &address)).await;
+    let json: IrysBlockHeader = response.json().await.unwrap();
+    assert!(json.poa.chunk.is_none());
+
+    let response = client_request(&format!("{}/v1/block/1/full", &address)).await;
+    let json: IrysBlockHeader = response.json().await.unwrap();
+    assert!(json.poa.chunk.is_some());
+
+    // tests should check total number of json objects returned are equal to the expected number.
     for limit in 0..2 {
         for height in 0..2 {
-            let mut response = block_index_endpoint_request(&address, height, limit).await;
-            assert_eq!(response.status(), 200);
-            assert_eq!(response.content_type(), ContentType::json().to_string());
-            let json_response: Vec<BlockIndexItem> =
-                response.json().await.expect("valid BlockIndexItem");
-            assert_eq!(json_response.len() as u64, limit);
+            let response = block_index_endpoint_request(&address, height, limit).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get("content-type").unwrap(),
+                &ContentType::json().to_string()
+            );
+            let items: Vec<BlockIndexItem> = response.json().await.expect("valid BlockIndexItem");
+            let expected = expected_count(total_entries, height, limit);
+            assert_eq!(
+                items.len() as u64,
+                expected,
+                "unexpected length for height={}, limit={}, total_entries={}",
+                height,
+                limit,
+                total_entries
+            );
         }
     }
 

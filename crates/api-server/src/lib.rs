@@ -13,19 +13,23 @@ use irys_actors::{mempool_service::MempoolServiceMessage, pledge_provider::Mempo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{app_state::DatabaseProvider, Config, PeerAddress};
+use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
 use routes::{
-    block, block_index, commitment, get_chunk, index, network_config, peer_list, post_chunk,
-    post_version, price, proxy::proxy, tx,
+    block, block_index, block_tree, commitment, full_config, get_chunk, index, ledger, mempool,
+    mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
     sync::Arc,
+    time::Instant,
 };
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, info};
+use tracing::{info, warn};
 
 use crate::routes::anchor;
+
+/// API version prefix for all routes
+pub const API_VERSION: &str = "v1";
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -41,6 +45,8 @@ pub struct ApiState {
     pub block_index: BlockIndexReadGuard,
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub started_at: Instant,
+    pub mining_address: Address,
 }
 
 impl ApiState {
@@ -50,13 +56,23 @@ impl ApiState {
 }
 
 pub fn routes() -> impl HttpServiceFactory {
-    web::scope("v1")
-        .wrap(middleware::Logger::default())
+    web::scope(API_VERSION)
         .route("/", web::get().to(index::info_route))
-        .route("/block/{block_tag}", web::get().to(block::get_block))
+        .route(
+            "/block/{block_tag}",
+            web::get().to(block::get_block_without_poa),
+        )
+        .route(
+            "/block/{block_tag}/full",
+            web::get().to(block::get_block_with_poa),
+        )
         .route(
             "/block_index",
             web::get().to(block_index::block_index_route),
+        )
+        .route(
+            "/block_tree/forks",
+            web::get().to(block_tree::get_block_tree_forks),
         )
         .route(
             "/commitment_tx",
@@ -73,10 +89,12 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
+        .route("/genesis", web::get().to(index::genesis_route))
         .route(
             "/network/config",
             web::get().to(network_config::get_network_config),
         )
+        .route("/config", web::get().to(full_config::get_full_config))
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route(
             "/price/commitment/stake",
@@ -107,30 +125,73 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
+        // Ledger endpoints
+        .route(
+            "/ledger/submit/{miner_address}/summary",
+            web::get().to(ledger::get_submit_summary),
+        )
+        .route(
+            "/ledger/publish/{miner_address}/summary",
+            web::get().to(ledger::get_publish_summary),
+        )
+        .route(
+            "/ledger/submit/{miner_address}/assignments",
+            web::get().to(ledger::get_submit_assignments),
+        )
+        .route(
+            "/ledger/publish/{miner_address}/assignments",
+            web::get().to(ledger::get_publish_assignments),
+        )
+        .route(
+            "/ledger/{miner_address}/assignments",
+            web::get().to(ledger::get_all_assignments),
+        )
+        // Epoch endpoints
+        .route("/epoch/current", web::get().to(ledger::get_current_epoch))
+        // Storage endpoints
+        .route(
+            "/storage/intervals/{ledger}/{slot_index}/{chunk_type}",
+            web::get().to(storage::get_intervals),
+        )
+        .route(
+            "/storage/counts/{ledger}/{slot_index}",
+            web::get().to(storage::get_chunk_counts),
+        )
+        .route(
+            "/mempool/status",
+            web::get().to(mempool::get_mempool_status),
+        )
+        // Mining endpoint
+        .route("/mining/info", web::get().to(mining::get_mining_info))
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
-    info!(?port, "Starting API server");
-
+    info!(custom.port = ?port, "Starting API server");
+    let state = web::Data::new(app_state);
     HttpServer::new(move || {
         let awc_client = awc::Client::new();
         App::new()
-            .app_data(web::Data::new(app_state.clone()))
+            .app_data(state.clone())
             .app_data(web::Data::new(awc_client))
             .app_data(
                 JsonConfig::default()
                     .limit(1024 * 1024) // Set JSON payload limit to 1MB
                     .error_handler(|err, req| {
-                        debug!("JSON decode error for req {:?} - {:?}", &req.path(), &err);
-                        InternalError::from_response(err, HttpResponse::BadRequest().finish())
-                            .into()
+                        warn!("JSON decode error for req {:?} - {:?}", &req.path(), &err);
+                        let error_message = format!("JSON decode/parse error: {}", err);
+                        InternalError::from_response(
+                            err,
+                            HttpResponse::BadRequest().body(error_message),
+                        )
+                        .into()
                     }),
             )
             // not a permanent redirect, so we can redirect to the highest API version
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
             .wrap(Cors::permissive())
+            .wrap(middleware::Logger::default().log_target("api-server"))
     })
     .listen(listener)
     .unwrap()
@@ -159,7 +220,7 @@ pub fn create_listener(addr: SocketAddr) -> eyre::Result<TcpListener> {
 // Tests
 //------------------------------------------------------------------------------
 // #[cfg(test)]
-// #[actix_web::test]
+// #[tokio::test]
 // async fn post_tx_and_chunks_golden_path() {
 //     use irys_database::tables::IrysTables;
 //     use reth::tasks::TaskManager;

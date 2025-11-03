@@ -1,11 +1,12 @@
 use crate::block_pool::{BlockPool, BlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
-use crate::peer_network_service::PeerNetworkService;
+use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, BlockDiscoveryStub, FakeGossipServer, MempoolStub, MockRethServiceActor,
+    data_handler_stub, ApiClientStub, BlockDiscoveryStub, FakeGossipServer, MempoolStub,
 };
-use crate::{BlockStatusProvider, GetPeerListGuard};
-use actix::Actor as _;
+use crate::types::GossipResponse;
+use crate::BlockStatusProvider;
+use futures::{future, FutureExt as _};
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -14,12 +15,13 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     AcceptedResponse, Address, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    Config, DataTransactionHeader, DatabaseProvider, GossipData, GossipDataRequest,
-    IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender,
-    PeerResponse, PeerScore, VersionRequest, H256,
+    CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData,
+    GossipDataRequest, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, VersionRequest, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -48,6 +50,14 @@ impl ApiClient for MockApiClient {
         Ok(())
     }
 
+    async fn post_commitment_transaction(
+        &self,
+        _peer: SocketAddr,
+        _transaction: CommitmentTransaction,
+    ) -> eyre::Result<()> {
+        Ok(())
+    }
+
     async fn get_transactions(
         &self,
         _peer: SocketAddr,
@@ -68,8 +78,26 @@ impl ApiClient for MockApiClient {
         &self,
         _peer: SocketAddr,
         _block_hash: BlockHash,
+        _with_poa: bool,
     ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
         Ok(self.block_response.clone())
+    }
+
+    async fn get_latest_block(
+        &self,
+        _peer: SocketAddr,
+        _with_poa: bool,
+    ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
+        Ok(None)
+    }
+
+    async fn get_block_by_height(
+        &self,
+        _peer: SocketAddr,
+        _block_height: u64,
+        _with_poa: bool,
+    ) -> eyre::Result<Option<CombinedBlockHeader>> {
+        Ok(None)
     }
 
     async fn get_block_index(
@@ -101,6 +129,7 @@ struct MockedServices {
     execution_payload_provider: ExecutionPayloadCache,
     mempool_stub: MempoolStub,
     service_senders: ServiceSenders,
+    is_vdf_mining_enabled: Arc<AtomicBool>,
 }
 
 impl MockedServices {
@@ -121,36 +150,39 @@ impl MockedServices {
             block_status_provider: block_status_provider_mock.clone(),
             internal_message_bus: None,
         };
-        let reth_service = MockRethServiceActor {};
-        let reth_addr = reth_service.start();
+        let (service_senders, service_receivers) =
+            irys_actors::test_helpers::build_test_service_senders();
+        let _reth_service_tx = service_senders.reth_service.clone();
+        let mut vdf_receiver = service_receivers.vdf_fast_forward;
+        let mut block_tree_receiver = service_receivers.block_tree;
+
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-        let peer_list_service = PeerNetworkService::new_with_custom_api_client(
+        let runtime_handle = tokio::runtime::Handle::current();
+        let reth_peer_sender = Arc::new(|peer_info: RethPeerInfo| {
+            let _ = peer_info;
+            future::ready(()).boxed()
+        });
+
+        let (_peer_network_handle, peer_list_data_guard) = spawn_peer_network_service_with_client(
             db.clone(),
             config,
             mock_client.clone(),
-            reth_addr,
+            reth_peer_sender,
             receiver,
             sender,
+            tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+            runtime_handle,
         );
-        let peer_service_addr = peer_list_service.start();
-        let peer_list_data_guard = peer_service_addr
-            .send(GetPeerListGuard)
-            .await
-            .expect("to get peer list")
-            .expect("to get peer list");
         let execution_payload_provider =
             ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mempool_stub = MempoolStub::new(tx);
 
-        let vdf_state_stub =
+        let vdf_state_readonly =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
 
-        let (service_senders, service_receivers) = ServiceSenders::new();
-
-        let mut vdf_receiver = service_receivers.vdf_fast_forward;
-        let vdf_state = vdf_state_stub;
+        let vdf_state = vdf_state_readonly;
         tokio::spawn(async move {
             loop {
                 match vdf_receiver.recv().await {
@@ -168,8 +200,6 @@ impl MockedServices {
             }
         });
 
-        let mut block_tree_receiver = service_receivers.block_tree;
-
         tokio::spawn(async move {
             while let Some(message) = block_tree_receiver.recv().await {
                 debug!("Received BlockTreeServiceMessage: {:?}", message);
@@ -185,11 +215,12 @@ impl MockedServices {
             execution_payload_provider,
             mempool_stub,
             service_senders,
+            is_vdf_mining_enabled: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_process_block() {
     let config = create_test_config();
 
@@ -201,6 +232,7 @@ async fn should_process_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -232,7 +264,7 @@ async fn should_process_block() {
     let test_header = Arc::new(test_header.clone());
 
     service
-        .process_block(Arc::clone(&test_header), false)
+        .process_block::<ApiClientStub>(Arc::clone(&test_header), false)
         .await
         .expect("can't process block");
 
@@ -244,7 +276,7 @@ async fn should_process_block() {
     assert_eq!(block_header_in_discovery, test_header);
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_process_block_with_intermediate_block_in_api() {
     let config = create_test_config();
 
@@ -294,6 +326,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -356,6 +389,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         block_pool.clone(),
         data_handler,
         None,
+        is_vdf_mining_enabled,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -364,11 +398,11 @@ async fn should_process_block_with_intermediate_block_in_api() {
         tokio::runtime::Handle::current(),
     );
 
-    // Set the fake server to mimic get_data -> gossip_service sends message to block pool
+    // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
     let block_for_server = block2.clone();
     let pool_for_server = block_pool.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
-        GossipDataRequest::ExecutionPayload(_) => None,
+        GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
         GossipDataRequest::Block(block_hash) => {
             let block = block_for_server.clone();
             let block_for_response = block.clone();
@@ -376,17 +410,14 @@ async fn should_process_block_with_intermediate_block_in_api() {
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                pool.process_block(Arc::new(block.clone()), false)
+                pool.process_block::<ApiClientStub>(Arc::new(block.clone()), false)
                     .await
                     .expect("to process block");
             });
-            Some(GossipData::Block(Arc::new(block_for_response)))
+            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
         }
-        GossipDataRequest::Chunk(_) => None,
+        GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
     });
-    // gossip_server.set_on_block_data_request(move |block_hash| {
-    //
-    // });
 
     let block2 = Arc::new(block2.clone());
     let block3 = Arc::new(block3.clone());
@@ -396,7 +427,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     // Process block3
     block_pool
-        .process_block(Arc::clone(&block3), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block3), false)
         .await
         .expect("can't process block");
 
@@ -417,7 +448,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     assert_eq!(discovered_block3, block3);
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
     let config = create_test_config();
 
@@ -429,6 +460,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -482,17 +514,14 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     );
 
     let res = block_pool
-        .process_block(Arc::new(header_building_on_very_old_block.clone()), false)
+        .process_block::<ApiClientStub>(Arc::new(header_building_on_very_old_block.clone()), false)
         .await;
 
     assert!(res.is_err());
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let config = create_test_config();
 
@@ -504,6 +533,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -572,6 +602,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         block_pool.clone(),
         data_handler,
         None,
+        is_vdf_mining_enabled,
     );
 
     let sync_service_handle = ChainSyncService::spawn_service(
@@ -630,7 +661,9 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         if let Some(block) = block {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let res = pool.process_block(Arc::new(block.clone()), false).await;
+                let res = pool
+                    .process_block::<ApiClientStub>(Arc::new(block.clone()), false)
+                    .await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
                     errors_sender.send(err).unwrap();
@@ -638,10 +671,10 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                     debug!("Block processed successfully");
                 }
             });
-            true
+            GossipResponse::Accepted(true)
         } else {
             debug!("Block not found");
-            false
+            GossipResponse::Accepted(false)
         }
     });
 
@@ -653,17 +686,16 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     assert!(is_parent_in_index);
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
-    let res = block_pool.process_block(Arc::new(bogus_block), false).await;
+    let res = block_pool
+        .process_block::<ApiClientStub>(Arc::new(bogus_block), false)
+        .await;
 
     sync_service_handle.shutdown_signal.fire();
 
-    assert!(matches!(
-        res,
-        Err(BlockPoolError::TryingToReprocessFinalizedBlock(_))
-    ));
+    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
 }
 
-#[actix_rt::test]
+#[tokio::test]
 async fn should_not_fast_track_block_already_in_index() {
     let config = create_test_config();
 
@@ -675,6 +707,7 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider,
         mempool_stub,
         service_senders,
+        is_vdf_mining_enabled: _,
     } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
@@ -706,7 +739,7 @@ async fn should_not_fast_track_block_already_in_index() {
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let err = service
-        .process_block(Arc::new(test_header.clone()), true)
+        .process_block::<ApiClientStub>(Arc::new(test_header.clone()), true)
         .await
         .expect_err("to have an error");
 

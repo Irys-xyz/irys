@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_types::NodeConfig;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_peer_mining_test() -> eyre::Result<()> {
     // Configure a test network with accelerated epochs (2 blocks per epoch)
     let num_blocks_in_epoch = 7;

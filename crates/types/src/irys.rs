@@ -1,8 +1,8 @@
 use crate::storage_pricing::TERM_FEE;
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, Address, Base64, CommitmentTransaction,
-    DataLedger, DataTransaction, DataTransactionHeader, IrysBlockHeader, IrysSignature, Signature,
-    VersionRequest, H256, U256,
+    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Address,
+    Base64, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
+    IngressProof, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256, U256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -38,7 +38,7 @@ impl IrysSigner {
     }
 
     /// Creates a transaction from a data iterator (which can yield any size Vec), with an optional anchor and flag for if the input data should be stored in the `data` field.
-    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    /// The txid will not be set until the transaction is signed with [`IrysSigner::sign_transaction`]
     pub fn create_transaction_from_iter(
         &self,
         data: impl Iterator<Item = eyre::Result<Vec<u8>>>,
@@ -80,13 +80,13 @@ impl IrysSigner {
     }
 
     /// Creates a transaction from a data buffer - which it stores in .data -  with an optional anchor.
-    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    /// The txid will not be set until the transaction is signed with [`IrysSigner::sign_transaction`]
     pub fn create_transaction(&self, data: Vec<u8>, anchor: H256) -> Result<DataTransaction> {
         self.create_transaction_from_iter(vec_to_chunk_iter(data), anchor, true)
     }
 
     /// Creates a transaction from a data buffer - which it DOES NOT store in .data - with an optional anchor.
-    /// The txid will not be set until the transaction is signed with [sign_transaction]
+    /// The txid will not be set until the transaction is signed with [`IrysSigner::sign_transaction`]
     pub fn create_transaction_discard_data(
         &self,
         data: Vec<u8>,
@@ -147,16 +147,12 @@ impl IrysSigner {
         Ok(transaction)
     }
 
-    pub fn sign_commitment(
-        &self,
-        mut commitment: CommitmentTransaction,
-    ) -> Result<CommitmentTransaction> {
+    pub fn sign_commitment(&self, commitment: &mut CommitmentTransaction) -> Result<()> {
         // Store the signer address
         commitment.signer = Address::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
         let prehash = commitment.signature_hash();
-
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
         commitment.signature = IrysSignature::new(signature);
@@ -164,7 +160,7 @@ impl IrysSigner {
         // Derive the txid by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
         commitment.id = H256::from(id);
-        Ok(commitment)
+        Ok(())
     }
 
     pub fn sign_block_header(&self, block_header: &mut IrysBlockHeader) -> Result<()> {
@@ -190,6 +186,14 @@ impl IrysSigner {
         let prehash = handshake_message.signature_hash();
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
         handshake_message.signature = IrysSignature::new(signature);
+
+        Ok(())
+    }
+
+    pub fn sign_ingress_proof(&self, proof: &mut IngressProof) -> Result<()> {
+        let prehash = proof.signature_hash();
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
+        proof.signature = IrysSignature::new(signature);
 
         Ok(())
     }
@@ -222,15 +226,15 @@ impl IrysSigner {
             return Err(eyre::eyre!("Last chunk cannot be zero length"));
         }
 
+        let mut header = DataTransactionHeader::default();
+        header.data_size = chunks
+            .last()
+            .expect("Unable to get last chunk")
+            .max_byte_range as u64;
+        header.data_root = data_root;
+
         Ok(DataTransaction {
-            header: DataTransactionHeader {
-                data_size: chunks
-                    .last()
-                    .expect("Unable to get last chunk")
-                    .max_byte_range as u64,
-                data_root,
-                ..Default::default()
-            },
+            header,
             data: data.map(Base64),
             chunks,
             proofs,
@@ -250,6 +254,7 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 
 #[cfg(test)]
 mod tests {
+    use crate::versioning::Signable as _;
     use crate::{hash_sha256, validate_chunk, H256};
     use rand::Rng as _;
     use reth_primitives::transaction::recover_signer;

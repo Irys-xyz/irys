@@ -15,7 +15,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
-    #[instrument(skip_all, fields(hash= %block.block_hash, height = %block.height), err)]
+    #[instrument(skip_all, fields(hash= %block.block_hash(), height = %block.height()), err)]
     pub async fn handle_block_confirmed_message(
         &mut self,
         block: Arc<IrysBlockHeader>,
@@ -37,13 +37,26 @@ impl Inner {
                     });
 
                 // Get and update DB header if needed
-                let mut db_header = self
-                    .read_tx()
-                    .ok()
-                    .and_then(|read_tx| tx_header_by_txid(&read_tx, txid).unwrap_or(None))
-                    .inspect(|_tx| {
-                        debug!("Got tx {} from DB", txid);
-                    });
+                let mut db_header = match self.read_tx() {
+                    Ok(read_tx) => match tx_header_by_txid(&read_tx, txid) {
+                        Ok(Some(h)) => {
+                            debug!("Got tx {} from DB", txid);
+                            Some(h)
+                        }
+                        Ok(None) => {
+                            debug!("Tx {} not found in DB", txid);
+                            None
+                        }
+                        Err(e) => {
+                            warn!("DB error loading tx {}: {}", txid, e);
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to open DB read transaction: {}", e);
+                        None
+                    }
+                };
 
                 if let Some(ref mut db_tx) = db_header {
                     if db_tx.promoted_height.is_none() {
@@ -75,6 +88,39 @@ impl Inner {
 
                 info!("Promoted tx:\n{:#?}", header);
             }
+        }
+
+        // Update `CachedDataRoots` so that this block_hash is cached for each data_root
+        let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+        let submit_tx_headers = self.handle_get_data_tx_message(submit_txids).await;
+
+        for (i, submit_tx) in submit_tx_headers.iter().enumerate() {
+            let Some(submit_tx) = submit_tx else {
+                error!(
+                    "No transaction header found for txid: {}",
+                    block.data_ledgers[DataLedger::Submit].tx_ids.0[i]
+                );
+                continue;
+            };
+
+            let data_root = submit_tx.data_root;
+            match self.irys_db.update_eyre(|db_tx| {
+                irys_database::cache_data_root(db_tx, submit_tx, Some(&block))?;
+                Ok(())
+            }) {
+                Ok(()) => {
+                    info!(
+                        "Successfully cached data_root {:?} for tx {:?}",
+                        data_root, submit_tx.id
+                    );
+                }
+                Err(db_error) => {
+                    error!(
+                        "Failed to cache data_root {:?} for tx {:?}: {:?}",
+                        data_root, submit_tx.id, db_error
+                    );
+                }
+            };
         }
 
         self.prune_pending_txs().await;
@@ -125,7 +171,7 @@ impl Inner {
             )
         };
         for (id, tx) in valid_submit_ledger_tx {
-            match self.handle_data_tx_ingress_message(tx).await {
+            match self.handle_data_tx_ingress_message_gossip(tx).await {
                 Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
                 Err(err) => debug!("failed to resubmit data tx {} to mempool: {:?}", &id, &err),
             }
@@ -133,7 +179,7 @@ impl Inner {
         for (_address, txs) in valid_commitment_tx {
             for tx in txs {
                 let id = tx.id;
-                match self.handle_ingress_commitment_tx_message(tx).await {
+                match self.handle_ingress_commitment_tx_message_gossip(tx).await {
                     Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
                     Err(err) => debug!(
                         "failed to resubmit commitment tx {} to mempool: {:?}",
@@ -143,6 +189,38 @@ impl Inner {
             }
         }
 
+        Ok(())
+    }
+
+    /// Clears the promotion state for a data transaction in the mempool when its prior
+    /// promotion occurred on an orphaned fork. This should only be invoked from reorg
+    /// handling code paths to ensure that promotion state is rolled back correctly for
+    /// transactions that are no longer promoted on the new canonical chain.
+    ///
+    /// Behavior:
+    /// - If the transaction header exists in `mempool_state.valid_submit_ledger_tx`, set
+    ///   `promoted_height` to `None` and update `recent_valid_tx`.
+    /// - If the header is not in the mempool, leave it unchanged; do not load or insert from DB.
+    /// - Logging: Emits debug logs whether the tx was updated or left unchanged.
+    ///
+    /// Notes:
+    /// - This method only mutates in-memory mempool state. It does not persist changes to the DB.
+    /// - Do not call from normal ingress paths; promotion state should be preserved during ingress.
+    /// - Intended usage is within reorg handlers (e.g., `handle_confirmed_data_tx_reorg`) to
+    ///   revert promotion for txs promoted on orphaned forks.
+    async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
+        // Try fast-path: clear in-place if present in the mempool
+        {
+            let mut state = self.mempool_state.write().await;
+            if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
+                header.promoted_height = None;
+                state.recent_valid_tx.put(txid, ());
+                tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
+                return Ok(());
+            }
+        }
+
+        tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
         Ok(())
     }
 
@@ -366,15 +444,21 @@ impl Inner {
 
         // resubmit each commitment tx
         for (id, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
-            let _ = self
-                .handle_ingress_commitment_tx_message(orphaned_full_commitment_tx)
+            if let Err(e) = self
+                .handle_ingress_commitment_tx_message_gossip(orphaned_full_commitment_tx)
                 .await
                 .inspect_err(|e| {
                     error!(
                         "Error resubmitting orphaned commitment tx {}: {:?}",
                         &id, &e
                     )
-                });
+                })
+            {
+                error!(
+                    "Failed to resubmit orphaned commitment tx {}: {:?}",
+                    &id, &e
+                );
+            }
         }
 
         Ok(())
@@ -489,16 +573,19 @@ impl Inner {
                 let tx_id = tx.id;
                 // TODO: handle errors better
                 // note: the Skipped error is valid, so we'll need to match over the errors and abort on problematic ones (if/when appropriate)
-                let _ = self
-                    .handle_data_tx_ingress_message(tx)
+                if let Err(e) = self
+                    .handle_data_tx_ingress_message_gossip(tx)
                     .await
-                    .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e));
+                    .inspect_err(|e| error!("Error re-submitting orphaned tx {} {:?}", &tx_id, &e))
+                {
+                    error!("Failed to re-submit orphaned tx {} {:?}", &tx_id, &e);
+                }
             } else {
                 warn!("Unable to get orphaned tx {:?}", &submit_txs.get(idx))
             }
         }
 
-        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, restore ingress proof state to mempool
+        // 4. If a transaction was promoted in the orphaned fork but not the new canonical chain, clear promotion state in mempool (promoted_height = None)
 
         // get the confirmed (but not published) publish ledger txs from the old fork
         let orphaned_confirmed_publish_txs = orphaned_confirmed_ledger_txs
@@ -507,17 +594,15 @@ impl Inner {
             .unwrap_or_default();
 
         // these txs have been confirmed, but NOT migrated
-        {
-            let mut mempool_state_write_guard = self.mempool_state.write().await;
-
-            for tx in orphaned_confirmed_publish_txs {
-                debug!("reorging orphaned publish tx: {}", &tx);
-                // if the tx is in `valid_submit_ledger_tx`, update it so `ingress_proofs` is `none`
-                // note: sometimes txs are *not* in this list, and I don't currently understand why
-                mempool_state_write_guard
-                    .valid_submit_ledger_tx
-                    .entry(tx)
-                    .and_modify(|tx| tx.promoted_height = None);
+        for tx_id in orphaned_confirmed_publish_txs {
+            debug!("reorging orphaned publish tx: {}", &tx_id);
+            // Clear promotion state for txs that were promoted on an orphaned fork
+            if let Err(e) = self.mark_unpromoted_in_mempool(tx_id).await {
+                warn!(
+                    tx.id = %tx_id,
+                    tx.err = %e,
+                    "Failed to unpromote tx during reorg"
+                );
             }
         }
 
@@ -588,7 +673,13 @@ impl Inner {
             event.block.height
         );
 
-        let mut migrated_block = (*event.block).clone();
+        let migrated_block = (*event.block).clone();
+        // todo: investigate the `poa chunk` - after uncommenting the `eyre::ensure` below, all the tests pass.
+        // Yet the code is architected in a way where we could migrate a block without a PoA chunk being present.
+        eyre::ensure!(
+            migrated_block.poa.chunk.is_some(),
+            "poa chunk must be present"
+        );
         let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
 
         // stage 1: move commitment transactions from tree to index
@@ -606,17 +697,12 @@ impl Inner {
             // Insert the commitment transaction in to the db, perform migration
             insert_commitment_tx(&tx, commitment_tx)?;
             // Remove the commitment tx from the mempool cache, completing the migration
-            self.remove_commitment_tx(&commitment_tx.id).await;
+            self.remove_commitment_tx(&commitment_tx.id()).await;
         }
         tx.inner.commit()?;
 
         // stage 2: move submit transactions from tree to index
-        let submit_tx_ids: Vec<H256> = data_ledger_txs
-            .get(&DataLedger::Submit)
-            .unwrap()
-            .iter()
-            .copied()
-            .collect();
+        let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
         {
             let mut_tx = self
                 .irys_db
@@ -652,12 +738,7 @@ impl Inner {
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
-        let publish_tx_ids: Vec<H256> = data_ledger_txs
-            .get(&DataLedger::Publish)
-            .unwrap()
-            .iter()
-            .copied()
-            .collect();
+        let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
         {
             let mut_tx = self
                 .irys_db
@@ -707,25 +788,8 @@ impl Inner {
         }
 
         // add block with optional poa chunk to index
-        {
-            let mempool_state_read_guard = mempool_state.read().await;
-            migrated_block.poa.chunk = mempool_state_read_guard
-                .prevalidated_blocks_poa
-                .get(&migrated_block.block_hash)
-                .cloned();
-            self.irys_db
-                .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))
-                .unwrap();
-        }
-
-        // Remove migrated block and poa chunk from mempool cache
-        {
-            let mut state = self.mempool_state.write().await;
-            state.prevalidated_blocks.remove(&migrated_block.block_hash);
-            state
-                .prevalidated_blocks_poa
-                .remove(&migrated_block.block_hash);
-        }
+        self.irys_db
+            .update_eyre(|tx| irys_database::insert_block_header(tx, &migrated_block))?;
 
         Ok(())
     }

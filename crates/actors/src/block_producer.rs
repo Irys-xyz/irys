@@ -1,12 +1,10 @@
 use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
-    broadcast_mining_service::{BroadcastDifficultyUpdate, BroadcastMiningService},
-    mempool_service::MempoolServiceMessage,
-    reth_service::{BlockHashType, ForkChoiceUpdateMessage, RethServiceActor},
+    mempool_service::{MempoolServiceMessage, MempoolTxs},
+    mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     services::ServiceSenders,
-    shadow_tx_generator::{PublishLedgerWithTxs, RollingHash, ShadowTxGenerator},
+    shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
-use actix::prelude::*;
 use alloy_consensus::{
     transaction::SignerRecoverable as _, EthereumTxEnvelope, SignableTransaction as _, TxEip4844,
 };
@@ -19,7 +17,8 @@ use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
 use irys_domain::{
-    BlockIndex, BlockTreeReadGuard, EmaSnapshot, EpochSnapshot, ExponentialMarketAvgCalculation,
+    BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
+    ExponentialMarketAvgCalculation,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -34,10 +33,11 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
+use ledger_expiry::LedgerExpiryBalanceDelta;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
@@ -49,10 +49,10 @@ use reth::{
     tasks::shutdown::Shutdown,
 };
 use reth_transaction_pool::EthPooledTransaction;
+use std::time::UNIX_EPOCH;
 use std::{
-    collections::BTreeMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
@@ -60,6 +60,30 @@ use tracing::{debug, error, info, warn, Instrument as _};
 mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
+
+/// Result of checking parent validity and solution compatibility
+#[derive(Debug)]
+pub enum ParentCheckResult {
+    /// Parent is still the best canonical block - keep current block
+    ParentStillBest,
+    /// Parent changed but solution is valid - must rebuild on new parent
+    MustRebuild { new_parent: H256 },
+    /// Solution is completely invalid and must be discarded
+    SolutionInvalid {
+        new_parent: H256,
+        reason: InvalidReason,
+    },
+}
+
+/// Reason why a solution is completely invalid
+#[derive(Debug)]
+pub enum InvalidReason {
+    /// Solution VDF step is at or before the new parent's VDF step
+    VdfTooOld {
+        parent_vdf_step: u64,
+        solution_vdf_step: u64,
+    },
+}
 
 /// Commands that can be sent to the block producer service
 #[derive(Debug)]
@@ -95,7 +119,7 @@ pub struct BlockProducerInner {
     /// Message the block discovery actor when a block is produced locally
     pub block_discovery: BlockDiscoveryFacadeImpl,
     /// Mining broadcast service
-    pub mining_broadcaster: Addr<BroadcastMiningService>,
+    pub mining_broadcaster: MiningBus,
     /// Reference to all the services we can send messages to
     pub service_senders: ServiceSenders,
     /// Global config
@@ -114,12 +138,74 @@ pub struct BlockProducerInner {
     pub reth_provider: NodeProvider,
     /// Shadow tx store
     pub shadow_tx_store: ShadowTxStore,
-    /// Reth service actor
-    pub reth_service: Addr<RethServiceActor>,
     /// Reth beacon engine handle
     pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
+}
+
+/// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnpledgeRefundEvent {
+    pub account: Address,
+    pub amount: U256,
+    pub irys_ref_txid: H256,
+}
+
+impl Ord for UnpledgeRefundEvent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.amount
+            .cmp(&other.amount)
+            .then(self.irys_ref_txid.cmp(&other.irys_ref_txid))
+    }
+}
+
+impl PartialOrd for UnpledgeRefundEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Event emitted on epoch blocks to refund Unstake commitments (fee charged at inclusion; value refunded at epoch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnstakeRefundEvent {
+    pub account: Address,
+    pub amount: U256,
+    pub irys_ref_txid: H256,
+}
+
+impl Ord for UnstakeRefundEvent {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.amount
+            .cmp(&other.amount)
+            .then(self.irys_ref_txid.cmp(&other.irys_ref_txid))
+    }
+}
+
+impl PartialOrd for UnstakeRefundEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Named result bundle for mempool-derived inputs to block production.
+#[derive(Debug, Clone)]
+pub struct MempoolTxsBundle {
+    /// Commitment txs included in the commitment ledger
+    pub commitment_txs: Vec<CommitmentTransaction>,
+
+    /// commitment txs included in the commitment ledger and billed to
+    /// the user during shadow tx processing (empty on epochs)
+    pub commitment_txs_to_bill: Vec<CommitmentTransaction>,
+
+    pub submit_txs: Vec<DataTransactionHeader>,
+    pub publish_txs: PublishLedgerWithTxs,
+    pub aggregated_miner_fees: LedgerExpiryBalanceDelta,
+
+    /// Unpledge refund events to emit on epoch blocks; empty on non-epoch blocks
+    pub commitment_refund_events: Vec<UnpledgeRefundEvent>,
+    /// Unstake refund events to emit on epoch blocks; empty on non-epoch blocks
+    pub unstake_refund_events: Vec<UnstakeRefundEvent>,
 }
 
 impl BlockProducerService {
@@ -201,16 +287,16 @@ impl BlockProducerService {
             BlockProducerCommand::SolutionFound { solution, response } => {
                 let solution_hash = solution.solution_hash;
                 info!(
-                    solution_hash = %solution_hash,
-                    vdf_step = solution.vdf_step,
-                    mining_address = %solution.mining_address,
+                    solution.hash = %solution_hash,
+                    solution.vdf_step = solution.vdf_step,
+                    solution.mining_address = %solution.mining_address,
                     "Block producer received mining solution"
                 );
 
                 if let Some(blocks_remaining) = self.blocks_remaining_for_test {
                     if blocks_remaining == 0 {
                         info!(
-                            solution_hash = %solution_hash,
+                            solution.hash = %solution_hash,
                             "No more blocks needed for test, skipping block production"
                         );
                         let _ = response.send(Ok(None));
@@ -225,8 +311,8 @@ impl BlockProducerService {
                 // Only decrement blocks_remaining_for_test when a block is successfully produced
                 if let Some((irys_block_header, eth_built_payload)) = &result {
                     info!(
-                        block_hash = %irys_block_header.block_hash,
-                        block_height = irys_block_header.height,
+                        block.hash = %irys_block_header.block_hash,
+                        block.height = irys_block_header.height,
                         "Block production completed successfully"
                     );
 
@@ -257,8 +343,8 @@ impl BlockProducerService {
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
-                    old_value = ?self.blocks_remaining_for_test,
-                    new_value = ?remaining,
+                    custom.old_value = ?self.blocks_remaining_for_test,
+                    custom.new_value = ?remaining,
                     "Updating test blocks remaining"
                 );
                 self.blocks_remaining_for_test = remaining;
@@ -269,17 +355,17 @@ impl BlockProducerService {
 
     /// Internal method to produce a block without the non-Send trait
     #[tracing::instrument(skip_all, fields(
-        solution_hash = %solution.solution_hash,
-        vdf_step = solution.vdf_step,
-        mining_address = %solution.mining_address
+        solution.hash = %solution.solution_hash,
+        solution.vdf_step = solution.vdf_step,
+        solution.mining_address = %solution.mining_address
     ))]
     async fn produce_block_inner(
         inner: Arc<BlockProducerInner>,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
         info!(
-            partition_hash = %solution.partition_hash,
-            chunk_offset = solution.chunk_offset,
+            solution.partition_hash = %solution.partition_hash,
+            solution.chunk_offset = solution.chunk_offset,
             "Starting block production for solution"
         );
 
@@ -341,6 +427,96 @@ pub trait BlockProdStrategy {
             .ok_or_else(|| eyre!("EMA snapshot not found for block {}", block_hash))
     }
 
+    /// Checks parent validity and determines if the solution is still valid.
+    /// Returns a descriptive result indicating the required action.
+    async fn check_parent_and_solution_validity(
+        &self,
+        parent_hash: &H256,
+        solution: &SolutionContext,
+    ) -> ParentCheckResult {
+        let tree = self.inner().block_tree_guard.read();
+        let (_max_difficulty, current_best) = tree.get_max_cumulative_difficulty_block();
+
+        // Check if parent is still the best
+        if current_best == *parent_hash {
+            return ParentCheckResult::ParentStillBest;
+        }
+
+        // Parent changed - get new parent's VDF step
+        let new_parent_vdf_step = tree
+            .get_block(&current_best)
+            .map(|b| b.vdf_limiter_info.global_step_number)
+            .unwrap_or(0);
+
+        // Check if solution is too old (at or before new parent's VDF step)
+        if solution.vdf_step <= new_parent_vdf_step {
+            return ParentCheckResult::SolutionInvalid {
+                new_parent: current_best,
+                reason: InvalidReason::VdfTooOld {
+                    parent_vdf_step: new_parent_vdf_step,
+                    solution_vdf_step: solution.vdf_step,
+                },
+            };
+        }
+
+        // Parent changed but solution is valid - must rebuild on new parent
+        ParentCheckResult::MustRebuild {
+            new_parent: current_best,
+        }
+    }
+
+    /// Core block production logic that can be used for both initial production and rebuilds.
+    async fn produce_block_with_parent(
+        &self,
+        solution: &SolutionContext,
+        prev_block_header: IrysBlockHeader,
+        prev_block_ema_snapshot: Arc<EmaSnapshot>,
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            EthBuiltPayload,
+        )>,
+    > {
+        let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
+        let current_timestamp = current_timestamp(&prev_block_header).await;
+
+        let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
+
+        let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
+
+        let (eth_built_payload, final_treasury) = self
+            .create_evm_block(
+                &prev_block_header,
+                &prev_evm_block,
+                &mempool_bundle,
+                block_reward,
+                current_timestamp,
+                solution.solution_hash,
+            )
+            .await?;
+        let evm_block = eth_built_payload.block();
+
+        let block_result = self
+            .produce_block_without_broadcasting(
+                solution,
+                &prev_block_header,
+                mempool_bundle,
+                current_timestamp,
+                block_reward,
+                evm_block,
+                &prev_block_ema_snapshot,
+                final_treasury,
+            )
+            .await?;
+
+        let Some((block, stats)) = block_result else {
+            return Ok(None);
+        };
+
+        Ok(Some((block, stats, eth_built_payload)))
+    }
+
     /// Selects the parent block for new block production.
     ///
     /// Targets the block with highest cumulative difficulty, but only if fully validated.
@@ -372,7 +548,7 @@ pub trait BlockProdStrategy {
 
     async fn fully_produce_new_block_without_gossip(
         &self,
-        solution: SolutionContext,
+        solution: &SolutionContext,
     ) -> eyre::Result<
         Option<(
             Arc<IrysBlockHeader>,
@@ -381,76 +557,111 @@ pub trait BlockProdStrategy {
         )>,
     > {
         let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
-        let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
-        let current_timestamp = current_timestamp(&prev_block_header).await;
-
-        let (
-            system_tx_ledger,
-            commitment_txs_to_bill,
-            submit_txs,
-            mut publish_txs,
-            expired_ledger_fees,
-        ) = self.get_mempool_txs(&prev_block_header).await?;
-        let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
-        let (eth_built_payload, final_treasury) = self
-            .create_evm_block(
-                &prev_block_header,
-                &prev_evm_block,
-                &commitment_txs_to_bill,
-                &submit_txs,
-                &mut publish_txs,
-                block_reward,
-                current_timestamp,
-                expired_ledger_fees,
-            )
-            .await?;
-        let evm_block = eth_built_payload.block();
-
-        let block_result = self
-            .produce_block_without_broadcasting(
-                solution,
-                &prev_block_header,
-                submit_txs,
-                publish_txs,
-                system_tx_ledger,
-                current_timestamp,
-                block_reward,
-                evm_block,
-                &prev_block_ema_snapshot,
-                final_treasury,
-            )
-            .await?;
-
-        let Some((block, stats)) = block_result else {
-            return Ok(None);
-        };
-
-        Ok(Some((block, stats, eth_built_payload)))
+        self.produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
+            .await
     }
 
+    /// Produces a new block with automatic parent chain rebuild capability.
+    ///
+    /// # Race Condition Handling
+    /// This function addresses a critical race condition where the canonical parent block
+    /// can change while we're producing a block, which would waste the valuable mining solution.
+    ///
+    /// ## The Problem
+    /// 1. Block production takes time
+    /// 2. During this time, another node might broadcast a new block
+    /// 3. If that block becomes the new canonical tip, building on the old parent wastes the solution
+    ///
+    /// ## The Solution
+    /// After producing a block, we check if the parent is still the best canonical block.
+    /// If not, we rebuild the block on the new parent, reusing the same solution hash.
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
     ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        let result = self
-            .fully_produce_new_block_without_gossip(solution)
+        let mut rebuild_attempts = 0;
+
+        // Initial block production
+        let mut result = self
+            .fully_produce_new_block_without_gossip(&solution)
             .await?;
+
+        // Check if we need to rebuild on a new parent
+        while let Some((ref block, _, _)) = result {
+            let parent_hash = &block.previous_block_hash;
+
+            match self
+                .check_parent_and_solution_validity(parent_hash, &solution)
+                .await
+            {
+                ParentCheckResult::ParentStillBest => {
+                    // Parent is still the best, keep the current block
+                    break;
+                }
+
+                ParentCheckResult::MustRebuild { new_parent } => {
+                    info!(
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        block.new_parent = %new_parent,
+                        block.rebuild_attempt = rebuild_attempts + 1,
+                        "Parent changed but solution is valid - rebuilding on new parent"
+                    );
+
+                    // Rebuild the block on the new parent
+                    result = self
+                        .fully_produce_new_block_without_gossip(&solution)
+                        .await?;
+                    rebuild_attempts += 1;
+                }
+
+                ParentCheckResult::SolutionInvalid { new_parent, reason } => {
+                    // Log the specific reason why solution is invalid
+                    match &reason {
+                        InvalidReason::VdfTooOld {
+                            parent_vdf_step,
+                            solution_vdf_step,
+                        } => {
+                            warn!(
+                                solution.hash = %solution.solution_hash,
+                                solution.vdf_step = solution.vdf_step,
+                                block.new_parent = %new_parent,
+                                block.parent_vdf_step = parent_vdf_step,
+                                "Solution is too old for new parent (vdf_step {} <= {}), discarding",
+                                solution_vdf_step,
+                                parent_vdf_step
+                            );
+                        }
+                    }
+                    // Solution is completely invalid, cannot produce a block
+                    return Ok(None);
+                }
+            }
+        }
 
         let Some((block, stats, eth_built_payload)) = result else {
             return Ok(None);
         };
 
+        if rebuild_attempts > 0 {
+            info!(
+                block.solution_hash = %solution.solution_hash,
+                block.final_parent = %block.previous_block_hash,
+                block.block_height = block.height,
+                block.rebuild_count = rebuild_attempts,
+                "REBUILD_SUCCESS: Block successfully rebuilt after parent changes"
+            );
+        }
+
         if !block.data_ledgers[DataLedger::Publish].tx_ids.is_empty() {
-            let x = 5;
             debug!(
-                "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?} {}",
+                "Publish Block:\n hash:{}\n height: {}\n solution_hash: {}\n global_step:{}\n parent: {}\n publish txids: {:#?}",
                 block.block_hash,
                 block.height,
                 block.solution_hash,
                 block.vdf_limiter_info.global_step_number,
                 block.previous_block_hash,
                 block.data_ledgers[DataLedger::Publish].tx_ids,
-                x
             );
         }
 
@@ -465,12 +676,10 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         perv_evm_block: &reth_ethereum_primitives::Block,
-        commitment_txs_to_bill: &[CommitmentTransaction],
-        submit_txs: &[DataTransactionHeader],
-        publish_txs: &mut PublishLedgerWithTxs,
+        mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
-        expired_ledger_fees: BTreeMap<Address, (U256, RollingHash)>,
+        solution_hash: H256,
     ) -> eyre::Result<(EthBuiltPayload, U256)> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -484,13 +693,16 @@ pub trait BlockProdStrategy {
             &self.inner().config.node_config.reward_address,
             &reward_amount.amount,
             prev_block_header,
+            &solution_hash,
             &self.inner().config.consensus,
-            commitment_txs_to_bill,
-            submit_txs,
-            publish_txs,
+            &mempool.commitment_txs_to_bill,
+            &mempool.submit_txs,
+            &mempool.publish_txs,
             initial_treasury_balance,
-            &expired_ledger_fees,
-        );
+            &mempool.aggregated_miner_fees,
+            &mempool.commitment_refund_events,
+            &mempool.unstake_refund_events,
+        )?;
 
         let mut shadow_txs = Vec::new();
         for tx_result in shadow_tx_generator.by_ref() {
@@ -526,9 +738,9 @@ pub trait BlockProdStrategy {
     }
 
     #[tracing::instrument(skip_all, fields(
-        parent_evm_hash = %prev_block_header.evm_block_hash,
-        timestamp_sec = timestamp_ms / 1000,
-        shadow_tx_count = shadow_txs.len()
+        payload.parent_evm_hash = %prev_block_header.evm_block_hash,
+        payload.timestamp_sec = timestamp_ms / 1000,
+        payload.shadow_tx_count = shadow_txs.len()
     ))]
     async fn build_and_submit_reth_payload(
         &self,
@@ -549,9 +761,9 @@ pub trait BlockProdStrategy {
         };
 
         debug!(
-            timestamp_sec = attributes.timestamp,
-            fee_recipient = %attributes.suggested_fee_recipient,
-            parent_beacon_root = ?attributes.parent_beacon_block_root,
+            payload.timestamp_sec = attributes.timestamp,
+            payload.fee_recipient = %attributes.suggested_fee_recipient,
+            payload.parent_beacon_root = ?attributes.parent_beacon_block_root,
             "Payload attributes created"
         );
 
@@ -564,7 +776,7 @@ pub trait BlockProdStrategy {
         // store shadow txs
         let key = DeterministicShadowTxKey::new(attributes.payload_id());
         debug!(
-            payload_id = %attributes.payload_id(),
+            payload.id = %attributes.payload_id(),
             "Storing shadow transactions"
         );
         self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
@@ -579,7 +791,7 @@ pub trait BlockProdStrategy {
             .map_err(|e| eyre!("Payload builder returned error: {}", e))?;
 
         debug!(
-            payload_id = %payload_id,
+            payload.id = %payload_id,
             "Payload accepted by builder"
         );
 
@@ -613,8 +825,8 @@ pub trait BlockProdStrategy {
         );
 
         info!(
-            payload_block_hash = %built_payload.block().hash(),
-            payload_tx_count = built_payload.block().body().transactions.len(),
+            payload.block_hash = %built_payload.block().hash(),
+            payload.tx_count = built_payload.block().body().transactions.len(),
             "Reth payload built successfully"
         );
 
@@ -623,11 +835,9 @@ pub trait BlockProdStrategy {
 
     async fn produce_block_without_broadcasting(
         &self,
-        solution: SolutionContext,
+        solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
-        submit_txs: Vec<DataTransactionHeader>,
-        publish_txs: PublishLedgerWithTxs,
-        system_transaction_ledger: Vec<SystemTransactionLedger>,
+        mempool_bundle: MempoolTxsBundle,
         current_timestamp: u128,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
@@ -639,17 +849,23 @@ pub trait BlockProdStrategy {
         let evm_block_hash = eth_built_payload.hash();
 
         if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!("Skipping solution for old step number {}, previous block step number {} for block {}", solution.vdf_step, prev_block_header.vdf_limiter_info.global_step_number, prev_block_hash);
+            warn!(
+                "Skipping solution for old step number {}, previous block step number {} for block {}",
+                solution.vdf_step,
+                prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_hash
+            );
             return Ok(None);
         }
 
         // Publish Ledger Transactions
-        let publish_chunks_added =
-            calculate_chunks_added(&publish_txs.txs, self.inner().config.consensus.chunk_size);
-        let publish_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Publish]
-            .max_chunk_offset
-            + publish_chunks_added;
-        let opt_proofs = publish_txs.proofs.clone();
+        let publish_chunks_added = calculate_chunks_added(
+            &mempool_bundle.publish_txs.txs,
+            self.inner().config.consensus.chunk_size,
+        );
+        let publish_total_chunks =
+            prev_block_header.data_ledgers[DataLedger::Publish].total_chunks + publish_chunks_added;
+        let opt_proofs = mempool_bundle.publish_txs.proofs.clone();
 
         // Difficulty adjustment logic
         let mut last_diff_timestamp = prev_block_header.last_diff_timestamp;
@@ -682,7 +898,7 @@ pub trait BlockProdStrategy {
             .and_then(|pa| pa.ledger_id);
 
         // Create PoA data using the trait method
-        let (poa, poa_chunk_hash) = self.create_poa_data(&solution, ledger_id)?;
+        let (poa, poa_chunk_hash) = self.create_poa_data(solution, ledger_id)?;
 
         let mut steps = if prev_block_header.vdf_limiter_info.global_step_number + 1
             > solution.vdf_step - 1
@@ -715,14 +931,28 @@ pub trait BlockProdStrategy {
             // Record the hash of the epoch block (previous block) as our epoch reference
             last_epoch_hash = prev_block_hash;
         }
-        let submit_chunks_added =
-            calculate_chunks_added(&submit_txs, self.inner().config.consensus.chunk_size);
-        let submit_max_chunk_offset = prev_block_header.data_ledgers[DataLedger::Submit]
-            .max_chunk_offset
-            + submit_chunks_added;
+        let submit_chunks_added = calculate_chunks_added(
+            &mempool_bundle.submit_txs,
+            self.inner().config.consensus.chunk_size,
+        );
+        let submit_total_chunks =
+            prev_block_header.data_ledgers[DataLedger::Submit].total_chunks + submit_chunks_added;
+
+        let system_ledgers = if !mempool_bundle.commitment_txs.is_empty() {
+            let mut txids = H256List::new();
+            for ctx in mempool_bundle.commitment_txs.iter() {
+                txids.push(ctx.id);
+            }
+            vec![SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids: txids,
+            }]
+        } else {
+            vec![]
+        };
 
         // build a new block header
-        let mut irys_block = IrysBlockHeader {
+        let mut irys_block = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
             block_hash: H256::zero(), // block_hash is initialized after signing
             height: block_height,
             diff,
@@ -740,14 +970,24 @@ pub trait BlockProdStrategy {
             miner_address: solution.mining_address,
             signature: Signature::test_signature().into(), // temp value until block is signed with the mining singer
             timestamp: current_timestamp,
-            system_ledgers: system_transaction_ledger,
+            system_ledgers,
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
                     ledger_id: DataLedger::Publish.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(&publish_txs.txs).0,
-                    tx_ids: H256List(publish_txs.txs.iter().map(|t| t.id).collect::<Vec<_>>()),
-                    max_chunk_offset: publish_max_chunk_offset,
+                    tx_root: DataTransactionLedger::merklize_tx_root(
+                        &mempool_bundle.publish_txs.txs,
+                    )
+                    .0,
+                    tx_ids: H256List(
+                        mempool_bundle
+                            .publish_txs
+                            .txs
+                            .iter()
+                            .map(|t| t.id)
+                            .collect::<Vec<_>>(),
+                    ),
+                    total_chunks: publish_total_chunks,
                     expires: None,
                     proofs: opt_proofs,
                     required_proof_count: Some(
@@ -761,9 +1001,15 @@ pub trait BlockProdStrategy {
                 // Term Submit Ledger
                 DataTransactionLedger {
                     ledger_id: DataLedger::Submit.into(),
-                    tx_root: DataTransactionLedger::merklize_tx_root(&submit_txs).0,
-                    tx_ids: H256List(submit_txs.iter().map(|t| t.id).collect::<Vec<_>>()),
-                    max_chunk_offset: submit_max_chunk_offset,
+                    tx_root: DataTransactionLedger::merklize_tx_root(&mempool_bundle.submit_txs).0,
+                    tx_ids: H256List(
+                        mempool_bundle
+                            .submit_txs
+                            .iter()
+                            .map(|t| t.id)
+                            .collect::<Vec<_>>(),
+                    ),
+                    total_chunks: submit_total_chunks,
                     expires: Some(
                         self.inner()
                             .config
@@ -777,7 +1023,7 @@ pub trait BlockProdStrategy {
             ],
             evm_block_hash,
             vdf_limiter_info: VDFLimiterInfo::new(
-                &solution,
+                solution,
                 prev_block_header,
                 steps,
                 &self.inner().config,
@@ -785,20 +1031,11 @@ pub trait BlockProdStrategy {
             oracle_irys_price: ema_calculation.oracle_price_for_block_inclusion,
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
-        };
+        });
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
-        let _res = self
-            .inner()
-            .reth_service
-            .send(ForkChoiceUpdateMessage {
-                head_hash: BlockHashType::Evm(irys_block.evm_block_hash),
-                confirmed_hash: None,
-                finalized_hash: None,
-            })
-            .await??;
 
         let block = Arc::new(irys_block);
         Ok(Some((block, stats)))
@@ -812,16 +1049,28 @@ pub trait BlockProdStrategy {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {
             if stats.is_adjusted {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
                 info!(
-                    max_difficulty = ?U256::MAX,
-                    previous_cumulative_diff = ?block.previous_cumulative_diff,
-                    current_diff = ?block.diff,
+                    "🧊 block_time: {:?} is {}% off the target block_time of {:?} and above the minimum threshold of {:?}%, adjusting difficulty. ",
+                    stats.actual_block_time,
+                    stats.percent_different,
+                    stats.target_block_time,
+                    stats.min_threshold
+                );
+                info!(
+                    block.max_difficulty = ?U256::MAX,
+                    block.previous_cumulative_diff = ?block.previous_cumulative_diff,
+                    block.current_diff = ?block.diff,
                     "Difficulty data",
                 );
                 is_difficulty_updated = true;
             } else {
-                info!("🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.", stats.actual_block_time, stats.percent_different, stats.target_block_time, stats.min_threshold);
+                info!(
+                    "🧊 block_time: {:?} is {}% off the target block_time of {:?} and below the minimum threshold of {:?}%. No difficulty adjustment.",
+                    stats.actual_block_time,
+                    stats.percent_different,
+                    stats.target_block_time,
+                    stats.min_threshold
+                );
             }
         }
 
@@ -861,12 +1110,12 @@ pub trait BlockProdStrategy {
         if is_difficulty_updated {
             self.inner()
                 .mining_broadcaster
-                .do_send(BroadcastDifficultyUpdate(block.clone()));
+                .send_difficulty(BroadcastDifficultyUpdate(block.clone()));
         }
 
         info!(
-            block_height = ?block.height,
-            hash = ?block.block_hash,
+            block.height = ?block.height,
+            block.hash = ?block.block_hash,
             "Finished producing block",
         );
 
@@ -891,7 +1140,16 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let oracle_irys_price = self.inner().price_oracle.current_price().await?;
+        let (fresh_price, last_updated) = self.inner().price_oracle.current_snapshot()?;
+        let oracle_updated_ms = millis_since_epoch(last_updated);
+
+        let oracle_irys_price = choose_oracle_price(
+            parent_block.timestamp,
+            parent_block.oracle_irys_price,
+            fresh_price,
+            oracle_updated_ms,
+        );
+
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
             parent_block,
             oracle_irys_price,
@@ -905,14 +1163,64 @@ pub trait BlockProdStrategy {
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
-    ) -> eyre::Result<(
-        Vec<SystemTransactionLedger>,
-        Vec<CommitmentTransaction>,
-        Vec<DataTransactionHeader>,
-        PublishLedgerWithTxs,
-        BTreeMap<Address, (U256, RollingHash)>,
-    )> {
-        let config = &self.inner().config;
+    ) -> eyre::Result<MempoolTxsBundle> {
+        // Fetch mempool once
+        let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
+        // Sort txs to be of deterministic order
+        mempool_txs.submit_tx.sort();
+        mempool_txs.commitment_tx.sort();
+        let block_height = prev_block_header.height + 1;
+        let is_epoch = self.is_epoch_block(block_height);
+
+        if !is_epoch {
+            debug!(
+                block.height = block_height,
+                custom.commitment_ids = ?mempool_txs
+                    .commitment_tx
+                    .iter()
+                    .map(|t| t.id)
+                    .collect::<Vec<_>>(),
+                "Selected best mempool txs"
+            );
+            return Ok(self.build_non_epoch_bundle(mempool_txs));
+        }
+
+        // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
+        let (parent_epoch_snapshot, parent_commitment_snapshot) =
+            self.fetch_parent_snapshots(prev_block_header)?;
+
+        let aggregated_miner_fees = self
+            .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
+            .await?;
+
+        let commitment_refund_events = self.derive_unpledge_refunds(&parent_commitment_snapshot)?;
+        let unstake_refund_events =
+            crate::commitment_refunds::derive_unstake_refunds_from_snapshot(
+                &parent_commitment_snapshot,
+                &self.inner().config.consensus,
+            )?;
+
+        Ok(MempoolTxsBundle {
+            // on epoch blocks we don't bill the end-user
+            commitment_txs: parent_commitment_snapshot.get_epoch_commitments(),
+            commitment_txs_to_bill: vec![],
+            submit_txs: mempool_txs.submit_tx,
+            publish_txs: mempool_txs.publish_tx,
+            aggregated_miner_fees,
+            commitment_refund_events,
+            unstake_refund_events,
+        })
+    }
+
+    fn is_epoch_block(&self, height: u64) -> bool {
+        height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
+    }
+
+    #[tracing::instrument(skip_all, err)]
+    async fn fetch_best_mempool_txs(
+        &self,
+        prev_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<MempoolTxs> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.inner()
             .service_senders
@@ -922,105 +1230,70 @@ pub trait BlockProdStrategy {
                 tx,
             ))
             .expect("to send MempoolServiceMessage");
-        let mempool_txs = rx.await.expect("to receive txns")?;
-        let block_height = prev_block_header.height + 1;
-        let is_epoch_block = block_height % config.consensus.epoch.num_blocks_in_epoch == 0;
+        rx.await.expect("to receive txns")
+    }
+
+    #[tracing::instrument(skip_all, err)]
+    fn fetch_parent_snapshots(
+        &self,
+        prev_block_header: &IrysBlockHeader,
+    ) -> eyre::Result<(Arc<EpochSnapshot>, Arc<CommitmentSnapshot>)> {
+        let read = self.inner().block_tree_guard.read();
+        let epoch = read
+            .get_epoch_snapshot(&prev_block_header.block_hash)
+            .ok_or_eyre("parent blocks epoch snapshot must be available")?;
+        let commit = read
+            .get_commitment_snapshot(&prev_block_header.block_hash)
+            .map_err(|e| {
+                eyre!(
+                    "Could not find commitment snapshot for current epoch: {}",
+                    e
+                )
+            })?;
+        Ok((epoch, commit))
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn build_commitment_ledger_epoch(
+        &self,
+        commit_snapshot: &CommitmentSnapshot,
+    ) -> SystemTransactionLedger {
+        let mut txids = H256List::new();
+        let commitments = commit_snapshot.get_epoch_commitments();
+        for tx in commitments.iter() {
+            txids.push(tx.id);
+        }
         debug!(
-            "get_best_mempool_txs for block height: {} returned: {:#?}",
-            block_height,
-            mempool_txs
-                .commitment_tx
-                .iter()
-                .map(|t| t.id)
-                .collect::<Vec<_>>()
+            custom.tx_count = commitments.len(),
+            "Producing epoch rollup for commitment ledger"
         );
-        let commitment_txs_to_bill;
-        let system_transaction_ledger;
-        let aggregated_miner_fees;
-        if is_epoch_block {
-            let parent_epoch_snapshot = self
-                .inner()
-                .block_tree_guard
-                .read()
-                .get_epoch_snapshot(&prev_block_header.block_hash)
-                .ok_or_eyre("parent blocks epoch snapshot must be available")?;
+        SystemTransactionLedger {
+            ledger_id: SystemLedger::Commitment.into(),
+            tx_ids: txids,
+        }
+    }
 
-            tracing::error!("about to calculate fees");
-            // Calculate fees for expired ledgers
-            aggregated_miner_fees = self
-                .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
-                .await?;
+    #[tracing::instrument(skip_all)]
+    fn derive_unpledge_refunds(
+        &self,
+        commit_snapshot: &CommitmentSnapshot,
+    ) -> eyre::Result<Vec<UnpledgeRefundEvent>> {
+        crate::commitment_refunds::derive_unpledge_refunds_from_snapshot(
+            commit_snapshot,
+            &self.inner().config.consensus,
+        )
+    }
 
-            // todo - if tx is of publish ledger and did not get promoted then we refund the perm fee
-
-            // === EPOCH BLOCK: Rollup all commitments from the current epoch ===
-            // Epoch blocks don't add new commitments - they summarize all commitments
-            // that were validated throughout the epoch into a single rollup entry
-            let entry = self
-                .inner()
-                .block_tree_guard
-                .read()
-                .get_commitment_snapshot(&prev_block_header.block_hash);
-
-            if let Ok(entry) = entry {
-                let mut txids = H256List::new();
-                let commitments = entry.get_epoch_commitments();
-
-                // Collect all commitment transaction IDs from the epoch
-                for tx in commitments.iter() {
-                    txids.push(tx.id);
-                }
-
-                debug!(
-                    "Producing epoch block at height {} with commitments rollup tx {:#?}",
-                    block_height, txids
-                );
-
-                system_transaction_ledger = SystemTransactionLedger {
-                    ledger_id: SystemLedger::Commitment.into(),
-                    tx_ids: txids,
-                };
-
-                // IMPORTANT: On epoch blocks we don't bill the user for commitment txs
-                commitment_txs_to_bill = vec![];
-            } else {
-                eyre::bail!("Could not find commitment snapshot for current epoch");
-            }
-        } else {
-            // === REGULAR BLOCK: Process new commitment transactions ===
-            // Regular blocks add fresh commitment transactions from the mempool
-            // and create ledger entries that reference these new commitments
-            let mut txids = H256List::new();
-
-            // Add each new commitment transaction to the ledger
-            mempool_txs.commitment_tx.iter().for_each(|ctx| {
-                txids.push(ctx.id);
-            });
-            debug!(
-                "Producing block at height {} with commitment tx {:#?}",
-                block_height, txids
-            );
-            system_transaction_ledger = SystemTransactionLedger {
-                ledger_id: SystemLedger::Commitment.into(),
-                tx_ids: txids,
-            };
-            // IMPORTANT: Commitment txs get billed on regular blocks
-            commitment_txs_to_bill = mempool_txs.commitment_tx;
-            aggregated_miner_fees = BTreeMap::new();
-        };
-        let system_ledgers = if !system_transaction_ledger.tx_ids.is_empty() {
-            vec![system_transaction_ledger]
-        } else {
-            Vec::new()
-        };
-
-        Ok((
-            system_ledgers,
-            commitment_txs_to_bill,
-            mempool_txs.submit_tx,
-            mempool_txs.publish_tx,
-            aggregated_miner_fees,
-        ))
+    fn build_non_epoch_bundle(&self, mempool_txs: MempoolTxs) -> MempoolTxsBundle {
+        MempoolTxsBundle {
+            commitment_txs_to_bill: mempool_txs.commitment_tx.clone(),
+            commitment_txs: mempool_txs.commitment_tx,
+            submit_txs: mempool_txs.submit_tx,
+            publish_txs: mempool_txs.publish_tx,
+            aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+            commitment_refund_events: Vec::new(),
+            unstake_refund_events: Vec::new(),
+        }
     }
 
     async fn get_evm_block(
@@ -1085,7 +1358,7 @@ pub trait BlockProdStrategy {
         &self,
         parent_epoch_snapshot: &EpochSnapshot,
         block_height: u64,
-    ) -> eyre::Result<BTreeMap<Address, (U256, RollingHash)>> {
+    ) -> eyre::Result<LedgerExpiryBalanceDelta> {
         ledger_expiry::calculate_expired_ledger_fees(
             parent_epoch_snapshot,
             block_height,
@@ -1094,10 +1367,43 @@ pub trait BlockProdStrategy {
             Arc::clone(&self.inner().block_index),
             self.inner().service_senders.mempool.clone(),
             self.inner().db.clone(),
+            true, // we expect the txs to be promoted otherwise return perm fee
         )
         .in_current_span()
         .await
     }
+}
+
+fn millis_since_epoch(time: SystemTime) -> u128 {
+    time.duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+#[inline]
+fn choose_oracle_price(
+    parent_ts_ms: u128,
+    parent_price: IrysTokenPrice,
+    oracle_price: IrysTokenPrice,
+    oracle_updated_ms: u128,
+) -> IrysTokenPrice {
+    let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
+        (parent_price, "parent_fallback")
+    } else {
+        (oracle_price, "oracle_fresh")
+    };
+
+    tracing::debug!(
+        parent_ts_ms,
+        oracle_updated_ms,
+        parent_price = %parent_price,
+        oracle_price = %oracle_price,
+        chosen_price = %chosen,
+        source,
+        "selected oracle price for EMA calculation"
+    );
+
+    chosen
 }
 
 pub struct ProductionStrategy {
@@ -1150,16 +1456,48 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
     bytes_added / chunk_size
 }
 
-/// Similar to [`BlockConfirmedMessage`] (but takes ownership of parameters) and
-/// acts as a placeholder for when the node will maintain a block tree of
-/// confirmed blocks and produce migrated blocks for the canonical chain when
-/// enough confirmations have occurred. Chunks are moved from the in-memory
-/// index to the storage modules when a block is migrated.
-#[derive(Message, Debug, Clone)]
-#[rtype(result = "eyre::Result<()>")]
-pub struct BlockMigrationMessage {
-    /// Block being migrated
-    pub block_header: Arc<IrysBlockHeader>,
-    /// Include all the blocks transaction headers [Submit, Publish]
-    pub all_txs: Arc<Vec<DataTransactionHeader>>,
+#[cfg(test)]
+mod oracle_choice_tests {
+    use super::{choose_oracle_price, millis_since_epoch};
+    use irys_types::storage_pricing::Amount;
+    use rust_decimal_macros::dec;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn chooses_parent_when_parent_is_newer() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(2_000); // parent block timestamp 2 seconds
+        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
+
+        let chosen = choose_oracle_price(
+            millis_since_epoch(parent_ts_ms),
+            parent_price,
+            oracle_price,
+            millis_since_epoch(oracle_updated_at),
+        );
+        assert_eq!(
+            chosen, parent_price,
+            "should choose parent price when parent is newer"
+        );
+    }
+
+    #[test]
+    fn chooses_oracle_when_oracle_is_fresh() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(1_000); // parent block timestamp 1 second
+        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
+
+        let chosen = choose_oracle_price(
+            millis_since_epoch(parent_ts_ms),
+            parent_price,
+            oracle_price,
+            millis_since_epoch(oracle_updated_at),
+        );
+        assert_eq!(
+            chosen, oracle_price,
+            "should choose oracle price when oracle is fresher"
+        );
+    }
 }

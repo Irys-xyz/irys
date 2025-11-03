@@ -30,11 +30,11 @@ pub async fn post_tx(
 
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    let tx_ingress_msg = MempoolServiceMessage::IngestDataTx(tx, oneshot_tx);
+    let tx_ingress_msg = MempoolServiceMessage::IngestDataTxFromApi(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver chunk: {:?}", err)));
+            .body(format!("Failed to deliver chunk: {err:?}")));
     }
     let msg_result = oneshot_rx.await;
 
@@ -42,7 +42,7 @@ pub async fn post_tx(
     if let Err(err) = msg_result {
         tracing::error!("API: {:?}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {:?}", err)));
+            .body(format!("Failed to deliver transaction: {err:?}")));
     }
 
     // If message delivery succeeded, check for validation errors within the response
@@ -51,36 +51,40 @@ pub async fn post_tx(
         tracing::warn!("API: {:?}", err);
         return match err {
             TxIngressError::InvalidSignature => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Signature: {:?}", err))),
+                .body(format!("Invalid Signature: {err:?}"))),
             TxIngressError::Unfunded => Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
-                .body(format!("Unfunded: {:?}", err))),
+                .body(format!("Unfunded: {err:?}"))),
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
                 tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Failed to deliver transaction: {:?}", err)))
+                    .body(format!("Failed to deliver transaction: {err:?}")))
             }
             TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Anchor: {:?}", err))),
+                .body(format!("Invalid Anchor: {err:?}"))),
             TxIngressError::DatabaseError => {
                 tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal database error: {:?}", err)))
+                    .body(format!("Internal database error: {err:?}")))
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {:?}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal service error: {:?}", err)))
+                    .body(format!("Internal service error: {err:?}")))
             }
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
-                    "Commitment validation error: {:?}",
-                    commitment_validation_error
+                    "Commitment validation error: {commitment_validation_error:?}"
                 )))
             }
             TxIngressError::InvalidLedger(_) => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid ledger ID: {:?}", err))),
+                .body(format!("Invalid ledger ID: {err:?}"))),
+            TxIngressError::BalanceFetchError { address, reason } => {
+                tracing::error!("API: Balance fetch error for {}: {}", address, reason);
+                Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(format!("Unable to verify balance for {address}: {reason}")))
+            }
         };
     }
 
@@ -207,9 +211,8 @@ pub async fn get_tx_local_start_offset(
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PromotionStatus {
-    is_promoted: bool,
     #[serde(default, with = "option_u64_stringify")]
-    promotion_height: Option<u64>,
+    pub promotion_height: Option<u64>,
 }
 
 // TODO: REMOVE ME ONCE WE HAVE A GATEWAY
@@ -244,14 +247,7 @@ pub async fn get_tx_promotion_status(
 
     // Report its promoted status
 
-    Ok(web::Json(match tx_header.promoted_height {
-        Some(height) => PromotionStatus {
-            is_promoted: true,
-            promotion_height: Some(height),
-        },
-        None => PromotionStatus {
-            is_promoted: false,
-            promotion_height: None,
-        },
+    Ok(web::Json(PromotionStatus {
+        promotion_height: tx_header.promoted_height,
     }))
 }

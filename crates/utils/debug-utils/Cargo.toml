@@ -1,0 +1,19 @@
+[package]
+name = "irys-debug-utils"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+irys-database.workspace = true
+eyre.workspace = true
+tracing-error.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
+reth-node-core.workspace = true
+
+
+[lints]
+workspace = true

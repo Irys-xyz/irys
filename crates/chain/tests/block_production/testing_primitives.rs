@@ -5,14 +5,14 @@ use tracing::info;
 
 use crate::utils::IrysNodeTest;
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_wait_until_height() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
     info!("height: {}", height);
     let steps = 2;
     let seconds = 60;
-    irys_node.node_ctx.start_mining().await.unwrap();
+    irys_node.node_ctx.start_mining().unwrap();
     let _block_hash = irys_node
         .wait_until_height(height + steps, seconds)
         .await
@@ -22,7 +22,7 @@ async fn heavy_test_wait_until_height() {
     irys_node.stop().await;
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_mine() {
     let irys_node = IrysNodeTest::default_async().start().await;
     let height = irys_node.get_canonical_chain_height().await;
@@ -36,7 +36,7 @@ async fn heavy_test_mine() {
     irys_node.stop().await;
 }
 
-#[test_log::test(actix::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_test_mine_tx() {
     // output tracing
     let mut config = NodeConfig::testing();
@@ -54,7 +54,7 @@ async fn heavy_test_mine_tx() {
     let data = "Hello, world!".as_bytes().to_vec();
     info!("height: {}", height);
     let tx = irys_node
-        .create_publish_data_tx(&account, data)
+        .post_publish_data_tx(&account, data)
         .await
         .unwrap();
     irys_node.mine_block().await.unwrap();

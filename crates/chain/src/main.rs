@@ -6,10 +6,13 @@ use tracing_subscriber::{
     layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
 };
 
+#[cfg(feature = "telemetry")]
+use irys_utils::telemetry;
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
-#[actix_web::main]
+#[tokio::main]
 async fn main() -> eyre::Result<()> {
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
@@ -17,7 +20,22 @@ async fn main() -> eyre::Result<()> {
     }
 
     // init logging
-    init_tracing().expect("initializing tracing should work");
+    #[cfg(feature = "telemetry")]
+    {
+        // Check if Axiom credentials are set
+        if std::env::var("AXIOM_API_TOKEN").is_ok() && std::env::var("AXIOM_DATASET").is_ok() {
+            info!("Axiom credentials detected, initializing OpenTelemetry");
+            telemetry::init_telemetry()?;
+        } else {
+            info!("Axiom credentials not set, using standard tracing");
+            init_tracing().expect("initializing tracing should work");
+        }
+    }
+    #[cfg(not(feature = "telemetry"))]
+    {
+        init_tracing().expect("initializing tracing should work");
+    }
+
     setup_panic_hook().expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
     // load the config
@@ -26,7 +44,7 @@ async fn main() -> eyre::Result<()> {
     // start the node
     info!("starting the node, mode: {:?}", &config.node_mode);
     let handle = IrysNode::new(config)?.start().await?;
-    handle.start_mining().await?;
+    handle.start_mining()?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
     tokio::task::spawn_blocking(|| {

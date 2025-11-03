@@ -1,20 +1,19 @@
-use std::collections::HashSet;
-
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};
+use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
 
-#[actix_web::test]
-async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
+#[tokio::test]
+async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var(
     //     "RUST_LOG",
     //     "debug,irys_actors::block_validation=none;irys_p2p::server=none;irys_actors::mining=error",
     // );
-    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::broadcast_mining_service=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=debug,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
+    std::env::set_var("RUST_LOG", "debug,irys_database=off,irys_p2p::gossip_service=off,irys_actors::storage_module_service=off,trie=off,irys_reth::evm=off,engine::root=off,irys_p2p::peer_list=off,storage::db::mdbx=off,reth_basic_payload_builder=off,irys_gossip_service=off,providers::db=off,reth_payload_builder::service=off,irys_actors::mining_bus=off,reth_ethereum_payload_builder=off,provider::static_file=off,engine::persistence=off,provider::storage_writer=off,reth_engine_tree::persistence=off,irys_actors::cache_service=off,irys_vdf=off,irys_actors::block_tree_service=debug,irys_actors::vdf_service=off,rys_gossip_service::service=off,eth_ethereum_payload_builder=off,reth_node_events::node=off,reth::cli=off,reth_engine_tree::tree=off,irys_actors::ema_service=off,irys_efficient_sampling=off,hyper_util::client::legacy::connect::http=off,hyper_util::client::legacy::pool=off,irys_database::migration::v0_to_v1=off,irys_storage::storage_module=off,actix_server::worker=off,irys::packing::update=off,engine::tree=off,irys_actors::mining=error,payload_builder=off,irys_actors::reth_service=off,irys_actors::packing=off,irys_actors::reth_service=off,irys::packing::progress=off,irys_chain::vdf=off,irys_vdf::vdf_state=off");
     initialize_tracing();
 
     // Configure a test network with accelerated epochs (2 blocks per epoch)
@@ -121,7 +120,7 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     // Post a transaction that should be gossiped to all peers
     let shared_tx = genesis_node
         .post_data_tx(
-            H256::zero(),
+            genesis_node.get_anchor().await?,
             data3,
             &genesis_node.node_ctx.config.irys_signer(),
         )
@@ -134,10 +133,10 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
-        .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
+        .post_data_tx_without_gossip(peer1_node.get_anchor().await?, data1, &peer1_signer)
         .await;
     let peer2_tx = peer2_node
-        .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
+        .post_data_tx_without_gossip(peer2_node.get_anchor().await?, data2, &peer2_signer)
         .await;
 
     // Mine mine blocks on both peers in parallel
@@ -336,6 +335,225 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Simulates a shallow fork produced by a single peer while gossip is disabled.
+/// The peer begins mining first, the genesis node continues extending the canonical chain,
+/// and the fork overtakes the main chain once gossip resumes.
+/// Assertions cover:
+/// - Block index alignment with reth FCU state.
+/// - Reth FCU propagation (`Latest`, `Safe`, `Finalized`) matching the canonical/migrated blocks.
+/// - Reth latest tags on both nodes reflect their respective fork tips before the reorg.
+#[test_log::test(tokio::test)]
+async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<()> {
+    let seconds_to_wait = 20;
+    let num_blocks_in_epoch = 3;
+    let block_tree_depth: u64 = 6;
+    let block_migration_depth: u32 = 4;
+
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_tree_depth = block_tree_depth;
+    genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth;
+
+    let peer_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&peer_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
+    let peer_node = genesis_node
+        .testing_peer_with_assignments_and_name(peer_config, "PEER")
+        .await?;
+
+    let base_height = genesis_node.get_canonical_chain_height().await;
+
+    // Stage 1: peer mines a private fork with gossip disabled
+    peer_node.gossip_disable();
+
+    peer_node.mine_blocks_without_gossip(1).await?;
+    let fork_height = base_height + 1;
+    let fork_block_level1 = peer_node.get_block_by_height(fork_height).await?;
+
+    // Stage 2: genesis extends the canonical chain while unaware of the fork
+    genesis_node.gossip_disable();
+    let canonical_block_level1 = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_until_height(canonical_block_level1.height, seconds_to_wait)
+        .await?;
+
+    let canonical_block_level2 = genesis_node.mine_block().await?;
+    genesis_node
+        .wait_until_height(canonical_block_level2.height, seconds_to_wait)
+        .await?;
+
+    let _ = genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Latest,
+            canonical_block_level2.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
+    // Stage 3: peer privately extends the fork beyond canonical length and ensures its Reth view is updated
+    peer_node.mine_blocks_without_gossip(2).await?;
+    let fork_block_level2 = peer_node.get_block_by_height(fork_height + 1).await?;
+    let fork_block_level3 = peer_node.get_block_by_height(fork_height + 2).await?;
+
+    let _ = peer_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Latest,
+            fork_block_level3.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
+    let fork_arc_level1 = Arc::new(fork_block_level1.clone());
+    let fork_arc_level2 = Arc::new(fork_block_level2.clone());
+    let fork_arc_level3 = Arc::new(fork_block_level3.clone());
+
+    // Stage 4: peer reveals the first fork block (still not longer than canonical)
+    peer_node.gossip_enable();
+    genesis_node.gossip_enable();
+    peer_node.gossip_block_to_peers(&fork_arc_level1)?;
+    genesis_node
+        .wait_for_block(&fork_block_level1.block_hash, seconds_to_wait)
+        .await?;
+
+    let _ = genesis_node
+        .wait_for_reth_marker(
+            BlockNumberOrTag::Latest,
+            canonical_block_level2.evm_block_hash,
+            seconds_to_wait as u64,
+        )
+        .await?;
+
+    let reorg_future = genesis_node.wait_for_reorg(seconds_to_wait);
+
+    // Stage 5: peer gossips additional fork blocks to overtake canonical tip
+    peer_node.gossip_block_to_peers(&fork_arc_level2)?;
+    genesis_node
+        .wait_for_block(&fork_block_level2.block_hash, seconds_to_wait)
+        .await?;
+    peer_node.gossip_block_to_peers(&fork_arc_level3)?;
+    genesis_node
+        .wait_for_block(&fork_block_level3.block_hash, seconds_to_wait)
+        .await?;
+
+    let reorg_event = reorg_future.await?;
+
+    let extension_height = fork_height + 2;
+    genesis_node
+        .wait_until_height(extension_height, seconds_to_wait)
+        .await?;
+    peer_node
+        .wait_until_height(extension_height, seconds_to_wait)
+        .await?;
+
+    let chain_tip_height = genesis_node.get_canonical_chain_height().await;
+    assert_eq!(
+        chain_tip_height, extension_height,
+        "expected tip to match fork extension height"
+    );
+
+    let migration_depth_u64 = block_migration_depth as u64;
+    let prune_depth_u64 = block_tree_depth;
+    let migration_height = chain_tip_height.saturating_sub(migration_depth_u64);
+    let prune_height = chain_tip_height.saturating_sub(prune_depth_u64);
+
+    genesis_node
+        .wait_until_block_index_height(migration_height, seconds_to_wait)
+        .await?;
+
+    let head_block = genesis_node.get_block_by_height(chain_tip_height).await?;
+    let migration_block = genesis_node.get_block_by_height(migration_height).await?;
+    let prune_block = genesis_node.get_block_by_height_from_index(prune_height, false)?;
+
+    for node in [&genesis_node, &peer_node] {
+        // Stage 6: validate block index contains migrated block & pruned block
+        {
+            let block_index_guard = node.node_ctx.block_index_guard.read();
+            let migrated_entry = block_index_guard
+                .get_item(migration_height)
+                .expect("migration height missing from block index");
+            assert_eq!(
+                migrated_entry.block_hash, migration_block.block_hash,
+                "migration height should match canonical block"
+            );
+
+            let latest_entry = block_index_guard
+                .get_latest_item()
+                .expect("block index should have at least one entry");
+            assert_eq!(
+                latest_entry.block_hash, migration_block.block_hash,
+                "latest block index entry should align with migration block"
+            );
+
+            let pruned_entry = block_index_guard
+                .get_item(prune_height)
+                .expect("prune height missing from block index");
+            assert_eq!(
+                pruned_entry.block_hash, prune_block.block_hash,
+                "prune height should track canonical block"
+            );
+        }
+
+        // Stage 7: block tree does not contain pruned block
+        {
+            let block_tree_guard = node.node_ctx.block_tree_guard.read();
+            let (canonical_entries, _) = block_tree_guard.get_canonical_chain();
+            let last_entry = canonical_entries.first().unwrap();
+            let last_entry = block_tree_guard.get_block(&last_entry.block_hash).unwrap();
+            assert_eq!(
+                last_entry.height,
+                prune_height + 1,
+                "tip height should be exactly one greater than pruned block height"
+            );
+            assert_eq!(
+                last_entry.previous_block_hash, prune_block.block_hash,
+                "tip should reference the pruned block as its parent"
+            );
+            let pruned_block_in_tree = block_tree_guard.get_block(&prune_block.block_hash);
+            assert!(
+                pruned_block_in_tree.is_none(),
+                "block at prune depth should be removed from block tree"
+            );
+        }
+
+        // reth internal tracking state matches the expected irys heights
+        let _ = node
+            .wait_for_reth_marker(
+                BlockNumberOrTag::Latest,
+                head_block.evm_block_hash,
+                seconds_to_wait as u64,
+            )
+            .await?;
+        let safe_hash = node
+            .wait_for_reth_marker(
+                BlockNumberOrTag::Safe,
+                migration_block.evm_block_hash,
+                seconds_to_wait as u64,
+            )
+            .await?;
+        assert_eq!(
+            safe_hash, migration_block.evm_block_hash,
+            "reth safe tag should reference migration block"
+        );
+        let _ = node
+            .wait_for_reth_marker(
+                BlockNumberOrTag::Finalized,
+                prune_block.evm_block_hash,
+                seconds_to_wait as u64,
+            )
+            .await?;
+    }
+
+    assert_eq!(reorg_event.new_tip, head_block.block_hash);
+
+    tokio::join!(genesis_node.stop(), peer_node.stop());
+    Ok(())
+}
+
 /// Reorg where there are 3 forks and the tip moves across all of them as each is extended longer than the other.
 ///   We need to verify that
 ///    - commitment txs are eligible for inclusion in future blocks once they are no longer part of the canonical chain
@@ -343,7 +561,7 @@ async fn heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 ///    - all canonical blocks move to all peers
 ///    - TODO: all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - TODO: new balance changes are applied based on the new canonical branch
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()> {
     initialize_tracing();
     // config variables
@@ -449,8 +667,18 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    node_a
+        .wait_until_height(a_block2.height, seconds_to_wait)
+        .await?;
+
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    node_b
+        .wait_until_height(b_block3.height, seconds_to_wait)
+        .await?;
 
     // check how many txs made it into each block, we expect no more than 2
     assert_eq!(
@@ -648,8 +876,13 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
 ///    - tests all canonical blocks move to all peers
 ///    - tests all the balance changes that were applied in one fork are reverted during the Reorg
 ///    - tests new balance changes are applied based on the new canonical branch
-#[test_log::test(actix_web::test)]
-async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
+#[rstest::rstest]
+#[case::full_validation(true)]
+#[case::default(false)]
+#[test_log::test(tokio::test)]
+async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
+    #[case] enable_full_validation: bool,
+) -> eyre::Result<()> {
     initialize_tracing();
 
     //
@@ -666,6 +899,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     genesis_config.consensus.get_mut().chunk_size = DATA_CHUNK_SIZE as u64;
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    genesis_config
+        .consensus
+        .get_mut()
+        .enable_full_ingress_proof_validation = enable_full_validation;
 
     // create test data
     let data = vec![0_u8; DATA_CHUNK_SIZE];
@@ -839,7 +1076,14 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // Mine competing blocks on A and B without gossip
     let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    node_a
+        .wait_until_height(a_block2.height, seconds_to_wait)
+        .await?;
+
     let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    node_b
+        .wait_until_height(b_block2.height, seconds_to_wait)
+        .await?;
 
     // post chunks so txs go from submit ledger to publish ledger in block 3
     node_b
@@ -851,6 +1095,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // Mine the heightest block on any node so far, on Node B
     let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    node_b
+        .wait_until_height(b_block3.height, seconds_to_wait)
+        .await?;
 
     // check how many txs made it into each block, we expect no more than 1
     assert_eq!(
@@ -902,16 +1149,15 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 
     // check balances in block b2
     // Only 1 Submit tx from node B should be in block b2
-    // The transaction fee includes term_fee + perm_fee
-    let peer_b_total_fee =
-        peer_b_b2_submit_tx.header.term_fee + peer_b_b2_submit_tx.header.perm_fee.unwrap();
-
-    // Calculate block producer reward (5% of term_fee) that b_signer receives as the miner
+    // Calculate fee components
     let term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
         peer_b_b2_submit_tx.header.term_fee,
         &node_b.node_ctx.config.consensus,
     )?;
     let block_producer_reward = term_charges.block_producer_reward;
+
+    let peer_b_total_fee =
+        peer_b_b2_submit_tx.header.term_fee + peer_b_b2_submit_tx.header.perm_fee.unwrap();
 
     assert_eq!(
         node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
@@ -1038,11 +1284,23 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         node_a.gossip_enable();
         node_b.gossip_enable();
         node_c.gossip_enable();
-        // Gossip all blocks so everyone syncs
-        node_b.gossip_block_to_peers(&b_block2)?;
-        node_b.gossip_block_to_peers(&b_block3)?;
-        node_c.gossip_block_to_peers(&c_block4)?;
-        node_a.gossip_block_to_peers(&a_block2)?;
+        if enable_full_validation {
+            // Use full block transfer so chunks arrive before validation
+            node_b.send_full_block(&node_a, &b_block2).await?;
+            node_b.send_full_block(&node_a, &b_block3).await?;
+            node_c.send_full_block(&node_a, &c_block4).await?;
+            // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
+            // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
+            // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
+            node_a.send_block_to_peer(&node_b, &a_block2).await?;
+            node_a.send_block_to_peer(&node_c, &a_block2).await?;
+        } else {
+            // Gossip all blocks so everyone syncs
+            node_b.gossip_block_to_peers(&b_block2)?;
+            node_b.gossip_block_to_peers(&b_block3)?;
+            node_c.gossip_block_to_peers(&c_block4)?;
+            node_a.gossip_block_to_peers(&a_block2)?;
+        }
     }
     //
     // Stage 9: FINAL STATE CHECKS
@@ -1105,7 +1363,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             height: u64,
             ledger: DataLedger,
         ) -> eyre::Result<Vec<H256>> {
-            let txs_map: HashSet<H256> = node
+            let txs_map: Vec<H256> = node
                 .get_block_by_height(height)
                 .await?
                 .get_data_ledger_tx_ids()
@@ -1170,16 +1428,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
             signer_c_genesis_balance,
         );
         // assert final balances
-        // Calculate peer C's total fee (for the tx that was included in c_block4)
-        let peer_c_total_fee =
-            peer_c_b2_submit_tx.header.term_fee + peer_c_b2_submit_tx.header.perm_fee.unwrap();
-
-        // Calculate block producer reward for peer C's transaction (c_signer receives this as miner of c_block4)
-        let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
-            peer_c_b2_submit_tx.header.term_fee,
-            &node_c.node_ctx.config.consensus,
-        )?;
-        let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
+        // Calculate fee components for peer C's transaction
 
         // Calculate publish fee rewards for peer C's transaction if it has perm_fee
         let perm_fee = peer_c_b2_submit_tx.header.perm_fee.unwrap();
@@ -1192,6 +1441,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         // c_signer gets the ingress proof reward as they posted the chunk
         let peer_c_publish_rewards = peer_c_publish_charges.ingress_proof_reward;
 
+        // Calculate block producer reward for peer C's transaction
+        let peer_c_term_charges = irys_types::transaction::fee_distribution::TermFeeCharges::new(
+            peer_c_b2_submit_tx.header.term_fee,
+            &node_c.node_ctx.config.consensus,
+        )?;
+        let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
+
         assert_eq!(
             node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
             signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
@@ -1201,7 +1457,8 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
         );
         assert_eq!(
             node_a.get_balance(c_signer.address(), c_block4.evm_block_hash),
-            signer_c_genesis_balance + c_block4.reward_amount - peer_c_total_fee
+            signer_c_genesis_balance + c_block4.reward_amount
+                - peer_c_b2_submit_tx.header.total_cost()
                 + peer_c_block_producer_reward
                 + peer_c_publish_rewards,
         );
@@ -1217,7 +1474,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs() -> eyre::Result<()> {
 /// while peer B mines one block short. This creates the longest possible
 /// fork without triggering block migration. Once gossip is re-enabled peer A should
 /// reorg to peer B's chain.
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     initialize_tracing();
     // config variables

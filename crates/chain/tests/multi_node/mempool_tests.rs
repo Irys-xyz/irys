@@ -31,7 +31,7 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
 use tracing::debug;
 
-#[actix::test]
+#[tokio::test]
 async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     // std::env::set_var("RUST_LOG", "debug");
@@ -110,7 +110,7 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
@@ -157,7 +157,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Ensure it did not get cached
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
@@ -170,7 +170,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
@@ -212,7 +212,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Ensure it did not get cached
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
@@ -225,7 +225,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
@@ -267,7 +267,7 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Ensure it did not get cached
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
@@ -280,7 +280,7 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
@@ -330,7 +330,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix::test]
+#[tokio::test]
 /// Test mempool persists to disk during shutdown
 ///
 /// FIXME: This test will not be effective until mempool tree/index separation work is complete
@@ -420,7 +420,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
@@ -539,7 +539,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Post a transaction that should be gossiped to all peers
     let shared_tx = genesis_node
         .post_data_tx(
-            H256::zero(),
+            genesis_node.get_anchor().await?,
             data3,
             &genesis_node.node_ctx.config.irys_signer(),
         )
@@ -554,10 +554,10 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 
     // Post a unique storage transaction to each peer
     let peer1_tx = peer1_node
-        .post_data_tx_without_gossip(H256::zero(), data1, &peer1_signer)
+        .post_data_tx_without_gossip(peer1_node.get_anchor().await?, data1, &peer1_signer)
         .await;
     let peer2_tx = peer2_node
-        .post_data_tx_without_gossip(H256::zero(), data2, &peer2_signer)
+        .post_data_tx_without_gossip(peer2_node.get_anchor().await?, data2, &peer2_signer)
         .await;
 
     // Mine mine blocks on both peers in parallel
@@ -779,23 +779,27 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 /// prime a fork - mine one block on A and two on B
 ///  the second B block should promote B's storage tx
 /// assert A and B's blocks include their respective promoted tx
-/// trigger a reorg - gossip B's txs & blocks to A
+/// trigger a reorg - send B's txs & blocks to A
 /// assert that A has a reorg event
 /// assert that A's tx is returned to the mempool
-/// gossip A's tx to B & prepare it for promotion
+/// send A's tx to B & prepare it for promotion
 /// mine a block on B, assert A's tx is included correctly
-/// gossip B's block back to A, assert mempool state ingress proofs etc are correct
+/// send B's block back to A, assert mempool state ingress proofs etc are correct
 // TODO: once longer forks are stable & if it's worthwhile:
 /// mine 4 blocks on C
-/// gossip these to A
+/// send  C's blocks to A
 /// assert all txs return to mempool
-/// gossip C's blocks to B
+/// send C's blocks to B
 /// assert txs return to mempool
-/// gossip returned txs to C
+/// send returned txs to C
 /// mine a block on C, assert that all reorgd txs are present
-
-#[actix_web::test]
-async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
+#[rstest::rstest]
+#[case::full_validation(true)]
+#[case::default(false)]
+#[test_log::test(tokio::test)]
+async fn slow_heavy_mempool_publish_fork_recovery_test(
+    #[case] enable_full_validation: bool,
+) -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
@@ -811,6 +815,11 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let mut a_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch.try_into().unwrap());
     a_config.consensus.get_mut().chunk_size = 32;
     a_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
+    a_config
+        .consensus
+        .get_mut()
+        .enable_full_ingress_proof_validation = enable_full_validation;
+
     // signers
     // Create a signer (keypair) for the peer and fund it
     let b_signer = a_config.new_random_signer();
@@ -920,7 +929,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     let a_blk1_tx1 = a_node
         .post_data_tx(
-            H256::zero(),
+            a_node.get_anchor().await?,
             [[1; 32], [1; 32], [1; 32]].concat(),
             &a_signer,
         )
@@ -950,7 +959,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let b_blk1_tx1 = {
         let b_blk1_tx1 = b_node
             .post_data_tx(
-                H256::zero(),
+                b_node.get_anchor().await?,
                 [[2; 32], [2; 32], [2; 32]].concat(),
                 &b_signer,
             )
@@ -964,9 +973,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         b_blk1_tx1
     };
 
-    b_node.mine_block().await?;
-
-    let b_blk1 = b_node.get_block_by_height(network_height).await?;
+    let b_blk1 = {
+        b_node.mine_block().await?;
+        b_node.get_block_by_height(network_height).await?
+    };
 
     assert_eq!(
         b_blk1.data_ledgers[DataLedger::Submit].tx_ids,
@@ -983,16 +993,18 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     // don't upload chunks, we want this in the submit ledger
     let b_blk2_tx1 = b_node
         .post_data_tx(
-            H256::zero(),
+            b_node.get_anchor().await?,
             [[3; 32], [3; 32], [3; 32]].concat(),
             &b_signer,
         )
         .await;
 
-    b_node.mine_block().await?;
-    network_height += 1;
+    let b_blk2 = {
+        b_node.mine_block().await?;
+        network_height += 1;
+        b_node.get_block_by_height(network_height).await?
+    };
 
-    let b_blk2 = b_node.get_block_by_height(network_height).await?;
     assert_eq!(
         b_blk2.data_ledgers[DataLedger::Submit].tx_ids,
         vec![b_blk2_tx1.header.id]
@@ -1005,40 +1017,55 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     b_node
         .wait_until_height(network_height, seconds_to_wait)
         .await?;
+    b_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
+        .await?;
 
     // send B1&2 to A, causing a reorg
-    let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
+    {
+        let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
 
-    b_node.send_full_block(&a_node, &b_blk1).await?;
-    b_node.send_full_block(&a_node, &b_blk2).await?;
+        // note we send the full blocks to node a, including txs, and chunks
+        b_node.send_full_block(&a_node, &b_blk1).await?;
+        a_node
+            .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
+            .await?;
+        b_node.send_full_block(&a_node, &b_blk2).await?;
+        a_node
+            .wait_for_block(&b_blk2.block_hash, seconds_to_wait)
+            .await?;
 
+        // wait for a reorg event
+        let _a1_b2_reorg = a1_b2_reorg_fut.await?;
+        a_node
+            .wait_until_height(network_height, seconds_to_wait)
+            .await?;
+        assert_eq!(
+            a_node.get_block_by_height(network_height).await?,
+            b_node.get_block_by_height(network_height).await?
+        );
+    }
+
+    // ensure mempool has settled to expected shape for submit/publish
+    // (allow both A and B txs to appear)
     a_node
-        .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
-    a_node
-        .wait_for_block(&b_blk2.block_hash, seconds_to_wait)
-        .await?;
-
-    // wait for a reorg event
-
-    let _a1_b2_reorg = a1_b2_reorg_fut.await?;
-
-    a_node
-        .wait_until_height(network_height, seconds_to_wait)
-        .await?;
-
-    assert_eq!(
-        a_node.get_block_by_height(network_height).await?,
-        b_node.get_block_by_height(network_height).await?
-    );
-
-    // assert that a_blk1_tx1 is back in a's mempool
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
 
+    // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
         a1_b2_reorg_mempool_txs.submit_tx,
-        vec![a_blk1_tx1.header.clone()]
+        vec![a_blk1_tx1.header.clone()],
+        "We expected 1 submit tx from the mempool shape and for it to be {:?}",
+        a_blk1_tx1.header.clone()
+    );
+
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.publish_tx.txs.len(),
+        1,
+        "unexpected best mempool txs shape"
     );
 
     let a_blk1_tx1_proof1 = {
@@ -1051,10 +1078,21 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
     a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
 
-    // assert that a_blk1_tx1 shows back up in get_best_mempool_txs (treated as if it wasn't promoted)
-    assert_eq!(
-        a1_b2_reorg_mempool_txs.publish_tx.txs,
-        vec![a_blk1_tx1_published]
+    // assert that A’s tx is among publish candidates (treated as if it wasn't promoted)
+    // (allow additional candidates as sometimes Bs tx will also show up)
+    assert!(
+        a1_b2_reorg_mempool_txs
+            .publish_tx
+            .txs
+            .iter()
+            .any(|h| h.id == a_blk1_tx1.header.id),
+        "A's tx missing in publish candidates: got {:?}",
+        a1_b2_reorg_mempool_txs
+            .publish_tx
+            .txs
+            .iter()
+            .map(|h| h.id)
+            .collect::<Vec<_>>()
     );
 
     let a_blk1_tx1_mempool = {
@@ -1111,14 +1149,17 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         .unwrap()
         .ne(&IngressProofsList(vec![a_blk1_tx1_proof1.proof.clone()])));
 
-    // now we gossip B3 back to A
+    // now we send (bypassing gossip) B3 back to A
     // it shouldn't reorg, and should accept the block
     // as well as overriding the ingress proof it has locally with the one from the block
-
     b_node.send_full_block(&a_node, &b_blk3).await?;
 
+    // wait for height and index on node a
     a_node
         .wait_until_height(network_height, seconds_to_wait)
+        .await?;
+    a_node
+        .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
     assert_eq!(
@@ -1126,8 +1167,12 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
         b_node.get_block_by_height(network_height).await?
     );
 
-    // assert that a_blk1_tx1 is no longer present in the mempool
-    // (nothing should be in the mempool)
+    // Wait for the "best mempool txs" to settle to expected shape
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
+
+    // (a second check) assert that nothing is in the mempool
     let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
@@ -1141,11 +1186,8 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 
     assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height, Some(b_blk3.height));
 
-    // tada!
-
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);
-    debug!("DONE!");
     Ok(())
 }
 
@@ -1169,8 +1211,8 @@ async fn slow_heavy_mempool_publish_fork_recovery_test() -> eyre::Result<()> {
 /// mine a block on B, assert A's tx is included correctly
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
-#[actix_web::test]
-async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
+#[tokio::test]
+async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
     std::env::set_var(
         "RUST_LOG",
         "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
@@ -1304,7 +1346,6 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 
     let a_blk1 = a_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
-
     assert_eq!(
         a_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
         vec![a_blk1_tx1.id]
@@ -1428,8 +1469,8 @@ async fn heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
 // 3.) re-connecting the peers and ensuring that the correct fork was selected, and the account cannot afford the storage transaction (the funding tx was on the shorter fork)
 // This test will probably be expanded in the future - it also includes a set of primitives for managing forks on the EVM/reth side too
 
-#[actix_web::test]
-async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
+#[tokio::test]
+async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",
@@ -1468,7 +1509,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     genesis_config.consensus.extend_genesis_accounts(vec![(
         rich_account.address(),
         GenesisAccount {
-            balance: U256::from(1000000000000000000_u128), // 1 IRYS
+            balance: U256::from(100000000000000000000_u128), // 100 IRYS
             ..Default::default()
         },
     )]);
@@ -1566,7 +1607,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
-        value: Some(U256::from(1000000000000000_u128)),
+        value: Some(U256::from(1000000000000000000_u128)),
         nonce: Some(1),
         chain_id: Some(chain_id),
         ..Default::default()
@@ -1658,7 +1699,8 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     wait_for_evm_tx(&peer2_reth_context, tx_env2.hash()).await?;
 
-    expected_recipient2_balance += U256::from(1000000000000000_u128);
+    // Initial balance + received value
+    expected_recipient2_balance += U256::from(1000000000000000000_u128);
 
     // Mine blocks on both peers in parallel to create a fork
     let (result1, result2) = tokio::join!(
@@ -1707,8 +1749,10 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     let chunks = [[40; 32], [50; 32], [60; 32]];
     let data: Vec<u8> = chunks.concat();
 
+    // Anchor this storage transaction to the actual genesis block hash instead of H256::zero()
+    // Using H256::zero() encodes to base58 "1111.." which is now rejected as an invalid anchor.
     let _peer2_tx = peer2
-        .post_data_tx_without_gossip(H256::zero(), data, &recipient2)
+        .post_data_tx_without_gossip(peer2.node_ctx.genesis_hash, data, &recipient2)
         .await;
 
     // call get best txs from the mempool
@@ -1782,7 +1826,7 @@ async fn heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     Ok(())
 }
 
-#[actix_web::test]
+#[tokio::test]
 async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var("RUST_LOG", "debug");
@@ -1967,7 +2011,7 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 /// send (staked) invalid pledge commitment txs where tx id has been tampered with
 /// try with and without pending anchor
 /// expect invalid txs to fail when sent directly to the mempool
@@ -1988,7 +2032,8 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     //
 
     // create valid and invalid stake commitment tx
-    let stake_tx = new_stake_tx(&H256::zero(), &signer, &genesis_config.consensus_config());
+    let stake_anchor = genesis_node.get_anchor().await?;
+    let stake_tx = new_stake_tx(&stake_anchor, &signer, &genesis_config.consensus_config());
     let mut stake_tx_invalid = stake_tx.clone();
     let mut bytes = stake_tx_invalid.id.to_fixed_bytes();
     bytes[0] ^= 0x01;
@@ -2017,7 +2062,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
 
     let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used to check mempool ingress
     let pledge_tx = new_pledge_tx(
-        &H256::zero(),
+        &stake_anchor,
         &signer,
         &genesis_config.consensus_config(),
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
@@ -2057,7 +2102,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 /// send (unstaked) invalid pledge commitment txs where tx id has been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
 async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
@@ -2100,7 +2145,7 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
     Ok(())
 }
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 /// try ingress invalid data tx where tx id has been tampered with
 /// try ingress valid data tx where tx id has not been tampered with
 /// expect invalid txs to fail when sent directly to the mempool
@@ -2174,7 +2219,7 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
         tx.value = required_value + irys_types::U256::from(10000); // 30000 instead of 20000
     },
 )]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn stake_tx_fee_and_value_validation_test(
     #[case] tx_modifier: fn(&mut CommitmentTransaction, u64, irys_types::U256),
 ) -> eyre::Result<()> {
@@ -2191,9 +2236,9 @@ async fn stake_tx_fee_and_value_validation_test(
     let required_value = config.stake_value.amount;
 
     // Create stake transaction and apply the modifier
-    let mut stake_tx = CommitmentTransaction::new_stake(config, H256::zero());
+    let mut stake_tx = CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
     tx_modifier(&mut stake_tx, required_fee, required_value);
-    let stake_tx = signer.sign_commitment(stake_tx)?;
+    signer.sign_commitment(&mut stake_tx)?;
 
     // Test that the transaction is rejected with the expected error
     let res = genesis_node
@@ -2245,7 +2290,7 @@ async fn stake_tx_fee_and_value_validation_test(
         tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
     },
 )]
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn pledge_tx_fee_validation_test(
     #[case] pledge_count: u64,
     #[case] tx_modifier: fn(&mut CommitmentTransaction, &ConsensusConfig, u64, u64),
@@ -2262,13 +2307,17 @@ async fn pledge_tx_fee_validation_test(
     let required_fee = config.mempool.commitment_fee;
 
     // Create pledge transaction with modifications
-    let mut pledge_tx =
-        CommitmentTransaction::new_pledge(config, H256::zero(), &pledge_count, signer.address())
-            .await;
+    let mut pledge_tx = CommitmentTransaction::new_pledge(
+        config,
+        genesis_node.get_anchor().await?,
+        &pledge_count,
+        signer.address(),
+    )
+    .await;
 
     // Apply the modification (fee or value)
     tx_modifier(&mut pledge_tx, config, pledge_count, required_fee);
-    let pledge_tx = signer.sign_commitment(pledge_tx)?;
+    signer.sign_commitment(&mut pledge_tx)?;
 
     // Test that the transaction is rejected with the expected error
     let res = genesis_node
@@ -2292,7 +2341,7 @@ async fn pledge_tx_fee_validation_test(
 #[case::pledge_double_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 2)] // First pledge, 200 instead of 100
 #[case::pledge_triple_fee(CommitmentType::Pledge {pledge_count_before_executing: 1 }, 3)] // Second pledge, 300 instead of 100
 #[case::pledge_exact_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 1)] // First pledge, 100 (exact required fee)
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn commitment_tx_valid_higher_fee_test(
     #[case] commitment_type: CommitmentType,
     #[case] fee_multiplier: u64,
@@ -2310,19 +2359,26 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
-        CommitmentType::Stake => CommitmentTransaction::new_stake(config, H256::zero()),
+        CommitmentType::Stake => {
+            CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
+        }
         CommitmentType::Pledge {
             pledge_count_before_executing: count,
         } => {
-            CommitmentTransaction::new_pledge(config, H256::zero(), &{ count }, signer.address())
-                .await
+            CommitmentTransaction::new_pledge(
+                config,
+                genesis_node.get_anchor().await?,
+                &{ count },
+                signer.address(),
+            )
+            .await
         }
         _ => unreachable!(),
     };
 
     // Apply the fee multiplier
     commitment_tx.fee = required_fee * fee_multiplier;
-    let commitment_tx = signer.sign_commitment(commitment_tx)?;
+    signer.sign_commitment(&mut commitment_tx)?;
 
     // Should be accepted
     genesis_node

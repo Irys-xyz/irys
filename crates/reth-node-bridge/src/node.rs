@@ -21,7 +21,7 @@ use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
-use tracing::{error, Instrument as _};
+use tracing::{warn, Instrument as _};
 
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
@@ -91,6 +91,16 @@ pub async fn run_node(
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
+    if let Err(e) = unwind_to(&node_config, chainspec.clone(), latest_block).await {
+        // hack to ignore trying to unwind future blocks
+        // (this can happen sometimes, but should be resolved by the payload repair process - erroring here won't help.)
+        if e.to_string().starts_with("Target block number") {
+            warn!("Error unwinding - Reth/Irys head block mismatch {}", &e)
+        } else {
+            return Err(e);
+        }
+    }
+
     reth_config.network.discovery.disable_discovery = true;
     reth_config.rpc.http = true;
     reth_config.rpc.http_api = Some(RpcModuleSelection::Selection(HashSet::from([
@@ -128,7 +138,11 @@ pub async fn run_node(
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();
 
-    tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
+    tracing::info!(
+        target = "reth::cli",
+        custom.path = ?db_path,
+        "Opening database"
+    );
     let database =
         RethDbWrapper::new(init_db(db_path.clone(), db_args.database_args())?.with_metrics());
 
@@ -160,14 +174,13 @@ pub async fn run_node(
         .expect("latest block should be Some");
 
     if latest.header.number > latest_block {
-        error!("\x1b[1;31m!!! REMOVING OUT OF SYNC BLOCK(s) !!! Reth head is {}, Irys head is {}\x1b[0m", &latest.header.number, &latest_block);
-        database.close(); // important! otherwise we get MDBX error 11
-        drop(context);
-        drop(handle);
-
-        unwind_to(node_config, chainspec.clone(), latest_block).await?;
-        return Err(eyre::eyre!("Unwound blocks"));
-    };
+        //Note: if this happens, let Jesse know ASAP
+        eyre::bail!(
+            "Error: Reth is ahead of Irys (Reth: {}, Irys: {})",
+            &latest.header.number,
+            &latest_block
+        )
+    }
 
     Ok((handle, context))
 }

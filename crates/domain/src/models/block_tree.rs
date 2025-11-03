@@ -17,7 +17,7 @@ use crate::{
     CommitmentSnapshot, EmaSnapshot, EpochReplayData, EpochSnapshot,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockTreeEntry {
     pub block_hash: BlockHash,
     pub height: u64,
@@ -51,6 +51,7 @@ pub struct BlockTree {
 
 #[derive(Debug)]
 pub struct BlockMetadata {
+    // todo: wrap into Arc to avoid expensive clones
     pub block: IrysBlockHeader,
     chain_state: ChainState,
     timestamp: SystemTime,
@@ -335,7 +336,7 @@ impl BlockTree {
             let epoch_snapshot = if is_epoch_block {
                 // Epoch boundary reached: create a fresh epoch snapshot that incorporates
                 // all commitments from the commitment cache and computes the epoch state for the new epoch
-                create_epoch_snapshot_for_block(&block, parent_block_entry, consensus_config)
+                create_epoch_snapshot_for_block(&block, parent_block_entry, consensus_config)?
             } else {
                 // Just copy the previous blocks epoch_snapshot reference
                 let epoch_snapshot = parent_block_entry.epoch_snapshot.clone();
@@ -385,6 +386,10 @@ impl BlockTree {
             )
         })?;
 
+        // TODO: if we restart when we have a very large amount of blocks,
+        // then actually we would be storing almost all of the block index in memory -
+        // this is because pruning is only called at the very end
+
         // Prune the cache after restoration to ensure correct depth
         // Subtract 1 to ensure we keep exactly `depth` blocks.
         // The cache.prune() implementation does not count `tip` into the depth
@@ -423,9 +428,10 @@ impl BlockTree {
             .insert(hash);
 
         debug!(
-            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}",
-            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash
+            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}",
+            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash()
         );
+
         if block.cumulative_diff > self.max_cumulative_difficulty.0 {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
@@ -475,7 +481,7 @@ impl BlockTree {
             self.blocks.get(&hash).map(|b| b.chain_state),
             Some(ChainState::Onchain)
         ) {
-            debug!(?hash, "already part of the main chian state");
+            debug!(block.hash = ?hash, "already part of the main chian state");
             return Ok(());
         }
 
@@ -633,11 +639,26 @@ impl BlockTree {
                     blocks_to_collect -= 1;
                 }
 
-                // For Validated or other NotOnchain states
-                ChainState::Validated(_) | ChainState::NotOnchain(_) => {
+                ChainState::Validated(_) => {
                     let chain_cache_entry = make_block_tree_entry(&entry.block);
                     pairs.push(chain_cache_entry);
+
                     not_onchain_count += 1;
+
+                    if blocks_to_collect == 0 {
+                        break;
+                    }
+                    blocks_to_collect -= 1;
+                }
+
+                ChainState::NotOnchain(block_state) => {
+                    let chain_cache_entry = make_block_tree_entry(&entry.block);
+                    pairs.push(chain_cache_entry);
+
+                    // We only count this as not onchain if it's validated
+                    if *block_state == BlockState::ValidBlock {
+                        not_onchain_count += 1;
+                    }
 
                     if blocks_to_collect == 0 {
                         break;
@@ -715,6 +736,13 @@ impl BlockTree {
 
         let block = block_entry.block.clone();
         let old_tip = self.tip;
+
+        let (canonical_diff, canonical_block_hash) = self.max_cumulative_difficulty;
+
+        if block.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
+            // "Cannot move tip away from canonical for another block with same cumulative_diff"
+            return Ok(false);
+        }
 
         // Recursively mark previous blocks
         self.mark_on_chain(&block)?;
@@ -1117,17 +1145,27 @@ impl BlockTree {
                         for child in children {
                             if let Some(child_entry) = self.blocks.get(&child) {
                                 if !matches!(child_entry.chain_state, ChainState::Onchain) {
-                                    let _ = self
-                                        .remove_block(&child)
-                                        .inspect_err(|err| tracing::error!(?err));
+                                    let child_state = child_entry.chain_state;
+                                    if let Err(err) = self.remove_block(&child) {
+                                        tracing::error!(
+                                            custom.error = ?err,
+                                            custom.child_hash = ?child,
+                                            custom.child_state = ?child_state,
+                                            "Failed to remove non-on-chain child block"
+                                        );
+                                    }
                                 }
                             }
                         }
 
                         // Now remove just this block
-                        let _ = self
-                            .delete_block(&hash)
-                            .inspect_err(|err| tracing::error!(?err));
+                        if let Err(err) = self.delete_block(&hash) {
+                            tracing::error!(
+                                custom.error = ?err,
+                                block.hash = ?hash,
+                                "Failed to delete block"
+                            );
+                        }
                     }
                 }
             }
@@ -1324,7 +1362,7 @@ pub fn create_epoch_snapshot_for_block(
     block: &IrysBlockHeader,
     parent_block_entry: &BlockMetadata,
     consensus_config: &ConsensusConfig,
-) -> Arc<EpochSnapshot> {
+) -> eyre::Result<Arc<EpochSnapshot>> {
     let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
 
     if is_epoch_block {
@@ -1332,13 +1370,12 @@ pub fn create_epoch_snapshot_for_block(
         let commitments = parent_block_entry
             .commitment_snapshot
             .get_epoch_commitments();
-
         let mut new_snapshot = (*prev_epoch_snapshot).clone();
         let prev_epoch_block = new_snapshot.epoch_block.clone();
-        let _ = new_snapshot.perform_epoch_tasks(&Some(prev_epoch_block), block, commitments);
-        Arc::new(new_snapshot)
+        new_snapshot.perform_epoch_tasks(&Some(prev_epoch_block), block, commitments)?;
+        Ok(Arc::new(new_snapshot))
     } else {
-        parent_block_entry.epoch_snapshot.clone()
+        Ok(parent_block_entry.epoch_snapshot.clone())
     }
 }
 
@@ -1423,15 +1460,15 @@ mod tests {
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testing();
-        let genesis_header = IrysBlockHeader {
-            oracle_irys_price: config.genesis_price,
-            ema_irys_price: config.genesis_price,
+        let genesis_header = IrysBlockHeader::V1(irys_types::IrysBlockHeaderV1 {
+            oracle_irys_price: config.genesis.genesis_price,
+            ema_irys_price: config.genesis.genesis_price,
             ..Default::default()
-        };
+        });
         EmaSnapshot::genesis(&genesis_header)
     }
 
-    #[actix::test]
+    #[tokio::test]
     async fn test_block_cache() {
         let b1 = random_block(U256::from(0));
 
@@ -2049,41 +2086,28 @@ mod tests {
         );
         let reorg = cache.mark_tip(&b13.block_hash).unwrap();
 
-        // The tip does change here, even though it's not part of the longest
-        // chain, this seems like a bug
         println!("tip: {} after mark_tip()", cache.tip);
-        assert!(reorg);
+        // Verify the change doesn't switch tip to b13
+        assert!(!reorg);
 
-        assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
-        // Although b13 becomes the tip, it's not included in the longest_chain_cache.
-        // This is because the cache follows blocks from max_cumulative_difficulty, which
-        // was set to b12 when it was first added. When multiple blocks have the same
-        // cumulative difficulty, max_cumulative_difficulty preserves the first one seen.
-        // Since b13's difficulty equals b12's (rather than exceeds it), b12 remains the
-        // reference point for longest chain calculations.
-
+        assert_eq!(
+            cache
+                .get_earliest_not_onchain_in_longest_chain()
+                .unwrap()
+                .0
+                .block
+                .block_hash,
+            b12.block_hash
+        );
         // Block tree state:
         //
-        //                     [B13] cdiff=1, Validated
-        //                    /  ⚡ marked as tip but not in longest chain
-        //                   /     because B12 has same cdiff & was first
+        //                     [B13] cdiff=1, Validated(ValidBlock)
+        //                    / ⚠ not counted as onchain
+        //                   /
         //                  /
         // [B11] cdiff=0 --+-- [B12] cdiff=1, NotValidated (first added)
-        // (genesis - tip)       ⚠ not counted as onchain due to not being validated
-        //
-        // ▶ Longest chain contains: [B11]
-        // ▶ Not on chain count: 0
-        // ▶ First added wins longest_chain with equal cdiff
-
-        // DMac's Note:
-        // Issue: tip and longest chain can become misaligned when marking a tip that has
-        //   equal difficulty to an earlier block. The tip could point to b13 while the
-        //   longest chain contains b12, as b12 was seen first with same difficulty.
-        // Fix: mark_tip() should reject attempts to change tip to a block that has equal
-        //   (rather than greater) difficulty compared to the current max_difficulty block.
-        //   This would ensure tip always follows the longest chain. TBH the current behavior
-        //   is likely aligned with the local miners economic interest and why things
-        //   like "uncle" blocks exist on other chains.
+        // (genesis - tip).    ⚡ stays marked as tip but on longest chain
+        //                       because while B13 has same cdiff & was second
         assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
 
         // Extend the b13->b11 chain
@@ -2107,9 +2131,13 @@ mod tests {
             b14.block_hash
         );
         // by adding b14 we've now made the b13->b11 chain heavier and because
-        // b13 is already validated it is included in the longest chain
+        // b13 is isn't already validated so it counts towards not_onchain_count
         // b14 isn't validated so it doesn't count towards the not_onchain_count
-        assert_matches!(check_longest_chain(&[&b11, &b13], 0, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b13], 1, &cache), Ok(()));
+
+        // Now mark b13 as the tip, it should succeed as b14 made it canonical
+        let reorg = cache.mark_tip(&b13.block_hash).unwrap();
+        assert!(reorg);
 
         // Try to mutate the state of the cache with some random validations
         assert_matches!(
@@ -2295,18 +2323,18 @@ mod tests {
             ),
             Ok(())
         );
-        let _b13 = extend_chain(random_block(U256::one()), &b11);
+        let b13 = extend_chain(random_block(U256::from(2)), &b12);
         println!("---");
-        assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
+        assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
-        // Verify the longest chain state isn't changed by b16 pending Vdf validation
-        assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
+        // Verify the longest chain state isn't changed by adding b12
+        assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
 
-        // Now add the subsequent block, but as awaitingValidation
+        // Now add the subsequent block, but as ValidationScheduled
         assert_matches!(
             cache.add_common(
-                b12.block_hash,
-                &b12,
+                b13.block_hash,
+                &b13,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2314,13 +2342,13 @@ mod tests {
             ),
             Ok(())
         );
-        assert_matches!(check_longest_chain(&[&b11, &b12], 1, &cache), Ok(()));
+        assert_matches!(check_longest_chain(&[&b11, &b12, &b13], 1, &cache), Ok(()));
 
         // When a locally produced block is added as validated "onchain" but it
         // hasn't yet been validated by the validation_service
         assert_matches!(
             check_earliest_not_onchain(
-                &b12.block_hash,
+                &b13.block_hash,
                 &ChainState::Validated(BlockState::ValidationScheduled),
                 &cache
             ),
@@ -2417,12 +2445,12 @@ mod tests {
         block
     }
 
-    const fn extend_chain(
+    fn extend_chain(
         mut new_block: IrysBlockHeader,
         previous_block: &IrysBlockHeader,
     ) -> IrysBlockHeader {
-        new_block.previous_block_hash = previous_block.block_hash;
-        new_block.height = previous_block.height + 1;
+        new_block.previous_block_hash = previous_block.block_hash();
+        new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;
         // Don't modify solution_hash - keep the random one from block creation
         new_block
@@ -2463,6 +2491,13 @@ mod tests {
     ) -> eyre::Result<()> {
         let (canonical_blocks, not_onchain_count) = cache.get_canonical_chain();
         let actual_blocks: Vec<_> = canonical_blocks.iter().map(|e| e.block_hash).collect();
+
+        let expected = expected_blocks
+            .iter()
+            .map(|b| b.block_hash())
+            .collect::<Vec<_>>();
+
+        println!("actual: {:?}\nexpected: {:?}", actual_blocks, expected);
 
         ensure!(
             actual_blocks

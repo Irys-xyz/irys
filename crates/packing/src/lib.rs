@@ -8,6 +8,7 @@ use irys_types::{
 
 #[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
+use serde::{Deserialize, Serialize};
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
 /// unpacking & trimming the data, and passing through metadata (size, tx_offset, etc)
@@ -72,7 +73,7 @@ pub fn unpack_with_entropy(
 }
 
 /// Performs the entropy packing for the specified chunk offset, partition, and mining address
-/// defaults to [`PACKING_SHA_1_5_S`]`, returns entropy chunk in out_entropy_chunk parameter.
+/// returns the computed entropy chunk by overwriting the out_entropy_chunk parameter.
 /// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
@@ -115,18 +116,26 @@ pub fn capacity_pack_range_cuda_c(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
-    iterations: Option<u32>,
-    entropy: &mut Vec<u8>,
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
+    entropy: &mut Vec<u8>,
 ) -> u32 {
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
     let partition_hash = partition_hash.as_ptr() as *const std::os::raw::c_uchar;
-    let iterations = iterations.unwrap_or(entropy_packing_iterations);
 
     let entropy_ptr = entropy.as_ptr() as *mut u8;
+
+    // Sanity check: enforce capacity matches CUDA C implementation expectations
+    let expected_entropy_capacity =
+        (num_chunks as usize) * (irys_types::ConsensusConfig::CHUNK_SIZE as usize);
+    assert!(
+        entropy.capacity() == expected_entropy_capacity,
+        "CUDA entropy buffer capacity must equal num_chunks * CHUNK_SIZE ({}), got {}",
+        expected_entropy_capacity,
+        entropy.capacity()
+    );
 
     let result;
     unsafe {
@@ -139,7 +148,7 @@ pub fn capacity_pack_range_cuda_c(
             partition_hash,
             partition_hash_len,
             entropy_ptr,
-            iterations,
+            entropy_packing_iterations,
         );
 
         entropy.set_len(entropy.capacity());
@@ -154,7 +163,6 @@ pub fn capacity_pack_range_with_data_cuda_c(
     mining_address: Address,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
-    iterations: Option<u32>,
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
 ) {
@@ -167,20 +175,18 @@ pub fn capacity_pack_range_with_data_cuda_c(
         mining_address,
         chunk_offset,
         partition_hash,
-        iterations,
-        &mut entropy,
         entropy_packing_iterations,
         irys_chain_id,
+        &mut entropy,
     );
 
     // TODO: check if it is worth to move this to GPU ? implies big data transfer from host to device that now is not needed
     xor_vec_u8_arrays_in_place(data, &entropy);
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PackingType {
     CPU,
-    #[cfg(feature = "nvidia")]
     CUDA,
     AMD,
 }
@@ -264,6 +270,65 @@ pub fn packing_xor_vec_u8(mut entropy: Vec<u8>, data: &[u8]) -> Vec<u8> {
     entropy
 }
 
+/// Runs entropy packing, starting with the testnet config's step count, calibrating the iterations between runs to get to ~3.5s/chunk - returning the value once `runs` runs are complete
+/// Note: please set `runs` to a decently high value, so calibration can occur on the maximum sustained performance, instead of the short lived peak performance
+/// This function may not accurately provide an iteration count for tests, or when many threads are run at the same time
+/// to calibrate that, run multiple instances of this function at the same time and take the lowest value
+/// (this is particularly notable on Heterogenous CPUs, with some higher and some lower performance cores)
+pub fn calibrate_packing(runs: u64) -> u32 {
+    let target_secs = std::time::Duration::from_millis(3_500).as_secs_f64();
+
+    let chunk_size = 256 * 1024;
+    let mining_address = Address::random();
+    let partition_hash = irys_types::H256::random();
+    let mut iterations = 10_000_000;
+    let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
+    let chain_id = 1270;
+
+    // we don't early return once we have a precise value - this is to allow the calibration to accurately reflect the sustained performance
+    for attempt in 0..runs {
+        let start = std::time::Instant::now();
+
+        capacity_single::compute_entropy_chunk(
+            mining_address,
+            0,
+            partition_hash.0,
+            iterations,
+            chunk_size,
+            &mut entropy_chunk,
+            chain_id,
+        );
+
+        let elapsed = start.elapsed();
+        let elapsed_secs = elapsed.as_secs_f64();
+
+        let ratio = target_secs / elapsed_secs;
+
+        println!(
+            "attempt {}: {} iterations took {:.6}s (target: {:.6}s, ratio: {:.4})",
+            attempt + 1,
+            iterations,
+            elapsed_secs,
+            target_secs,
+            ratio
+        );
+
+        // adjust iterations based on the ratio of target time to actual time
+        iterations = (iterations as f64 * ratio).round() as u32;
+
+        if iterations == 0 {
+            iterations = 1;
+        }
+    }
+
+    println!(
+        "maximum attempts reached - best approximation: {}",
+        iterations
+    );
+
+    iterations
+}
+
 #[cfg(test)]
 mod tests {
     use crate::capacity_single::SHA_HASH_SIZE;
@@ -336,13 +401,14 @@ mod tests {
         use irys_types::NodeConfig;
 
         let mut rng = rand::thread_rng();
-        let testing_config = ConsensusConfig::testing();
-        let node_config = NodeConfig::testing();
+        let mut testing_config = ConsensusConfig::testing();
+        testing_config.chunk_size = 256 * 1024;
+        let node_config = NodeConfig::testnet();
         let mining_address = node_config.miner_address();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
-        let iterations = 2 * testing_config.chunk_size as u32;
+        let iterations = 50_000; /* 2 * testing_config.chunk_size as u32; */
 
         let mut chunk: Vec<u8> = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
         let mut chunk2: Vec<u8> = Vec::<u8>::with_capacity(testing_config.chunk_size as usize);
@@ -410,10 +476,9 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            Some(iterations),
-            &mut c_chunk_cuda,
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
+            &mut c_chunk_cuda,
         );
 
         println!("CUDA result: {}", result);
@@ -552,7 +617,6 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash.into(),
-            iterations,
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
         );

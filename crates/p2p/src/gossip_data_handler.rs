@@ -2,14 +2,18 @@ use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     rate_limiting::DataRequestTracker,
-    types::{InternalGossipError, InvalidDataError},
+    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    CriticalChunkIngressError, MempoolFacade,
+};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
+use irys_types::Address;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
@@ -17,6 +21,7 @@ use irys_types::{
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, Span};
@@ -86,43 +91,58 @@ where
             }
             Err(error) => {
                 match error {
-                    ChunkIngressError::UnknownTransaction => {
-                        // TODO:
-                        //  I suppose we have to ask the peer for transaction,
-                        //  but what if it doesn't have one?
-                        Ok(())
+                    ChunkIngressError::Critical(err) => {
+                        match err {
+                            // ===== External invalid data errors
+                            CriticalChunkIngressError::InvalidProof => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
+                            ),
+                            CriticalChunkIngressError::InvalidDataHash => Err(
+                                GossipError::InvalidData(InvalidDataError::ChinkInvalidDataHash),
+                            ),
+                            CriticalChunkIngressError::InvalidChunkSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
+                            ),
+                            CriticalChunkIngressError::InvalidDataSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
+                            ),
+                            // ===== Internal errors
+                            CriticalChunkIngressError::DatabaseError => {
+                                Err(GossipError::Internal(InternalGossipError::Database))
+                            }
+                            CriticalChunkIngressError::ServiceUninitialized => Err(
+                                GossipError::Internal(InternalGossipError::ServiceUninitialized),
+                            ),
+                            CriticalChunkIngressError::Other(other) => {
+                                Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+                            }
+                        }
                     }
-                    // ===== External invalid data errors
-                    ChunkIngressError::InvalidProof => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::InvalidDataHash => Err(GossipError::InvalidData(
-                        InvalidDataError::ChinkInvalidDataHash,
-                    )),
-                    ChunkIngressError::InvalidChunkSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidDataSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedBytes => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedDataPath => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::PreHeaderOffsetExceedsCap => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    // ===== Internal errors
-                    ChunkIngressError::DatabaseError => {
-                        Err(GossipError::Internal(InternalGossipError::Database))
-                    }
-                    ChunkIngressError::ServiceUninitialized => Err(GossipError::Internal(
-                        InternalGossipError::ServiceUninitialized,
-                    )),
-                    ChunkIngressError::Other(other) => {
-                        Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+
+                    ChunkIngressError::Advisory(err) => {
+                        match err {
+                            // ===== Interval data 'errors' (peers should not be punished)
+                            AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedBytes,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::Other(other) => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::Other(other),
+                                )))
+                            }
+                        }
                     }
                 }
             }
@@ -144,8 +164,6 @@ where
         let tx_id = tx.id;
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
-        self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
 
         if already_seen {
             debug!(
@@ -157,7 +175,7 @@ where
 
         if self
             .mempool
-            .is_known_transaction(tx_id)
+            .is_known_data_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -165,6 +183,7 @@ where
                     e
                 )))
             })?
+            .is_known()
         {
             debug!(
                 "Node {}: Transaction has already been handled, skipping",
@@ -175,12 +194,15 @@ where
 
         match self
             .mempool
-            .handle_data_transaction_ingress(tx)
+            .handle_data_transaction_ingress_gossip(tx)
             .await
             .map_err(GossipError::from)
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Transaction sent to mempool");
+                // Only record as seen after successful validation
+                self.cache
+                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
                 Ok(())
             }
             Err(error) => {
@@ -203,17 +225,14 @@ where
 
         let proof = proof_request.data;
         let source_miner_address = proof_request.miner_address;
+        let proof_hash = proof.proof;
 
-        let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof.proof)?;
-        self.cache.record_seen(
-            source_miner_address,
-            GossipCacheKey::IngressProof(proof.proof),
-        )?;
+        let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof_hash)?;
 
         if already_seen {
             debug!(
                 "Node {}: Ingress Proof {} is already recorded in the cache, skipping",
-                self.gossip_client.mining_address, proof.proof
+                self.gossip_client.mining_address, proof_hash
             );
             return Ok(());
         }
@@ -228,6 +247,11 @@ where
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Ingress Proof sent to mempool");
+                // Only record as seen after successful validation
+                self.cache.record_seen(
+                    source_miner_address,
+                    GossipCacheKey::IngressProof(proof_hash),
+                )?;
                 Ok(())
             }
             Err(error) => {
@@ -252,8 +276,6 @@ where
         let tx_id = tx.id;
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
-        self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
 
         if already_seen {
             debug!(
@@ -265,7 +287,7 @@ where
 
         if self
             .mempool
-            .is_known_transaction(tx_id)
+            .is_known_commitment_transaction(tx_id)
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
@@ -273,6 +295,7 @@ where
                     e
                 )))
             })?
+            .is_known()
         {
             debug!(
                 "Node {}: Commitment Transaction has already been handled, skipping",
@@ -283,12 +306,15 @@ where
 
         match self
             .mempool
-            .handle_commitment_transaction_ingress(tx)
+            .handle_commitment_transaction_ingress_gossip(tx)
             .await
             .map_err(GossipError::from)
         {
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Commitment Transaction sent to mempool");
+                // Only record as seen after successful validation
+                self.cache
+                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
                 Ok(())
             }
             Err(error) => {
@@ -307,6 +333,7 @@ where
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
     ) -> GossipResult<()> {
+        debug!("Pulling block {} from the network", block_hash);
         let (source_address, irys_block) = self
             .gossip_client
             .pull_block_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
@@ -321,10 +348,14 @@ where
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
+        debug!(
+            "Pulled block {} from peer {}, sending for processing",
+            block_hash, source_address
+        );
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
-                data: irys_block.as_ref().clone(),
+                data: (*irys_block).clone(),
             },
             peer_info.address.api,
             peer_info.address.gossip,
@@ -354,7 +385,7 @@ where
         self.handle_block_header(
             GossipRequest {
                 miner_address: source_address,
-                data: irys_block.as_ref().clone(),
+                data: (*irys_block).clone(),
             },
             peer_info.address.api,
             peer_info.address.gossip,
@@ -381,12 +412,11 @@ where
             block_header.height
         );
 
-        if self.sync_state.is_syncing()
-            && block_header.height > (self.sync_state.sync_target_height() + 1) as u64
-        {
+        let sync_target = self.sync_state.sync_target_height();
+        if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
-                "Node {}: Block {} is out of the sync range, skipping",
-                self.gossip_client.mining_address, block_hash
+                "Node {}: Block {} is out of the sync range (target: {}, highest processed: {}), skipping",
+                self.gossip_client.mining_address, block_hash, &sync_target, &self.sync_state.highest_processed_block()
             );
             return Ok(());
         }
@@ -411,6 +441,17 @@ where
                 "Node: {}: Block {} has an invalid signature",
                 self.gossip_client.mining_address, block_header.block_hash
             );
+
+            debug!(
+                target = "invalid_block_header_json",
+                "Invalid block: {:#}",
+                &serde_json::to_string(&block_header).unwrap_or_else(|e| format!(
+                    // fallback to debug printing the header
+                    "error serializing block header: {}\n{:#}",
+                    &e, &block_header
+                ))
+            );
+
             self.peer_list
                 .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
 
@@ -441,15 +482,15 @@ where
             self.gossip_client.mining_address, block_header.block_hash
         );
 
-        let mut missing_tx_ids = Vec::new();
+        let mut missing_invalid_tx_ids = Vec::new();
 
         for tx_id in block_header
             .data_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(tx_id).await? {
-                missing_tx_ids.push(tx_id);
+            if !self.is_known_valid_present_data_tx(tx_id).await? {
+                missing_invalid_tx_ids.push(tx_id);
             }
         }
 
@@ -458,64 +499,114 @@ where
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
         {
-            if !self.is_known_tx(system_tx_id).await? {
-                missing_tx_ids.push(system_tx_id);
+            if !self
+                .is_known_valid_present_commitment_tx(system_tx_id)
+                .await?
+            {
+                missing_invalid_tx_ids.push(system_tx_id);
             }
         }
 
-        if !missing_tx_ids.is_empty() {
-            debug!("Missing transactions to fetch: {:?}", missing_tx_ids);
+        if !missing_invalid_tx_ids.is_empty() {
+            debug!(
+                "Missing/invalid transactions to fetch: {:?}",
+                missing_invalid_tx_ids
+            );
         }
 
         // remove them from the mempool's blacklist
         self.mempool
-            .remove_from_blacklist(missing_tx_ids.clone())
+            .remove_from_blacklist(missing_invalid_tx_ids.clone())
             .await
             .map_err(|error| {
                 error!("Failed to remove txs from mempool blacklist");
                 GossipError::unknown(&error)
             })?;
 
-        // Fetch missing transactions from the source peer
-        let missing_txs = self
-            .api_client
-            .get_transactions(source_api_address, &missing_tx_ids)
-            .await
-            .map_err(|error| {
-                error!(
-                    "Failed to fetch transactions from peer {}: {}",
-                    source_api_address, error
-                );
-                GossipError::unknown(&error)
-            })?;
+        // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
+        // Fetch and process each missing transaction one-by-one with retries
+        for tx_id_to_fetch in missing_invalid_tx_ids {
+            // Try source peer first
+            let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
+            let mut last_err: Option<String> = None;
 
-        // Process each transaction
-        for tx_response in missing_txs {
-            let tx_id;
-            let mempool_response = match tx_response {
-                IrysTransactionResponse::Commitment(commitment_tx) => {
-                    tx_id = commitment_tx.id;
-                    self.mempool
-                        .handle_commitment_transaction_ingress(commitment_tx)
-                        .await
+            match self
+                .api_client
+                .get_transaction(source_api_address, tx_id_to_fetch)
+                .await
+            {
+                Ok(resp) => {
+                    fetched = Some((resp, source_miner_address));
                 }
-                IrysTransactionResponse::Storage(tx) => {
-                    tx_id = tx.id;
-                    self.mempool.handle_data_transaction_ingress(tx).await
-                }
-            };
-
-            match mempool_response.map_err(GossipError::from) {
-                Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
-                    debug!("Transaction sent to mempool");
-                    self.cache
-                        .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?
-                }
-                Err(error) => {
-                    error!("Error when sending transaction to mempool: {:?}", error);
-                    return Err(error);
+                Err(e) => {
+                    warn!(
+                        "Failed to fetch tx {:?} from source peer {}: {:?}",
+                        tx_id_to_fetch, source_api_address, e
+                    );
+                    last_err = Some(e.to_string());
                 }
             }
+
+            // If source failed, try top 5 active peers (excluding the source)
+            if fetched.is_none() {
+                let mut exclude = std::collections::HashSet::new();
+                exclude.insert(source_miner_address);
+                let top_peers = self.peer_list.top_active_peers(Some(5), Some(exclude));
+
+                for (peer_addr, peer_item) in top_peers {
+                    match self
+                        .api_client
+                        .get_transaction(peer_item.address.api, tx_id_to_fetch)
+                        .await
+                    {
+                        Ok(resp) => {
+                            fetched = Some((resp, peer_addr));
+                            break;
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to fetch tx {:?} from peer {}: {:?}",
+                                tx_id_to_fetch, peer_item.address.api, e
+                            );
+                            last_err = Some(e.to_string());
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            let Some((tx_response, from_miner_addr)) = fetched else {
+                let err_msg = format!(
+                    "Failed to fetch transaction {:?} from source {} and top peers{:?}",
+                    tx_id_to_fetch,
+                    source_api_address,
+                    last_err
+                        .as_ref()
+                        .map(|e| format!("; last error: {}", e))
+                        .unwrap_or_default()
+                );
+                error!("{:?}", err_msg);
+                return Err(GossipError::Network(err_msg));
+            };
+
+            // Store the fetched transaction in the BlockPool's per-block cache
+            let tx_id = match &tx_response {
+                IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
+                IrysTransactionResponse::Storage(tx) => tx.id,
+            };
+
+            self.block_pool
+                .add_tx_for_block(block_hash, tx_response)
+                .await;
+
+            // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
+            debug!(
+                "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
+                tx_id, block_hash
+            );
+            // Record that we have seen this transaction from the peer that served it
+            self.cache
+                .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
         }
 
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
@@ -530,7 +621,7 @@ where
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
-            .process_block(Arc::new(block_header), skip_block_validation)
+            .process_block::<A>(Arc::new(block_header), skip_block_validation)
             .await
             .map_err(GossipError::BlockPool)?;
         Ok(())
@@ -580,7 +671,18 @@ where
     ) -> GossipResult<()> {
         let source_miner_address = execution_payload_request.miner_address;
         let evm_block = execution_payload_request.data;
-        let sealed_block = evm_block.seal_slow();
+
+        // Basic validation: ensure the block can be sealed (structure validation)
+        let sealed_block = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            evm_block.seal_slow()
+        })) {
+            Ok(sealed) => sealed,
+            Err(_) => {
+                return Err(GossipError::InvalidData(
+                    InvalidDataError::ExecutionPayloadInvalidStructure,
+                ));
+            }
+        };
 
         let evm_block_hash = sealed_block.hash();
         let payload_already_seen_before = self
@@ -591,12 +693,6 @@ where
             .is_waiting_for_payload(&evm_block_hash)
             .await;
 
-        // Record payload as seen from the source peer
-        self.cache.record_seen(
-            source_miner_address,
-            GossipCacheKey::ExecutionPayload(evm_block_hash),
-        )?;
-
         if payload_already_seen_before && !expecting_payload {
             debug!(
                 "Node {}: Execution payload for EVM block {:?} already seen, and no service requested it to be fetched again, skipping",
@@ -606,9 +702,24 @@ where
             return Ok(());
         }
 
+        // Additional validation: verify block structure is valid
+        let header = sealed_block.header();
+        if header.number == 0 && !header.parent_hash.is_zero() {
+            return Err(GossipError::InvalidData(
+                InvalidDataError::ExecutionPayloadInvalidStructure,
+            ));
+        }
+
         self.execution_payload_cache
             .add_payload_to_cache(sealed_block)
             .await;
+
+        // Only record as seen after validation and successful cache addition
+        self.cache.record_seen(
+            source_miner_address,
+            GossipCacheKey::ExecutionPayload(evm_block_hash),
+        )?;
+
         debug!(
             "Node {}: Execution payload for EVM block {:?} have been added to the cache",
             self.gossip_client.mining_address, evm_block_hash
@@ -617,13 +728,30 @@ where
         Ok(())
     }
 
-    async fn is_known_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        self.mempool.is_known_transaction(tx_id).await.map_err(|e| {
-            GossipError::Internal(InternalGossipError::Unknown(format!(
-                "is_known_transaction() errored: {:?}",
-                e
-            )))
-        })
+    async fn is_known_valid_present_data_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        self.mempool
+            .is_known_data_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_valid_data_tx() errored: {:?}",
+                    e
+                )))
+            })
+            .map(|s| s.is_known_valid_and_present())
+    }
+
+    async fn is_known_valid_present_commitment_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
+        self.mempool
+            .is_known_commitment_transaction(tx_id)
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "is_known_valid_commitment_tx() errored: {:?}",
+                    e
+                )))
+            })
+            .map(|s| s.is_known_valid_and_present())
     }
 
     pub(crate) async fn handle_get_data(
@@ -729,5 +857,33 @@ where
             }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
         }
+    }
+
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
+        self.mempool
+            .get_stake_and_pledge_whitelist()
+            .await
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) async fn pull_and_process_stake_and_pledge_whitelist(&self) -> GossipResult<()> {
+        let allowed_miner_addresses = self
+            .gossip_client
+            .clone()
+            .stake_and_pledge_whitelist(&self.peer_list)
+            .await?;
+
+        self.mempool
+            .update_stake_and_pledge_whitelist(HashSet::from_iter(
+                allowed_miner_addresses.into_iter(),
+            ))
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "get_stake_and_pledge_whitelist() errored: {:?}",
+                    e
+                )))
+            })
     }
 }

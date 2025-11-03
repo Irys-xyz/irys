@@ -21,8 +21,8 @@ clap = { workspace = true, features = ["derive"] }
 reth-node-core.workspace = true
 irys-reth-node-bridge.workspace = true
 irys-chain.workspace = true
-irys-config.workspace = true
 tokio.workspace = true
 irys-domain.workspace = true
+irys-tui.workspace = true
 [lints]
 workspace = true

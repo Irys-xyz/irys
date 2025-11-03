@@ -44,7 +44,7 @@
 //! - **Block 10-19**: Still uses genesis price, EMA calculated each block
 //! - **Block 19**: Records EMA (E19) in header
 //! - **Block 20-29**: NOW uses E9 for fees (recorded 2 intervals ago)
-//! - **Block 29**: Records EMA (E29) using oracle[18] + ema[19]
+//! - **Block 29**: Records EMA (E29) using oracle\[18\] + ema\[19\]
 //! - **Block 30-39**: Uses E19 for fees
 //! - **Block 40-49**: Uses E29 for fees
 
@@ -226,7 +226,7 @@ impl EmaSnapshot {
                 parent_snapshot.ema_price_current_interval,
             )
             .unwrap_or_else(|err| {
-                tracing::warn!(?err, "price overflow, using previous EMA price");
+                tracing::warn!(custom.error = ?err, "price overflow, using previous EMA price");
                 parent_snapshot.ema_price_current_interval
             });
         ExponentialMarketAvgCalculation {
@@ -272,7 +272,11 @@ impl EmaSnapshot {
 /// - Input $1.15 → Returns $1.10 (capped at max)
 /// - Input $0.85 → Returns $0.90 (capped at min)
 /// - Input $1.05 → Returns $1.05 (within range)
-#[tracing::instrument]
+#[tracing::instrument(skip_all, fields(
+    price.desired = ?desired_price,
+    price.base = ?base_price,
+    price.safe_range = ?safe_range
+))]
 pub fn bound_in_min_max_range(
     desired_price: IrysTokenPrice,
     safe_range: Amount<Percentage>,
@@ -283,8 +287,8 @@ pub fn bound_in_min_max_range(
 
     if desired_price > max_acceptable {
         tracing::warn!(
-            ?max_acceptable,
-            ?desired_price,
+            price.max_acceptable = ?max_acceptable,
+            price.desired_price = ?desired_price,
             "oracle price too high, capping"
         );
         return max_acceptable;
@@ -292,8 +296,8 @@ pub fn bound_in_min_max_range(
 
     if desired_price < min_acceptable {
         tracing::warn!(
-            ?min_acceptable,
-            ?desired_price,
+            price.min_acceptable = ?min_acceptable,
+            price.desired_price = ?desired_price,
             "oracle price too low, capping"
         );
         return min_acceptable;
@@ -418,7 +422,7 @@ mod test {
 
             // Set oracle price for all blocks
             block.oracle_irys_price = if height == 0 {
-                config.genesis_price
+                config.genesis.genesis_price
             } else {
                 oracle_price_for_height(height)
             };
@@ -426,7 +430,7 @@ mod test {
             // Calculate snapshot and EMA price based on block height
             let snapshot = if height == 0 {
                 // Genesis block: use genesis price for EMA and create genesis snapshot
-                block.ema_irys_price = config.genesis_price;
+                block.ema_irys_price = config.genesis.genesis_price;
                 EmaSnapshot::genesis(&block)
             } else {
                 // Non-genesis blocks: calculate EMA and create next snapshot
@@ -589,8 +593,8 @@ mod test {
         // Create genesis block
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
-        genesis_block.oracle_irys_price = config.genesis_price;
-        genesis_block.ema_irys_price = config.genesis_price;
+        genesis_block.oracle_irys_price = config.genesis.genesis_price;
+        genesis_block.ema_irys_price = config.genesis.genesis_price;
 
         // Create genesis snapshot
         let genesis_snapshot = EmaSnapshot::genesis(&genesis_block);

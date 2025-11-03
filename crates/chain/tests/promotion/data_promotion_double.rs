@@ -1,10 +1,10 @@
 use crate::utils::post_chunk;
 use crate::utils::{get_block_parent, verify_published_chunk, IrysNodeTest};
+use actix_web::http::StatusCode;
 use actix_web::test::{self, call_service, TestRequest};
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
-use awc::http::StatusCode;
-use irys_actors::packing::wait_for_packing;
+
 use irys_database::{tables::IngressProofs, walk_all};
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
@@ -12,7 +12,7 @@ use reth_db::Database as _;
 use std::time::Duration;
 use tracing::debug;
 
-#[test_log::test(actix_web::test)]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let mut config = NodeConfig::testing();
     let chunk_size = 32; // 32 byte chunks
@@ -46,12 +46,10 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     ]);
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
-    wait_for_packing(
-        node.node_ctx.actor_addresses.packing.clone(),
-        Some(Duration::from_secs(10)),
-    )
-    .await
-    .unwrap();
+    node.node_ctx
+        .packing_waiter
+        .wait_for_idle(Some(Duration::from_secs(10)))
+        .await?;
 
     let block1 = node.mine_block().await.expect("expected mined block");
 
@@ -162,6 +160,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
         .wait_for_ingress_proofs(unconfirmed_promotions, 20)
         .await;
     assert!(result.is_ok());
+    node.mine_block().await?;
 
     // wait for the first set of chunks to appear in the publish ledger
     // FIXME: in prior commit, this was a loop that was never asserting or erroring on failure - is it important for the test case?
@@ -178,9 +177,18 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     let db = &node.node_ctx.db.clone();
     let block_tx1 = get_block_parent(txs[0].header.id, DataLedger::Publish, db).unwrap();
 
-    let txid_1 = block_tx1.data_ledgers[DataLedger::Publish].tx_ids.0[0];
-    let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
-    println!("1:{}", block_tx1);
+    let first_tx_id_in_block = block_tx1.data_ledgers[DataLedger::Publish]
+        .tx_ids
+        .0
+        .iter()
+        .copied()
+        .find(|tid| txs.iter().any(|tx| tx.header.id == *tid))
+        .expect("Expected at least one of the test txs to be in the block");
+    let first_tx_index: usize = txs
+        .iter()
+        .position(|tx| tx.header.id == first_tx_id_in_block)
+        .expect("Matching tx not found in txs");
+    println!("1:{:?}", block_tx1);
 
     // ==============================
     // Verify chunk ordering in publish ledger storage module
@@ -329,7 +337,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     //     let txid_2 = block_tx2.ledgers[Ledger::Publish].tx_ids.0[0];
     let first_tx_index: usize = txs.iter().position(|tx| tx.header.id == txid_1).unwrap();
     //     next_tx_index = txs.iter().position(|tx| tx.header.id == txid_2).unwrap();
-    println!("1:{}", block_tx1);
+    println!("1:{:?}", block_tx1);
     //     println!("2:{}", block_tx2);
 
     // ==============================
