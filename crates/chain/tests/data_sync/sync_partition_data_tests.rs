@@ -23,7 +23,7 @@ use crate::utils::IrysNodeTest;
 // 11. Validate that they are syncing data chunks to their assigned partitions
 #[tokio::test]
 async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var("RUST_LOG", "info");
     initialize_tracing();
 
     let seconds_to_wait = 20;

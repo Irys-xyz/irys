@@ -137,11 +137,11 @@ pub fn set_data_root_infos_for_data_root<T: DbTxMut>(
 pub fn add_data_root_info<T: DbTxMut + DbTx>(
     tx: &T,
     data_root: DataRoot,
-    info: DataRootInfo,
+    info: &DataRootInfo,
 ) -> eyre::Result<()> {
     let mut data_root_infos = get_data_root_infos_for_data_root(tx, data_root)?.unwrap_or_default();
-    if !data_root_infos.0.contains(&info) {
-        data_root_infos.0.push(info);
+    if !data_root_infos.0.contains(info) {
+        data_root_infos.0.push(info.clone());
     }
     set_data_root_infos_for_data_root(tx, data_root, data_root_infos)?;
     Ok(())
@@ -160,7 +160,9 @@ pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
 mod tests {
     use crate::db::IrysDatabaseExt as _;
     use crate::submodule::tables::DataRootInfos;
-    use crate::submodule::{get_data_root_infos_for_data_root, set_data_root_infos_for_data_root};
+    use crate::submodule::{
+        add_data_root_info, get_data_root_infos_for_data_root, set_data_root_infos_for_data_root,
+    };
     use crate::{
         open_or_create_db,
         submodule::tables::{DataRootInfo, SubmoduleTables},
@@ -213,6 +215,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(infos, infos2.0);
+
+        // add a DataRootInfo to existing DataRootInfos
+        let new_data_root_info = DataRootInfo {
+            start_offset: RelativeChunkOffset(1),
+            data_size: 100,
+        };
+
+        db.update_eyre(|tx| add_data_root_info(tx, data_root, &new_data_root_info))?;
+
+        let infos3 = db
+            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+            .unwrap();
+
+        assert_eq!(infos3.0.len(), 6);
+        assert_eq!(*infos3.0.last().unwrap(), new_data_root_info);
+
+        let random_data_root = H256::random();
+        let missing_infos =
+            db.view_eyre(|tx| get_data_root_infos_for_data_root(tx, random_data_root))?;
+
+        assert!(missing_infos.is_none());
 
         Ok(())
     }

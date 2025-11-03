@@ -997,12 +997,12 @@ impl StorageModule {
                         let part_offset = PartitionChunkOffset::from(offset);
                         add_tx_path_hash_to_offset_index(tx, part_offset, Some(tx_path_hash))?;
                     }
-                    // Add the data_root metadata to the metadata index for this data_root
-                    let metadata = DataRootInfo {
+                    // Add the DataRootInfo to the Infos for this data_root
+                    let info = DataRootInfo {
                         start_offset,
                         data_size: data_tx.data_size,
                     };
-                    add_data_root_info(tx, data_tx.data_root, metadata)?;
+                    add_data_root_info(tx, data_tx.data_root, &info)?;
                 }
                 Ok(())
             })?;
@@ -1055,19 +1055,18 @@ impl StorageModule {
         Ok(data_root_infos
             .0
             .iter()
-            .filter_map(|metadata| {
+            .filter_map(|info| {
                 // Check if the chunk's tx_offset + start offset exceeds the data_size for the data root
                 let tx_offset: u32 = chunk.tx_offset.into();
                 let chunk_byte_offset: u64 = tx_offset as u64 * chunk_size;
 
-                if chunk_byte_offset >= metadata.data_size {
+                if chunk_byte_offset >= info.data_size {
                     // Skip any chunks that go past the data_size (don't error, just filter out)
                     None
                 } else {
                     // Calculate the partition offset for this valid chunk
-                    let partition_offset = PartitionChunkOffset::from(
-                        *metadata.start_offset as u64 + tx_offset as u64,
-                    );
+                    let partition_offset =
+                        PartitionChunkOffset::from(*info.start_offset as u64 + tx_offset as u64);
 
                     // Check if this offset is in an Entropy interval
                     if intervals
@@ -1100,10 +1099,10 @@ impl StorageModule {
         let mut pending_offsets = vec![];
 
         // Scan all potential locations and categorize them
-        for metadata in data_root_infos.0 {
-            // TODO: Check this against the data_size in the metadata
+        for info in data_root_infos.0 {
+            // TODO: Check this against the data_size in the DataRootInfo
             let partition_offset =
-                PartitionChunkOffset::from(metadata.start_offset + (*chunk.tx_offset as i32));
+                PartitionChunkOffset::from(info.start_offset + (*chunk.tx_offset as i32));
 
             // Check if there's an entropy chunk in the intervals map at this location and collect if present
             let intervals = self.intervals.read().unwrap();
@@ -1236,19 +1235,20 @@ impl StorageModule {
                 data_root_infos.0.sort_unstable();
 
                 // Binary search to find the DataRootInfo entry that contains our partition_offset.
-                // partition_point returns the index of the first element where start_offset >= partition_offset,
+                // partition_point returns the index of the first element where start_offset >= partition_offset
+                // (which we -1 from to find the last element with a start_offset < then partition offset)
                 // which means our target DataRootInfo is at this index (or doesn't exist if index is out of bounds).
                 let index = data_root_infos
                     .0
-                    .partition_point(|metadata| metadata.start_offset < partition_offset.into());
+                    .partition_point(|info| info.start_offset < partition_offset.into()).saturating_sub(1);
 
-                // Extract the data_size from the located metadata entry.
+                // Extract the data_size from the located DataRootInfo.
                 // If the index is valid, we've found the correct funding transaction's data_size.
-                // If not, the partition_offset doesn't belong to any known metadata entry.
+                // If not, the partition_offset doesn't belong to any known DataRootInfo entry.
                 let data_size = if index < data_root_infos.0.len() {
                     data_root_infos.0[index].data_size
                 } else {
-                    return Err(eyre!("could not find metadata for partition_offset"));
+                    return Err(eyre!("could not find DataRootInfo for partition_offset"));
                 };
 
                 let data_path = get_data_path_by_offset(tx, partition_offset)?
