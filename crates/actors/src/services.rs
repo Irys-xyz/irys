@@ -21,7 +21,7 @@ use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
 };
 
 // Only contains senders, thread-safe to clone and share
@@ -101,7 +101,7 @@ pub struct ServiceReceivers {
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
-    pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
+    pub block_index: Receiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reth_service: UnboundedReceiver<RethServiceMessage>,
@@ -124,7 +124,7 @@ pub struct ServiceSendersInner {
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
-    pub block_index: UnboundedSender<BlockIndexServiceMessage>,
+    pub block_index: Sender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reth_service: UnboundedSender<RethServiceMessage>,
@@ -152,8 +152,7 @@ impl ServiceSendersInner {
             unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
-        let (block_index_sender, block_index_receiver) =
-            unbounded_channel::<BlockIndexServiceMessage>();
+        let (block_index_sender, block_index_receiver) = channel::<BlockIndexServiceMessage>(256);
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =

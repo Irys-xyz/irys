@@ -287,7 +287,8 @@ impl BlockTreeServiceInner {
                 block_header: arc_block.clone(),
                 all_txs: arc_all_txs.clone(),
                 response: tx,
-            })?;
+            })
+            .await?;
         rx.await
             .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
             .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
