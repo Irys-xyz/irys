@@ -77,16 +77,11 @@ pub async fn get_price(
             // fees remain sufficient even if the transaction is included after the interval rolls over
             let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
             let position_in_interval = next_block_height % price_adjustment_interval;
-            let blocks_until_boundary = if position_in_interval == 0 {
-                0 // Exactly at interval boundary
-            } else {
-                price_adjustment_interval - position_in_interval
-            };
 
             // Last 25% of interval: use max(current_pricing, next_interval_pricing)
-            let last_quarter_size = price_adjustment_interval.div_ceil(4); // Ceiling division
-            let in_last_quarter =
-                blocks_until_boundary > 0 && blocks_until_boundary <= last_quarter_size;
+            let last_quarter_start =
+                price_adjustment_interval - price_adjustment_interval.div_ceil(4);
+            let in_last_quarter = position_in_interval >= last_quarter_start;
 
             let pricing_ema = if in_last_quarter {
                 // Protect against price increases when interval boundary is crossed

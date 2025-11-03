@@ -193,8 +193,6 @@ impl Inner {
         self.validate_data_tx_ema_pricing(&tx)?;
 
         // Validate funding against canonical chain (API only)
-        // Note: We do NOT mark tx as invalid on funding failure, allowing
-        // it to be revalidated if the account is funded later
         self.validate_data_tx_funding(&tx)?;
 
         // Protocol fee structure checks (API only)
@@ -222,13 +220,8 @@ impl Inner {
         self.postprocess_data_ingress(&tx, expiry_height).await
     }
 
-    // --- Small shared helpers (kept private to this module) ---
-
     /// Validates that a data transaction has sufficient balance to cover its fees.
     /// Checks the balance against the canonical chain tip.
-    ///
-    /// IMPORTANT: This function does NOT mark the transaction as invalid if unfunded,
-    /// allowing the transaction to be revalidated later if the account is funded.
     fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
