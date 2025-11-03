@@ -1412,12 +1412,12 @@ mod tests {
     use reth_evm::EvmEnv;
     use reth_provider::ReceiptProvider as _;
 
+    use alloy_primitives::aliases::U200;
+    use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
     use reth_transaction_pool::{PoolTransaction as _, TransactionOrigin, TransactionPool as _};
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
-    use alloy_primitives::aliases::U200;
-    use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
 
     fn tx_request_base() -> alloy_rpc_types::TransactionRequest {
         alloy_rpc_types::TransactionRequest {

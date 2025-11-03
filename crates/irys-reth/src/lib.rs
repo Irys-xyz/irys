@@ -2445,6 +2445,7 @@ pub mod test_utils {
 
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
+    use alloy_primitives::aliases::U200;
     use reth::{
         api::{FullNodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -2460,7 +2461,6 @@ pub mod test_utils {
     use std::collections::HashSet;
     use std::sync::Arc;
     use tracing::{span, Level};
-    use alloy_primitives::aliases::U200;
 
     /// Common setup for tests - creates wallets, nodes, and returns initialized context
     pub struct TestContext {
