@@ -1,4 +1,5 @@
 use actix_web::{http::header::ContentType, web, HttpResponse};
+use irys_types::config::ConsensusConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::ApiState;
@@ -6,29 +7,10 @@ use crate::ApiState;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicFullConfig {
-    pub consensus: PublicConsensusConfig,
+    pub consensus: ConsensusConfig,
     pub mempool: PublicMempoolConfig,
     pub vdf: PublicVdfConfig,
     pub node: PublicNodeConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublicConsensusConfig {
-    pub chain_id: u64,
-    pub chunk_size: u64,
-    pub num_chunks_in_partition: u64,
-    pub num_chunks_in_recall_range: u64,
-    pub num_partitions_per_slot: u64,
-    pub entropy_packing_iterations: u32,
-    pub block_migration_depth: u32,
-    pub block_tree_depth: u64,
-    pub max_data_txs_per_block: u64,
-    pub max_commitment_txs_per_block: u64,
-    pub anchor_expiry_depth: u8,
-    pub commitment_fee: u64,
-    pub block_time: u64,
-    pub num_blocks_in_epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,22 +45,7 @@ pub async fn get_full_config(state: web::Data<ApiState>) -> HttpResponse {
     HttpResponse::Ok()
         .content_type(ContentType::json())
         .json(PublicFullConfig {
-            consensus: PublicConsensusConfig {
-                chain_id: config.consensus.chain_id,
-                chunk_size: config.consensus.chunk_size,
-                num_chunks_in_partition: config.consensus.num_chunks_in_partition,
-                num_chunks_in_recall_range: config.consensus.num_chunks_in_recall_range,
-                num_partitions_per_slot: config.consensus.num_partitions_per_slot,
-                entropy_packing_iterations: config.consensus.entropy_packing_iterations,
-                block_migration_depth: config.consensus.block_migration_depth,
-                block_tree_depth: config.consensus.block_tree_depth,
-                max_data_txs_per_block: config.consensus.mempool.max_data_txs_per_block,
-                max_commitment_txs_per_block: config.consensus.mempool.max_commitment_txs_per_block,
-                anchor_expiry_depth: config.consensus.mempool.anchor_expiry_depth,
-                commitment_fee: config.consensus.mempool.commitment_fee,
-                block_time: config.consensus.difficulty_adjustment.block_time,
-                num_blocks_in_epoch: config.consensus.epoch.num_blocks_in_epoch,
-            },
+            consensus: config.consensus.clone(),
             mempool: PublicMempoolConfig {
                 anchor_expiry_depth: config.consensus.mempool.anchor_expiry_depth,
                 block_migration_depth: config.consensus.block_migration_depth,
