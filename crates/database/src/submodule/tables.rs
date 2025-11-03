@@ -68,7 +68,7 @@ pub struct DataRootInfos(pub Vec<DataRootInfo>);
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 pub struct DataRootInfo {
     pub start_offset: RelativeChunkOffset,
-    pub data_size: u64, // The data_size from the data transaction that payed to store the data_root at this start_offset
+    pub data_size: u64, // The data_size from the data transaction that paid to store the data_root at this start_offset
 }
 
 impl PartialOrd for DataRootInfo {
