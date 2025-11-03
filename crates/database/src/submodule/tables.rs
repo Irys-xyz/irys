@@ -9,12 +9,13 @@ use reth_db::table::TableInfo;
 use reth_db::{tables, TableSet};
 use reth_db::{TableType, TableViewer};
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::fmt;
 
 // Per-submodule database tables
 tables! {
     SubmoduleTables;
-  /// Maps a partition relative offset to a chunk's path hashes
+    /// Maps a partition relative offset to a chunk's path hashes
     /// note: mdbx keys are always sorted, so range queries work :)
     /// TODO: use custom Compact impl for Vec<u8> so we don't have problems
     /// Also change/split this to leverage key-sorting to only store a single tx_path_hash entry/data_root
@@ -36,23 +37,13 @@ tables! {
         type Value = TxPath;
     }
 
-    /// Maps a chunk path hash to the list of submodule-relative offsets it should inhabit
-    table ChunkOffsetsByPathHash {
-        type Key = ChunkPathHash;
-        type Value = ChunkOffsets;
+    /// Maps a data root to the list of DataRootInfos for each occurrence of the data_root
+    /// in the submodule including their submodule relative start_offset and data_size
+    table DataRootInfosByDataRoot {
+        type Key = DataRoot;
+        type Value = DataRootInfos;
     }
 
-    /// Maps a data root to the list of submodule-relative start offsets
-    table StartOffsetsByDataRoot {
-        type Key = DataRoot;
-        type Value = RelativeStartOffsets;
-    }
-
-    /// Maps a data root to its data size (used for validation)
-    table DataSizeByDataRoot {
-        type Key = DataRoot;
-        type Value = u64;
-    }
 
     /// Table to store various metadata, such as the current db schema version
     table Metadata {
@@ -63,11 +54,6 @@ tables! {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
-/// chunk offsets
-/// TODO: use a custom Compact as the default for `Vec<T>` sucks (make a custom one using const generics so we can optimize for fixed-size types?)
-pub struct ChunkOffsets(pub Vec<PartitionChunkOffset>);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
 /// compound value, containing the data path and tx path hashes
 pub struct ChunkPathHashes {
     pub data_path_hash: Option<H256>, // ChunkPathHash - we can't use the alias types as proc_macro just deals with tokens
@@ -75,9 +61,28 @@ pub struct ChunkPathHashes {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
-/// relative start offsets
+/// relative start offsets and data_size for each instance of a data_root in the submodule
 /// TODO: use a custom Compact as the default for `Vec<T>` sucks (make a custom one using const generics so we can optimize for fixed-size types?)
-pub struct RelativeStartOffsets(pub Vec<RelativeChunkOffset>);
+pub struct DataRootInfos(pub Vec<DataRootInfo>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, Compact)]
+pub struct DataRootInfo {
+    pub start_offset: RelativeChunkOffset,
+    pub data_size: u64, // The data_size from the data transaction that payed to store the data_root at this start_offset
+}
+
+impl PartialOrd for DataRootInfo {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Orders DataRootInfo by start_offset in ascending order
+impl Ord for DataRootInfo {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.start_offset.cmp(&other.start_offset)
+    }
+}
 
 #[cfg(test)]
 mod tests {

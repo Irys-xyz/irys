@@ -61,12 +61,15 @@ impl ChunkProvider {
             })
             .collect::<Vec<_>>();
 
+        // TODO: this also needs to be checked for data_size constraints
+        // So you can't get a chunk that overlaps the next txs chunks / start_offset
+
         for sm in sms {
-            let start_offsets1 = sm.collect_start_offsets(data_root)?;
-            let offsets = start_offsets1
+            let data_root_infos1 = sm.collect_data_root_infos(data_root)?;
+            let offsets = data_root_infos1
                 .0
                 .iter()
-                .map(|mapped_start| *mapped_start + (*data_tx_offset as i32))
+                .map(|info| info.start_offset + (*data_tx_offset as i32))
                 .collect::<Vec<_>>();
 
             for part_relative_offset in offsets {
@@ -100,15 +103,18 @@ impl ChunkProvider {
             })
             .collect::<Vec<_>>();
 
+        // TODO: see if we should check the metadata data_size here too
+
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {
             let sm_range_start = sm.get_storage_module_ledger_offsets().unwrap().start();
-            let start_offsets = sm.collect_start_offsets(data_root)?;
-            let mapped_offsets = start_offsets
+            let data_root_infos = sm.collect_data_root_infos(data_root)?;
+            let mapped_offsets = data_root_infos
                 .0
                 .iter()
-                .filter_map(|so| {
-                    checked_add_i32_u64(**so, sm_range_start.into()) // translate into ledger-relative space
+                .filter_map(|info| {
+                    checked_add_i32_u64(*info.start_offset, sm_range_start.into())
+                    // translate into ledger-relative space
                 })
                 .collect::<Vec<_>>();
 
@@ -188,10 +194,9 @@ mod tests {
 
         let chunk_range = ledger_chunk_offset_ii!(49, 51);
         let _ = storage_module.index_transaction_data(
+            &tx.header,
             tx_path,
-            data_root,
             LedgerChunkRange(chunk_range),
-            tx.header.data_size,
         );
 
         let mut unpacked_chunks = vec![];

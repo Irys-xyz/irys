@@ -221,29 +221,29 @@ pub fn process_ledger_transactions(
     let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index.clone());
     let mut prev_chunk_offset = block_offsets.start();
 
-    for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
-        let num_chunks_in_tx: u32 = data_size
+    for ((_txid, tx_path), tx) in path_pairs {
+        let num_chunks_in_tx: u32 = tx
+            .data_size
             .div_ceil(chunk_size as u64)
             .try_into()
             .expect("Value exceeds u32::MAX");
+
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
             prev_chunk_offset + num_chunks_in_tx as u64,
         ));
 
         update_storage_module_indexes(
+            tx,
             &tx_path.proof,
-            data_root,
             tx_chunk_range,
             ledger,
             storage_modules_guard,
-            data_size,
         )?;
 
         process_transaction_chunks(
+            tx,
             num_chunks_in_tx,
-            data_root,
-            data_size,
             tx_chunk_range,
             ledger,
             storage_modules_guard,
@@ -263,9 +263,8 @@ pub fn process_ledger_transactions(
 }
 
 fn process_transaction_chunks(
+    tx: &DataTransactionHeader,
     num_chunks_in_tx: u32,
-    data_root: DataRoot,
-    data_size: u64,
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
@@ -274,7 +273,7 @@ fn process_transaction_chunks(
     for tx_chunk_offset in 0..num_chunks_in_tx {
         let tx_chunk_offset = TxChunkOffset::from(tx_chunk_offset);
         // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset) {
+        let chunk_info = match get_cached_chunk(db, tx.data_root, tx_chunk_offset) {
             Ok(Some(info)) => info,
             _ => continue,
         };
@@ -286,7 +285,7 @@ fn process_transaction_chunks(
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
-            write_chunk_to_module(&module, chunk_info, data_root, data_size, tx_chunk_offset)?;
+            write_chunk_to_module(&module, chunk_info, tx, tx_chunk_offset)?;
         }
     }
     Ok(())
@@ -339,11 +338,11 @@ fn get_block_offsets_in_ledger(
 }
 
 #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
-fn get_tx_path_pairs(
-    block: &IrysBlockHeader,
+fn get_tx_path_pairs<'a>(
+    block: &'a IrysBlockHeader,
     ledger: DataLedger,
-    txs: &[DataTransactionHeader],
-) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
+    txs: &'a [DataTransactionHeader],
+) -> eyre::Result<Vec<((H256, Proof), &'a DataTransactionHeader)>> {
     let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(txs);
 
     let block_tx_root = block.data_ledgers[ledger].tx_root;
@@ -359,29 +358,23 @@ fn get_tx_path_pairs(
     Ok(proofs
         .into_iter()
         .zip(txs.iter())
-        .map(|(proof, tx)| ((tx.id, proof), (tx.data_root, tx.data_size)))
+        .map(|(proof, tx)| ((tx.id, proof), tx))
         .collect())
 }
 
 fn update_storage_module_indexes(
+    data_tx: &DataTransactionHeader,
     tx_path_proof: &[u8],
-    data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
-    data_size: u64,
 ) -> Result<(), MigrationError> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules_guard, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(
-                &tx_path_proof.to_vec(),
-                data_root,
-                tx_chunk_range,
-                data_size,
-            )
+            .index_transaction_data(data_tx, &tx_path_proof.to_vec(), tx_chunk_range)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",
@@ -425,16 +418,15 @@ fn find_storage_module(
 fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
     chunk_info: (CachedChunkIndexMetadata, CachedChunk),
-    data_root: DataRoot,
-    data_size: u64,
+    tx: &DataTransactionHeader,
     chunk_offset: TxChunkOffset,
 ) -> Result<(), MigrationError> {
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
     if let Some(bytes) = chunk_info.1.chunk {
         let chunk = UnpackedChunk {
-            data_root,
-            data_size,
+            data_root: tx.data_root,
+            data_size: tx.data_size,
             data_path,
             bytes,
             tx_offset: chunk_offset,
