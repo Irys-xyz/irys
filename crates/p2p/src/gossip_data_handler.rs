@@ -2,11 +2,14 @@ use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     rate_limiting::DataRequestTracker,
-    types::{InternalGossipError, InvalidDataError},
+    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    CriticalChunkIngressError, MempoolFacade,
+};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
@@ -88,43 +91,58 @@ where
             }
             Err(error) => {
                 match error {
-                    ChunkIngressError::UnknownTransaction => {
-                        // TODO:
-                        //  I suppose we have to ask the peer for transaction,
-                        //  but what if it doesn't have one?
-                        Ok(())
+                    ChunkIngressError::Critical(err) => {
+                        match err {
+                            // ===== External invalid data errors
+                            CriticalChunkIngressError::InvalidProof => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
+                            ),
+                            CriticalChunkIngressError::InvalidDataHash => Err(
+                                GossipError::InvalidData(InvalidDataError::ChinkInvalidDataHash),
+                            ),
+                            CriticalChunkIngressError::InvalidChunkSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
+                            ),
+                            CriticalChunkIngressError::InvalidDataSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
+                            ),
+                            // ===== Internal errors
+                            CriticalChunkIngressError::DatabaseError => {
+                                Err(GossipError::Internal(InternalGossipError::Database))
+                            }
+                            CriticalChunkIngressError::ServiceUninitialized => Err(
+                                GossipError::Internal(InternalGossipError::ServiceUninitialized),
+                            ),
+                            CriticalChunkIngressError::Other(other) => {
+                                Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+                            }
+                        }
                     }
-                    // ===== External invalid data errors
-                    ChunkIngressError::InvalidProof => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::InvalidDataHash => Err(GossipError::InvalidData(
-                        InvalidDataError::ChinkInvalidDataHash,
-                    )),
-                    ChunkIngressError::InvalidChunkSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidDataSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedBytes => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedDataPath => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::PreHeaderOffsetExceedsCap => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    // ===== Internal errors
-                    ChunkIngressError::DatabaseError => {
-                        Err(GossipError::Internal(InternalGossipError::Database))
-                    }
-                    ChunkIngressError::ServiceUninitialized => Err(GossipError::Internal(
-                        InternalGossipError::ServiceUninitialized,
-                    )),
-                    ChunkIngressError::Other(other) => {
-                        Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+
+                    ChunkIngressError::Advisory(err) => {
+                        match err {
+                            // ===== Interval data 'errors' (peers should not be punished)
+                            AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedBytes,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::Other(other) => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::Other(other),
+                                )))
+                            }
+                        }
                     }
                 }
             }
