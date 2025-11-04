@@ -1565,8 +1565,11 @@ impl MempoolState {
         &mut self,
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        // If tx already exists, it's a duplicate - just skip
-        if self.valid_submit_ledger_tx.contains_key(&tx.id) {
+        use std::collections::btree_map::Entry;
+        // If tx already exists we still update it.
+        // the new entry might have the `is_promoted` flag set on it, which is needded for correct promotion logic
+        if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx.id) {
+            value.insert(tx);
             return Ok(());
         }
 
