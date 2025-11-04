@@ -592,6 +592,244 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
             .await?;
     }
 
+    {
+        // Debug dump before asserting new tip consistency. This captures:
+        // - Canonical chain heights and hashes for both nodes
+        // - Block index markers (latest, migration, prune) for both nodes
+        // - Reth markers (Latest, Safe, Finalized) numbers and hashes for both nodes
+        println!("\n[DEBUG] reorg debug dump start");
+        println!(
+            "[DEBUG] expected: head_hash={:?}, migration_hash={:?}, prune_hash={:?}",
+            head_block.block_hash, migration_block.block_hash, prune_block.block_hash
+        );
+        println!("[DEBUG] reorg_event.new_tip: {:?}", reorg_event.new_tip);
+
+        // GENESIS node state
+        {
+            let label = "GENESIS";
+            let height = genesis_node.get_canonical_chain_height().await;
+            let canon = genesis_node.get_canonical_chain();
+            println!("[DEBUG] {} canonical height: {}", label, height);
+            println!("[DEBUG] {} canonical chain:", label);
+            for e in canon.iter() {
+                println!("  {} h={} hash={:?}", label, e.height, e.block_hash);
+            }
+
+            // Block index markers
+            {
+                let bi = genesis_node.node_ctx.block_index_guard.read();
+                if let Some(latest) = bi.get_latest_item() {
+                    let latest_h = bi.latest_height();
+                    println!(
+                        "[DEBUG] {} block_index latest: h={} hash={:?}",
+                        label, latest_h, latest.block_hash
+                    );
+                } else {
+                    println!("[DEBUG] {} block_index latest: None", label);
+                }
+                if let Some(m) = bi.get_item(migration_height) {
+                    println!(
+                        "[DEBUG] {} block_index migration@{}: hash={:?}",
+                        label, migration_height, m.block_hash
+                    );
+                } else {
+                    println!(
+                        "[DEBUG] {} block_index missing migration@{}",
+                        label, migration_height
+                    );
+                }
+                if let Some(p) = bi.get_item(prune_height) {
+                    println!(
+                        "[DEBUG] {} block_index prune@{}: hash={:?}",
+                        label, prune_height, p.block_hash
+                    );
+                } else {
+                    println!(
+                        "[DEBUG] {} block_index missing prune@{}",
+                        label, prune_height
+                    );
+                }
+            }
+
+            // Reth markers
+            let eth_api = genesis_node
+                .node_ctx
+                .reth_node_adapter
+                .reth_node
+                .inner
+                .eth_api();
+            let latest = eth_api
+                .block_by_number(BlockNumberOrTag::Latest, false)
+                .await
+                .ok()
+                .flatten();
+            let safe = eth_api
+                .block_by_number(BlockNumberOrTag::Safe, false)
+                .await
+                .ok()
+                .flatten();
+            let finalized = eth_api
+                .block_by_number(BlockNumberOrTag::Finalized, false)
+                .await
+                .ok()
+                .flatten();
+
+            match latest {
+                Some(b) => println!(
+                    "[DEBUG] {} Reth Latest: number={} hash={:?}",
+                    label, b.header.number, b.header.hash
+                ),
+                None => println!("[DEBUG] {} Reth Latest: None", label),
+            }
+            match safe {
+                Some(b) => println!(
+                    "[DEBUG] {} Reth Safe: number={} hash={:?}",
+                    label, b.header.number, b.header.hash
+                ),
+                None => println!("[DEBUG] {} Reth Safe: None", label),
+            }
+            match finalized {
+                Some(b) => println!(
+                    "[DEBUG] {} Reth Finalized: number={} hash={:?}",
+                    label, b.header.number, b.header.hash
+                ),
+                None => println!("[DEBUG] {} Reth Finalized: None", label),
+            }
+        }
+
+        // PEER node state
+        {
+            let label = "PEER";
+            let height = peer_node.get_canonical_chain_height().await;
+            let canon = peer_node.get_canonical_chain();
+            println!("[DEBUG] {} canonical height: {}", label, height);
+            println!("[DEBUG] {} canonical chain:", label);
+            for e in canon.iter() {
+                println!("  {} h={} hash={:?}", label, e.height, e.block_hash);
+            }
+
+            // Block index markers
+            {
+                let bi = peer_node.node_ctx.block_index_guard.read();
+                if let Some(latest) = bi.get_latest_item() {
+                    let latest_h = bi.latest_height();
+                    println!(
+                        "[DEBUG] {} block_index latest: h={} hash={:?}",
+                        label, latest_h, latest.block_hash
+                    );
+                } else {
+                    println!("[DEBUG] {} block_index latest: None", label);
+                }
+                if let Some(m) = bi.get_item(migration_height) {
+                    println!(
+                        "[DEBUG] {} block_index migration@{}: hash={:?}",
+                        label, migration_height, m.block_hash
+                    );
+                } else {
+                    println!(
+                        "[DEBUG] {} block_index missing migration@{}",
+                        label, migration_height
+                    );
+                }
+                if let Some(p) = bi.get_item(prune_height) {
+                    println!(
+                        "[DEBUG] {} block_index prune@{}: hash={:?}",
+                        label, prune_height, p.block_hash
+                    );
+                } else {
+                    println!(
+                        "[DEBUG] {} block_index missing prune@{}",
+                        label, prune_height
+                    );
+                }
+            }
+
+            // Reth markers
+            let eth_api = peer_node
+                .node_ctx
+                .reth_node_adapter
+                .reth_node
+                .inner
+                .eth_api();
+            let latest = eth_api
+                .block_by_number(BlockNumberOrTag::Latest, false)
+                .await
+                .ok()
+                .flatten();
+            let safe = eth_api
+                .block_by_number(BlockNumberOrTag::Safe, false)
+                .await
+                .ok()
+                .flatten();
+            let finalized = eth_api
+                .block_by_number(BlockNumberOrTag::Finalized, false)
+                .await
+                .ok()
+                .flatten();
+
+            match latest {
+                Some(b) => println!(
+                    "[DEBUG] {} Reth Latest: number={} hash={:?}",
+                    label, b.header.number, b.header.hash
+                ),
+                None => println!("[DEBUG] {} Reth Latest: None", label),
+            }
+            match safe {
+                Some(b) => println!(
+                    "[DEBUG] {} Reth Safe: number={} hash={:?}",
+                    label, b.header.number, b.header.hash
+                ),
+                None => println!("[DEBUG] {} Reth Safe: None", label),
+            }
+            match finalized {
+                Some(b) => println!(
+                    "[DEBUG] {} Reth Finalized: number={} hash={:?}",
+                    label, b.header.number, b.header.hash
+                ),
+                None => println!("[DEBUG] {} Reth Finalized: None", label),
+            }
+        }
+
+        println!("[DEBUG] reorg debug dump end\n");
+    }
+
+    if reorg_event.new_tip != head_block.block_hash {
+        let tip_block = genesis_node.get_block_by_hash(&reorg_event.new_tip).ok();
+        let head_parent = genesis_node
+            .get_block_by_hash(&head_block.previous_block_hash)
+            .ok();
+        let tip_parent = tip_block
+            .as_ref()
+            .and_then(|b| genesis_node.get_block_by_hash(&b.previous_block_hash).ok());
+
+        println!("\n[MISMATCH] reorg_event.new_tip != head_block.block_hash");
+        println!(
+            "  head:      h={} hash={:?} parent={:?}",
+            head_block.height, head_block.block_hash, head_block.previous_block_hash
+        );
+        match head_parent {
+            Some(ref p) => println!(
+                "  head prev: h={} hash={:?} parent={:?}",
+                p.height, p.block_hash, p.previous_block_hash
+            ),
+            None => println!("  head prev: <missing>"),
+        }
+        if let Some(ref tip) = tip_block {
+            println!(
+                "  new_tip:   h={} hash={:?} parent={:?}",
+                tip.height, tip.block_hash, tip.previous_block_hash
+            );
+        } else {
+            println!("  new_tip:   <missing in block tree>");
+        }
+        match tip_parent {
+            Some(ref p) => println!(
+                "  tip prev:  h={} hash={:?} parent={:?}",
+                p.height, p.block_hash, p.previous_block_hash
+            ),
+            None => println!("  tip prev:  <missing>"),
+        }
+    }
     assert_eq!(reorg_event.new_tip, head_block.block_hash);
 
     tokio::join!(genesis_node.stop(), peer_node.stop());
