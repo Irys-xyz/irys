@@ -23,7 +23,7 @@ members = [
   "crates/utils/testing-utils",
   "crates/packing-worker",
   "crates/tui",
-  "crates/macros/integer-tagged",
+  "crates/macros/integer-tagged", "crates/stress-test",
 ]
 resolver = "2"
 
