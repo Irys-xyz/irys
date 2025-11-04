@@ -1104,6 +1104,19 @@ impl StorageModule {
             let partition_offset =
                 PartitionChunkOffset::from(info.start_offset + (*chunk.tx_offset as i32));
 
+            // Calculate the number of chunks the data tx paid for
+            let data_size_in_chunks = (info.data_size / self.config.consensus.chunk_size) as i32;
+
+            // Use that to compute the last paid for PartitionChunkOffset for that data_root
+            let last_chunk_offset = (info.start_offset.0 + data_size_in_chunks).into();
+
+            // Check to see if the offset being written is past the end of what was paid for
+            if partition_offset > last_chunk_offset {
+                // Skips writing to any partition chunk offsets that exceed the data_size
+                // amount of chunks paid for by the data transaction
+                continue;
+            }
+
             // Check if there's an entropy chunk in the intervals map at this location and collect if present
             let intervals = self.intervals.read().unwrap();
             if intervals
