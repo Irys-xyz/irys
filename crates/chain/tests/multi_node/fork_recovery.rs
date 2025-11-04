@@ -362,51 +362,86 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .await;
 
     let peer_config = genesis_node.testing_peer_with_signer(&peer_signer);
+    // testing_peer_with_assignments_and_name will mine one epochs worth of blocks while setting up assignments
     let peer_node = genesis_node
         .testing_peer_with_assignments_and_name(peer_config, "PEER")
         .await?;
 
     let base_height = genesis_node.get_canonical_chain_height().await;
 
+    // This assert failed (left 4 right 3) at 13:14 on 4th November
+    assert_eq!(base_height, num_blocks_in_epoch as u64);
+
     // Stage 1: peer mines a private fork with gossip disabled
     peer_node.gossip_disable();
 
     peer_node.mine_blocks_without_gossip(1).await?;
     let fork_height = base_height + 1;
+    assert_eq!(fork_height, base_height + 1);
+    // Early check: ensure peer did not overshoot beyond a single block
+    let peer_height_after = peer_node.get_canonical_chain_height().await;
+    assert_eq!(
+        peer_height_after, fork_height,
+        "peer overshoot: expected fork height {}, got {}",
+        fork_height, peer_height_after
+    );
     let fork_block_level1 = peer_node.get_block_by_height(fork_height).await?;
 
     // Stage 2: genesis extends the canonical chain while unaware of the fork
     genesis_node.gossip_disable();
+    let genesis_height_before = genesis_node.get_canonical_chain_height().await;
     let canonical_block_level1 = genesis_node.mine_block().await?;
+    // Early check: ensure genesis only advanced by one block for this mine
+    assert_eq!(
+        canonical_block_level1.height,
+        genesis_height_before + 1,
+        "genesis overshoot: height before {} after {}",
+        genesis_height_before,
+        canonical_block_level1.height
+    );
+
+    // This assert failed (left 4 right 5) at 10:25 on 4th November
+    // The fork height cannot vary as it is set base_height + 1 and base_height = num_blocks_in_epoch, which is 3
+    // ∴ canonical_block_level1 has progressed 1 too many and genesis_node.mine_block() mined two blocks?
+    assert_eq!(fork_height, canonical_block_level1.height);
     genesis_node
         .wait_until_height(canonical_block_level1.height, seconds_to_wait)
         .await?;
 
     let canonical_block_level2 = genesis_node.mine_block().await?;
+    assert_eq!(fork_height + 1, canonical_block_level2.height);
+    // Also ensure sequential single-block advance on genesis
+    assert_eq!(
+        canonical_block_level2.height,
+        canonical_block_level1.height + 1,
+        "genesis produced more than one block between level1 and level2"
+    );
     genesis_node
         .wait_until_height(canonical_block_level2.height, seconds_to_wait)
         .await?;
 
-    let _ = genesis_node
+    let result = genesis_node
         .wait_for_reth_marker(
             BlockNumberOrTag::Latest,
             canonical_block_level2.evm_block_hash,
             seconds_to_wait as u64,
         )
         .await?;
+    assert_eq!(result, canonical_block_level2.evm_block_hash);
 
     // Stage 3: peer privately extends the fork beyond canonical length and ensures its Reth view is updated
     peer_node.mine_blocks_without_gossip(2).await?;
     let fork_block_level2 = peer_node.get_block_by_height(fork_height + 1).await?;
     let fork_block_level3 = peer_node.get_block_by_height(fork_height + 2).await?;
 
-    let _ = peer_node
+    let result = peer_node
         .wait_for_reth_marker(
             BlockNumberOrTag::Latest,
             fork_block_level3.evm_block_hash,
             seconds_to_wait as u64,
         )
         .await?;
+    assert_eq!(result, fork_block_level3.evm_block_hash);
 
     let fork_arc_level1 = Arc::new(fork_block_level1.clone());
     let fork_arc_level2 = Arc::new(fork_block_level2.clone());
@@ -440,6 +475,8 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .wait_for_block(&fork_block_level3.block_hash, seconds_to_wait)
         .await?;
 
+    // This failed "No reorg event received within 20 seconds" at 12:39 on 4th November
+    // "Error: Timeout: No reorg event received within 20 seconds" at 13:06 on 4th Nov
     let reorg_event = reorg_future.await?;
 
     let extension_height = fork_height + 2;
@@ -465,8 +502,11 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .wait_until_block_index_height(migration_height, seconds_to_wait)
         .await?;
 
+    // Canonical tip block at the current chain height (expected to match Reth 'Latest')
     let head_block = genesis_node.get_block_by_height(chain_tip_height).await?;
+    // Canonical block at the migration depth (expected to match Reth 'Safe')
     let migration_block = genesis_node.get_block_by_height(migration_height).await?;
+    // Canonical block at the prune depth fetched from the block index (expected to match Reth 'Finalized')
     let prune_block = genesis_node.get_block_by_height_from_index(prune_height, false)?;
 
     for node in [&genesis_node, &peer_node] {
@@ -484,6 +524,10 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
             let latest_entry = block_index_guard
                 .get_latest_item()
                 .expect("block index should have at least one entry");
+            // Error at 13:15 on 4th Nov
+            // /var/folders/h5/my1x7_wn3ys6wj1k7pnv3_d00000gn/T/tmp.mdw0UhkcWJ
+            // left: 6iTRzoLXUg2m9FR8QWaPhFoUQaGFwQpPvXrAXtF6ALwt
+            // right: 8fmdBks6cVasnyWu6AtpGv7w5CeccAqyQTcentem7WZv
             assert_eq!(
                 latest_entry.block_hash, migration_block.block_hash,
                 "latest block index entry should align with migration block"
