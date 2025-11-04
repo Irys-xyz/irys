@@ -1567,7 +1567,7 @@ impl MempoolState {
     ) -> Result<(), TxIngressError> {
         use std::collections::btree_map::Entry;
         // If tx already exists we still update it.
-        // the new entry might have the `is_promoted` flag set on it, which is needded for correct promotion logic
+        // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
         if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx.id) {
             value.insert(tx);
             return Ok(());
