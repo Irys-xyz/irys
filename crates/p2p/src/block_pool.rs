@@ -141,6 +141,7 @@ impl BlockCacheGuard {
     }
 
     async fn remove_block(&self, block_hash: &BlockHash) {
+        debug!("Removing {:?} block from BlockPool cache", block_hash);
         self.inner.write().await.remove_block(block_hash);
     }
 
@@ -511,7 +512,12 @@ where
         Ok(())
     }
 
-    #[instrument(skip_all, target = "BlockPool")]
+    #[instrument(
+        skip_all,
+        target = "BlockPool",
+        fields(block.hash = %block_header.block_hash, block.height = block_header.height),
+        err
+    )]
     pub(crate) async fn process_block<A: ApiClient>(
         &self,
         block_header: Arc<IrysBlockHeader>,
