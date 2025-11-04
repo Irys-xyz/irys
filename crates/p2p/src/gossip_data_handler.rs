@@ -393,10 +393,7 @@ where
         .await
     }
 
-    #[instrument(
-        skip(self, block_header_request, source_api_address, data_source_ip),
-        fields(block.hash = ?block_header_request.data.block_hash))
-    ]
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), err)]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -519,7 +516,7 @@ where
             }
         }
         debug!(
-            "Collected missing system ledgers: {:?}",
+            "Collected missing commitment tx ids: {:?}",
             missing_invalid_tx_ids
         );
 
