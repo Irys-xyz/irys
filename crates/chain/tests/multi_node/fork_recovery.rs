@@ -2,6 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};
+use reth::rpc::api::EthApiServer as _;
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
