@@ -449,18 +449,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
 }
 
 #[tokio::test]
-async fn should_bla_bla() {
-    // Two blocks:
-    // 1. Block 1 arrives at 20:09:50.9
-    // 2. Block pool: Processing block for block 1 happens at 20:10:05.551373
-    //    Block 1 has been processed: 20:10:5.660390
-    //            No orphans: 20:10:5.660617
-    // 3. Block 2 arrives at 20:09.55.3
-    // 4. Block 2 Processing block for block 2 happens at 20:10:05.551086
-    // 5. Block 2 requests parent at 2025-11-03T20:10:05.551282
-}
-
-#[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
     let config = create_test_config();
 
