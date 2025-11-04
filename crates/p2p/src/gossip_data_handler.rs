@@ -648,8 +648,7 @@ where
 
         self.block_pool
             .process_block::<A>(Arc::new(block_header), skip_block_validation)
-            .await
-            .map_err(GossipError::BlockPool)?;
+            .await?;
         Ok(())
     }
 
@@ -802,9 +801,7 @@ where
 
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let block_result = self.block_pool.get_block_data(&block_hash).await;
-
-                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
 
                 match maybe_block {
                     Some(block) => {
@@ -866,11 +863,7 @@ where
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let maybe_block = self
-                    .block_pool
-                    .get_block_data(&block_hash)
-                    .await
-                    .map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
                 Ok(maybe_block.map(GossipData::Block))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {

@@ -32,7 +32,7 @@ use tracing::{debug, error, info, instrument, warn};
 const BLOCK_POOL_CACHE_SIZE: usize = 250;
 
 #[derive(Debug, Clone, PartialEq, Error)]
-pub enum BlockPoolError {
+pub enum CriticalBlockPoolError {
     #[error("Database error: {0}")]
     DatabaseError(String),
     #[error("Mempool error: {0}")]
@@ -41,8 +41,6 @@ pub enum BlockPoolError {
     OtherInternal(String),
     #[error("Block error: {0}")]
     BlockError(String),
-    #[error("Block {0:?} has already been processed")]
-    AlreadyProcessed(BlockHash),
     #[error("Block {0:?} is already being fast tracked")]
     AlreadyFastTracking(BlockHash),
     #[error("Block {0:?} is already being processed or has been processed")]
@@ -61,9 +59,26 @@ pub enum BlockPoolError {
     TransactionValidationFailed(BlockHash, TxIngressError),
 }
 
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum AdvisoryBlockPoolError {
+    #[error("Block {0:?} has already been processed")]
+    AlreadyProcessed(BlockHash),
+}
+
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum BlockPoolError {
+    #[error(transparent)]
+    Critical(#[from] CriticalBlockPoolError),
+    #[error(transparent)]
+    Advisory(#[from] AdvisoryBlockPoolError),
+}
+
 impl From<PeerNetworkError> for BlockPoolError {
     fn from(err: PeerNetworkError) -> Self {
-        Self::OtherInternal(format!("Peer list error: {:?}", err))
+        Self::Critical(CriticalBlockPoolError::OtherInternal(format!(
+            "Peer list error: {:?}",
+            err
+        )))
     }
 }
 
@@ -350,7 +365,7 @@ where
             .execution_payload_provider
             .reth_payload_provider
             .as_irys_reth_adapter()
-            .ok_or(BlockPoolError::OtherInternal(
+            .ok_or(CriticalBlockPoolError::OtherInternal(
                 "Reth payload provider is not set".into(),
             ))?;
 
@@ -363,7 +378,7 @@ where
         )
         .await
         .map_err(|error| {
-            BlockPoolError::OtherInternal(format!(
+            CriticalBlockPoolError::OtherInternal(format!(
                 "Encountered a problem while trying to fix payload {:?}: {error:?}",
                 block_header.evm_block_hash
             ))
@@ -375,7 +390,7 @@ where
             .wait_for_payload(&block_header.evm_block_hash)
             .await
             .ok_or_else(|| {
-                BlockPoolError::OtherInternal(format!(
+                CriticalBlockPoolError::OtherInternal(format!(
                     "Failed to fetch execution payload for block {:?}",
                     block_header.evm_block_hash
                 ))
@@ -389,7 +404,7 @@ where
         )
         .await
         .map_err(|err| {
-            BlockPoolError::OtherInternal(format!(
+            CriticalBlockPoolError::OtherInternal(format!(
                 "Failed to submit payload to reth for block {:?}: {:?}",
                 block_header.block_hash, err
             ))
@@ -401,7 +416,7 @@ where
 
         if let Some(reth_service) = reth_service {
             let fcu_markers = self.fcu_markers().map_err(|_err| {
-                BlockPoolError::OtherInternal("FCU marker computation failed".to_string())
+                CriticalBlockPoolError::OtherInternal("FCU marker computation failed".to_string())
             })?;
             let head_hash = fcu_markers.head.block_hash;
             let confirmed_hash = fcu_markers.migration_block.block_hash;
@@ -424,14 +439,14 @@ where
                     response: tx,
                 })
                 .map_err(|err| {
-                    BlockPoolError::OtherInternal(format!(
+                    CriticalBlockPoolError::OtherInternal(format!(
                         "Failed to send ForkChoiceUpdateMessage to Reth service: {:?}",
                         err
                     ))
                 })?;
 
             rx.await.map_err(|err| {
-                BlockPoolError::ForkChoiceFailed(format!(
+                CriticalBlockPoolError::ForkChoiceFailed(format!(
                     "Reth service dropped FCU acknowledgment: {:?}",
                     err
                 ))
@@ -471,7 +486,7 @@ where
             let block = self
                 .get_block_data(&block_hash)
                 .await?
-                .ok_or(BlockPoolError::PreviousBlockNotFound(block_hash))?;
+                .ok_or(CriticalBlockPoolError::PreviousBlockNotFound(block_hash))?;
 
             let prev_payload_exists = self
                 .execution_payload_provider
@@ -538,7 +553,9 @@ where
                 "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
                 block_header.block_hash
             );
-            return Err(BlockPoolError::AlreadyProcessed(block_header.block_hash));
+            return Err(BlockPoolError::Advisory(
+                AdvisoryBlockPoolError::AlreadyProcessed(block_header.block_hash),
+            ));
         }
 
         self.blocks_cache
@@ -571,7 +588,7 @@ where
             self.blocks_cache
                 .remove_block(&block_header.block_hash)
                 .await;
-            return Err(BlockPoolError::ForkedBlock(block_header.block_hash));
+            return Err(CriticalBlockPoolError::ForkedBlock(block_header.block_hash).into());
         }
 
         if !previous_block_status.is_processed() {
@@ -656,7 +673,7 @@ where
                 self.blocks_cache
                     .remove_block(&block_header.block_hash)
                     .await;
-                return Err(BlockPoolError::BlockError(format!("{:?}", err)));
+                return Err(CriticalBlockPoolError::BlockError(format!("{:?}", err)).into());
             }
         }
 
@@ -706,10 +723,11 @@ where
                             self.blocks_cache
                                 .remove_block(&block_header.block_hash)
                                 .await;
-                            return Err(BlockPoolError::TransactionValidationFailed(
+                            return Err(CriticalBlockPoolError::TransactionValidationFailed(
                                 current_block_hash,
                                 err,
-                            ));
+                            )
+                            .into());
                         }
                     }
                 }
@@ -728,10 +746,11 @@ where
                             self.blocks_cache
                                 .remove_block(&block_header.block_hash)
                                 .await;
-                            return Err(BlockPoolError::TransactionValidationFailed(
+                            return Err(CriticalBlockPoolError::TransactionValidationFailed(
                                 current_block_hash,
                                 err,
-                            ));
+                            )
+                            .into());
                         }
                     }
                 }
@@ -750,10 +769,9 @@ where
             self.blocks_cache
                 .remove_block(&block_header.block_hash)
                 .await;
-            return Err(BlockPoolError::BlockError(format!(
-                "{:?}",
-                block_discovery_error
-            )));
+            return Err(
+                CriticalBlockPoolError::BlockError(format!("{:?}", block_discovery_error)).into(),
+            );
         }
 
         info!(
@@ -964,16 +982,19 @@ where
             Ok(Some(header)) => return Ok(Some(Arc::new(header))),
             Ok(None) => {}
             Err(err) => {
-                return Err(BlockPoolError::MempoolError(format!(
+                return Err(CriticalBlockPoolError::MempoolError(format!(
                     "Mempool error: {:?}",
                     err
-                )));
+                ))
+                .into());
             }
         }
 
         self.db
             .view_eyre(|tx| block_header_by_hash(tx, block_hash, true))
-            .map_err(|db_error| BlockPoolError::DatabaseError(format!("{:?}", db_error)))
+            .map_err(|db_error| {
+                CriticalBlockPoolError::DatabaseError(format!("{:?}", db_error)).into()
+            })
             .map(|block| block.map(Arc::new))
     }
 
@@ -1046,21 +1067,23 @@ fn check_block_status(
                 "Block pool: Block {:?} (height {}) is already processed",
                 block_hash, block_height,
             );
-            Err(BlockPoolError::AlreadyProcessed(block_hash))
+            Err(BlockPoolError::Advisory(
+                AdvisoryBlockPoolError::AlreadyProcessed(block_hash),
+            ))
         }
         BlockStatus::Finalized => {
             debug!(
                 "Block pool: Block at height {} is finalized and cannot be reorganized (Tried to process block {:?})",
                 block_height, block_hash,
             );
-            Err(BlockPoolError::TryingToReprocessFinalizedBlock(block_hash))
+            Err(CriticalBlockPoolError::TryingToReprocessFinalizedBlock(block_hash).into())
         }
         BlockStatus::PartOfAPrunedFork => {
             debug!(
                 "Block pool: Block {:?} (height {}) is part of a pruned fork",
                 block_hash, block_height,
             );
-            Err(BlockPoolError::ForkedBlock(block_hash))
+            Err(CriticalBlockPoolError::ForkedBlock(block_hash).into())
         }
     }
 }
