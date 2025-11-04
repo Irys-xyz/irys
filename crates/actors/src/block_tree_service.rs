@@ -385,10 +385,50 @@ impl BlockTreeServiceInner {
             debug!("No reorg subscribers: {:?}", e);
         }
 
-        self.send_block_migration_message(Arc::clone(block))
-            .await
-            .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
-            .unwrap();
+        // Collect blocks to migrate by walking backwards from the current migration block
+        // Note: generally we should have only 1 block to migrate. Sometimes that is not the case.
+        // Optimal solution is to find out the root cause for why we'd have more blocks
+        // than a single one to migrate.
+        let blocks_to_migrate = {
+            let block_tree = self.cache.read().expect("poisoned lock");
+            let mut blocks_to_migrate = vec![Arc::clone(block)]; // Start with current block
+            let mut current = Arc::clone(block);
+            let parents_to_fetch = {
+                let bi = binding.read();
+                let diff = migration_height.saturating_sub(bi.num_blocks());
+                diff.saturating_sub(1)
+            };
+
+            if parents_to_fetch > 0 {
+                tracing::error!("block tree service has advanced further than a single block between doing block migration. Error migration code kicking in. Fetching {} extra blocks to migrate", parents_to_fetch);
+            }
+            for _ in 0..parents_to_fetch {
+                let parent_hash = current.previous_block_hash;
+                let parent = block_tree
+                    .get_block(&parent_hash)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "parent block {} not found while collecting blocks for migration",
+                            parent_hash
+                        )
+                    })
+                    .clone();
+                blocks_to_migrate.push(Arc::new(parent.clone()));
+                current = Arc::new(parent);
+            }
+
+            // Reverse to get oldest-first order
+            blocks_to_migrate.reverse();
+            blocks_to_migrate
+        };
+
+        // Send all blocks in order (oldest to newest)
+        for block_to_migrate in blocks_to_migrate {
+            self.send_block_migration_message(block_to_migrate)
+                .await
+                .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
+                .unwrap();
+        }
     }
 
     /// Handles pre-validated blocks received from the validation service.
