@@ -420,8 +420,12 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 "Failed to pull and process block {:?}: {:?}",
                 block_hash, err
             );
-            self.block_pool.remove_requested_block(&block_hash).await;
-            self.block_pool.remove_block_from_cache(&block_hash).await;
+
+            if !err.is_advisory() {
+                self.block_pool.remove_requested_block(&block_hash).await;
+                self.block_pool.remove_block_from_cache(&block_hash).await;
+            }
+
             Err(ChainSyncError::Internal(format!(
                 "Network error: {:?}",
                 err
