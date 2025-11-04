@@ -739,8 +739,8 @@ impl BlockTree {
 
         let (canonical_diff, canonical_block_hash) = self.max_cumulative_difficulty;
 
-        if block.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
-            // "Cannot move tip away from canonical for another block with same cumulative_diff"
+        if block.cumulative_diff <= canonical_diff && canonical_block_hash != *block_hash {
+            // "Cannot move tip away from canonical for another block with the same or smaller cumulative_diff"
             return Ok(false);
         }
 
