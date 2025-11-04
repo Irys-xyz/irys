@@ -1398,7 +1398,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pd_tx::{encode_pd_storage_key, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+    use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
     use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
     use crate::test_utils::{
         advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
@@ -1412,6 +1412,8 @@ mod tests {
     use reth_evm::EvmEnv;
     use reth_provider::ReceiptProvider as _;
 
+    use alloy_primitives::aliases::U200;
+    use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
     use reth_transaction_pool::{PoolTransaction as _, TransactionOrigin, TransactionPool as _};
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
@@ -1444,7 +1446,14 @@ mod tests {
     /// Helper to build PD access list with N chunks
     fn build_pd_access_list(num_chunks: usize) -> alloy_eips::eip2930::AccessList {
         let keys: Vec<_> = (0..num_chunks)
-            .map(|i| encode_pd_storage_key([0_u8; 26], i as u32, 1))
+            .map(|i| {
+                let spec = ChunkRangeSpecifier {
+                    partition_index: U200::ZERO,
+                    offset: i as u32,
+                    chunk_count: 1,
+                };
+                B256::from(spec.encode())
+            })
             .collect();
         alloy_eips::eip2930::AccessList(vec![AlItem {
             address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
@@ -1578,9 +1587,11 @@ mod tests {
         let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
 
         // PD access list: 3 storage keys at PD precompile address
-        let key1 = encode_pd_storage_key([0_u8; 26], 0, 1);
-        let key2 = encode_pd_storage_key([0_u8; 26], 1, 1);
-        let key3 = encode_pd_storage_key([0_u8; 26], 2, 1);
+        use crate::test_utils::chunk_spec_with_params;
+
+        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
+        let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());
+        let key3 = B256::from(chunk_spec_with_params([0; 25], 2, 1).encode());
         let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
             address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
             storage_keys: vec![key1, key2, key3],
