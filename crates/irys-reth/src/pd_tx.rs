@@ -161,7 +161,6 @@ mod tests {
     use super::*;
     use crate::test_utils::chunk_spec_with_params;
     use alloy_primitives::Address;
-    use irys_types::range_specifier::PdAccessListArgSerde as _;
 
     fn other_address() -> Address {
         Address::repeat_byte(0xff)
