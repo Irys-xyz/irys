@@ -1,4 +1,4 @@
-use crate::utils::{mine_blocks, AddTxError, IrysNodeTest};
+use crate::utils::{AddTxError, IrysNodeTest};
 use irys_actors::mempool_service::TxIngressError;
 
 use irys_chain::{
@@ -444,12 +444,10 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
     {
         let additional_blocks_for_gossip_test: usize = 2;
         let genesis_starting_index_height = ctx_genesis_node.get_block_index_height();
-        mine_blocks(
-            &ctx_genesis_node.node_ctx,
-            additional_blocks_for_gossip_test,
-        )
-        .await
-        .expect("expected many mined blocks");
+        ctx_genesis_node
+            .mine_blocks(additional_blocks_for_gossip_test)
+            .await
+            .expect("expected many mined blocks");
 
         // check a block really was mined on genesis and the genesis node index increased
         ctx_genesis_node
