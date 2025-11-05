@@ -25,7 +25,7 @@ use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::log::warn;
-use tracing::{debug, error, Span};
+use tracing::{debug, error, instrument, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -394,6 +394,7 @@ where
         .await
     }
 
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), err)]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -483,6 +484,10 @@ where
             self.gossip_client.mining_address, block_header.block_hash
         );
 
+        debug!(
+            "Collecting missing/invalid data transactions for block {:?}",
+            block_hash
+        );
         let mut missing_invalid_tx_ids = Vec::new();
 
         for tx_id in block_header
@@ -494,6 +499,10 @@ where
                 missing_invalid_tx_ids.push(tx_id);
             }
         }
+        debug!(
+            "Collected missing data tx ids: {:?}",
+            missing_invalid_tx_ids
+        );
 
         for system_tx_id in block_header
             .system_ledgers
@@ -507,6 +516,10 @@ where
                 missing_invalid_tx_ids.push(system_tx_id);
             }
         }
+        debug!(
+            "Collected missing commitment tx ids: {:?}",
+            missing_invalid_tx_ids
+        );
 
         if !missing_invalid_tx_ids.is_empty() {
             debug!(
@@ -520,9 +533,14 @@ where
             .remove_from_blacklist(missing_invalid_tx_ids.clone())
             .await
             .map_err(|error| {
-                error!("Failed to remove txs from mempool blacklist");
+                error!("Failed to remove txs from the mempool blacklist");
                 GossipError::unknown(&error)
             })?;
+
+        debug!(
+            "Fetching missing transactions from the network for block {:?}",
+            block_hash
+        );
 
         // Fetch missing transactions in parallel with a concurrency limit of 10
         let fetch_results: Vec<_> = stream::iter(missing_invalid_tx_ids)
@@ -626,6 +644,11 @@ where
             }
         }
 
+        debug!(
+            "Got all missing transactions for block {:?}, sending to processing",
+            block_hash
+        );
+
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
         let is_in_the_trusted_sync_range = self
             .sync_state
@@ -639,8 +662,7 @@ where
 
         self.block_pool
             .process_block::<A>(Arc::new(block_header), skip_block_validation)
-            .await
-            .map_err(GossipError::BlockPool)?;
+            .await?;
         Ok(())
     }
 
@@ -793,9 +815,7 @@ where
 
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let block_result = self.block_pool.get_block_data(&block_hash).await;
-
-                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
 
                 match maybe_block {
                     Some(block) => {
@@ -857,11 +877,7 @@ where
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let maybe_block = self
-                    .block_pool
-                    .get_block_data(&block_hash)
-                    .await
-                    .map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
                 Ok(maybe_block.map(GossipData::Block))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
