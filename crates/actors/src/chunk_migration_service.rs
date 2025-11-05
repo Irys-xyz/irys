@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{error, info, instrument};
+use tracing::{error, instrument};
 
 pub struct ChunkMigrationService {
     shutdown: Shutdown,
