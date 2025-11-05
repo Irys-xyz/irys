@@ -401,6 +401,8 @@ where
             block_header,
             adapter,
             execution_data,
+            self.block_status_provider.block_tree_read_guard(),
+            &self.config.consensus,
         )
         .await
         .map_err(|err| {

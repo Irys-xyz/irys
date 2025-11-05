@@ -1098,6 +1098,8 @@ pub async fn submit_payload_to_reth(
     block: &IrysBlockHeader,
     reth_adapter: &IrysRethNodeAdapter,
     execution_data: ExecutionData,
+    block_tree: &BlockTreeReadGuard,
+    config: &ConsensusConfig,
 ) -> eyre::Result<()> {
     let ExecutionData { payload, sidecar } = execution_data;
 
@@ -1126,6 +1128,22 @@ pub async fn submit_payload_to_reth(
                 return Err(eyre::Report::msg(validation_error));
             }
             alloy_rpc_types_engine::PayloadStatusEnum::Syncing => {
+                let tip = block_tree.read().tip;
+                let block_height = block_tree
+                    .read()
+                    .blocks
+                    .get(&tip)
+                    .ok_or_eyre("expect block tree tip to be present")?
+                    .block
+                    .height;
+                if block_height > block.height {
+                    // we are most likely evaluating a fork
+                    let diff = block_height - block.height;
+                    eyre::ensure!(
+                        diff < config.block_tree_depth,
+                        "we are evaluating an irrecoverable fork"
+                    );
+                }
                 tracing::debug!(
                     "syncing extra blocks to validate payload {:?}",
                     payload_v3.payload_inner.payload_inner.block_num_hash()
