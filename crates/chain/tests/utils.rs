@@ -2105,12 +2105,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn post_chunk_32b(
+    pub async fn post_chunk_32b_with_status(
         &self,
         tx: &DataTransaction,
         chunk_index: usize,
         chunks: &[[u8; 32]],
-    ) {
+    ) -> (reqwest::StatusCode, String) {
         let chunk = UnpackedChunk {
             data_root: tx.header.data_root,
             data_size: tx.header.data_size,
@@ -2129,8 +2129,21 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("client post failed");
 
+        (response.status(), response.text().await.unwrap())
+    }
+
+    pub async fn post_chunk_32b(
+        &self,
+        tx: &DataTransaction,
+        chunk_index: usize,
+        chunks: &[[u8; 32]],
+    ) {
+        let (status, _body) = self
+            .post_chunk_32b_with_status(tx, chunk_index, chunks)
+            .await;
+
         debug!("chunk_index: {:?}", chunk_index);
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(status, reqwest::StatusCode::OK);
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {
