@@ -1048,6 +1048,7 @@ impl StorageModule {
 
         let intervals = self.intervals.read().unwrap();
         let chunk_size = self.config.consensus.chunk_size;
+        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
 
         // The data_root_infos contain all the start_offsets and data_sizes for this chunks data_root
         // what we need to do is find all the ones where the chunks tx_offset fits within the data_size
@@ -1064,16 +1065,28 @@ impl StorageModule {
                     // Skip any chunks that go past the data_size (don't error, just filter out)
                     None
                 } else {
-                    // Calculate the partition offset for this valid chunk
-                    let partition_offset =
-                        PartitionChunkOffset::from(*info.start_offset as u64 + tx_offset as u64);
+                    // Calculate the relative partition offset, this can sometimes be negative if the
+                    // data_root overlaps two partitions
+                    let relative_offset =
+                        RelativeChunkOffset::from(info.start_offset + tx_offset as i32);
 
-                    // Check if this offset is in an Entropy interval
-                    if intervals
-                        .get_at_point(partition_offset)
-                        .is_some_and(|s| *s == ChunkType::Entropy)
+                    // Only include a writeable offset for a partition if it has a >= 0
+                    // partition relative offset
+                    if relative_offset.0 >= 0
+                        && (relative_offset.0 as u64) < num_chunks_in_partition
                     {
-                        Some(partition_offset)
+                        // Convert the partition relative offset to a proper PartitionChunkOffset
+                        let partition_offset = PartitionChunkOffset::from(relative_offset.0 as u32);
+
+                        // Check if this offset is in an Entropy interval
+                        if intervals
+                            .get_at_point(partition_offset)
+                            .is_some_and(|s| *s == ChunkType::Entropy)
+                        {
+                            Some(partition_offset)
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
