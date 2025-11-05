@@ -846,3 +846,23 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 
     Ok(())
 }
+
+#[test_log::test(tokio::test)]
+async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().block_tree_depth = 3;
+    genesis_config.consensus.get_mut().block_migration_depth = 1;
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    let peer_node = genesis_node.testing_peer_with_assignments(&test_signer).await?;
+    genesis_node.mine_blocks_without_gossip(5).await?;
+    let (block, payload) = peer_node.mine_block_without_gossip().await?;
+
+    Ok(())
+}
