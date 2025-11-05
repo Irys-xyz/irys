@@ -55,7 +55,7 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, warn, Instrument as _};
 
-#[derive(Debug, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
@@ -219,6 +219,105 @@ pub enum PreValidationError {
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
     InvalidEpochSnapshot { error: String },
+}
+
+/// Validation error type that covers all block validation failures.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ValidationError {
+    /// Pre-validation error (consensus parameter validation)
+    #[error("Pre-validation failed: {0}")]
+    PreValidation(#[from] PreValidationError),
+
+    /// Validation was cancelled due to block tree state changes
+    #[error("Validation cancelled: {reason}")]
+    ValidationCancelled { reason: String },
+
+    /// A validation task panicked unexpectedly
+    #[error("Validation task panicked: {task}: {details}")]
+    TaskPanicked { task: String, details: String },
+
+    /// VDF validation failed
+    #[error("VDF validation failed: {0}")]
+    VdfValidationFailed(String),
+
+    /// Seed data validation failed
+    #[error("Seed data invalid: {0}")]
+    SeedDataInvalid(String),
+
+    /// Execution layer (Reth) validation failed
+    #[error("Execution layer validation failed: {0}")]
+    ExecutionLayerFailed(String),
+
+    /// Recall range validation failed
+    #[error("Recall range validation failed: {0}")]
+    RecallRangeInvalid(String),
+
+    /// Shadow transaction validation failed
+    #[error("Shadow transaction validation failed: {0}")]
+    ShadowTransactionInvalid(String),
+
+    /// Failed to fetch commitment transactions from mempool or database
+    #[error("Failed to fetch commitment transactions: {0}")]
+    CommitmentTransactionFetchFailed(String),
+
+    /// Commitment transaction has invalid value (stake/pledge/unpledge amount)
+    #[error("Commitment transaction {tx_id} at position {position} has invalid value: {reason}")]
+    CommitmentValueInvalid {
+        tx_id: H256,
+        position: usize,
+        reason: String,
+    },
+
+    /// Commitment ordering validation failed
+    #[error("Commitment ordering validation failed: {0}")]
+    CommitmentOrderingFailed(String),
+
+    /// Commitment snapshot validation rejected the commitment
+    #[error("Commitment {tx_id} rejected by snapshot validation with status {status:?}")]
+    CommitmentSnapshotRejected {
+        tx_id: H256,
+        status: CommitmentSnapshotStatus,
+    },
+
+    /// Unpledge commitment targets partition not owned by signer
+    #[error("Unpledge commitment {tx_id} targets partition {partition_hash} not owned by signer {signer}")]
+    UnpledgePartitionNotOwned {
+        tx_id: H256,
+        partition_hash: H256,
+        signer: Address,
+    },
+
+    /// Parent commitment snapshot not found
+    #[error("Parent commitment snapshot missing for block {block_hash}")]
+    ParentCommitmentSnapshotMissing { block_hash: H256 },
+
+    /// Parent epoch snapshot not found
+    #[error("Parent epoch snapshot missing for block {block_hash}")]
+    ParentEpochSnapshotMissing { block_hash: H256 },
+
+    /// Parent block not found in block tree
+    #[error("Parent block {block_hash} not found in block tree")]
+    ParentBlockMissing { block_hash: H256 },
+
+    /// Epoch block commitment mismatch
+    #[error("Epoch block commitment mismatch at position {position}")]
+    EpochCommitmentMismatch { position: usize },
+
+    /// Epoch block contains extra commitment
+    #[error("Epoch block contains extra commitment at position {position}")]
+    EpochExtraCommitment { position: usize },
+
+    /// Epoch block missing expected commitment
+    #[error("Epoch block missing expected commitment at position {position}")]
+    EpochMissingCommitment { position: usize },
+
+    /// Commitment transaction in wrong order
+    #[error("Commitment transaction at position {position} in wrong order")]
+    CommitmentWrongOrder { position: usize },
+
+    /// Generic validation error for edge cases
+    #[error("Validation failed: {0}")]
+    Other(String),
 }
 
 /// Full pre-validation steps for a block
@@ -1414,7 +1513,10 @@ pub fn is_seed_data_valid(
             "Seed data is invalid. Expected: {:?}, got: {:?}",
             expected_seed_data, vdf_info
         );
-        ValidationResult::Invalid
+        ValidationResult::Invalid(ValidationError::SeedDataInvalid(format!(
+            "Expected: {:?}, got: {:?}",
+            expected_seed_data, vdf_info
+        )))
     }
 }
 
@@ -1429,7 +1531,7 @@ pub async fn commitment_txs_are_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
-) -> eyre::Result<()> {
+) -> Result<(), ValidationError> {
     // Extract commitment transaction IDs from the block
     let block_tx_ids = block
         .system_ledgers
@@ -1440,7 +1542,9 @@ pub async fn commitment_txs_are_valid(
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db)
+            .await
+            .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -1449,19 +1553,26 @@ pub async fn commitment_txs_are_valid(
                 "Commitment transaction {} at position {} has invalid value: {}",
                 tx.id, idx, e
             );
-            eyre::eyre!("Invalid commitment transaction value: {}", e)
+            ValidationError::CommitmentValueInvalid {
+                tx_id: tx.id,
+                position: idx,
+                reason: e.to_string(),
+            }
         })?;
     }
 
     let (parent_commitment_snapshot, parent_epoch_snapshot) = {
         let read = block_tree_guard.read();
-        let commitment_snapshot = read.get_commitment_snapshot(&block.previous_block_hash)?;
+        let commitment_snapshot = read
+            .get_commitment_snapshot(&block.previous_block_hash)
+            .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
         let epoch_snapshot = read
             .get_epoch_snapshot(&block.previous_block_hash)
-            .ok_or_eyre(format!(
-                "Parent epoch snapshot missing for block {}",
-                block.previous_block_hash
-            ))?;
+            .ok_or_else(|| ValidationError::ParentEpochSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
         (commitment_snapshot, epoch_snapshot)
     };
 
@@ -1484,27 +1595,27 @@ pub async fn commitment_txs_are_valid(
         {
             match pair {
                 EitherOrBoth::Both(actual, expected) => {
-                    ensure!(
-                        actual == expected,
-                        "Epoch block commitment mismatch at position {}. Expected: {:?}, Got: {:?}",
-                        idx,
-                        expected,
-                        actual
-                    );
+                    if actual != expected {
+                        error!(
+                            "Epoch block commitment mismatch at position {}. Expected: {:?}, Got: {:?}",
+                            idx, expected, actual
+                        );
+                        return Err(ValidationError::EpochCommitmentMismatch { position: idx });
+                    }
                 }
                 EitherOrBoth::Left(actual) => {
                     error!(
                         "Extra commitment in epoch block at position {}: {:?}",
                         idx, actual
                     );
-                    eyre::bail!("Epoch block contains extra commitment transaction");
+                    return Err(ValidationError::EpochExtraCommitment { position: idx });
                 }
                 EitherOrBoth::Right(expected) => {
                     error!(
                         "Missing commitment in epoch block at position {}: {:?}",
                         idx, expected
                     );
-                    eyre::bail!("Epoch block missing expected commitment transaction");
+                    return Err(ValidationError::EpochMissingCommitment { position: idx });
                 }
             }
         }
@@ -1525,23 +1636,22 @@ pub async fn commitment_txs_are_valid(
                 .partition_assignments
                 .get_assignment(partition_hash)
                 .map(|assignment| assignment.miner_address);
-            ensure!(
-                owner == Some(tx.signer),
-                "Unpledge commitment {} targets partition {} not owned by signer {} (owner {:?})",
-                tx.id,
-                partition_hash,
-                tx.signer,
-                owner
-            );
+            if owner != Some(tx.signer) {
+                return Err(ValidationError::UnpledgePartitionNotOwned {
+                    tx_id: tx.id,
+                    partition_hash,
+                    signer: tx.signer,
+                });
+            }
         }
 
         let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
-        ensure!(
-            status == CommitmentSnapshotStatus::Accepted,
-            "Commitment {} rejected by snapshot validation with status {:?}",
-            tx.id,
-            status
-        );
+        if status != CommitmentSnapshotStatus::Accepted {
+            return Err(ValidationError::CommitmentSnapshotRejected {
+                tx_id: tx.id,
+                status,
+            });
+        }
     }
 
     // Regular block validation: check priority ordering for stake and pledge commitments
@@ -1573,17 +1683,20 @@ pub async fn commitment_txs_are_valid(
     {
         match pair {
             EitherOrBoth::Both(actual, expected) => {
-                ensure!(
-                    actual.id == expected.id,
-                    "Commitment transaction at position {} in wrong order. Expected: {}, Got: {}",
-                    idx,
-                    expected.id,
-                    actual.id
-                );
+                if actual.id != expected.id {
+                    error!(
+                        "Commitment transaction at position {} in wrong order. Expected: {}, Got: {}",
+                        idx, expected.id, actual.id
+                    );
+                    return Err(ValidationError::CommitmentWrongOrder { position: idx });
+                }
             }
             _ => {
                 // This should never happen since we're comparing the same filtered set
-                eyre::bail!("Internal error: commitment ordering validation mismatch");
+                error!("Internal error: commitment ordering validation mismatch");
+                return Err(ValidationError::CommitmentOrderingFailed(
+                    "Internal error: commitment ordering validation mismatch".to_string(),
+                ));
             }
         }
     }
@@ -2819,12 +2932,15 @@ mod tests {
         );
 
         // Now let's try to rotate the seeds when no rotation is needed by increasing the
-        // reset frequency
+        // reset frequency - this makes the previously calculated seeds invalid
         let large_reset_frequency = 100;
         let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
         assert!(
-            matches!(is_valid, ValidationResult::Invalid),
-            "Seed data should still be valid"
+            matches!(
+                is_valid,
+                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+            ),
+            "Seed data should be invalid due to wrong reset frequency"
         );
 
         // Now let's try to set some random seeds that are not valid
@@ -2833,8 +2949,11 @@ mod tests {
         let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
 
         assert!(
-            matches!(is_valid, ValidationResult::Invalid),
-            "Seed data should be invalid"
+            matches!(
+                is_valid,
+                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+            ),
+            "Seed data should be invalid with random seeds"
         );
     }
 
