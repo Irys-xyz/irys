@@ -1260,7 +1260,7 @@ impl StorageModule {
                 // which means our target DataRootInfo is at this index (or doesn't exist if index is out of bounds).
                 let index = data_root_infos
                     .0
-                    .partition_point(|info| info.start_offset < partition_offset.into()).saturating_sub(1);
+                    .partition_point(|info| info.start_offset <= partition_offset.into()).saturating_sub(1);
 
                 // Extract the data_size from the located DataRootInfo.
                 // If the index is valid, we've found the correct funding transaction's data_size.
