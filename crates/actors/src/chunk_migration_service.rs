@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
-use tracing::{error, instrument};
+use tracing::{error, info, instrument};
 
 pub struct ChunkMigrationService {
     shutdown: Shutdown,
@@ -319,21 +319,28 @@ fn get_block_offsets_in_ledger(
             .get_item(block.height - 1)
             .map(|prev| prev.ledgers[ledger].total_chunks)
             .unwrap_or(0)
-            .saturating_sub(1)
     } else {
         0
     };
 
+    // Calculate the end offset, accounting for blocks that add no chunks to the ledger.
+    // If chunks were added: end_offset = total_chunks - 1 (convert count to 0-indexed offset)
+    // If no chunks added: end_offset = start_offset (creates an empty/invalid range, which
+    // correctly signals that this block contributed nothing to the ledger)
+    let end_chunk_offset = if block.data_ledgers[ledger].total_chunks > start_chunk_offset {
+        block.data_ledgers[ledger].total_chunks.saturating_sub(1)
+    } else {
+        start_chunk_offset
+    };
+
     // debug!(
     //     "get_block_range - {} {}",
-    //     start_chunk_offset,
-    //     block.data_ledgers[ledger].total_chunks.saturating_sub(1)
+    //     start_chunk_offset, end_chunk_offset
     // );
 
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
-        // We subtract 1 from `total_chunks` to get the offsets
-        LedgerChunkOffset::from(block.data_ledgers[ledger].total_chunks.saturating_sub(1)),
+        LedgerChunkOffset::from(end_chunk_offset),
     ))
 }
 
