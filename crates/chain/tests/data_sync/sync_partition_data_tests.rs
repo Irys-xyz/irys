@@ -141,27 +141,33 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Check genesis node
-        let counts1 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
-        let counts2 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
-        let counts3 = check_submodule_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
+        let counts1 = check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
+        let counts2 = check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
+        let counts3 = check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
 
         genesis_synced = (counts1.data == 50 && counts1.packed == 10)
             && (counts2.data == 50 && counts2.packed == 10)
             && (counts3.packed == 60 && counts3.data == 0);
 
         // Check peer1
-        let peer1_counts1 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
-        let peer1_counts2 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
-        let peer1_counts3 = check_submodule_chunks(&peer1_node, "PEER1", DataLedger::Submit, 1);
+        let peer1_counts1 =
+            check_storage_module_chunks(&peer1_node, "PEER1", DataLedger::Publish, 0);
+        let peer1_counts2 =
+            check_storage_module_chunks(&peer1_node, "PEER1", DataLedger::Submit, 0);
+        let peer1_counts3 =
+            check_storage_module_chunks(&peer1_node, "PEER1", DataLedger::Submit, 1);
 
         peer1_synced = (peer1_counts1.data == 50 && peer1_counts1.packed == 10)
             && (peer1_counts2.data == 50 && peer1_counts2.packed == 10)
             && (peer1_counts3.packed == 60 && peer1_counts3.data == 0);
 
         // Check peer2
-        let peer2_counts1 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
-        let peer2_counts2 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
-        let peer2_counts3 = check_submodule_chunks(&peer2_node, "PEER2", DataLedger::Submit, 1);
+        let peer2_counts1 =
+            check_storage_module_chunks(&peer2_node, "PEER2", DataLedger::Publish, 0);
+        let peer2_counts2 =
+            check_storage_module_chunks(&peer2_node, "PEER2", DataLedger::Submit, 0);
+        let peer2_counts3 =
+            check_storage_module_chunks(&peer2_node, "PEER2", DataLedger::Submit, 1);
 
         peer2_synced = (peer2_counts1.data == 50 && peer2_counts1.packed == 10)
             && (peer2_counts2.data == 50 && peer2_counts2.packed == 10)
@@ -243,7 +249,7 @@ struct ChunkCountTotals {
     pub packed: usize,
 }
 
-fn check_submodule_chunks(
+fn check_storage_module_chunks(
     node: &IrysNodeTest<IrysNodeCtx>,
     name: &str,
     ledger: DataLedger,
