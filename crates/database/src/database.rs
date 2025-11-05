@@ -159,6 +159,11 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         cached_data_root.txid_set.push(tx_header.id);
     }
 
+    // If the entry exists and the tx_headers data_size is larger than the one in the cache, update it
+    if cached_data_root.data_size < tx_header.data_size {
+        cached_data_root.data_size = tx_header.data_size;
+    }
+
     // If the entry exists and a block header reference was provided, add the block hash reference if necessary
     if let Some(block_header) = block_header {
         if !cached_data_root
