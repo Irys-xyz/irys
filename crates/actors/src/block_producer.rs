@@ -308,38 +308,65 @@ impl BlockProducerService {
                 let inner = self.inner.clone();
                 let result = Self::produce_block_inner(inner, solution).await?;
 
-                // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Some((irys_block_header, eth_built_payload)) = &result {
-                    info!(
-                        block.hash = %irys_block_header.block_hash,
-                        block.height = irys_block_header.height,
-                        "Block production completed successfully"
-                    );
-
-                    // Broadcast the EVM payload
-                    let execution_payload_gossip_data =
-                        GossipBroadcastMessage::from(eth_built_payload.block().clone());
-                    if let Err(payload_broadcast_error) = self
-                        .inner
-                        .service_senders
-                        .gossip_broadcast
-                        .send(execution_payload_gossip_data)
-                    {
-                        error!(
-                            "Failed to broadcast execution payload: {:?}",
-                            payload_broadcast_error
-                        );
+                if let Some((irys_block_header, eth_built_payload)) = result {
+                    // Final guard: ensure tests haven't exhausted quota
+                    if matches!(self.blocks_remaining_for_test, Some(0)) {
+                        info!("Test guard exhausted; dropping candidate block before publication");
+                        let _ = response.send(Ok(None));
+                        return Ok(());
                     }
 
-                    if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
-                        *remaining = remaining.saturating_sub(1);
-                        debug!("Test blocks remaining after production: {}", *remaining);
+                    // Publish the block to discovery (advances canonical chain)
+                    match self
+                        .inner
+                        .block_discovery
+                        .handle_block(Arc::clone(&irys_block_header), false)
+                        .await
+                    {
+                        Ok(()) => {
+                            info!(
+                                block.hash = %irys_block_header.block_hash,
+                                block.height = irys_block_header.height,
+                                "Block publication completed successfully"
+                            );
+
+                            // Gossip the EVM payload
+                            let execution_payload_gossip_data =
+                                GossipBroadcastMessage::from(eth_built_payload.block().clone());
+                            if let Err(payload_broadcast_error) = self
+                                .inner
+                                .service_senders
+                                .gossip_broadcast
+                                .send(execution_payload_gossip_data)
+                            {
+                                error!(
+                                    "Failed to broadcast execution payload: {:?}",
+                                    payload_broadcast_error
+                                );
+                            }
+
+                            if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
+                                *remaining = remaining.saturating_sub(1);
+                                debug!("Test blocks remaining after publication: {}", *remaining);
+                            }
+
+                            let _ = response.send(Ok(Some((irys_block_header, eth_built_payload))));
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to publish block {:?} ({}): {:?}",
+                                &irys_block_header.block_hash.0, &irys_block_header.height, e
+                            );
+                            let _ = response.send(Ok(None));
+                            return Ok(());
+                        }
                     }
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
+                    let _ = response.send(Ok(None));
+                    return Ok(());
                 }
-
-                let _ = response.send(Ok(result));
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
@@ -370,7 +397,10 @@ impl BlockProducerService {
         );
 
         let production_strategy = ProductionStrategy { inner };
-        production_strategy.fully_produce_new_block(solution).await
+        let candidate = production_strategy
+            .fully_produce_new_block_candidate(solution)
+            .await?;
+        Ok(candidate.map(|(b, _stats, p)| (b, p)))
     }
 }
 
