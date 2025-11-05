@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{
+    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+};
 use irys_actors::{
-    async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    async_trait, block_validation::ValidationError, reth_ethereum_primitives, BlockProdStrategy,
+    BlockProducerInner, ProductionStrategy,
 };
 use irys_types::{
     storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256,
@@ -84,7 +86,11 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with invalid EVM block reward should be rejected",
+    );
 
     peer_node.stop().await;
     genesis_node.stop().await;
@@ -148,8 +154,12 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     peer_node.gossip_eth_block_to_peers(eth_payload.block())?;
     peer_node.gossip_eth_block_to_peers(eth_payload_other.block())?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with invalid reth hash should be rejected",
+    );
 
     peer_node.stop().await;
     genesis_node.stop().await;
@@ -236,7 +246,11 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with misaligned shadow transactions should be rejected",
+    );
 
     peer_node.stop().await;
     genesis_node.stop().await;
@@ -328,7 +342,11 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with reordered shadow transactions should be rejected",
+    );
 
     peer_node.stop().await;
     genesis_node.stop().await;
