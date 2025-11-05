@@ -561,24 +561,25 @@ pub trait BlockProdStrategy {
             .await
     }
 
-    /// Produces a new block with automatic parent chain rebuild capability.
+    /// Produces a new block candidate with automatic parent chain rebuild capability.
+    /// This does NOT broadcast or publish the block.
     ///
     /// # Race Condition Handling
     /// This function addresses a critical race condition where the canonical parent block
     /// can change while we're producing a block, which would waste the valuable mining solution.
     ///
-    /// ## The Problem
-    /// 1. Block production takes time
-    /// 2. During this time, another node might broadcast a new block
-    /// 3. If that block becomes the new canonical tip, building on the old parent wastes the solution
-    ///
-    /// ## The Solution
     /// After producing a block, we check if the parent is still the best canonical block.
     /// If not, we rebuild the block on the new parent, reusing the same solution hash.
-    async fn fully_produce_new_block(
+    async fn fully_produce_new_block_candidate(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            EthBuiltPayload,
+        )>,
+    > {
         let mut rebuild_attempts = 0;
 
         // Initial block production
@@ -664,6 +665,20 @@ pub trait BlockProdStrategy {
                 block.data_ledgers[DataLedger::Publish].tx_ids,
             );
         }
+
+        Ok(Some((block, stats, eth_built_payload)))
+    }
+
+    /// Produces and broadcasts a new block. Kept for tests and direct strategies.
+    async fn fully_produce_new_block(
+        &self,
+        solution: SolutionContext,
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+        let Some((block, stats, eth_built_payload)) =
+            self.fully_produce_new_block_candidate(solution).await?
+        else {
+            return Ok(None);
+        };
 
         let block = self.broadcast_block(block, stats).await?;
         let Some(block) = block else { return Ok(None) };
