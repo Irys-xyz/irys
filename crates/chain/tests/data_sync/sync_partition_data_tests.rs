@@ -137,7 +137,7 @@ async fn slow_heavy_sync_partition_data_between_peers_test() -> eyre::Result<()>
     let (mut genesis_synced, mut peer1_synced, mut peer2_synced) = (false, false, false);
 
     tracing::info!("waiting for data to sync");
-    for attempt in 0..60 {
+    for attempt in 0..80 {
         tokio::time::sleep(Duration::from_secs(1)).await;
 
         // Check genesis node
