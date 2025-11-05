@@ -1,4 +1,4 @@
-use crate::block_pool::BlockPoolError;
+use crate::block_pool::{AdvisoryBlockPoolError, BlockPoolError, CriticalBlockPoolError};
 use irys_actors::{
     mempool_service::{IngressProofError, TxIngressError},
     AdvisoryChunkIngressError, ChunkIngressError,
@@ -21,7 +21,7 @@ pub enum GossipError {
     #[error("Invalid data: {0}")]
     InvalidData(InvalidDataError),
     #[error("Block pool error: {0:?}")]
-    BlockPool(BlockPoolError),
+    BlockPool(CriticalBlockPoolError),
     #[error("Transaction has already been handled")]
     TransactionIsAlreadyHandled,
     #[error("Commitment validation error: {0}")]
@@ -105,9 +105,24 @@ impl From<PeerNetworkError> for GossipError {
     }
 }
 
+impl From<BlockPoolError> for GossipError {
+    fn from(value: BlockPoolError) -> Self {
+        match value {
+            BlockPoolError::Critical(err) => Self::BlockPool(err),
+            BlockPoolError::Advisory(err) => {
+                Self::Advisory(AdvisoryGossipError::BlockPoolError(err))
+            }
+        }
+    }
+}
+
 impl GossipError {
     pub fn unknown<T: ToString + ?Sized>(error: &T) -> Self {
         Self::Internal(InternalGossipError::Unknown(error.to_string()))
+    }
+
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, Self::Advisory(_))
     }
 }
 
@@ -165,6 +180,8 @@ pub enum InternalGossipError {
 pub enum AdvisoryGossipError {
     #[error("Failed to ingress chunk: {0:?}")]
     ChunkIngress(AdvisoryChunkIngressError),
+    #[error("Block pool failed to ingest the block: {0:?}")]
+    BlockPoolError(AdvisoryBlockPoolError),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
