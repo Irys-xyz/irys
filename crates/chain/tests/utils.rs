@@ -1133,12 +1133,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         let _block_hash = self
             .wait_until_height(height + num_blocks as u64, 60 * num_blocks)
             .await?;
+        // stop mining immediately after reaching the correct height
+        let stop_mining_result = self.node_ctx.stop_mining();
         self.node_ctx
             .service_senders
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(None))
             .unwrap();
-        self.node_ctx.stop_mining()
+        stop_mining_result
     }
 
     pub async fn mine_blocks_without_gossip(&self, num_blocks: usize) -> eyre::Result<()> {
