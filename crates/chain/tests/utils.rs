@@ -2146,6 +2146,60 @@ impl IrysNodeTest<IrysNodeCtx> {
         assert_eq!(status, reqwest::StatusCode::OK);
     }
 
+    pub async fn get_chunk(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+    ) -> Option<PackedChunk> {
+        let client = reqwest::Client::new();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let url = format!(
+            "{}/v1/chunk/ledger/{}/{}",
+            api_uri, ledger as usize, chunk_offset
+        );
+
+        let response = client.get(&url).send().await;
+        // info!("{:#?}", response);
+
+        if let Ok(resp) = response {
+            if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
+                return Some(packed_chunk);
+            }
+        }
+        None
+    }
+
+    pub async fn verify_migrated_chunk_32b(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        expected_bytes: &[u8; 32],
+        expected_data_size: u64,
+    ) {
+        if let Some(packed_chunk) = self.get_chunk(ledger, chunk_offset).await {
+            let unpacked_chunk = unpack(
+                &packed_chunk,
+                self.node_ctx.config.consensus.entropy_packing_iterations,
+                self.node_ctx.config.consensus.chunk_size as usize,
+                self.node_ctx.config.consensus.chain_id,
+            );
+            if unpacked_chunk.bytes.0 != expected_bytes {
+                println!(
+                    "ledger_chunk_offset: {}\nfound: {:?}\nexpected: {:?}",
+                    chunk_offset, unpacked_chunk.bytes.0, expected_bytes
+                )
+            }
+            assert_eq!(unpacked_chunk.bytes.0, expected_bytes);
+
+            assert_eq!(unpacked_chunk.data_size, expected_data_size);
+        } else {
+            panic!(
+                "Chunk not found! {} ledger chunk_offset: {}",
+                ledger, chunk_offset
+            );
+        }
+    }
+
     pub fn get_api_client(&self) -> IrysApiClient {
         IrysApiClient::new()
     }

@@ -1,7 +1,7 @@
 use irys_chain::IrysNodeCtx;
 use irys_domain::ChunkType;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{DataLedger, NodeConfig};
+use irys_types::{DataLedger, LedgerChunkOffset, NodeConfig};
 use tracing::info;
 
 use crate::utils::IrysNodeTest;
@@ -119,7 +119,32 @@ async fn overlapping_data_sizes() -> eyre::Result<()> {
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
 
-    // genesis_node.wait_for_chunk(app, ledger, offset, seconds)
+    // Validate chunks in both Submit and Publish ledgers
+    for ledger in [DataLedger::Submit, DataLedger::Publish] {
+        // Validate the 3 wrong_data_size_tx chunks (bytes & data_size)
+        for i in 0..3 {
+            genesis_node
+                .verify_migrated_chunk_32b(
+                    ledger,
+                    LedgerChunkOffset::from(i as u64),
+                    &chunks[i],
+                    wrong_data_size_tx.header.data_size,
+                )
+                .await;
+        }
+
+        // Validate the 6 valid_tx chunks (bytes & data_size)
+        for i in 0..6 {
+            genesis_node
+                .verify_migrated_chunk_32b(
+                    ledger,
+                    LedgerChunkOffset::from((i + 3) as u64),
+                    &chunks[i],
+                    valid_tx.header.data_size,
+                )
+                .await;
+        }
+    }
 
     // Graceful shutdown
     genesis_node.stop().await;
