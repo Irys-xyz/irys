@@ -2813,10 +2813,24 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     Ok(poa_solution)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Outcome of block validation for testing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockValidationOutcome {
+    /// Block was validated and stored with the given chain state.
     StoredOnNode(ChainState),
-    Discarded,
+    /// Block was discarded with validation error details.
+    Discarded(irys_actors::block_validation::ValidationError),
+}
+
+pub fn assert_validation_error(
+    outcome: BlockValidationOutcome,
+    error_matcher: impl Fn(&block_validation::ValidationError) -> bool,
+    context: &str,
+) {
+    match outcome {
+        BlockValidationOutcome::Discarded(ref err) if error_matcher(err) => {}
+        other => panic!("{} - expected validation error, got: {:?}", context, other),
+    }
 }
 
 pub async fn mine_block_and_wait_for_validation(
@@ -2840,10 +2854,22 @@ pub async fn read_block_from_state(
     block_hash: &H256,
 ) -> BlockValidationOutcome {
     let mut was_validation_scheduled = false;
+    let mut event_receiver = node_ctx.service_senders.subscribe_block_state_updates();
 
-    // TODO: we must have a better way of getting block updates,
-    // some kind of event bus from the block tree would be great.
+    // Poll for up to 50 seconds (500 iterations * 100ms)
     for _ in 0..500 {
+        // Check for block state events (non-blocking)
+        while let Ok(event) = event_receiver.try_recv() {
+            if event.block_hash == *block_hash && event.discarded {
+                // Block was discarded, extract validation error from result
+                if let irys_actors::block_tree_service::ValidationResult::Invalid(error) =
+                    event.validation_result
+                {
+                    return BlockValidationOutcome::Discarded(error);
+                }
+            }
+        }
+
         let result = {
             let read = node_ctx.block_tree_guard.read();
             let mut result = read
@@ -2857,7 +2883,11 @@ pub async fn read_block_from_state(
             // If we previously saw "validation scheduled" and now block status is None,
             // it means the block was discarded
             if was_validation_scheduled {
-                return BlockValidationOutcome::Discarded;
+                return BlockValidationOutcome::Discarded(
+                    irys_actors::block_validation::ValidationError::Other(
+                        "Block was discarded without validation error event".to_string(),
+                    ),
+                );
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -2871,7 +2901,9 @@ pub async fn read_block_from_state(
             _ => return BlockValidationOutcome::StoredOnNode(chain_state),
         }
     }
-    BlockValidationOutcome::Discarded
+    BlockValidationOutcome::Discarded(irys_actors::block_validation::ValidationError::Other(
+        "Timeout waiting for block validation".to_string(),
+    ))
 }
 
 /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
