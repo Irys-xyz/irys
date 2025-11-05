@@ -1100,15 +1100,22 @@ impl StorageModule {
 
         // Scan all potential locations and categorize them
         for info in data_root_infos.0 {
-            // TODO: Check this against the data_size in the DataRootInfo
             let partition_offset =
                 PartitionChunkOffset::from(info.start_offset + (*chunk.tx_offset as i32));
 
             // Calculate the number of chunks the data tx paid for
-            let data_size_in_chunks = (info.data_size / self.config.consensus.chunk_size) as i32;
+            let data_size_in_chunks =
+                (info.data_size.div_ceil(self.config.consensus.chunk_size)) as i32;
 
-            // Use that to compute the last paid for PartitionChunkOffset for that data_root
-            let last_chunk_offset = (info.start_offset.0 + data_size_in_chunks).into();
+            // Calculate the last valid chunk offset for this data transaction.
+            // Convert data_size (bytes) to chunk count, then add to start_offset to get the
+            // exclusive end boundary. Subtract 1 to convert from count to the inclusive
+            // last offset.
+            // Example: 3-chunk tx starting at offset 5 reserves offsets [5,6,7]
+            //   → start=5, chunks=3, end_boundary=8, last_offset=7
+            let last_chunk_offset = (info.start_offset.0 + data_size_in_chunks)
+                .saturating_sub(1)
+                .into();
 
             // Check to see if the offset being written is past the end of what was paid for
             if partition_offset > last_chunk_offset {
