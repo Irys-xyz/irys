@@ -27,6 +27,7 @@ use crate::block_validation::{
 };
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use eyre::Context as _;
+use futures::FutureExt;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use irys_vdf::state::CancelEnum;
@@ -98,29 +99,38 @@ impl BlockValidationTask {
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     pub async fn execute_concurrent(self) -> ValidationResult {
-        let validation_result = self.validate_block().await;
+        let parent_got_cancelled = || {
+            // Task was cancelled due to height difference
+            // Return invalid to prevent this block from being accepted
+            tracing::warn!(
+                block.hash = %self.block.block_hash,
+                "Validation cancelled due to height difference"
+            );
+            return ValidationResult::Invalid(ValidationError::ValidationCancelled {
+                reason: "height difference".to_string(),
+            });
+        };
 
-        // If validation is successful, wait for parent to be validated before reporting
-        if matches!(validation_result, ValidationResult::Valid) {
-            match self.wait_for_parent_validation().await {
-                ParentValidationResult::Cancelled => {
-                    // Task was cancelled due to height difference
-                    // Return invalid to prevent this block from being accepted
-                    tracing::warn!(
-                        block.hash = %self.block.block_hash,
-                        "Validation cancelled due to height difference"
-                    );
-                    return ValidationResult::Invalid(ValidationError::ValidationCancelled {
-                        reason: "height difference".to_string(),
-                    });
+        let wait_for_parent_validation = self.exit_if_block_is_too_old().boxed();
+        let validate_block = self.validate_block().boxed();
+        match futures::future::select(validate_block, wait_for_parent_validation).await {
+            futures::future::Either::Left((validation_result, _block_too_old_future)) => {
+                // If validation is successful, wait for parent to be validated before reporting
+                if matches!(validation_result, ValidationResult::Valid) {
+                    match self.wait_for_parent_validation().await {
+                        ParentValidationResult::Cancelled => return parent_got_cancelled(),
+                        ParentValidationResult::Ready => {
+                            // Parent is ready, continue to report validation result
+                        }
+                    }
                 }
-                ParentValidationResult::Ready => {
-                    // Parent is ready, continue to report validation result
-                }
+
+                validation_result
+            }
+            futures::future::Either::Right(((), _validation_task)) => {
+                return parent_got_cancelled();
             }
         }
-
-        validation_result
     }
 
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
@@ -238,6 +248,59 @@ impl BlockValidationTask {
                         "Block state channel closed while waiting for parent"
                     );
                     return ParentValidationResult::Cancelled;
+                }
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    async fn exit_if_block_is_too_old(&self) {
+        let parent_hash = self.block.previous_block_hash;
+
+        // Subscribe to block state updates
+        let mut block_state_rx = self
+            .service_inner
+            .service_senders
+            .subscribe_block_state_updates();
+
+        loop {
+            // 1. Check cancellation condition first
+            if self.should_exit_due_to_height_diff() {
+                let block_tree = self.block_tree_guard.read();
+                let tip_hash = block_tree.tip;
+                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
+                    let height_diff = tip_block.height.saturating_sub(self.block.height);
+                    warn!(
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        block.height_diff= height_diff,
+                        config.threshold = self.service_inner.config.consensus.block_tree_depth,
+                        "Cancelling validation: block too far behind tip"
+                    );
+                }
+                return;
+            }
+
+            // 3. Wait for relevant state changes
+            debug!(block.parent_hash = %parent_hash, "Waiting for parent validation");
+            match block_state_rx.recv().await {
+                Ok(event) if event.block_hash == parent_hash => {
+                    // Parent state changed, loop back to check
+                    continue;
+                }
+                Ok(_) => {
+                    // Not our parent, continue waiting
+                    continue;
+                }
+                Err(_) => {
+                    // Channel closed - treat as error
+                    error!(
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        "Block state channel closed while waiting for parent"
+                    );
+                    return;
                 }
             }
         }
@@ -522,6 +585,7 @@ impl BlockValidationTask {
                 ));
             }
         };
+                tracing::error!("shadow txs are valid");
 
         match (
             &recall_result,
@@ -547,7 +611,7 @@ impl BlockValidationTask {
                     &self.block_tree_guard.clone(),
                     &config.consensus,
                 )
-                .instrument(tracing::info_span!(
+                .instrument(tracing::error_span!(
                     "reth_submission",
                     block.hash = %self.block.block_hash,
                     block.height = %self.block.height
