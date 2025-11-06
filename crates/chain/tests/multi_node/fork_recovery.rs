@@ -401,9 +401,6 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         canonical_block_level1.height
     );
 
-    // This assert failed (left 4 right 5) at 10:25 on 4th November
-    // The fork height cannot vary as it is set base_height + 1 and base_height = num_blocks_in_epoch, which is 3
-    // ∴ canonical_block_level1 has progressed 1 too many and genesis_node.mine_block() mined two blocks?
     assert_eq!(fork_height, canonical_block_level1.height);
     genesis_node
         .wait_until_height(canonical_block_level1.height, seconds_to_wait)
@@ -476,8 +473,6 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .wait_for_block(&fork_block_level3.block_hash, seconds_to_wait)
         .await?;
 
-    // This failed "No reorg event received within 20 seconds" at 12:39 on 4th November
-    // "Error: Timeout: No reorg event received within 20 seconds" at 13:06 on 4th Nov
     let reorg_event = reorg_future.await?;
 
     let extension_height = fork_height + 2;
@@ -525,10 +520,6 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
             let latest_entry = block_index_guard
                 .get_latest_item()
                 .expect("block index should have at least one entry");
-            // Error at 13:15 on 4th Nov
-            // /var/folders/h5/my1x7_wn3ys6wj1k7pnv3_d00000gn/T/tmp.mdw0UhkcWJ
-            // left: 6iTRzoLXUg2m9FR8QWaPhFoUQaGFwQpPvXrAXtF6ALwt
-            // right: 8fmdBks6cVasnyWu6AtpGv7w5CeccAqyQTcentem7WZv
             assert_eq!(
                 latest_entry.block_hash, migration_block.block_hash,
                 "latest block index entry should align with migration block"
