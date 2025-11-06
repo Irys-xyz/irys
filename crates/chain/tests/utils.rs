@@ -1135,10 +1135,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await?;
         // stop mining immediately after reaching the correct height
         let stop_mining_result = self.node_ctx.stop_mining();
+        // Keep the test mining guard active at Some(0) to avoid a queued SolutionFound
+        // being accepted after stop_mining but before the guard is reset. The next call
+        // to mine_blocks() will override this with Some(n).
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SetTestBlocksRemaining(None))
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
         stop_mining_result
     }
