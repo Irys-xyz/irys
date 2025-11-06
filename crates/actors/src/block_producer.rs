@@ -345,6 +345,13 @@ impl BlockProducerService {
                                 );
                             }
 
+                            // Broadcast difficulty update to miners (unconditionally after publication)
+                            // Note: Opted not to Broadcast only on parent difficulty change as it
+                            //       introduce superfluous timing and resource challenges
+                            self.inner.mining_broadcaster.send_difficulty(
+                                BroadcastDifficultyUpdate(Arc::clone(&irys_block_header)),
+                            );
+
                             if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
                                 *remaining = remaining.saturating_sub(1);
                                 debug!("Test blocks remaining after publication: {}", *remaining);
