@@ -28,6 +28,9 @@ use std::sync::Arc;
 use tracing::log::warn;
 use tracing::{debug, error, instrument, Span};
 
+pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
+pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
+
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
 pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient>
@@ -571,9 +574,11 @@ where
                 if fetched.is_none() {
                     let mut exclude = std::collections::HashSet::new();
                     exclude.insert(source_miner_address);
-                    let mut top_peers = self.peer_list.top_active_peers(Some(15), Some(exclude));
+                    let mut top_peers = self
+                        .peer_list
+                        .top_active_peers(Some(MAX_PEERS_TO_SELECT_FROM), Some(exclude));
                     top_peers.shuffle(&mut rand::thread_rng());
-                    top_peers.truncate(7);
+                    top_peers.truncate(MAX_TX_PEERS_TO_TRY);
 
                     for (peer_addr, peer_item) in top_peers {
                         match self
