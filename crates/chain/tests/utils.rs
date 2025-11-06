@@ -1135,10 +1135,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await?;
         // stop mining immediately after reaching the correct height
         let stop_mining_result = self.node_ctx.stop_mining();
+        // Keep the test mining guard active at Some(0) to avoid a queued SolutionFound
+        // being accepted after stop_mining but before the guard is reset. The next call
+        // to mine_blocks() will override this with Some(n).
         self.node_ctx
             .service_senders
             .block_producer
-            .send(BlockProducerCommand::SetTestBlocksRemaining(None))
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
         stop_mining_result
     }
@@ -1151,6 +1154,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn mine_block_with_payload(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+        // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
+        self.node_ctx
+            .service_senders
+            .block_producer
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))
+            .unwrap();
+
         let poa_solution = solution_context(&self.node_ctx).await?;
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         self.node_ctx
@@ -1163,6 +1173,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap();
         let res = response_rx.await?;
         let maybe = res?;
+        // Reset the guard to Some(0) to avoid unintended mining beyond this call
+        self.node_ctx
+            .service_senders
+            .block_producer
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
+            .unwrap();
         maybe.ok_or_eyre("block not returned")
     }
 
@@ -2842,10 +2858,24 @@ pub async fn solution_context(node_ctx: &IrysNodeCtx) -> Result<SolutionContext,
     Ok(poa_solution)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Outcome of block validation for testing.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockValidationOutcome {
+    /// Block was validated and stored with the given chain state.
     StoredOnNode(ChainState),
-    Discarded,
+    /// Block was discarded with validation error details.
+    Discarded(irys_actors::block_validation::ValidationError),
+}
+
+pub fn assert_validation_error(
+    outcome: BlockValidationOutcome,
+    error_matcher: impl Fn(&block_validation::ValidationError) -> bool,
+    context: &str,
+) {
+    match outcome {
+        BlockValidationOutcome::Discarded(ref err) if error_matcher(err) => {}
+        other => panic!("{} - expected validation error, got: {:?}", context, other),
+    }
 }
 
 pub async fn read_block_from_state(
@@ -2853,10 +2883,22 @@ pub async fn read_block_from_state(
     block_hash: &H256,
 ) -> BlockValidationOutcome {
     let mut was_validation_scheduled = false;
+    let mut event_receiver = node_ctx.service_senders.subscribe_block_state_updates();
 
-    // TODO: we must have a better way of getting block updates,
-    // some kind of event bus from the block tree would be great.
+    // Poll for up to 50 seconds (500 iterations * 100ms)
     for _ in 0..500 {
+        // Check for block state events (non-blocking)
+        while let Ok(event) = event_receiver.try_recv() {
+            if event.block_hash == *block_hash && event.discarded {
+                // Block was discarded, extract validation error from result
+                if let irys_actors::block_tree_service::ValidationResult::Invalid(error) =
+                    event.validation_result
+                {
+                    return BlockValidationOutcome::Discarded(error);
+                }
+            }
+        }
+
         let result = {
             let read = node_ctx.block_tree_guard.read();
             let mut result = read
@@ -2870,7 +2912,11 @@ pub async fn read_block_from_state(
             // If we previously saw "validation scheduled" and now block status is None,
             // it means the block was discarded
             if was_validation_scheduled {
-                return BlockValidationOutcome::Discarded;
+                return BlockValidationOutcome::Discarded(
+                    irys_actors::block_validation::ValidationError::Other(
+                        "Block was discarded without validation error event".to_string(),
+                    ),
+                );
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             continue;
@@ -2884,7 +2930,9 @@ pub async fn read_block_from_state(
             _ => return BlockValidationOutcome::StoredOnNode(chain_state),
         }
     }
-    BlockValidationOutcome::Discarded
+    BlockValidationOutcome::Discarded(irys_actors::block_validation::ValidationError::Other(
+        "Timeout waiting for block validation".to_string(),
+    ))
 }
 
 /// Helper function for testing chunk uploads. Posts a single chunk of transaction data

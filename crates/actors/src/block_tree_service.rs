@@ -89,12 +89,14 @@ pub struct BlockMigratedEvent {
     pub block: Arc<IrysBlockHeader>,
 }
 
+/// Event broadcast when a block's state changes in the block tree.
 #[derive(Debug, Clone)]
 pub struct BlockStateUpdated {
     pub block_hash: BlockHash,
     pub height: u64,
     pub state: ChainState,
     pub discarded: bool,
+    pub validation_result: ValidationResult,
 }
 
 impl BlockTreeService {
@@ -552,20 +554,17 @@ impl BlockTreeServiceInner {
             block_hash, validation_result, height
         );
 
-        if validation_result == ValidationResult::Invalid {
+        if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
                 block.hash = %block_hash,
-                "invalid block"
+                error = %validation_error,
+                "block validation failed"
             );
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(
-                block.hash = %block_hash,
-                "invalid block"
-            );
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());
@@ -587,6 +586,7 @@ impl BlockTreeServiceInner {
                 height,
                 state,
                 discarded: true,
+                validation_result,
             };
             if let Err(e) = self.service_senders.block_state_events.send(event) {
                 tracing::warn!(
@@ -857,6 +857,7 @@ impl BlockTreeServiceInner {
             height,
             state,
             discarded: false,
+            validation_result: ValidationResult::Valid,
         };
         if let Err(e) = self.service_senders.block_state_events.send(event) {
             tracing::warn!(
@@ -994,8 +995,9 @@ pub fn prune_chains_at_ancestor(
     (old_divergent, new_divergent)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Result of block validation.
+#[derive(Debug, Clone)]
 pub enum ValidationResult {
     Valid,
-    Invalid,
+    Invalid(crate::block_validation::ValidationError),
 }

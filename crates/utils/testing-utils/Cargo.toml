@@ -13,6 +13,11 @@ tracing-error.workspace = true
 rand.workspace = true
 chrono = { version = "0.4.41", default-features = false, features = ["now"] }
 libc = "0.2.172"                                                              # same version as was already in the lockfile
+irys-utils = { path = "../utils", optional = true }
+
+[features]
+default = []
+telemetry = ["irys-utils/telemetry", "irys-utils"]
 
 [lints]
 workspace = true
