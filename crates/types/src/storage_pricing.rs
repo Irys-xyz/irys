@@ -55,7 +55,6 @@ impl<T> Encodable for Amount<T> {
 }
 
 impl<T: std::fmt::Debug> Decodable for Amount<T> {
-    #[tracing::instrument(err)]
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let res = U256::decode(buf)?;
         Ok(Self::new(res))
@@ -91,20 +90,17 @@ impl<T: std::fmt::Debug> Amount<T> {
         }
     }
 
-    #[tracing::instrument(err)]
     pub fn token(amount: Decimal) -> Result<Self> {
         let amount = Self::decimal_to_u256(amount, TOKEN_SCALE_NATIVE)?;
         Ok(Self::new(amount))
     }
 
-    #[tracing::instrument(err)]
     pub fn percentage(amount: Decimal) -> Result<Self> {
         let amount = Self::decimal_to_u256(amount, PRECISION_SCALE_NATIVE)?;
         Ok(Self::new(amount))
     }
 
     /// Helper to convert a Decimal into a scaled U256.
-    #[tracing::instrument(err)]
     pub fn decimal_to_u256(dec: Decimal, scale: u64) -> Result<U256> {
         // Only handle non-negative decimals.
         ensure!(dec >= Decimal::ZERO, "decimal must be non-negative");
@@ -134,19 +130,16 @@ impl<T: std::fmt::Debug> Amount<T> {
 
     /// Helper to convert a U256 (with 18 decimals) into a `Decimal` for assertions.
     /// Assumes that the U256 value is small enough to fit into a u128.
-    #[tracing::instrument(err)]
     pub fn token_to_decimal(&self) -> Result<Decimal> {
         self.amount_to_decimal(TOKEN_SCALE, TOKEN_SCALE_NATIVE)
     }
 
     /// Helper to convert a U256 (with 6 decimals) into a `Decimal` for assertions.
     /// Assumes that the U256 value is small enough to fit into a u128.
-    #[tracing::instrument(err)]
     pub fn percentage_to_decimal(&self) -> Result<Decimal> {
         self.amount_to_decimal(PRECISION_SCALE, PRECISION_SCALE_NATIVE)
     }
 
-    #[tracing::instrument(err)]
     fn amount_to_decimal(&self, scale: U256, scale_native: u64) -> Result<Decimal> {
         // Compute the integer and fractional parts.
         let quotient = safe_div(self.amount, scale)?;
@@ -225,7 +218,6 @@ impl Amount<Irys> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn apply_pledge_decay(
         self,
         current_pledge_count: u64,
@@ -274,7 +266,6 @@ impl Amount<(CostPerChunk, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn cost_per_replica(
         self,
         epochs: u64,
@@ -331,7 +322,6 @@ impl Amount<(CostPerChunkDurationAdjusted, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn replica_count(self, replicas: u64) -> Result<Self> {
         // safe_mul for scale * integer is okay (the result is still scaled)
         let total = safe_mul(self.amount, U256::from(replicas))?;
@@ -346,7 +336,6 @@ impl Amount<(CostPerChunkDurationAdjusted, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn base_network_fee(
         self,
         bytes_to_store: U256,
@@ -380,7 +369,6 @@ impl Amount<(NetworkFee, Irys)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 + percentage) / SCALE
         let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
@@ -401,7 +389,6 @@ impl Amount<(NetworkFee, Irys)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn add_ingress_proof_rewards(
         self,
         term_fee: U256,
@@ -441,7 +428,6 @@ impl Amount<(IrysPrice, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn calculate_ema(self, total_past_blocks: u64, previous_ema: Self) -> Result<Self> {
         // denominator = n+1
         let denom = U256::from(total_past_blocks)
@@ -480,7 +466,6 @@ impl Amount<(IrysPrice, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn add_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = amount * (1 + percentage) / SCALE
         let one_plus = safe_add(PRECISION_SCALE, percentage.amount)?;
@@ -494,7 +479,6 @@ impl Amount<(IrysPrice, Usd)> {
     /// # Errors
     ///
     /// Whenever any of the math operations fail due to bounds checks.
-    #[tracing::instrument(err)]
     pub fn sub_multiplier(self, percentage: Amount<Percentage>) -> Result<Self> {
         // total = (amount * (1 - percentage)) / PRECISION_SCALE
         let one_minus = safe_sub(PRECISION_SCALE, percentage.amount)?;
@@ -627,27 +611,23 @@ fn precision_pow(mut base_ps: U256, mut exp: u64) -> Result<U256> {
     Ok(result)
 }
 
-/// safe addition that errors on overflow.
-#[tracing::instrument(err)]
+/// safe addition that errors on overflow
 pub fn safe_add(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_add(rhs).ok_or_else(|| eyre!("overflow in add"))
 }
 
-/// safe subtraction that errors on underflow.
-#[tracing::instrument(err)]
+/// safe subtraction that errors on underflow
 pub fn safe_sub(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_sub(rhs)
         .ok_or_else(|| eyre!("underflow in sub"))
 }
 
-/// safe multiplication that errors on overflow.
-#[tracing::instrument(err)]
+/// safe multiplication that errors on overflow
 pub fn safe_mul(lhs: U256, rhs: U256) -> Result<U256> {
     lhs.checked_mul(rhs).ok_or_else(|| eyre!("overflow in mul"))
 }
 
-/// safe division that errors on division-by-zero.
-#[tracing::instrument(err)]
+/// safe division that errors on division-by-zero
 pub fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
     if rhs.is_zero() {
         Err(eyre!("division by zero"))
@@ -655,8 +635,6 @@ pub fn safe_div(lhs: U256, rhs: U256) -> Result<U256> {
         Ok(lhs.checked_div(rhs).unwrap())
     }
 }
-
-#[tracing::instrument(err)]
 pub fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
     if rhs.is_zero() {
         Err(eyre!("module by zero"))

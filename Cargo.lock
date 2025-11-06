@@ -5465,6 +5465,7 @@ dependencies = [
  "dirs 5.0.1",
  "eyre",
  "futures",
+ "irys-types",
  "ratatui 0.28.1",
  "reqwest 0.12.15",
  "serde",
