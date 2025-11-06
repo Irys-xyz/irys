@@ -20,11 +20,11 @@ use irys_types::{
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
     IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
+use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
-use rand::prelude::SliceRandom;
 use tracing::log::warn;
 use tracing::{debug, error, instrument, Span};
 
@@ -571,9 +571,7 @@ where
                 if fetched.is_none() {
                     let mut exclude = std::collections::HashSet::new();
                     exclude.insert(source_miner_address);
-                    let mut top_peers = self
-                        .peer_list
-                        .top_active_peers(Some(15), Some(exclude));
+                    let mut top_peers = self.peer_list.top_active_peers(Some(15), Some(exclude));
                     top_peers.shuffle(&mut rand::thread_rng());
                     top_peers.truncate(7);
 
