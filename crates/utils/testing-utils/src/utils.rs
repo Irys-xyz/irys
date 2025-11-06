@@ -14,6 +14,9 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
+#[cfg(feature = "telemetry")]
+use std::backtrace::Backtrace;
+
 pub fn initialize_tracing() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
@@ -97,8 +100,13 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         let location = panic_info.location();
 
         // Log panic to OpenTelemetry with structured fields
-        // Replace newlines to ensure clean OTLP export
         let panic_message_clean = panic_message.replace('\n', " | ");
+
+        // Capture backtrace if telemetry is enabled, otherwise empty string
+        #[cfg(feature = "telemetry")]
+        let backtrace_str = Backtrace::force_capture().to_string().replace('\n', " | ");
+        #[cfg(not(feature = "telemetry"))]
+        let backtrace_str = String::new();
 
         if let Some(loc) = location {
             tracing::error!(
@@ -107,12 +115,14 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
                 panic.file = %loc.file(),
                 panic.line = loc.line(),
                 panic.column = loc.column(),
+                panic.backtrace = %backtrace_str,
                 "PANIC OCCURRED - Process will abort"
             );
         } else {
             tracing::error!(
                 timestamp = %timestamp,
                 panic.message = %panic_message_clean,
+                panic.backtrace = %backtrace_str,
                 "PANIC OCCURRED (no location) - Process will abort"
             );
         }
