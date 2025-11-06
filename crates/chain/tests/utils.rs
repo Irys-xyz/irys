@@ -110,21 +110,48 @@ pub async fn craft_data_poa_solution_from_tx(
 
     let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
 
+    let chunks_per_partition = node.node_ctx.config.consensus.num_chunks_in_partition;
     eyre::ensure!(
-        prev_total_chunks >= slot_start,
-        "prev_total_chunks {} is before slot_start {} for partition {}",
+        prev_total_chunks > slot_start,
+        "prev_total_chunks {} is not greater than slot_start {} for partition {}",
         prev_total_chunks,
         slot_start,
         partition_hash
     );
 
-    let partition_chunk_offset_u64 = prev_total_chunks - slot_start;
-    let partition_chunk_offset: u32 = u32::try_from(partition_chunk_offset_u64).map_err(|_| {
-        eyre!(
-            "partition_chunk_offset {} doesn't fit u32",
-            partition_chunk_offset_u64
-        )
-    })?;
+    // Use last existing chunk to ensure strict bound (< prev_total_chunks), then wrap within the partition.
+    let last_existing = prev_total_chunks - 1;
+    let relative = last_existing.saturating_sub(slot_start);
+    let partition_chunk_offset_u64 = relative % chunks_per_partition;
+    let mut partition_chunk_offset: u32 =
+        u32::try_from(partition_chunk_offset_u64).map_err(|_| {
+            eyre!(
+                "partition_chunk_offset {} doesn't fit u32",
+                partition_chunk_offset_u64
+            )
+        })?;
+
+    // Validate per-partition and ledger bounds before building the solution.
+    let chunks_per_partition = node.node_ctx.config.consensus.num_chunks_in_partition;
+    eyre::ensure!(
+        u64::from(partition_chunk_offset) < chunks_per_partition,
+        "partition_chunk_offset {} out of range [0, {}) for partition {} (slot_index={}, slot_start={}, prev_total_chunks={})",
+        partition_chunk_offset,
+        chunks_per_partition,
+        partition_hash,
+        slot_index,
+        slot_start,
+        prev_total_chunks
+    );
+    let ledger_chunk_offset = slot_start + u64::from(partition_chunk_offset);
+    eyre::ensure!(
+        ledger_chunk_offset < prev_total_chunks,
+        "ledger_chunk_offset {} must be < prev_total_chunks {} (slot_start={}, partition_chunk_offset={})",
+        ledger_chunk_offset,
+        prev_total_chunks,
+        slot_start,
+        partition_chunk_offset
+    );
 
     // tx_path for a single-tx block (we'll ensure block_chunk_offset=0)
     let (_tx_root, tx_paths) = DataTransactionLedger::merklize_tx_root(&[tx.header.clone()]);
@@ -175,6 +202,96 @@ pub async fn craft_data_poa_solution_from_tx(
     let steps = vdf_steps_guard
         .read()
         .get_steps(ii(current_step.saturating_sub(1), current_step))?;
+
+    // Ensure recall range alignment for the current VDF step and partition.
+    let num_chunks_in_partition = node.node_ctx.config.consensus.num_chunks_in_partition;
+    let num_chunks_in_recall_range = node.node_ctx.config.consensus.num_chunks_in_recall_range;
+    let num_recall_ranges_in_partition =
+        (num_chunks_in_partition / num_chunks_in_recall_range) as usize;
+    // Compute VDF reset window start and collect recall steps for reconstruction
+    let num_rr_u64 = num_chunks_in_partition.div_ceil(num_chunks_in_recall_range);
+    let recall_reset_step = if current_step == 0 {
+        0
+    } else {
+        ((current_step - 1) / num_rr_u64) * num_rr_u64 + 1
+    };
+    let recall_steps = vdf_steps_guard
+        .read()
+        .get_steps(ii(recall_reset_step, current_step))?;
+    let recall_index = (u64::from(partition_chunk_offset) / num_chunks_in_recall_range) as usize;
+
+    eyre::ensure!(
+        recall_index < num_recall_ranges_in_partition,
+        "recall_index {} out of bounds [0, {}) (partition_chunk_offset={}, num_chunks_in_recall_range={}, num_chunks_in_partition={})",
+        recall_index,
+        num_recall_ranges_in_partition,
+        partition_chunk_offset,
+        num_chunks_in_recall_range,
+        num_chunks_in_partition
+    );
+
+    // Reconstruct expected recall range using the same approach as efficient-sampling:
+    // - maintain a ranges bag [0..num_recall_ranges_in_partition-1]
+    // - for each step, choose a position based on sha256(seed || partition_hash)
+    // - swap with the tail and shrink the bag
+    let mut ranges: Vec<usize> = (0..num_recall_ranges_in_partition).collect();
+    let mut last_pos = num_recall_ranges_in_partition.saturating_sub(1);
+    let mut expected_recall_index = 0_usize;
+    for seed in recall_steps.0.iter() {
+        // derive position from hash(seed, partition_hash)
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher.update(partition_hash.0);
+        let digest = hasher.finalize();
+        // guard bound to avoid panic on modulo by zero
+        let bound = if last_pos == 0 { 1 } else { last_pos };
+        let pos_u32 = u32::from_be_bytes(digest[28..32].try_into().unwrap());
+        let pos = (pos_u32 as usize) % bound;
+        let chosen = ranges[pos];
+        // swap-with-tail and shrink
+        ranges[pos] = ranges[last_pos];
+        expected_recall_index = chosen;
+        if last_pos == 0 {
+            // reinitialize after exhausting bag
+            ranges = (0..num_recall_ranges_in_partition).collect();
+            last_pos = num_recall_ranges_in_partition.saturating_sub(1);
+        } else {
+            last_pos -= 1;
+        }
+    }
+
+    // Snap partition_chunk_offset to the expected recall range
+    let expected_offset_u64 = (expected_recall_index as u64) * num_chunks_in_recall_range;
+    eyre::ensure!(
+        expected_offset_u64 < num_chunks_in_partition,
+        "expected recall offset {} out of partition bounds [0, {}) (recall_index={}, ranges={}, chunks_per_range={})",
+        expected_offset_u64,
+        num_chunks_in_partition,
+        expected_recall_index,
+        num_recall_ranges_in_partition,
+        num_chunks_in_recall_range
+    );
+    partition_chunk_offset = expected_offset_u64 as u32;
+
+    // Re-ensure per-partition and ledger bounds after snapping
+    eyre::ensure!(
+        u64::from(partition_chunk_offset) < num_chunks_in_partition,
+        "partition_chunk_offset {} out of range [0, {}) after snapping (partition={}, recall_index={}, chunks_per_range={})",
+        partition_chunk_offset,
+        num_chunks_in_partition,
+        partition_hash,
+        expected_recall_index,
+        num_chunks_in_recall_range
+    );
+    let ledger_chunk_offset = slot_start + u64::from(partition_chunk_offset);
+    eyre::ensure!(
+        ledger_chunk_offset < prev_total_chunks,
+        "ledger_chunk_offset {} must be < prev_total_chunks {} after snapping (slot_start={}, partition_chunk_offset={})",
+        ledger_chunk_offset,
+        prev_total_chunks,
+        slot_start,
+        partition_chunk_offset
+    );
 
     // Compute checkpoints for (current_step - 1)
     let mut hasher = Sha256::new();
