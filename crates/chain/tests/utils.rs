@@ -1154,6 +1154,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn mine_block_with_payload(
         &self,
     ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+        // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
+        self.node_ctx
+            .service_senders
+            .block_producer
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(1)))
+            .unwrap();
+
         let poa_solution = solution_context(&self.node_ctx).await?;
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         self.node_ctx
@@ -1166,6 +1173,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap();
         let res = response_rx.await?;
         let maybe = res?;
+        // Reset the guard to Some(0) to avoid unintended mining beyond this call
+        self.node_ctx
+            .service_senders
+            .block_producer
+            .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
+            .unwrap();
         maybe.ok_or_eyre("block not returned")
     }
 
