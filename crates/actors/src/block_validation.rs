@@ -1005,6 +1005,7 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
+#[tracing::instrument(skip_all, fields(block = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -1018,6 +1019,7 @@ pub async fn shadow_transactions_are_valid(
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
+        .in_current_span()
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
