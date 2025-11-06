@@ -608,8 +608,6 @@ impl BlockValidationTask {
                     &self.block,
                     &self.service_inner.reth_node_adapter,
                     execution_data,
-                    &self.block_tree_guard.clone(),
-                    &config.consensus,
                 )
                 .instrument(tracing::error_span!(
                     "reth_submission",
