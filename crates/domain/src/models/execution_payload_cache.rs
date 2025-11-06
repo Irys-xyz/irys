@@ -11,6 +11,7 @@ use reth::revm::primitives::B256;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot::Receiver;
 use tokio::sync::RwLock;
 use tracing::{debug, error, instrument, warn};
@@ -246,25 +247,36 @@ impl ExecutionPayloadCache {
         evm_block_hash: B256,
         use_trusted_peers_only: bool,
     ) {
-        self.cache
-            .write()
-            .await
-            .payloads_currently_requested_from_the_network
-            .put(evm_block_hash, ());
-        if let Err(peer_list_error) = self
-            .peer_list
-            .request_payload_from_the_network(evm_block_hash, use_trusted_peers_only)
-            .await
-        {
+        let mut max_iterations = 10;
+        loop {
+            if max_iterations == 0 {
+                break;
+            }
             self.cache
                 .write()
                 .await
                 .payloads_currently_requested_from_the_network
-                .pop(&evm_block_hash);
-            error!(
-                "Failed to request execution payload from the network: {:?}",
-                peer_list_error
-            );
+                .put(evm_block_hash, ());
+            if let Err(peer_list_error) = self
+                .peer_list
+                .request_payload_from_the_network(evm_block_hash, use_trusted_peers_only)
+                .await
+            {
+                self.cache
+                    .write()
+                    .await
+                    .payloads_currently_requested_from_the_network
+                    .pop(&evm_block_hash);
+                error!(
+                    "Failed to request execution payload from the network: {:?}",
+                    peer_list_error
+                );
+                // try re-requesting from the network afetr a short while
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                max_iterations -= 1;
+                continue;
+            }
+            break;
         }
     }
 
