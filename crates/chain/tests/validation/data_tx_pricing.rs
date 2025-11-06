@@ -1,9 +1,13 @@
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{
+    assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,
+    IrysNodeTest,
+};
 use crate::validation::unpledge_partition::gossip_data_tx_to_node;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    block_tree_service::BlockTreeServiceMessage, block_validation::ValidationError,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
 use irys_domain::ChainState;
@@ -140,7 +144,11 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with insufficient perm_fee should be rejected",
+    );
 
     genesis_node.stop().await;
 
@@ -256,7 +264,11 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with insufficient term_fee should be rejected",
+    );
 
     genesis_node.stop().await;
 

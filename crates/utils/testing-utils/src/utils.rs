@@ -14,6 +14,9 @@ use tracing_subscriber::{
     EnvFilter,
 };
 
+#[cfg(feature = "telemetry")]
+use std::backtrace::Backtrace;
+
 pub fn initialize_tracing() {
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
@@ -89,34 +92,64 @@ pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
 pub fn setup_panic_hook() -> eyre::Result<()> {
     color_eyre::install()?;
 
-    // wrap the color_eyre panic hook & log the timestamp before it runs
-    // not perfect, but probably good enough
-    // easier than hook_builder.panic_message
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
         // get current timestamp in RFC3339 format with microseconds and Z suffix to match `tracing`
         let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
+        let panic_message = panic_info.to_string();
+        let location = panic_info.location();
 
-        // print timestamp before the panic message
+        // Log panic to OpenTelemetry with structured fields
+        let panic_message_clean = panic_message.replace('\n', " | ");
+
+        // Capture backtrace if telemetry is enabled, otherwise empty string
+        #[cfg(feature = "telemetry")]
+        let backtrace_str = Backtrace::force_capture().to_string().replace('\n', " | ");
+        #[cfg(not(feature = "telemetry"))]
+        let backtrace_str = String::new();
+
+        if let Some(loc) = location {
+            tracing::error!(
+                timestamp = %timestamp,
+                panic.message = %panic_message_clean,
+                panic.file = %loc.file(),
+                panic.line = loc.line(),
+                panic.column = loc.column(),
+                panic.backtrace = %backtrace_str,
+                "PANIC OCCURRED - Process will abort"
+            );
+        } else {
+            tracing::error!(
+                timestamp = %timestamp,
+                panic.message = %panic_message_clean,
+                panic.backtrace = %backtrace_str,
+                "PANIC OCCURRED (no location) - Process will abort"
+            );
+        }
+
+        // Flush OpenTelemetry before calling original hook
+        #[cfg(feature = "telemetry")]
+        {
+            use irys_utils::telemetry;
+            if telemetry::flush_telemetry().is_ok() {
+                // Give batch processor time to send data
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+
+        // Print to stderr for immediate console visibility
         eprintln!("\x1b[1;31m[{timestamp}] Panic occurred:\x1b[0m");
 
-        // call the original panic hook
+        // Call the original panic hook for full backtrace
         original_hook(panic_info);
 
-        // abort the process
         eprintln!("\x1b[1;31mPanic occurred, Aborting process\x1b[0m");
-        // TODO: maybe change this so that the panic hook can trigger an orderly shutdown
 
-        // this will trigger the existing control-c signal detection
+        // Trigger SIGINT for orderly shutdown
         let pid = unsafe { libc::getpid() };
         unsafe {
             libc::kill(pid, libc::SIGINT);
         }
-
-        // sleeping the thread will cause SIGINT to not function correctly
-        // std::thread::sleep(std::time::Duration::from_secs(10));
-        // eprintln!("Waited 15s, force exiting...");
-        // std::process::exit(1)
     }));
 
     Ok(())
