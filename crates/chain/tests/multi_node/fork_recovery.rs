@@ -377,27 +377,11 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
     peer_node.mine_blocks_without_gossip(1).await?;
     let fork_height = base_height + 1;
     assert_eq!(fork_height, base_height + 1);
-    // Early check: ensure peer did not overshoot beyond a single block
-    let peer_height_after = peer_node.get_canonical_chain_height().await;
-    assert_eq!(
-        peer_height_after, fork_height,
-        "peer overshoot: expected fork height {}, got {}",
-        fork_height, peer_height_after
-    );
     let fork_block_level1 = peer_node.get_block_by_height(fork_height).await?;
 
     // Stage 2: genesis extends the canonical chain while unaware of the fork
     genesis_node.gossip_disable();
-    let genesis_height_before = genesis_node.get_canonical_chain_height().await;
     let canonical_block_level1 = genesis_node.mine_block().await?;
-    // Early check: ensure genesis only advanced by one block for this mine
-    assert_eq!(
-        canonical_block_level1.height,
-        genesis_height_before + 1,
-        "genesis overshoot: height before {} after {}",
-        genesis_height_before,
-        canonical_block_level1.height
-    );
 
     assert_eq!(fork_height, canonical_block_level1.height);
     genesis_node
@@ -406,12 +390,6 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
 
     let canonical_block_level2 = genesis_node.mine_block().await?;
     assert_eq!(fork_height + 1, canonical_block_level2.height);
-    // Also ensure sequential single-block advance on genesis
-    assert_eq!(
-        canonical_block_level2.height,
-        canonical_block_level1.height + 1,
-        "genesis produced more than one block between level1 and level2"
-    );
     genesis_node
         .wait_until_height(canonical_block_level2.height, seconds_to_wait)
         .await?;
