@@ -567,7 +567,7 @@ where
                     }
                 }
 
-                // If source failed, try top 5 active peers (excluding the source)
+                // If the source failed, try random 7 out of the top 15 active peers (excluding the source)
                 if fetched.is_none() {
                     let mut exclude = std::collections::HashSet::new();
                     exclude.insert(source_miner_address);
