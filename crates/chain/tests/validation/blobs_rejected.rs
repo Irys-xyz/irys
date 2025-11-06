@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{
+    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+};
 use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::Signature as AlloySignature;
 use alloy_primitives::{Bytes, B256, U256};
+use irys_actors::block_validation::ValidationError;
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
@@ -105,7 +108,11 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with blob_gas_used should be rejected",
+    );
 
     genesis_node.stop().await;
     Ok(())
@@ -143,7 +150,11 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with excess_blob_gas should be rejected",
+    );
 
     genesis_node.stop().await;
     Ok(())
@@ -188,7 +199,11 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with withdrawals should be rejected",
+    );
 
     genesis_node.stop().await;
     Ok(())
@@ -242,7 +257,11 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with versioned_hashes should be rejected",
+    );
 
     genesis_node.stop().await;
     Ok(())

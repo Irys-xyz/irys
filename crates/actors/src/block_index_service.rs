@@ -90,7 +90,7 @@ impl BlockIndexServiceInner {
                 if let Some((prev_height, prev_hash)) = &self.last_received_block {
                     if block_header.height != prev_height + 1 {
                         let err = eyre!(
-                            "Block migration out of order or with a gap: prev_height={}, prev_hash={:x}, current_height={}, current_hash={:x}",
+                            "Block migration out of order or with a gap: prev_height={}, prev_hash={}, current_height={}, current_hash={}",
                             prev_height,
                             prev_hash,
                             block_header.height,
