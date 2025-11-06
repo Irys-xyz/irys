@@ -79,7 +79,7 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
     // Wait for it to be migrated so it appears in the ledger first
     let wrong_data_size_header = wrong_data_size_tx.header.clone();
     genesis_node
-        .wait_for_migrated_txs(([wrong_data_size_header]).to_vec(), seconds_to_wait)
+        .wait_for_migrated_txs(vec![wrong_data_size_header], seconds_to_wait)
         .await?;
 
     // Post the last 3 chunks and validate they are not accepted
@@ -142,9 +142,7 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
         assert_eq!(status, reqwest::StatusCode::OK);
     }
 
-    genesis_node.mine_block().await?;
-    genesis_node.mine_block().await?;
-    genesis_node.mine_block().await?;
+    genesis_node.mine_blocks(3).await?;
 
     // Verify the chunks of the first and second tx
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
@@ -207,13 +205,23 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
         assert_eq!(status, reqwest::StatusCode::OK);
     }
 
-    genesis_node.mine_block().await?;
-    genesis_node.mine_block().await?;
-    genesis_node.mine_block().await?;
+    genesis_node.mine_blocks(3).await?;
 
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
+
+    // Validate the chunks of wrong_data_size_tx2 (the final tx in the ledger)
+    for i in 0..3 {
+        genesis_node
+            .verify_migrated_chunk_32b(
+                DataLedger::Submit,
+                LedgerChunkOffset::from(9 + i as u64),
+                &chunks2[i],
+                bad_data_size,
+            )
+            .await;
+    }
 
     // TODO: when implemented, validate that the wrong_data_size_tx2 do not promote
 
