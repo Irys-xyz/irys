@@ -671,7 +671,7 @@ mod tests {
 
             for _ in 0..cycles {
                 let before = score.get();
-                score.decrease_slow();
+                score.increase_online();
                 if before < PeerScore::MAX {
                     assert_eq!(score.get(), before + 1);
                 } else {
