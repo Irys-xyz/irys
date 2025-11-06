@@ -1067,8 +1067,7 @@ impl StorageModule {
                 } else {
                     // Calculate the relative partition offset, this can sometimes be negative if the
                     // data_root overlaps two partitions
-                    let relative_offset =
-                        RelativeChunkOffset::from(info.start_offset + tx_offset as i32);
+                    let relative_offset = info.start_offset + tx_offset as i32;
 
                     // Only include a writeable offset for a partition if it has a >= 0
                     // partition relative offset
