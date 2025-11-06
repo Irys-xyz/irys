@@ -7,7 +7,7 @@ use tracing::info;
 use crate::utils::IrysNodeTest;
 
 #[tokio::test]
-async fn overlapping_data_sizes() -> eyre::Result<()> {
+async fn test_overlapping_data_sizes() -> eyre::Result<()> {
     std::env::set_var("RUST_LOG", "info");
     initialize_tracing();
 
@@ -41,6 +41,10 @@ async fn overlapping_data_sizes() -> eyre::Result<()> {
     let chunks = [[10; 32], [20; 32], [30; 32], [40; 32], [50; 32], [60; 32]];
     let data: Vec<u8> = chunks.concat();
 
+    // Create a second set of chunks for a different data_root tx
+    let chunks2 = [[11; 32], [21; 32], [31; 32], [41; 32], [51; 32], [61; 32]];
+    let data2: Vec<u8> = chunks2.concat();
+
     // Compose a valid transaction with all of the chunks and accurate data_size
     let valid_tx = genesis_node
         .create_signed_data_tx(&genesis_signer, data.clone())
@@ -72,8 +76,11 @@ async fn overlapping_data_sizes() -> eyre::Result<()> {
         .post_data_tx_raw(&wrong_data_size_tx.header)
         .await;
 
-    // Mine a block
-    genesis_node.mine_block().await?;
+    // Wait for it to be migrated so it appears in the ledger first
+    let wrong_data_size_header = wrong_data_size_tx.header.clone();
+    genesis_node
+        .wait_for_migrated_txs(([wrong_data_size_header]).to_vec(), seconds_to_wait)
+        .await?;
 
     // Post the last 3 chunks and validate they are not accepted
     for i in 3..6 {
@@ -88,6 +95,10 @@ async fn overlapping_data_sizes() -> eyre::Result<()> {
     // Post the valid tx to adjust the data_size for the data_root
     genesis_node.post_data_tx_raw(&valid_tx.header).await;
 
+    genesis_node
+        .wait_for_mempool(valid_tx.header.id, seconds_to_wait)
+        .await?;
+
     // Now attempt to post the last 3 chunks and verify they succeed.
     for i in 3..6 {
         let (status, _body) = genesis_node
@@ -98,6 +109,26 @@ async fn overlapping_data_sizes() -> eyre::Result<()> {
 
     // Mine a block (to migrate the wrong_data_size_tx)
     genesis_node.mine_block().await?;
+
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, bad_data_size)
+        .await
+        .expect("Failed to get price");
+
+    // Also post the second bad tx (splitting these up over blocks enforces their order in the ledger)
+    let mut wrong_data_size_tx2 = genesis_signer.create_publish_transaction(
+        data2.clone(),
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee,
+        price_info.term_fee,
+    )?;
+    wrong_data_size_tx2.header.data_size = bad_data_size;
+    wrong_data_size_tx2 = genesis_signer.sign_transaction(wrong_data_size_tx2)?;
+
+    genesis_node
+        .post_data_tx_raw(&wrong_data_size_tx2.header)
+        .await;
+
     genesis_node.mine_block().await?;
 
     // Validate the chunks do not appear in the ledger
@@ -119,32 +150,72 @@ async fn overlapping_data_sizes() -> eyre::Result<()> {
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
     check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
 
-    // Validate chunks in both Submit and Publish ledgers
-    for ledger in [DataLedger::Submit, DataLedger::Publish] {
-        // Validate the 3 wrong_data_size_tx chunks (bytes & data_size)
-        for i in 0..3 {
+    // Get the first chunk from publish ledger to determine promotion order
+    let first_chunk = genesis_node
+        .get_chunk(DataLedger::Publish, LedgerChunkOffset::from(0))
+        .await
+        .expect("the publish ledger chunk should exist");
+
+    // For the publish ledger, track the offsets of the valid and invalid tx
+    // as the submit tx may have been promoted in any order
+    let (valid_publish_offset, wrong_publish_offset) =
+        if first_chunk.data_size == valid_tx.header.data_size {
+            (0, 6) // valid_tx promoted first
+        } else {
+            (3, 0) // wrong_data_size_tx promoted first
+        };
+
+    // Validate the 3 wrong_data_size_tx chunks in both ledgers
+    for i in 0..3 {
+        for (ledger, offset) in [
+            (DataLedger::Submit, 0),
+            (DataLedger::Publish, wrong_publish_offset),
+        ] {
             genesis_node
                 .verify_migrated_chunk_32b(
                     ledger,
-                    LedgerChunkOffset::from(i as u64),
+                    LedgerChunkOffset::from((i + offset) as u64),
                     &chunks[i],
                     wrong_data_size_tx.header.data_size,
                 )
                 .await;
         }
+    }
 
-        // Validate the 6 valid_tx chunks (bytes & data_size)
-        for i in 0..6 {
+    // Validate the 6 valid_tx chunks in both ledgers
+    for i in 0..6 {
+        for (ledger, offset) in [
+            (DataLedger::Submit, 3),
+            (DataLedger::Publish, valid_publish_offset),
+        ] {
             genesis_node
                 .verify_migrated_chunk_32b(
                     ledger,
-                    LedgerChunkOffset::from((i + 3) as u64),
+                    LedgerChunkOffset::from((i + offset) as u64),
                     &chunks[i],
                     valid_tx.header.data_size,
                 )
                 .await;
         }
     }
+
+    // Post the first 3 chunk of the second wrong size tx
+    for i in 0..3 {
+        let (status, _body) = genesis_node
+            .post_chunk_32b_with_status(&wrong_data_size_tx2, i, &chunks2)
+            .await;
+        assert_eq!(status, reqwest::StatusCode::OK);
+    }
+
+    genesis_node.mine_block().await?;
+    genesis_node.mine_block().await?;
+    genesis_node.mine_block().await?;
+
+    check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 0);
+    check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Submit, 1);
+    check_storage_module_chunks(&genesis_node, "GENESIS", DataLedger::Publish, 0);
+
+    // TODO: when implemented, validate that the wrong_data_size_tx2 do not promote
 
     // Graceful shutdown
     genesis_node.stop().await;
