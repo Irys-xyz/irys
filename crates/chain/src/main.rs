@@ -14,6 +14,9 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    // Load .env file if present (silently ignore if not found)
+    let _ = dotenvy::dotenv();
+
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };

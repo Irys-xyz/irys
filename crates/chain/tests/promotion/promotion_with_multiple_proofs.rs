@@ -54,9 +54,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .start_with_name("PEER2")
         .await;
 
-    genesis_node.start_mining();
-
-    genesis_node.wait_until_height(1, seconds_to_wait).await?;
+    genesis_node.mine_block().await?;
 
     let peer1_stake_tx = stake_and_pledge_signer(&peer1_node, &peer1_signer, 3).await?;
     let peer2_stake_tx = stake_and_pledge_signer(&peer2_node, &peer2_signer, 3).await?;
@@ -70,6 +68,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
 
     // Mine blocks to include the stake commitments in a confirmed block, then wait for peers to catch up.
     let height_before_commitments = genesis_node.get_canonical_chain_height().await;
+    genesis_node.mine_block().await?;
     genesis_node
         .wait_until_height_confirmed(height_before_commitments + 1, seconds_to_wait)
         .await?;
@@ -130,7 +129,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
     assert_matches!(res, Ok(()));
 
     let height = genesis_node.get_canonical_chain_height().await;
-    genesis_node.start_mining();
+    genesis_node.mine_block().await?;
     genesis_node
         .wait_until_height_confirmed(height + 1, seconds_to_wait)
         .await?;
