@@ -369,8 +369,6 @@ async fn heavy_shallow_fork_triggers_migration_prune_and_fcu() -> eyre::Result<(
         .await?;
 
     let base_height = genesis_node.get_canonical_chain_height().await;
-
-    // This assert failed (left 4 right 3) at 13:14 on 4th November
     assert_eq!(base_height, num_blocks_in_epoch as u64);
 
     // Stage 1: peer mines a private fork with gossip disabled
