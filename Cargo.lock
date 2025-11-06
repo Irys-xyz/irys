@@ -5074,6 +5074,7 @@ dependencies = [
  "assert_matches",
  "base58",
  "core_affinity",
+ "dotenvy",
  "eyre",
  "futures",
  "hex",
