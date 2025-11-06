@@ -27,7 +27,7 @@ use crate::block_validation::{
 };
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use eyre::Context as _;
-use futures::FutureExt;
+use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use irys_vdf::state::CancelEnum;
@@ -106,9 +106,9 @@ impl BlockValidationTask {
                 block.hash = %self.block.block_hash,
                 "Validation cancelled due to height difference"
             );
-            return ValidationResult::Invalid(ValidationError::ValidationCancelled {
+            ValidationResult::Invalid(ValidationError::ValidationCancelled {
                 reason: "height difference".to_string(),
-            });
+            })
         };
 
         let wait_for_parent_validation = self.exit_if_block_is_too_old().boxed();
@@ -585,7 +585,7 @@ impl BlockValidationTask {
                 ));
             }
         };
-                tracing::error!("shadow txs are valid");
+        tracing::error!("shadow txs are valid");
 
         match (
             &recall_result,

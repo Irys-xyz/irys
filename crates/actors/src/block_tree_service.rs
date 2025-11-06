@@ -502,7 +502,6 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
-
         if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
                 block.hash = %block_hash,

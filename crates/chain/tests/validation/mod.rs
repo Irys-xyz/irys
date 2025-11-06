@@ -26,7 +26,6 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
-use irys_testing_utils::initialize_tracing;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
     IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
@@ -55,7 +54,7 @@ async fn send_block_to_block_tree(
     response_rx.await.unwrap()
 }
 
-async fn send_block_to_block_validation(
+fn send_block_to_block_validation(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
 ) -> Result<(), PreValidationError> {
@@ -925,10 +924,9 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     Ok(())
 }
 
-
 /// Peer mines a block on top of common state with genesis
 /// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
-/// 
+///
 /// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
 #[test_log::test(tokio::test)]
 async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
@@ -953,7 +951,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
 
     // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
     // node will wait for this block to be validated for quite a while until it starts mining
-    send_block_to_block_validation(&genesis_node.node_ctx, block.clone()).await?;
+    send_block_to_block_validation(&genesis_node.node_ctx, block.clone())?;
 
     genesis_node.mine_blocks_without_gossip(3).await?;
     genesis_node.gossip_enable();

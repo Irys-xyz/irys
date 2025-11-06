@@ -271,7 +271,7 @@ impl ExecutionPayloadCache {
                     "Failed to request execution payload from the network: {:?}",
                     peer_list_error
                 );
-                // try re-requesting from the network afetr a short while
+                // try re-requesting from the network after a short while
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 max_iterations -= 1;
                 continue;
