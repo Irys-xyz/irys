@@ -9,6 +9,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
     StorageModuleServiceMessage,
 };
+use eyre::OptionExt as _;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
@@ -345,78 +346,44 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
-    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) {
-        let block_hash = block.block_hash;
-        let migration_height = block.height;
-
+    async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Check if the block is already in the block index
         let binding = self.block_index_guard.clone();
-        {
-            let bi = binding.read();
-            if bi.num_blocks() > migration_height {
-                if let Some(migrated) = bi.get_item(migration_height) {
-                    if migrated.block_hash == block_hash {
-                        // Already indexed, nothing to do.
-                        return;
-                    }
-                    panic!(
-                        "Block tree and index out of sync at height {} (index has {}, expected {})",
-                        migration_height, migrated.block_hash, block_hash
-                    );
-                } else {
-                    panic!(
-                        "Block index missing item at height {} while migrating {}",
-                        migration_height, block_hash
-                    );
-                }
-            }
-        }
 
         debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block");
 
-        // NOTE: order of events is very important! block migration event
-        // writes chunks to db, which is expected by `send_block_migration_message`.
-        let block_migrated_event = BlockMigratedEvent {
-            block: Arc::clone(block),
-        };
-        if let Err(e) = self
-            .service_senders
-            .block_migrated_events
-            .send(block_migrated_event)
-        {
-            debug!("No reorg subscribers: {:?}", e);
-        }
-
         // Collect blocks to migrate by walking backwards from the current migration block
-        // Note: generally we should have only 1 block to migrate. Sometimes that is not the case.
-        // Optimal solution is to find out the root cause for why we'd have more blocks
-        // than a single one to migrate.
         let blocks_to_migrate = {
-            let block_tree = self.cache.read().expect("poisoned lock");
-            let mut blocks_to_migrate = vec![Arc::clone(block)]; // Start with current block
-            let mut current = Arc::clone(block);
-            let parents_to_fetch = {
+            let mut blocks_to_migrate = vec![];
+            let mut current = block.block_hash;
+
+            // Get the last migrated block hash from block_index to know when to stop
+            let last_migrated_hash = {
                 let bi = binding.read();
-                let diff = migration_height.saturating_sub(bi.num_blocks());
-                diff.saturating_sub(1)
+                bi.get_latest_item()
+                    .ok_or_eyre("must have at laest a single item in block index")?
+                    .block_hash
             };
 
-            if parents_to_fetch > 0 {
-                tracing::error!("block tree service has advanced further than a single block between doing block migration. Error migration code kicking in. Fetching {} extra blocks to migrate", parents_to_fetch);
-            }
-            for _ in 0..parents_to_fetch {
-                let parent_hash = current.previous_block_hash;
-                let parent = block_tree
-                    .get_block(&parent_hash)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "parent block {} not found while collecting blocks for migration",
-                            parent_hash
+            // Walk backwards until we reach the last migrated block
+            let block_tree = self.cache.read().expect("poisoned lock");
+            loop {
+                // Stop if we've reached the last migrated block
+                if current == last_migrated_hash {
+                    break;
+                }
+
+                let to_migrate = block_tree
+                    .get_block(&current)
+                    .map(|block| Arc::new(block.clone()))
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "block {} not found while collecting blocks for migration",
+                            current,
                         )
-                    })
-                    .clone();
-                blocks_to_migrate.push(Arc::new(parent.clone()));
-                current = Arc::new(parent);
+                    })?;
+                blocks_to_migrate.push(to_migrate.clone());
+                current = to_migrate.previous_block_hash;
             }
 
             // Reverse to get oldest-first order
@@ -426,11 +393,23 @@ impl BlockTreeServiceInner {
 
         // Send all blocks in order (oldest to newest)
         for block_to_migrate in blocks_to_migrate {
+            // NOTE: order of events is very important! block migration event
+            // writes chunks to db, which is expected by `send_block_migration_message`.
+            let block_migrated_event = BlockMigratedEvent {
+                block: Arc::clone(&block_to_migrate),
+            };
+            if let Err(e) = self
+                .service_senders
+                .block_migrated_events
+                .send(block_migrated_event)
+            {
+                debug!("No reorg subscribers: {:?}", e);
+            }
             self.send_block_migration_message(block_to_migrate)
                 .await
-                .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))
-                .unwrap();
+                .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))?
         }
+        Ok(())
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -830,7 +809,7 @@ impl BlockTreeServiceInner {
             self.emit_block_confirmed(markers);
             // Handle block migration (move chunks to disk and add to block_index)
             if tip_changed {
-                self.migrate_block(&markers.migration_block).await;
+                self.migrate_block(&markers.migration_block).await?;
             }
         }
 
