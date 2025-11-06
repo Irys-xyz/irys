@@ -415,7 +415,7 @@ impl BlockTreeServiceInner {
         let parent_block_entry = cache
             .blocks
             .get(&block.previous_block_hash)
-            .expect("previous block to be in block tree");
+            .unwrap_or_else(|| panic!("block needs to be in cache {} at height: {}", block.previous_block_hash, block.height -1 ));
 
         // Get te parent block's commitment snapshot
         let prev_commitment_snapshot = parent_block_entry.commitment_snapshot.clone();
@@ -610,6 +610,7 @@ impl BlockTreeServiceInner {
             let arc_block = Arc::new(block_entry.block.clone());
 
             let tip_changed = cache.mark_tip(&block_hash)?;
+            tracing::error!(?tip_changed, ?block_hash,  height = arc_block.height, cumulative_diff = ?arc_block.cumulative_diff, "tip changed?");
 
             let (epoch_block, reorg_event, fcu_markers) = if tip_changed {
                 let block_index_read = self.block_index_guard.read();
@@ -943,6 +944,7 @@ pub fn prune_chains_at_ancestor(
         .expect("Common ancestor should exist in old chain");
 
     // Find the ancestor index in the new chain
+    tracing::error!(?ancestor_hash, ?ancestor_height, "reorg");
     let new_ancestor_idx = new_chain
         .iter()
         .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)

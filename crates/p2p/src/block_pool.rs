@@ -114,7 +114,7 @@ where
     sync_state: ChainSyncState,
 
     block_status_provider: BlockStatusProvider,
-    execution_payload_provider: ExecutionPayloadCache,
+    pub execution_payload_provider: ExecutionPayloadCache,
 
     config: Config,
     service_senders: ServiceSenders,
@@ -148,7 +148,7 @@ impl BlockCacheGuard {
         }
     }
 
-    async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
+    pub async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
         self.inner
             .write()
             .await

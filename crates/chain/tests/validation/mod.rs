@@ -31,7 +31,7 @@ use irys_types::{
 };
 
 // Helper function to send a block directly to the block tree service for validation
-async fn send_block_to_block_tree(
+pub async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
     commitment_txs: Vec<CommitmentTransaction>,
@@ -907,3 +907,5 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 
     Ok(())
 }
+
+
