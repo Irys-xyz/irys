@@ -91,16 +91,19 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
 
     let original_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        // get current timestamp in RFC3339 format with microseconds and Z suffix to match
+        // get current timestamp in RFC3339 format with microseconds and Z suffix to match `tracing`
         let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true);
         let panic_message = panic_info.to_string();
         let location = panic_info.location();
 
         // Log panic to OpenTelemetry with structured fields
+        // Replace newlines to ensure clean OTLP export
+        let panic_message_clean = panic_message.replace('\n', " | ");
+
         if let Some(loc) = location {
             tracing::error!(
                 timestamp = %timestamp,
-                panic.message = %panic_message,
+                panic.message = %panic_message_clean,
                 panic.file = %loc.file(),
                 panic.line = loc.line(),
                 panic.column = loc.column(),
@@ -109,9 +112,19 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         } else {
             tracing::error!(
                 timestamp = %timestamp,
-                panic.message = %panic_message,
+                panic.message = %panic_message_clean,
                 "PANIC OCCURRED (no location) - Process will abort"
             );
+        }
+
+        // Flush OpenTelemetry before calling original hook
+        #[cfg(feature = "telemetry")]
+        {
+            use irys_utils::telemetry;
+            if telemetry::flush_telemetry().is_ok() {
+                // Give batch processor time to send data
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
         }
 
         // Print to stderr for immediate console visibility
@@ -119,16 +132,6 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
 
         // Call the original panic hook for full backtrace
         original_hook(panic_info);
-
-        // Flush OpenTelemetry before process termination
-        #[cfg(feature = "telemetry")]
-        {
-            use irys_utils::telemetry;
-            tracing::error!("Flushing telemetry before shutdown...");
-            if let Err(e) = telemetry::flush_telemetry() {
-                eprintln!("Failed to flush telemetry: {}", e);
-            }
-        }
 
         eprintln!("\x1b[1;31mPanic occurred, Aborting process\x1b[0m");
 
