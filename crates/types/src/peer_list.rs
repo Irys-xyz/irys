@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tracing::debug;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, Arbitrary, PartialEq, Hash)]
 pub struct PeerScore(u16);
@@ -29,29 +30,31 @@ impl PeerScore {
     }
 
     /// Base method to increase score by a given amount
-    pub fn increase_by(&mut self, amount: u16) {
+    fn increase_by(&mut self, amount: u16) {
         self.0 = (self.0 + amount).min(Self::MAX);
     }
 
     /// Base method to decrease score by a given amount
-    pub fn decrease_by(&mut self, amount: u16) {
+    fn decrease_by(&mut self, amount: u16) {
         self.0 = self.0.saturating_sub(amount);
     }
 
-    pub fn increase(&mut self) {
-        self.increase_by(1);
-    }
-
-    pub fn decrease(&mut self) {
+    pub fn decrease_slow(&mut self) {
         self.decrease_by(1);
     }
 
-    pub fn decrease_offline(&mut self) {
+    pub fn decrease_offline(&mut self, msg: &str) {
+        debug!("Decreasing peer score due to offline status: {}", msg);
         self.decrease_by(3);
     }
 
-    pub fn decrease_bogus_data(&mut self) {
+    pub fn decrease_bogus_data(&mut self, msg: &str) {
+        debug!("Decreasing peer score due to bogus data: {}", msg);
         self.decrease_by(5);
+    }
+
+    pub fn increase_online(&mut self) {
+        self.increase_by(1);
     }
 
     pub fn is_active(&self) -> bool {
@@ -566,7 +569,7 @@ mod tests {
             #[case] expected: u16,
         ) {
             let mut score = PeerScore::new(initial);
-            score.decrease_bogus_data();
+            score.decrease_bogus_data("test");
             assert_eq!(score.get(), expected);
         }
 
@@ -581,7 +584,7 @@ mod tests {
             #[case] expected: u16,
         ) {
             let mut score = PeerScore::new(initial);
-            score.decrease_offline();
+            score.decrease_offline("test");
             assert_eq!(score.get(), expected);
         }
 
@@ -595,7 +598,7 @@ mod tests {
             #[case] expected: u16,
         ) {
             let mut score = PeerScore::new(initial);
-            score.decrease();
+            score.decrease_slow();
             assert_eq!(score.get(), expected);
         }
 
@@ -646,16 +649,16 @@ mod tests {
         fn test_combined_decreases() {
             let mut score = PeerScore::new(50);
 
-            score.decrease_bogus_data();
+            score.decrease_bogus_data("bogus data");
             assert_eq!(score.get(), 45);
 
-            score.decrease_offline();
+            score.decrease_offline("test");
             assert_eq!(score.get(), 42);
 
-            score.decrease();
+            score.decrease_slow();
             assert_eq!(score.get(), 41);
 
-            score.decrease_offline();
+            score.decrease_offline("test");
             assert_eq!(score.get(), 38);
         }
 
@@ -668,14 +671,14 @@ mod tests {
 
             for _ in 0..cycles {
                 let before = score.get();
-                score.increase();
+                score.increase_online();
                 if before < PeerScore::MAX {
                     assert_eq!(score.get(), before + 1);
                 } else {
                     assert_eq!(score.get(), PeerScore::MAX);
                 }
 
-                score.decrease();
+                score.decrease_slow();
                 if score.get() > 0 {
                     assert_eq!(score.get(), before);
                 }
@@ -696,8 +699,8 @@ mod tests {
                 match op_type {
                     0 => score.increase_by(amount),
                     1 => score.decrease_by(amount),
-                    2 => score.decrease_bogus_data(),
-                    3 => score.decrease_offline(),
+                    2 => score.decrease_bogus_data("bogus data"),
+                    3 => score.decrease_offline("offline"),
                     _ => {}
                 }
 
@@ -743,9 +746,9 @@ mod tests {
             let mut score2 = PeerScore::new(initial);
             let mut score3 = PeerScore::new(initial);
 
-            score1.decrease();
-            score2.decrease_offline();
-            score3.decrease_bogus_data();
+            score1.decrease_slow();
+            score2.decrease_offline("test");
+            score3.decrease_bogus_data("some error message");
 
             assert_eq!(score1.get(), 49);
             assert_eq!(score2.get(), 47);

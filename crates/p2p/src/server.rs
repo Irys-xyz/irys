@@ -397,11 +397,20 @@ where
         peer_list: &PeerList,
     ) {
         match error {
-            GossipError::InvalidData(_) => {
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            GossipError::InvalidData(invalid_data_error) => {
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::BogusData(format!(
+                        "Invalid data: {:?}",
+                        invalid_data_error
+                    )),
+                );
             }
-            GossipError::BlockPool(CriticalBlockPoolError::BlockError(_)) => {
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            GossipError::BlockPool(CriticalBlockPoolError::BlockError(msg)) => {
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::BogusData(format!("Block pool error: {:?}", msg)),
+                );
             }
             _ => {}
         };

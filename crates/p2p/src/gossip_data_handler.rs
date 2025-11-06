@@ -453,8 +453,10 @@ where
                 ))
             );
 
-            self.peer_list
-                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
+            self.peer_list.decrease_peer_score(
+                &source_miner_address,
+                ScoreDecreaseReason::BogusData("Invalid block signature".into()),
+            );
 
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
