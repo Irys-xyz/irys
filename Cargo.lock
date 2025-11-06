@@ -5445,6 +5445,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "color-eyre",
+ "irys-utils",
  "libc",
  "rand 0.8.5",
  "tempfile",
