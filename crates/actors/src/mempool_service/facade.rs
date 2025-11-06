@@ -3,6 +3,7 @@ use crate::mempool_service::{
     ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
 use crate::services::ServiceSenders;
+use crate::CriticalChunkIngressError;
 use eyre::eyre;
 use irys_types::{
     chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
@@ -180,7 +181,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         self.service
             .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
             .map_err(|_| {
-                ChunkIngressError::Other("Error sending ChunkIngressMessage ".to_owned())
+                CriticalChunkIngressError::Other("Error sending ChunkIngressMessage ".to_owned())
             })?;
 
         oneshot_rx.await.expect("to process ChunkIngressMessage")

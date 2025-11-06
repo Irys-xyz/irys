@@ -39,6 +39,7 @@ pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
         match err {
+            GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", &err)),
             GossipError::Network(msg) => Self::Network(msg),
             GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
             GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
@@ -419,8 +420,12 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 "Failed to pull and process block {:?}: {:?}",
                 block_hash, err
             );
-            self.block_pool.remove_requested_block(&block_hash).await;
-            self.block_pool.remove_block_from_cache(&block_hash).await;
+
+            if !err.is_advisory() {
+                self.block_pool.remove_requested_block(&block_hash).await;
+                self.block_pool.remove_block_from_cache(&block_hash).await;
+            }
+
             Err(ChainSyncError::Internal(format!(
                 "Network error: {:?}",
                 err

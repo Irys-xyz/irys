@@ -9,7 +9,7 @@ use tracing::info;
 
 use irys_types::{irys::IrysSigner, NodeConfig};
 
-use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
 sol!(
@@ -55,12 +55,9 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
 
     let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
 
-    let contract = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut deploy_fut,
-        Duration::from_millis(2_000),
-    )
-    .await??;
+    let contract = node
+        .future_or_mine_on_timeout(&mut deploy_fut, Duration::from_millis(2_000))
+        .await??;
 
     info!("Contract address is {:?}", contract.address());
     let main_balance = contract.balanceOf(main_address.address()).call().await?;
@@ -70,12 +67,9 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
     let transfer_call = transfer_call_builder.send().await?;
     let mut transfer_receipt_fut = Box::pin(transfer_call.get_receipt());
 
-    let _ = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut transfer_receipt_fut,
-        Duration::from_millis(2_000),
-    )
-    .await??;
+    let _ = node
+        .future_or_mine_on_timeout(&mut transfer_receipt_fut, Duration::from_millis(2_000))
+        .await?;
 
     // check balance for account1
     let addr1_balance = contract.balanceOf(account1.address()).call().await?;

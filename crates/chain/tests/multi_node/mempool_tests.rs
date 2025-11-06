@@ -157,7 +157,7 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Ensure it did not get cached
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
@@ -212,7 +212,7 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Ensure it did not get cached
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
@@ -267,7 +267,7 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
             .to_request(),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // Ensure it did not get cached
     genesis_node.wait_for_chunk_cache_count(0, 3).await?;
@@ -1637,7 +1637,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .expect("shared tx should be accepted");
 
     // mine a block
-    let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
+    let (_block, reth_exec_env) = genesis.mine_block_with_payload().await?;
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 

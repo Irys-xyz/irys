@@ -1,7 +1,10 @@
 // These tests create malicious block producers that include invalid PermFeeRefund shadow transactions.
 // They verify that blocks are rejected when they contain inappropriate refunds.
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{
+    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+};
 use crate::validation::send_block_to_block_tree;
+use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
@@ -114,10 +117,10 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     // Send block to the Genesis node for validation (not the genesis node)
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "Genesis should reject block with refund for promoted transaction"
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "Genesis should reject block with refund for promoted transaction",
     );
 
     // Send block to the PEER node for validation (not the genesis node)
@@ -125,10 +128,10 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 
     // Verify the PEER node rejected the block
     let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "Peer should reject block with refund for promoted transaction"
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "Peer should reject block with refund for promoted transaction",
     );
 
     // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure
@@ -225,10 +228,10 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
     // Send block to the Genesis node for validation (not the genesis node)
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "Genesis should reject block with refund for promoted transaction"
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "Genesis should reject block with refund for nonexistent transaction",
     );
 
     // Send block to the PEER node for validation (not the genesis node)
@@ -236,10 +239,10 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
 
     // Verify the PEER node rejected the block
     let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "Peer should reject block with refund for promoted transaction"
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "Peer should reject block with refund for nonexistent transaction",
     );
 
     // Verify the block was NOT submitted to the PEER's reth due to shadow validation failure

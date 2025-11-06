@@ -1,4 +1,4 @@
-use crate::block_pool::{BlockPool, BlockPoolError};
+use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
@@ -518,7 +518,12 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         .await;
 
     assert!(res.is_err());
-    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
+    assert!(matches!(
+        res,
+        Err(BlockPoolError::Critical(
+            CriticalBlockPoolError::ForkedBlock(_)
+        ))
+    ));
 }
 
 #[tokio::test]
@@ -692,7 +697,12 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     sync_service_handle.shutdown_signal.fire();
 
-    assert!(matches!(res, Err(BlockPoolError::ForkedBlock(_))));
+    assert!(matches!(
+        res,
+        Err(BlockPoolError::Critical(
+            CriticalBlockPoolError::ForkedBlock(_)
+        ))
+    ));
 }
 
 #[tokio::test]
@@ -749,6 +759,8 @@ async fn should_not_fast_track_block_already_in_index() {
 
     assert_eq!(
         err,
-        BlockPoolError::TryingToReprocessFinalizedBlock(test_header.block_hash)
+        BlockPoolError::Critical(CriticalBlockPoolError::TryingToReprocessFinalizedBlock(
+            test_header.block_hash
+        ))
     );
 }

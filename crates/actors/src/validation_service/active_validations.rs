@@ -307,7 +307,7 @@ impl ValidationCoordinator {
     }
 
     /// Check if block extends canonical tip
-    #[instrument(skip_all, fields(%block_hash))]
+    #[instrument(skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;

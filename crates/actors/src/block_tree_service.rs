@@ -89,12 +89,14 @@ pub struct BlockMigratedEvent {
     pub block: Arc<IrysBlockHeader>,
 }
 
+/// Event broadcast when a block's state changes in the block tree.
 #[derive(Debug, Clone)]
 pub struct BlockStateUpdated {
     pub block_hash: BlockHash,
     pub height: u64,
     pub state: ChainState,
     pub discarded: bool,
+    pub validation_result: ValidationResult,
 }
 
 impl BlockTreeService {
@@ -209,7 +211,9 @@ impl BlockTreeServiceInner {
         match msg {
             BlockTreeServiceMessage::GetBlockTreeReadGuard { response } => {
                 let guard = BlockTreeReadGuard::new(self.cache.clone());
-                let _ = response.send(guard);
+                if let Err(_guard) = response.send(guard) {
+                    tracing::warn!("Block tree guard response channel was closed by receiver");
+                }
             }
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
@@ -217,8 +221,17 @@ impl BlockTreeServiceInner {
                 skip_vdf_validation: skip_vdf,
                 response,
             } => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
                 let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
-                let _ = response.send(result);
+                if let Err(send_err) = response.send(result) {
+                    tracing::warn!(
+                        block.hash = ?block_hash,
+                        block.height = block_height,
+                        custom.send_error = ?send_err,
+                        "Failed to send pre-validation result to caller - receiver dropped"
+                    );
+                }
             }
             BlockTreeServiceMessage::BlockValidationFinished {
                 block_hash,
@@ -501,20 +514,17 @@ impl BlockTreeServiceInner {
             block_hash, validation_result, height
         );
 
-        if validation_result == ValidationResult::Invalid {
+        if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
                 block.hash = %block_hash,
-                "invalid block"
+                error = %validation_error,
+                "block validation failed"
             );
             let mut cache = self
                 .cache
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            error!(
-                block.hash = %block_hash,
-                "invalid block"
-            );
             let Some(block_entry) = cache.get_block(&block_hash) else {
                 // block not in the tree
                 return Ok(());
@@ -527,17 +537,24 @@ impl BlockTreeServiceInner {
                 .unwrap_or(ChainState::NotOnchain(BlockState::Unknown));
 
             // Remove the block
-            let _ = cache
-                .remove_block(&block_hash)
-                .inspect_err(|err| tracing::error!(?err));
+            if let Err(err) = cache.remove_block(&block_hash) {
+                tracing::error!(?err, "Failed to remove block from cache");
+            }
 
             let event = BlockStateUpdated {
                 block_hash,
                 height,
                 state,
                 discarded: true,
+                validation_result,
             };
-            let _ = self.service_senders.block_state_events.send(event);
+            if let Err(e) = self.service_senders.block_state_events.send(event) {
+                tracing::warn!(
+                    block.hash = ?block_hash,
+                    block.height = height,
+                    "Failed to broadcast block state update event: {}", e
+                );
+            }
 
             return Ok(());
         }
@@ -800,8 +817,15 @@ impl BlockTreeServiceInner {
             height,
             state,
             discarded: false,
+            validation_result: ValidationResult::Valid,
         };
-        let _ = self.service_senders.block_state_events.send(event);
+        if let Err(e) = self.service_senders.block_state_events.send(event) {
+            tracing::warn!(
+                block.hash = ?block_hash,
+                block.height = height,
+                "Failed to broadcast block state update event: {}", e
+            );
+        }
 
         Ok(())
     }
@@ -931,8 +955,9 @@ pub fn prune_chains_at_ancestor(
     (old_divergent, new_divergent)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Result of block validation.
+#[derive(Debug, Clone)]
 pub enum ValidationResult {
     Valid,
-    Invalid,
+    Invalid(crate::block_validation::ValidationError),
 }

@@ -2,11 +2,14 @@ use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     rate_limiting::DataRequestTracker,
-    types::{InternalGossipError, InvalidDataError},
+    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    CriticalChunkIngressError, MempoolFacade,
+};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
@@ -21,7 +24,7 @@ use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::log::warn;
-use tracing::{debug, error, Span};
+use tracing::{debug, error, instrument, Span};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -88,43 +91,58 @@ where
             }
             Err(error) => {
                 match error {
-                    ChunkIngressError::UnknownTransaction => {
-                        // TODO:
-                        //  I suppose we have to ask the peer for transaction,
-                        //  but what if it doesn't have one?
-                        Ok(())
+                    ChunkIngressError::Critical(err) => {
+                        match err {
+                            // ===== External invalid data errors
+                            CriticalChunkIngressError::InvalidProof => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
+                            ),
+                            CriticalChunkIngressError::InvalidDataHash => Err(
+                                GossipError::InvalidData(InvalidDataError::ChinkInvalidDataHash),
+                            ),
+                            CriticalChunkIngressError::InvalidChunkSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
+                            ),
+                            CriticalChunkIngressError::InvalidDataSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
+                            ),
+                            // ===== Internal errors
+                            CriticalChunkIngressError::DatabaseError => {
+                                Err(GossipError::Internal(InternalGossipError::Database))
+                            }
+                            CriticalChunkIngressError::ServiceUninitialized => Err(
+                                GossipError::Internal(InternalGossipError::ServiceUninitialized),
+                            ),
+                            CriticalChunkIngressError::Other(other) => {
+                                Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+                            }
+                        }
                     }
-                    // ===== External invalid data errors
-                    ChunkIngressError::InvalidProof => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::InvalidDataHash => Err(GossipError::InvalidData(
-                        InvalidDataError::ChinkInvalidDataHash,
-                    )),
-                    ChunkIngressError::InvalidChunkSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidDataSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedBytes => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedDataPath => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::PreHeaderOffsetExceedsCap => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    // ===== Internal errors
-                    ChunkIngressError::DatabaseError => {
-                        Err(GossipError::Internal(InternalGossipError::Database))
-                    }
-                    ChunkIngressError::ServiceUninitialized => Err(GossipError::Internal(
-                        InternalGossipError::ServiceUninitialized,
-                    )),
-                    ChunkIngressError::Other(other) => {
-                        Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+
+                    ChunkIngressError::Advisory(err) => {
+                        match err {
+                            // ===== Interval data 'errors' (peers should not be punished)
+                            AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedBytes,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::Other(other) => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::Other(other),
+                                )))
+                            }
+                        }
                     }
                 }
             }
@@ -375,6 +393,7 @@ where
         .await
     }
 
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), err)]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -464,6 +483,10 @@ where
             self.gossip_client.mining_address, block_header.block_hash
         );
 
+        debug!(
+            "Collecting missing/invalid data transactions for block {:?}",
+            block_hash
+        );
         let mut missing_invalid_tx_ids = Vec::new();
 
         for tx_id in block_header
@@ -475,6 +498,10 @@ where
                 missing_invalid_tx_ids.push(tx_id);
             }
         }
+        debug!(
+            "Collected missing data tx ids: {:?}",
+            missing_invalid_tx_ids
+        );
 
         for system_tx_id in block_header
             .system_ledgers
@@ -488,6 +515,10 @@ where
                 missing_invalid_tx_ids.push(system_tx_id);
             }
         }
+        debug!(
+            "Collected missing commitment tx ids: {:?}",
+            missing_invalid_tx_ids
+        );
 
         if !missing_invalid_tx_ids.is_empty() {
             debug!(
@@ -501,9 +532,14 @@ where
             .remove_from_blacklist(missing_invalid_tx_ids.clone())
             .await
             .map_err(|error| {
-                error!("Failed to remove txs from mempool blacklist");
+                error!("Failed to remove txs from the mempool blacklist");
                 GossipError::unknown(&error)
             })?;
+
+        debug!(
+            "Fetching missing transactions from the network for block {:?}",
+            block_hash
+        );
 
         // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
         // Fetch and process each missing transaction one-by-one with retries
@@ -591,6 +627,11 @@ where
                 .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
         }
 
+        debug!(
+            "Got all missing transactions for block {:?}, sending to processing",
+            block_hash
+        );
+
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
         let is_in_the_trusted_sync_range = self
             .sync_state
@@ -604,8 +645,7 @@ where
 
         self.block_pool
             .process_block::<A>(Arc::new(block_header), skip_block_validation)
-            .await
-            .map_err(GossipError::BlockPool)?;
+            .await?;
         Ok(())
     }
 
@@ -758,9 +798,7 @@ where
 
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let block_result = self.block_pool.get_block_data(&block_hash).await;
-
-                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
 
                 match maybe_block {
                     Some(block) => {
@@ -822,11 +860,7 @@ where
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let maybe_block = self
-                    .block_pool
-                    .get_block_data(&block_hash)
-                    .await
-                    .map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
                 Ok(maybe_block.map(GossipData::Block))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {

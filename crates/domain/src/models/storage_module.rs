@@ -350,10 +350,9 @@ impl StorageModule {
                 })?;
 
             // Initially just mark the global intervals as Uninitialized for this submodules interval
-            let _ = global_intervals.insert_merge_touching_if_values_equal(
-                submodule_interval,
-                ChunkType::Uninitialized,
-            );
+            global_intervals
+                .insert_merge_touching_if_values_equal(submodule_interval, ChunkType::Uninitialized)
+                .map_err(|e| eyre::eyre!("Failed to insert submodule interval: {:?}", e))?;
         }
 
         // TODO: if there are any gaps, or the range doesn't cover a full module range panic
@@ -990,7 +989,7 @@ impl StorageModule {
             RelativeChunkOffset::from(self.make_offset_partition_relative(chunk_range.start())?);
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
-            let _ = submodule.db.update(|tx| -> eyre::Result<()> {
+            submodule.db.update_eyre(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
                 add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
                 set_data_size_for_data_root(tx, data_root, data_size)?;
@@ -1020,11 +1019,12 @@ impl StorageModule {
         let res = self.submodules.get_key_value_at_point(partition_offset);
 
         if let Ok((_interval, submodule)) = res {
-            submodule.db.update(|tx| -> eyre::Result<()> {
+            submodule.db.update_eyre(|tx| -> eyre::Result<()> {
                 add_full_data_path(tx, data_path_hash, data_path)?;
                 add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
                 Ok(())
-            })?
+            })?;
+            Ok(())
         } else {
             Err(eyre::eyre!(
                 "No submodule found for Partition Offset {:?}",
@@ -1533,12 +1533,12 @@ impl StorageModule {
 impl Drop for StorageModule {
     fn drop(&mut self) {
         info!("Syncing SM {} to disk...", &self.id);
-        let _ = self.force_sync_pending_chunks().inspect_err(|e| {
+        if let Err(e) = self.force_sync_pending_chunks() {
             error!(
                 "Unable to sync writes while dropping SM {} - {:?}",
                 &self.id, &e
-            )
-        });
+            );
+        }
     }
 }
 

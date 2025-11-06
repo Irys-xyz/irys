@@ -8,7 +8,7 @@ use tracing::debug;
 
 use super::EpochSnapshot;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitmentSnapshotStatus {
     Accepted,           // The commitment is valid and was added to the snapshot
     Unknown,            // The commitment has no status in the snapshot
