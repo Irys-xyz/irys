@@ -45,12 +45,11 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(timeout_secs: u64) -> Result<Self> {
-        // Reduced connection timeout from 2s to 1s after profiling: prevents UI freezing
-        // during node discovery when multiple nodes are down. 1s provides good balance
-        // between responsiveness and avoiding false negatives on slow networks.
+        // Use configured timeout for both request timeout and connection timeout
+        // to allow flexibility for remote/international peers
         let client = ClientBuilder::new()
             .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(1))
+            .connect_timeout(Duration::from_secs(timeout_secs))
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(Duration::from_secs(60))
             .build()
@@ -177,7 +176,8 @@ impl ApiClient {
             .await
         {
             Ok(info) => Ok(info),
-            Err(_) => {
+            Err(e) => {
+                debug!("Failed to fetch /v1/info from {}: {}", node_url, e);
                 // Fallback: Try without /v1 prefix for older/remote nodes
                 self.get_with_cancellation_without_version(node_url, "/info", Some(cancel_token))
                     .await
