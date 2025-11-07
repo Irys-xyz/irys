@@ -734,24 +734,24 @@ where
                             RejectionReason::InvalidData => {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
-                                        "Peer reported invalid data for request {:?}",
-                                        data_request
+                                        "Peer {:?} reported invalid data for request {:?}",
+                                        peer.0, data_request
                                     )),
                                 ));
                             }
                             RejectionReason::RateLimited => {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
-                                        "Peer rate limited the request {:?}",
-                                        data_request
+                                        "Peer {:?} rate limited the request {:?}",
+                                        peer.0, data_request
                                     )),
                                 ));
                             }
                             RejectionReason::UnableToVerifyOrigin => {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
-                                        "Peer unable to verify our origin of request {:?}",
-                                        data_request
+                                        "Peer {:?} unable to verify our origin of request {:?}",
+                                        peer.0, data_request
                                     )),
                                 ));
                             }
