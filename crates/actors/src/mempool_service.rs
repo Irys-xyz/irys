@@ -1772,6 +1772,9 @@ pub enum TxIngressError {
     /// Catch-all variant for other errors.
     #[error("Transaction ingress error: {0}")]
     Other(String),
+    /// Transaction has encountered a fee calculation issue
+    #[error("Transaction misaligned funds: {0}")]
+    FundMisalignment(String),
     /// Commitment transaction validation error
     #[error("Commitment validation failed: {0}")]
     CommitmentValidationError(#[from] CommitmentValidationError),

@@ -91,6 +91,11 @@ pub async fn post_commitment_tx(
                     )),
                 )
             }
+            TxIngressError::FundMisalignment(reason) => {
+                tracing::debug!("Tx has invalid funding params: {}", reason);
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Funding for tx is invalid. {reason}")))
+            }
         };
     }
 

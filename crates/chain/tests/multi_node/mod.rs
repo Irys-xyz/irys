@@ -1,3 +1,4 @@
+pub mod api_ingress_validation;
 pub mod ema_forks;
 pub mod epoch_replay;
 pub mod fork_recovery;
