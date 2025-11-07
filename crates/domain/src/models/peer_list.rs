@@ -22,12 +22,12 @@ const UNSTAKED_PEER_PURGATORY_CAPACITY: usize = 500;
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug)]
 pub enum ScoreDecreaseReason {
-    BogusData,
-    Offline,
+    BogusData(String),
+    Offline(String),
+    NetworkError(String),
     SlowResponse,
-    NoResponse,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -629,13 +629,13 @@ impl PeerListDataInner {
             let was_active = peer.reputation_score.is_active() && peer.is_online;
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
             }
             let now_active = peer.reputation_score.is_active() && peer.is_online;
@@ -652,13 +652,13 @@ impl PeerListDataInner {
             let was_active = peer.reputation_score.is_active() && peer.is_online;
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
             }
 
@@ -702,17 +702,17 @@ impl PeerListDataInner {
         if let Some(peer_item) = self.persistent_peers_cache.get_mut(mining_addr) {
             let was_active = peer_item.reputation_score.is_active() && peer_item.is_online;
             match reason {
-                ScoreDecreaseReason::BogusData => {
-                    peer_item.reputation_score.decrease_bogus_data();
+                ScoreDecreaseReason::BogusData(message) => {
+                    peer_item.reputation_score.decrease_bogus_data(&message);
                 }
-                ScoreDecreaseReason::Offline => {
-                    peer_item.reputation_score.decrease_offline();
+                ScoreDecreaseReason::Offline(message) => {
+                    peer_item.reputation_score.decrease_offline(&message);
                 }
                 ScoreDecreaseReason::SlowResponse => {
-                    peer_item.reputation_score.decrease();
+                    peer_item.reputation_score.decrease_slow();
                 }
-                ScoreDecreaseReason::NoResponse => {
-                    peer_item.reputation_score.decrease_offline();
+                ScoreDecreaseReason::NetworkError(message) => {
+                    peer_item.reputation_score.decrease_offline(&message);
                 }
             }
 
@@ -1046,10 +1046,10 @@ mod tests {
         use rstest::rstest;
 
         #[rstest]
-        #[case(ScoreDecreaseReason::BogusData, 45)]
-        #[case(ScoreDecreaseReason::Offline, 47)]
+        #[case(ScoreDecreaseReason::BogusData(String::from("test")), 45)]
+        #[case(ScoreDecreaseReason::Offline(String::from("test")), 47)]
         #[case(ScoreDecreaseReason::SlowResponse, 49)]
-        #[case(ScoreDecreaseReason::NoResponse, 47)]
+        #[case(ScoreDecreaseReason::NetworkError(String::from("test")), 47)]
         fn test_decrease_peer_score_persistent_cache(
             #[case] reason: ScoreDecreaseReason,
             #[case] expected_score: u16,
@@ -1071,13 +1071,14 @@ mod tests {
 
             peer_list.add_or_update_peer(addr, peer, true);
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            peer_list
+                .decrease_peer_score(&addr, ScoreDecreaseReason::BogusData("bogus_data".into()));
             assert_eq!(
                 peer_list.get_peer(&addr).unwrap().reputation_score.get(),
                 45
             );
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline("offline".into()));
             assert_eq!(
                 peer_list.get_peer(&addr).unwrap().reputation_score.get(),
                 42
@@ -1089,7 +1090,10 @@ mod tests {
                 41
             );
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::NoResponse);
+            peer_list.decrease_peer_score(
+                &addr,
+                ScoreDecreaseReason::NetworkError("network_error".into()),
+            );
             assert_eq!(
                 peer_list.get_peer(&addr).unwrap().reputation_score.get(),
                 38
@@ -1105,7 +1109,7 @@ mod tests {
             peer_list.add_or_update_peer(addr, peer.clone(), true);
             assert!(peer_list.all_known_peers().contains(&peer.address));
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData("bogus".into()));
             let updated_peer = peer_list.get_peer(&addr);
 
             if let Some(p) = updated_peer {
@@ -1123,7 +1127,7 @@ mod tests {
             peer_list.add_or_update_peer(addr, peer.clone(), false);
             assert!(peer_list.get_peer(&addr).is_some());
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline("offline".into()));
             assert!(peer_list.get_peer(&addr).is_none());
             assert!(!peer_list.all_known_peers().contains(&peer.address));
         }
@@ -1154,7 +1158,7 @@ mod tests {
             peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
             peer_list.add_or_update_peer(addr, peer, true);
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline("offline".into()));
             let updated_peer = peer_list.get_peer(&addr).unwrap();
 
             assert_eq!(updated_peer.reputation_score.get(), 19);
@@ -1177,7 +1181,7 @@ mod tests {
             let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
             assert_eq!(initial_score, 50);
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData("bogus".into()));
 
             let final_peer = peer_list.get_peer(&addr);
             assert!(
