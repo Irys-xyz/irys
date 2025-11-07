@@ -31,6 +31,7 @@ use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use irys_vdf::state::CancelEnum;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
@@ -111,7 +112,9 @@ impl BlockValidationTask {
             })
         };
 
-        let wait_for_parent_validation = self.exit_if_block_is_too_old().boxed();
+        let wait_for_parent_validation = self
+            .exit_if_block_is_too_old(|_| ControlFlow::Continue(()))
+            .boxed();
         let validate_block = self.validate_block().boxed();
         match futures::future::select(validate_block, wait_for_parent_validation).await {
             futures::future::Either::Left((validation_result, _block_too_old_future)) => {
@@ -127,7 +130,7 @@ impl BlockValidationTask {
 
                 validation_result
             }
-            futures::future::Either::Right(((), _validation_task)) => {
+            futures::future::Either::Right((_, _validation_task)) => {
                 return parent_got_cancelled();
             }
         }
@@ -181,6 +184,37 @@ impl BlockValidationTask {
     /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
+        let parent_chain_state_check =
+            |parent_hash: BlockHash| match self.get_parent_chain_state(&parent_hash) {
+                None => {
+                    // Parent doesn't exist in tree - this is an error condition
+                    error!(
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        "CRITICAL: Parent block not found"
+                    );
+                    ControlFlow::Break(ParentValidationResult::Cancelled)
+                }
+                Some(parent_state) if self.is_parent_ready(&parent_state) => {
+                    debug!("Parent validation complete");
+                    ControlFlow::Break(ParentValidationResult::Ready)
+                }
+                Some(_) => {
+                    // Parent exists but not ready, wait for updates
+                    ControlFlow::Continue(())
+                }
+            };
+
+        self.exit_if_block_is_too_old(parent_chain_state_check)
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    async fn exit_if_block_is_too_old(
+        &self,
+        extra_checks: impl Fn(BlockHash) -> ControlFlow<ParentValidationResult, ()>,
+    ) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
         // Subscribe to block state updates
@@ -207,25 +241,9 @@ impl BlockValidationTask {
                 return ParentValidationResult::Cancelled;
             }
 
-            // 2. Check parent state (single check per iteration)
-            match self.get_parent_chain_state(&parent_hash) {
-                None => {
-                    // Parent doesn't exist in tree - this is an error condition
-                    error!(
-                        block.parent_hash = %parent_hash,
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
-                        "CRITICAL: Parent block not found"
-                    );
-                    return ParentValidationResult::Cancelled;
-                }
-                Some(parent_state) if self.is_parent_ready(&parent_state) => {
-                    debug!("Parent validation complete");
-                    return ParentValidationResult::Ready;
-                }
-                Some(_) => {
-                    // Parent exists but not ready, wait for updates
-                }
+            match extra_checks(parent_hash) {
+                ControlFlow::Continue(()) => {}
+                ControlFlow::Break(result) => return result,
             }
 
             // 3. Wait for relevant state changes
@@ -248,59 +266,6 @@ impl BlockValidationTask {
                         "Block state channel closed while waiting for parent"
                     );
                     return ParentValidationResult::Cancelled;
-                }
-            }
-        }
-    }
-
-    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
-    async fn exit_if_block_is_too_old(&self) {
-        let parent_hash = self.block.previous_block_hash;
-
-        // Subscribe to block state updates
-        let mut block_state_rx = self
-            .service_inner
-            .service_senders
-            .subscribe_block_state_updates();
-
-        loop {
-            // 1. Check cancellation condition first
-            if self.should_exit_due_to_height_diff() {
-                let block_tree = self.block_tree_guard.read();
-                let tip_hash = block_tree.tip;
-                if let Some(tip_block) = block_tree.get_block(&tip_hash) {
-                    let height_diff = tip_block.height.saturating_sub(self.block.height);
-                    warn!(
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
-                        block.height_diff= height_diff,
-                        config.threshold = self.service_inner.config.consensus.block_tree_depth,
-                        "Cancelling validation: block too far behind tip"
-                    );
-                }
-                return;
-            }
-
-            // 3. Wait for relevant state changes
-            debug!(block.parent_hash = %parent_hash, "Waiting for parent validation");
-            match block_state_rx.recv().await {
-                Ok(event) if event.block_hash == parent_hash => {
-                    // Parent state changed, loop back to check
-                    continue;
-                }
-                Ok(_) => {
-                    // Not our parent, continue waiting
-                    continue;
-                }
-                Err(_) => {
-                    // Channel closed - treat as error
-                    error!(
-                        block.parent_hash = %parent_hash,
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
-                        "Block state channel closed while waiting for parent"
-                    );
-                    return;
                 }
             }
         }
