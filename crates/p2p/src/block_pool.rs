@@ -148,7 +148,7 @@ impl BlockCacheGuard {
         }
     }
 
-    pub(crate) async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
+    async fn add_block(&self, block_header: Arc<IrysBlockHeader>, is_fast_tracking: bool) {
         self.inner
             .write()
             .await

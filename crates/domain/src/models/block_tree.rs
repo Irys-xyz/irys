@@ -433,20 +433,11 @@ impl BlockTree {
         );
 
         if block.cumulative_diff > self.max_cumulative_difficulty.0 {
-            tracing::error!(
+            debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
-                block.cumulative_diff,
-                hash,
-                block.height
+                block.cumulative_diff, hash, block.height
             );
             self.max_cumulative_difficulty = (block.cumulative_diff, hash);
-        } else {
-            tracing::error!(
-                "NOT UPDATING MAX CUMULATIVE DIFF ({}, {}) for height: {}",
-                block.cumulative_diff,
-                hash,
-                block.height
-            );
         }
 
         self.blocks.insert(
@@ -747,7 +738,6 @@ impl BlockTree {
         let old_tip = self.tip;
 
         let (canonical_diff, canonical_block_hash) = self.max_cumulative_difficulty;
-        tracing::error!(prev_max_cumulative_diff = ?self.max_cumulative_difficulty, cum_diff_match = ?block.cumulative_diff == canonical_diff, block_hashes_dont_match = canonical_block_hash != *block_hash, "old cumulative difficulty");
 
         if block.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
             // "Cannot move tip away from canonical for another block with same cumulative_diff"

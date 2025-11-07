@@ -644,14 +644,13 @@ impl BlockTreeServiceInner {
                 if old_tip_block.cumulative_diff >= arc_block.cumulative_diff {
                     // this also means that the tip can point to a block in a chain that is not
                     // the canonical one (aka which the self.max_cumulative_difficulty is pointing at).
-                    // That is valid becuase the blocks below self.max_cumulative_difficulty
+                    // That is valid because the blocks below self.max_cumulative_difficulty
                     // could still be undregoing validation, which is not guaranteed to succeed
                     false
                 } else {
                     cache.mark_tip(&block_hash)?
                 }
             };
-            tracing::error!(?tip_changed, ?block_hash,  height = arc_block.height, cumulative_diff = ?arc_block.cumulative_diff, "tip changed?");
 
             let (epoch_block, reorg_event, fcu_markers) = if tip_changed {
                 let block_index_read = self.block_index_guard.read();
