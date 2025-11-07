@@ -114,7 +114,7 @@ where
     sync_state: ChainSyncState,
 
     block_status_provider: BlockStatusProvider,
-    execution_payload_provider: ExecutionPayloadCache,
+    pub execution_payload_provider: ExecutionPayloadCache,
 
     config: Config,
     service_senders: ServiceSenders,

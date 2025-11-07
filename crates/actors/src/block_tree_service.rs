@@ -431,12 +431,19 @@ impl BlockTreeServiceInner {
             return Ok(());
         }
 
-        let parent_block_entry = cache
-            .blocks
-            .get(&block.previous_block_hash)
-            .expect("previous block to be in block tree");
+        let parent_block_entry =
+            cache
+                .blocks
+                .get(&block.previous_block_hash)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "block {} needs to be in cache at height: {}",
+                        block.previous_block_hash,
+                        block.height - 1
+                    )
+                });
 
-        // Get te parent block's commitment snapshot
+        // Get the parent block's commitment snapshot
         let prev_commitment_snapshot = parent_block_entry.commitment_snapshot.clone();
 
         // Create epoch snapshot for this block
@@ -629,7 +636,22 @@ impl BlockTreeServiceInner {
                 .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
             let arc_block = Arc::new(block_entry.block.clone());
 
-            let tip_changed = cache.mark_tip(&block_hash)?;
+            let tip_changed = {
+                let old_tip_block = cache
+                    .get_block(&cache.tip)
+                    .ok_or_eyre("tip block must always be present")?;
+
+                // only mark the tip if the new tip has higher cumulative difficulty than the old one
+                if old_tip_block.cumulative_diff >= arc_block.cumulative_diff {
+                    // this also means that the tip can point to a block in a chain that is not
+                    // the canonical one (aka which the self.max_cumulative_difficulty is pointing at).
+                    // That is valid because the blocks below self.max_cumulative_difficulty
+                    // could still be undregoing validation, which is not guaranteed to succeed
+                    false
+                } else {
+                    cache.mark_tip(&block_hash)?
+                }
+            };
 
             let (epoch_block, reorg_event, fcu_markers) = if tip_changed {
                 let block_index_read = self.block_index_guard.read();
