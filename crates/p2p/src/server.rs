@@ -112,8 +112,7 @@ where
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
-            let msg = "Failed to get peer address from gossip POST request";
-            debug!(msg);
+            warn!("Failed to get peer address from gossip POST request");
             return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::UnableToVerifyOrigin,
             )));
