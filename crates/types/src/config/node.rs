@@ -438,6 +438,9 @@ pub struct P2PGossipConfig {
     pub broadcast_batch_size: usize,
     /// Interval between broadcast steps in milliseconds
     pub broadcast_batch_throttle_interval: u64,
+    /// Enable scoring of peers based on their behavior. Disabling this might help with reducing
+    /// noise during debug, otherwise it's recommended to keep it enabled.
+    pub enable_scoring: bool,
 }
 
 impl Default for P2PGossipConfig {
@@ -445,6 +448,7 @@ impl Default for P2PGossipConfig {
         Self {
             broadcast_batch_size: 50,
             broadcast_batch_throttle_interval: 100,
+            enable_scoring: true,
         }
     }
 }
@@ -480,6 +484,8 @@ pub struct SyncConfig {
     pub periodic_sync_check_interval_secs: u64,
     /// Timeout for retry block pull/process
     pub retry_block_request_timeout_secs: u64,
+    /// Whether to enable periodic sync checks
+    pub enable_periodic_sync_check: bool,
 }
 
 impl Default for SyncConfig {
@@ -489,6 +495,7 @@ impl Default for SyncConfig {
             // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
+            enable_periodic_sync_check: true,
         }
     }
 }

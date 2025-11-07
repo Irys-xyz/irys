@@ -474,9 +474,20 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
             .node_config
             .sync
             .periodic_sync_check_interval_secs;
+        let is_periodic_check_enabled = self
+            .inner
+            .config
+            .node_config
+            .sync
+            .enable_periodic_sync_check;
 
+        let periodic_sync_check_interval = if is_periodic_check_enabled {
+            Duration::from_secs(period_secs)
+        } else {
+            Duration::MAX
+        };
         // Set up a periodic sync check timer
-        let mut periodic_timer = interval(Duration::from_secs(period_secs));
+        let mut periodic_timer = interval(periodic_sync_check_interval);
         periodic_timer.tick().await; // Consume the first immediate tick
 
         loop {
