@@ -733,23 +733,26 @@ where
                             }
                             RejectionReason::InvalidData => {
                                 last_error = Some(GossipError::PeerNetwork(
-                                    PeerNetworkError::FailedToRequestData(
-                                        "Peer reported invalid data".to_string(),
-                                    ),
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer reported invalid data for request {:?}",
+                                        data_request
+                                    )),
                                 ));
                             }
                             RejectionReason::RateLimited => {
                                 last_error = Some(GossipError::PeerNetwork(
-                                    PeerNetworkError::FailedToRequestData(
-                                        "Peer rate limited the request".to_string(),
-                                    ),
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer rate limited the request {:?}",
+                                        data_request
+                                    )),
                                 ));
                             }
                             RejectionReason::UnableToVerifyOrigin => {
                                 last_error = Some(GossipError::PeerNetwork(
-                                    PeerNetworkError::FailedToRequestData(
-                                        "Peer unable to verify our origin".to_string(),
-                                    ),
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer unable to verify our origin of request {:?}",
+                                        data_request
+                                    )),
                                 ));
                             }
                         }
