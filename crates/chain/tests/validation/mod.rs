@@ -14,6 +14,7 @@ use crate::utils::{
 };
 use crate::validation::unpledge_partition::gossip_commitment_to_node;
 use irys_actors::block_validation::ValidationError;
+use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
     async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
@@ -51,6 +52,21 @@ async fn send_block_to_block_tree(
         .unwrap();
 
     response_rx.await.unwrap()
+}
+
+fn send_block_to_block_validation(
+    node_ctx: &IrysNodeCtx,
+    block: Arc<IrysBlockHeader>,
+) -> Result<(), PreValidationError> {
+    node_ctx
+        .service_senders
+        .validation_service
+        .send(ValidationServiceMessage::ValidateBlock {
+            block,
+            skip_vdf_validation: false,
+        })
+        .unwrap();
+    Ok(())
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
@@ -904,6 +920,54 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     ));
 
     genesis_node.stop().await;
+
+    Ok(())
+}
+
+/// Peer mines a block on top of common state with genesis
+/// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
+///
+/// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
+#[test_log::test(tokio::test)]
+async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 2;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().block_tree_depth = 3;
+    genesis_config.consensus.get_mut().block_migration_depth = 1;
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    let peer_node = genesis_node
+        .testing_peer_with_assignments(&test_signer)
+        .await?;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    peer_node.gossip_disable();
+    let (block, _payload) = peer_node.mine_block_without_gossip().await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash);
+
+    // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
+    // node will wait for this block to be validated for quite a while until it starts mining
+    send_block_to_block_validation(&genesis_node.node_ctx, block.clone())?;
+
+    genesis_node.mine_blocks_without_gossip(3).await?;
+    genesis_node.gossip_enable();
+    peer_node.gossip_enable();
+    peer_node.gossip_block_to_peers(&block)?;
+
+    // Send block for validation
+    let outcome = outcome.await;
+
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ValidationCancelled { .. }),
+        "block with versioned_hashes should be rejected",
+    );
+    genesis_node.stop().await;
+    peer_node.stop().await;
 
     Ok(())
 }

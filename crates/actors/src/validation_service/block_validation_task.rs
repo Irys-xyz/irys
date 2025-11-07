@@ -27,9 +27,11 @@ use crate::block_validation::{
 };
 use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
 use eyre::Context as _;
+use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use irys_vdf::state::CancelEnum;
+use std::ops::ControlFlow;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
@@ -98,29 +100,40 @@ impl BlockValidationTask {
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     pub async fn execute_concurrent(self) -> ValidationResult {
-        let validation_result = self.validate_block().await;
+        let parent_got_cancelled = || {
+            // Task was cancelled due to height difference
+            // Return invalid to prevent this block from being accepted
+            tracing::warn!(
+                block.hash = %self.block.block_hash,
+                "Validation cancelled due to height difference"
+            );
+            ValidationResult::Invalid(ValidationError::ValidationCancelled {
+                reason: "height difference".to_string(),
+            })
+        };
 
-        // If validation is successful, wait for parent to be validated before reporting
-        if matches!(validation_result, ValidationResult::Valid) {
-            match self.wait_for_parent_validation().await {
-                ParentValidationResult::Cancelled => {
-                    // Task was cancelled due to height difference
-                    // Return invalid to prevent this block from being accepted
-                    tracing::warn!(
-                        block.hash = %self.block.block_hash,
-                        "Validation cancelled due to height difference"
-                    );
-                    return ValidationResult::Invalid(ValidationError::ValidationCancelled {
-                        reason: "height difference".to_string(),
-                    });
+        let wait_for_parent_validation = self
+            .exit_if_block_is_too_old(|_| ControlFlow::Continue(()))
+            .boxed();
+        let validate_block = self.validate_block().boxed();
+        match futures::future::select(validate_block, wait_for_parent_validation).await {
+            futures::future::Either::Left((validation_result, _block_too_old_future)) => {
+                // If validation is successful, wait for parent to be validated before reporting
+                if matches!(validation_result, ValidationResult::Valid) {
+                    match self.wait_for_parent_validation().await {
+                        ParentValidationResult::Cancelled => return parent_got_cancelled(),
+                        ParentValidationResult::Ready => {
+                            // Parent is ready, continue to report validation result
+                        }
+                    }
                 }
-                ParentValidationResult::Ready => {
-                    // Parent is ready, continue to report validation result
-                }
+
+                validation_result
+            }
+            futures::future::Either::Right((_, _validation_task)) => {
+                return parent_got_cancelled();
             }
         }
-
-        validation_result
     }
 
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
@@ -171,6 +184,37 @@ impl BlockValidationTask {
     /// We do this because just because a block is valid internally, if it's not connected to a valid chain it's still not valid
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
     async fn wait_for_parent_validation(&self) -> ParentValidationResult {
+        let parent_chain_state_check =
+            |parent_hash: BlockHash| match self.get_parent_chain_state(&parent_hash) {
+                None => {
+                    // Parent doesn't exist in tree - this is an error condition
+                    error!(
+                        block.parent_hash = %parent_hash,
+                        block.hash = %self.block.block_hash,
+                        block.height = %self.block.height,
+                        "CRITICAL: Parent block not found"
+                    );
+                    ControlFlow::Break(ParentValidationResult::Cancelled)
+                }
+                Some(parent_state) if self.is_parent_ready(&parent_state) => {
+                    debug!("Parent validation complete");
+                    ControlFlow::Break(ParentValidationResult::Ready)
+                }
+                Some(_) => {
+                    // Parent exists but not ready, wait for updates
+                    ControlFlow::Continue(())
+                }
+            };
+
+        self.exit_if_block_is_too_old(parent_chain_state_check)
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
+    async fn exit_if_block_is_too_old(
+        &self,
+        extra_checks: impl Fn(BlockHash) -> ControlFlow<ParentValidationResult, ()>,
+    ) -> ParentValidationResult {
         let parent_hash = self.block.previous_block_hash;
 
         // Subscribe to block state updates
@@ -197,25 +241,9 @@ impl BlockValidationTask {
                 return ParentValidationResult::Cancelled;
             }
 
-            // 2. Check parent state (single check per iteration)
-            match self.get_parent_chain_state(&parent_hash) {
-                None => {
-                    // Parent doesn't exist in tree - this is an error condition
-                    error!(
-                        block.parent_hash = %parent_hash,
-                        block.hash = %self.block.block_hash,
-                        block.height = %self.block.height,
-                        "CRITICAL: Parent block not found"
-                    );
-                    return ParentValidationResult::Cancelled;
-                }
-                Some(parent_state) if self.is_parent_ready(&parent_state) => {
-                    debug!("Parent validation complete");
-                    return ParentValidationResult::Ready;
-                }
-                Some(_) => {
-                    // Parent exists but not ready, wait for updates
-                }
+            match extra_checks(parent_hash) {
+                ControlFlow::Continue(()) => {}
+                ControlFlow::Break(result) => return result,
             }
 
             // 3. Wait for relevant state changes
@@ -545,7 +573,7 @@ impl BlockValidationTask {
                     &self.service_inner.reth_node_adapter,
                     execution_data,
                 )
-                .instrument(tracing::info_span!(
+                .instrument(tracing::error_span!(
                     "reth_submission",
                     block.hash = %self.block.block_hash,
                     block.height = %self.block.height
