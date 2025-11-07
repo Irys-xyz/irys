@@ -1,3 +1,4 @@
+use crate::storage_pricing::TERM_FEE;
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Address,
     Base64, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
@@ -46,10 +47,32 @@ impl IrysSigner {
     ) -> Result<DataTransaction> {
         let mut transaction = self.merklize(data, self.chunk_size as usize, store_data)?;
 
-        // TODO: These should be calculated from some pricing params passed in
-        // as a parameter
-        transaction.header.perm_fee = Some(U256::from(1));
-        transaction.header.term_fee = U256::from(1);
+        // Compute realistic fees using config defaults and pricing helpers
+        // Term fee: placeholder constant used across pricing until full dynamic pricing is wired
+        let term_fee = TERM_FEE;
+
+        // Use consensus defaults and genesis price to approximate perm fee (suitable for tests)
+        let config = crate::ConsensusConfig::testing();
+        let bytes_to_store = U256::from(transaction.header.data_size);
+
+        // Calculate base network fee for permanent storage
+        let cost_per_gb_per_year = config
+            .annual_cost_per_gb
+            .cost_per_replica(config.safe_minimum_number_of_years, config.decay_rate)?
+            .replica_count(config.number_of_ingress_proofs)?;
+        let base_network_fee =
+            cost_per_gb_per_year.base_network_fee(bytes_to_store, config.genesis_price)?;
+
+        // Add ingress proof rewards to get total perm_fee
+        let perm_fee = base_network_fee.add_ingress_proof_rewards(
+            term_fee,
+            config.number_of_ingress_proofs,
+            config.immediate_tx_inclusion_reward_percent,
+        )?;
+
+        // Set computed fees on the header
+        transaction.header.term_fee = term_fee;
+        transaction.header.perm_fee = Some(perm_fee.amount);
 
         transaction.header.anchor = anchor;
 
@@ -307,5 +330,54 @@ mod tests {
         let signer = recover_signer(&sig[..].try_into().unwrap(), prehash.into()).unwrap();
 
         assert_eq!(signer, tx.header.signer);
+    }
+
+    #[test]
+    fn create_transaction_sets_realistic_fees() {
+        let config = crate::ConsensusConfig::testing();
+        let irys = IrysSigner::random_signer(&config);
+        let data_bytes = vec![1_u8; 1234];
+
+        let tx = irys.create_transaction(data_bytes, None).unwrap();
+
+        // Term fee should equal the constant TERM_FEE used by pricing helpers
+        assert_eq!(tx.header.term_fee, crate::storage_pricing::TERM_FEE);
+
+        // Perm fee should equal base_network_fee + ingress proof rewards
+        let bytes_to_store = crate::U256::from(tx.header.data_size);
+        let cost_per_gb_per_year = config
+            .annual_cost_per_gb
+            .cost_per_replica(config.safe_minimum_number_of_years, config.decay_rate)
+            .unwrap()
+            .replica_count(config.number_of_ingress_proofs)
+            .unwrap();
+        let base_network_fee = cost_per_gb_per_year
+            .base_network_fee(bytes_to_store, config.genesis_price)
+            .unwrap();
+        let expected_perm = base_network_fee
+            .add_ingress_proof_rewards(
+                tx.header.term_fee,
+                config.number_of_ingress_proofs,
+                config.immediate_tx_inclusion_reward_percent,
+            )
+            .unwrap()
+            .amount;
+
+        assert_eq!(tx.header.perm_fee, Some(expected_perm));
+    }
+
+    #[test]
+    fn publish_fee_charges_accepts_computed_perm_fee() {
+        let config = crate::ConsensusConfig::testing();
+        let irys = IrysSigner::random_signer(&config);
+        let data = vec![7_u8; 1024];
+
+        let tx = irys.create_transaction(data, None).unwrap();
+        let perm = tx.header.perm_fee.expect("perm_fee set");
+        let term = tx.header.term_fee;
+
+        // Validate perm_fee against distribution logic
+        crate::transaction::fee_distribution::PublishFeeCharges::new(perm, term, &config)
+            .expect("perm_fee should be sufficient for ingress rewards + base cost");
     }
 }

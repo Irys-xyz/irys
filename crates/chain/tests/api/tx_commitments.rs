@@ -6,8 +6,8 @@ use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, CommitmentTransactionV1, CommitmentType,
-    NodeConfig, H256, U256,
+    irys::IrysSigner, Address, CommitmentTransaction, CommitmentType, DataLedger, NodeConfig, H256,
+    U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -250,14 +250,64 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
             &signer2_address,
         ));
 
+        // ===== PART 2: Force Submit ledger expansion via additional data =====
+        // Post additional data that exceeds one full partition to trigger a new Submit ledger slot assignment
+        let extra_num_chunks = config.consensus.get_mut().num_chunks_in_partition + 2;
+        let extra_chunk_size = config.consensus.get_mut().chunk_size;
+
+        let mut extra_data = Vec::with_capacity((extra_chunk_size * extra_num_chunks) as usize);
+        for chunk_index in 0..extra_num_chunks {
+            let chunk_data = vec![chunk_index as u8; extra_chunk_size as usize];
+            extra_data.extend(chunk_data);
+        }
+
+        // DATA TX (Part 2): Create and post another data transaction
+        let mut extra_tx = signer1
+            .create_transaction(extra_data, Some(genesis_block.block_hash))
+            .expect("To make an additional data transaction");
+
+        // Use realistic fee values (these are consistent with pricing helpers used elsewhere in tests)
+        extra_tx.header.perm_fee = Some(U256::from(4_000_000_000_000_u64));
+        extra_tx.header.term_fee = U256::from(1_000_000_000_u32);
+
+        // Sign and submit the data transaction
+        let extra_tx = signer1
+            .sign_transaction(extra_tx)
+            .expect("extra data tx should be signable");
+
+        node.post_data_tx_raw(&extra_tx.header).await;
+
+        let res = node.wait_for_mempool(extra_tx.header.id, 5).await;
+        assert_matches!(res, Ok(()));
+
+        // Mine enough blocks to reach the next epoch boundary and apply assignments
+        info!("MINE THIRD EPOCH BLOCK (Submit expansion):");
+        node.mine_blocks(num_blocks_in_epoch + 2).await?;
+
+        // wait for the block to be migrated
+        node.wait_until_height_confirmed(10, 50).await?;
+
+        // Validate that Submit ledger has at least one partition assigned to slot_index 1
+        let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+        let submit_assignments: Vec<_> = epoch_snapshot
+            .partition_assignments
+            .data_partitions
+            .values()
+            .filter(|pa| pa.ledger_id == Some(DataLedger::Submit as u32))
+            .copied()
+            .collect();
+        assert!(
+            submit_assignments.iter().any(|pa| pa.slot_index == Some(1)),
+            "Expected a Submit ledger partition assigned to slot_index 1 after exceeding one partition"
+        );
+
+        // Capture storage module infos after Part 2 expansion
         sm_infos_before = node
             .node_ctx
             .block_tree_guard
             .read()
             .canonical_epoch_snapshot()
             .map_storage_modules_to_partition_assignments();
-
-        node.wait_until_height_confirmed(6, 10).await?;
 
         node
     };
