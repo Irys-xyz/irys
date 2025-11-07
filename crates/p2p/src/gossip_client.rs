@@ -272,10 +272,17 @@ impl GossipClient {
             }
             Err(err) => {
                 if let GossipError::Network(_message) = err {
+                    debug!(
+                        "Setting peer {:?} status to 'offline' due to a network error",
+                        peer_miner_address
+                    );
                     peer_list.set_is_online(peer_miner_address, false);
                 }
                 // Failed to send, decrease score
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::Offline);
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::NetworkError(format!("{:?}", err)),
+                );
             }
         }
     }
@@ -305,9 +312,15 @@ impl GossipClient {
                         .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::SlowResponse);
                 }
             }
-            Err(_) => {
+            Err(err) => {
                 // Failed to respond - severe penalty
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::NoResponse);
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::NetworkError(format!(
+                        "handle_data_retrieval_score resulted in an error: {:?}",
+                        err
+                    )),
+                );
             }
         }
     }
@@ -378,9 +391,14 @@ impl GossipClient {
                     peer_list
                         .increase_peer_score(&peer_miner_address, ScoreIncreaseReason::DataRequest);
                 }
-                Err(_) => {
-                    peer_list
-                        .decrease_peer_score(&peer_miner_address, ScoreDecreaseReason::Offline);
+                Err(err) => {
+                    peer_list.decrease_peer_score(
+                        &peer_miner_address,
+                        ScoreDecreaseReason::Offline(format!(
+                            "send_data_and_update_score_for_request resulted in an error: {:?}",
+                            err
+                        )),
+                    );
                 }
             }
         });
