@@ -550,7 +550,6 @@ impl BlockValidationTask {
                 ));
             }
         };
-        tracing::error!("shadow txs are valid");
 
         match (
             &recall_result,
