@@ -522,24 +522,12 @@ impl BlockTreeServiceInner {
     ///
     /// The function carefully manages cache locks to avoid deadlocks during async operations,
     /// releasing the write lock before sending events that may trigger callbacks.
+    #[tracing::instrument(skip_all, err, fields(block_hash, validation_result))]
     async fn on_block_validation_finished(
         &mut self,
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
-        let height = self
-            .cache
-            .read()
-            .expect("cache read lock poisoned")
-            .get_block(&block_hash)
-            .unwrap_or_else(|| panic!("block {} to be in cache", block_hash))
-            .height;
-
-        debug!(
-            "\u{001b}[32mOn validation complete : result {} {:?} at height: {}\u{001b}[0m",
-            block_hash, validation_result, height
-        );
-
         if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
                 block.hash = %block_hash,
@@ -551,12 +539,7 @@ impl BlockTreeServiceInner {
                 .write()
                 .expect("block tree cache write lock poisoned");
 
-            let Some(block_entry) = cache.get_block(&block_hash) else {
-                // block not in the tree
-                return Ok(());
-            };
-            // Get block state info before removal for the event
-            let height = block_entry.height;
+            let height = cache.get_block(&block_hash).map(|x| x.height).unwrap_or(0);
             let state = cache
                 .get_block_and_status(&block_hash)
                 .map(|(_, state)| *state)
@@ -569,13 +552,14 @@ impl BlockTreeServiceInner {
 
             let event = BlockStateUpdated {
                 block_hash,
+                // todo: restructure the event so that `height` and `state` is not part of it
                 height,
                 state,
                 discarded: true,
                 validation_result,
             };
             if let Err(e) = self.service_senders.block_state_events.send(event) {
-                tracing::warn!(
+                tracing::trace!(
                     block.hash = ?block_hash,
                     block.height = height,
                     "Failed to broadcast block state update event: {}", e
@@ -584,6 +568,23 @@ impl BlockTreeServiceInner {
 
             return Ok(());
         }
+        let Some(height) = self
+            .cache
+            .read()
+            .expect("cache read lock poisoned")
+            .get_block(&block_hash)
+            .map(|block| block.height)
+        else {
+            // most likely the block was stuck in the validation queue for a bit and it got migrated out from the tree
+            tracing::warn!(
+                "block validation returned a result for a block that's no longer in block cache"
+            );
+            return Ok(());
+        };
+        debug!(
+            "\u{001b}[32mOn validation complete : result {} {:?} at height: {}\u{001b}[0m",
+            block_hash, validation_result, height
+        );
 
         let (arc_block, epoch_block, reorg_event, tip_changed, state, new_canonical_markers) = {
             let binding = self.cache.clone();
