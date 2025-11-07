@@ -773,36 +773,34 @@ impl GossipClient {
                             RejectionReason::HandshakeRequired => {
                                 last_error =
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
-                                        format!("Peer {:?} ({}) requires a handshake", url, peer.0),
+                                        format!("{}: Peer {:?} requires a handshake", url, peer.0),
                                     )));
                                 peer_list.initiate_handshake(peer.1.address.api, true);
                             }
                             RejectionReason::GossipDisabled => {
                                 last_error =
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
-                                        format!("Peer {:?} ({}) has gossip disabled", url, peer.0),
+                                        format!("{}: Peer {:?} has gossip disabled", url, peer.0),
                                     )));
                                 peer_list.set_is_online(&peer.0, false);
                             }
                             RejectionReason::InvalidData => {
-                                last_error = Some(GossipError::from(
-                                    PeerNetworkError::FailedToRequestData(format!(
-                                        "Peer {:?} ({}) reported invalid data",
-                                        url, peer.0
-                                    )),
-                                ));
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("{}: Peer {:?} reported invalid data", url, peer.0),
+                                    )));
                             }
                             RejectionReason::RateLimited => {
                                 last_error =
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
-                                        format!("Peer {:?} ({}) rate limited the request when updating the stake and pledge list", url, peer.0),
+                                        format!("{}: Peer {:?} rate limited the request when updating the stake and pledge list", url, peer.0),
                                     )));
                             }
                             RejectionReason::UnableToVerifyOrigin => {
                                 last_error =
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
                                         format!(
-                                            "Peer {:?} ({}) unable to verify our origin when updating the stake and pledge list",
+                                            "{}: Peer {:?} unable to verify our origin when updating the stake and pledge list",
                                             url, peer.0
                                         ),
                                     )));
