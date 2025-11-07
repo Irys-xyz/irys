@@ -526,6 +526,18 @@ pub struct MempoolNodeConfig {
     /// Maximum number of valid chunk hashes to keep track of
     /// Prevents re-processing and re-gossipping of recently seen chunks
     pub max_valid_chunks: usize,
+
+    /// Maximum number of data transactions to hold in mempool
+    /// Prevents unbounded growth. Conservative: max_data_txs_per_block * block_migration_depth * 3
+    pub max_valid_submit_txs: usize,
+
+    /// Maximum number of addresses with pending commitment transactions
+    /// Prevents unbounded growth. Conservative: num_staked_miners * 3
+    pub max_valid_commitment_addresses: usize,
+
+    /// Maximum commitment transactions per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_commitments_per_address: usize,
 }
 
 impl NodeConfig {
@@ -680,6 +692,9 @@ impl NodeConfig {
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
             },
 
             vdf: VdfNodeConfig {
@@ -814,6 +829,9 @@ impl NodeConfig {
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
             },
 
             vdf: VdfNodeConfig {
