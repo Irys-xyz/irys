@@ -95,6 +95,10 @@ impl From<TxIngressError> for GossipError {
                     address, reason
                 )))
             }
+            TxIngressError::MempoolFull(reason) => {
+                // Mempool at capacity - treat as internal/temporary issue
+                Self::Internal(InternalGossipError::MempoolFull(reason))
+            }
         }
     }
 }
@@ -160,6 +164,8 @@ pub enum InternalGossipError {
     Unknown(String),
     #[error("Database error")]
     Database,
+    #[error("Mempool is full")]
+    MempoolFull(String),
     #[error("Service uninitialized")]
     ServiceUninitialized,
     #[error("Cache cleanup error")]
