@@ -86,6 +86,7 @@ impl From<TxIngressError> for GossipError {
                 Self::Internal(InternalGossipError::ServiceUninitialized)
             }
             TxIngressError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            // todo: `CommitmentValidationError` should  probably be made into an external error
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Self::CommitmentValidation(commitment_validation_error)
             }
@@ -98,6 +99,9 @@ impl From<TxIngressError> for GossipError {
             TxIngressError::MempoolFull(reason) => {
                 // Mempool at capacity - treat as internal/temporary issue
                 Self::Internal(InternalGossipError::MempoolFull(reason))
+            }
+            TxIngressError::FundMisalignment(reason) => {
+                Self::Internal(InternalGossipError::FundMisalignment(reason))
             }
         }
     }
@@ -166,6 +170,8 @@ pub enum InternalGossipError {
     Database,
     #[error("Mempool is full")]
     MempoolFull(String),
+    #[error("Fund misalignment")]
+    FundMisalignment(String),
     #[error("Service uninitialized")]
     ServiceUninitialized,
     #[error("Cache cleanup error")]
