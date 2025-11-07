@@ -1,10 +1,9 @@
-use futures::{FutureExt, TryFutureExt};
 use irys_actors::block_tree_service::ValidationResult;
 use irys_types::NodeConfig;
 use rust_decimal_macros::dec;
 
 use crate::{
-    utils::{read_block_from_state, BlockValidationOutcome, IrysNodeTest},
+    utils::IrysNodeTest,
     validation::send_block_to_block_tree,
 };
 
@@ -58,12 +57,18 @@ async fn difficulty_adjusts_and_timestamp_updates() -> eyre::Result<()> {
     Ok(())
 }
 
-
-/// Ensures that the node adjusts its mining difficulty after the configured
-/// number of blocks and that the `last_diff_timestamp` metadata is updated to
-/// the timestamp of the block that triggered the adjustment.
+/// Create 3 nodes:
+/// - genesis that does not mine after peers come online
+/// - 2 peers that create competing forks
+///
+/// Scenario: all blocks get gossiped to the `genesis` node together, but we
+/// control the order of which they get validated by selectively broadacting the exectution payloads.
+///
+/// Expectation:
+/// - we only mark the tip for the blocks that are actually the newest validated "highest cumulative diff" block.
+/// (regression protection: `mark_tip` used to be called on every single validated block, even if it had a lesser cumulative diff)
 #[test_log::test(tokio::test)]
-async fn heavy_tip_updated_correctly_part_two() -> eyre::Result<()> {
+async fn heavy_tip_updated_correctly_in_forks_with_variying_cumulative_difficulties() -> eyre::Result<()> {
     // max time to wait for block validations
     let max_seconds = 10;
     let num_blocks_in_epoch = 2;
@@ -84,7 +89,7 @@ async fn heavy_tip_updated_correctly_part_two() -> eyre::Result<()> {
         .testing_peer_with_assignments(&test_signer_2)
         .await?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await; // broadcast blocks in the proper order
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // temp disable block valiation
     genesis_node.node_ctx.set_validation_enabled(false);
@@ -115,7 +120,6 @@ async fn heavy_tip_updated_correctly_part_two() -> eyre::Result<()> {
         send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await; // broadcast blocks in the proper order
     tracing::error!("...");
     tracing::error!("...");
     tracing::error!("...");
@@ -127,7 +131,6 @@ async fn heavy_tip_updated_correctly_part_two() -> eyre::Result<()> {
         .subscribe_block_state_updates();
     'outer: for ((block, eth_block), new_tip) in order.iter() {
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
-        // send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
         genesis_node
             .node_ctx
             .block_pool
@@ -152,7 +155,6 @@ async fn heavy_tip_updated_correctly_part_two() -> eyre::Result<()> {
                 genesis_node.node_ctx.block_tree_guard.read().tip,
                 block.block_hash
             );
-           
         }
     }
 

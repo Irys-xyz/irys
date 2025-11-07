@@ -9,7 +9,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
     StorageModuleServiceMessage,
 };
-use eyre::OptionExt;
+use eyre::OptionExt as _;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
@@ -985,7 +985,6 @@ pub fn prune_chains_at_ancestor(
         .expect("Common ancestor should exist in old chain");
 
     // Find the ancestor index in the new chain
-    tracing::error!(?ancestor_hash, ?ancestor_height, "reorg");
     let new_ancestor_idx = new_chain
         .iter()
         .position(|e| e.block_hash == ancestor_hash && e.height == ancestor_height)

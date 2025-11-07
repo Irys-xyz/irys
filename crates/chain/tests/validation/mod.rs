@@ -907,5 +907,3 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 
     Ok(())
 }
-
-
