@@ -66,10 +66,6 @@ impl From<GossipError> for ChainSyncError {
     }
 }
 
-const BLOCK_BATCH_SIZE: usize = 10;
-const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
-const RETRY_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 30; // Timeout for retry block pull/process
-
 /// Messages that can be sent to the SyncService
 #[derive(Debug)]
 pub enum SyncChainServiceMessage {
@@ -471,17 +467,34 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
 
     #[tracing::instrument(skip_all)]
     async fn start(mut self) -> ChainSyncResult<()> {
-        info!("Starting sync service");
+        info!("Starting the sync service");
+        let period_secs = self
+            .inner
+            .config
+            .node_config
+            .sync
+            .periodic_sync_check_interval_secs;
+        let is_periodic_check_enabled = self
+            .inner
+            .config
+            .node_config
+            .sync
+            .enable_periodic_sync_check;
 
-        // Set up periodic sync check timer
-        let mut periodic_timer = interval(Duration::from_secs(PERIODIC_SYNC_CHECK_INTERVAL_SECS));
+        let periodic_sync_check_interval = if is_periodic_check_enabled {
+            Duration::from_secs(period_secs)
+        } else {
+            Duration::MAX
+        };
+        // Set up a periodic sync check timer
+        let mut periodic_timer = interval(periodic_sync_check_interval);
         periodic_timer.tick().await; // Consume the first immediate tick
 
         loop {
             tokio::select! {
                 biased; // enable bias so polling happens in definition order
 
-                // Check for shutdown signal
+                // Check for a shutdown signal
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for sync service");
                     break;
@@ -628,6 +641,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 ) -> ChainSyncResult<()> {
     let migration_depth = config.consensus.block_migration_depth as usize;
     let sync_mode = config.node_config.sync_mode;
+    let block_batch_size = config.node_config.sync.block_batch_size;
+    let retry_block_request_timeout_secs = config.node_config.sync.retry_block_request_timeout_secs;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -721,7 +736,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         &api_client,
         // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
         sync_state.sync_target_height() + 1,
-        BLOCK_BATCH_SIZE,
+        block_batch_size,
         5,
         is_trusted_mode,
     )
@@ -807,7 +822,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
                                     // Try to reprocess the last prevalidated block
                                     match timeout(
-                                        Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                                        Duration::from_secs(retry_block_request_timeout_secs),
                                         gossip_data_handler.pull_and_process_block(
                                             retry_block.block_hash,
                                             sync_state.is_syncing_from_a_trusted_peer(),
@@ -822,7 +837,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                                             warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
                                         }
                                         Err(_) => {
-                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", RETRY_BLOCK_REQUEST_TIMEOUT_SECS, retry_block.block_hash);
+                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
                                         }
                                     }
                                 }
@@ -897,7 +912,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                 peer_list,
                 &api_client,
                 sync_target,
-                BLOCK_BATCH_SIZE,
+                block_batch_size,
                 5,
                 is_trusted_mode,
             )
@@ -949,6 +964,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         &api_client,
         gossip_data_handler.clone(),
         is_trusted_mode,
+        retry_block_request_timeout_secs,
     )
     .await
     {
@@ -1045,6 +1061,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
     api_client: &impl ApiClient,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     use_trusted_peers_only: bool,
+    retry_block_request_timeout_secs: u64,
 ) -> ChainSyncResult<()> {
     // Collect unique hashes with their reporting peers (trusted or top-N active peers)
     let peers_by_top_block_hash =
@@ -1091,7 +1108,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
             for (idx, peer) in peers.into_iter().enumerate() {
                 let attempt_num = idx + 1;
                 match tokio::time::timeout(
-                    Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                    Duration::from_secs(retry_block_request_timeout_secs),
                     handler.pull_and_process_block_from_peer(block_hash, &peer),
                 )
                 .await
@@ -1113,7 +1130,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
                     Err(_) => {
                         warn!(
                             "Post-sync: Attempt {} timed out ({}s) pulling block {:?} from peer {:?}",
-                            attempt_num, RETRY_BLOCK_REQUEST_TIMEOUT_SECS, block_hash, peer.0
+                            attempt_num, retry_block_request_timeout_secs, block_hash, peer.0
                         );
                     }
                 }
@@ -1857,6 +1874,8 @@ mod tests {
             node_config.sync_mode = SyncMode::Full;
             let config = Config::new(node_config);
 
+            let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
+
             let api_client_stub = ApiClientStub::new();
             api_client_stub.set_node_info_handler(move |_api| {
                 let info = NodeInfo {
@@ -1932,6 +1951,7 @@ mod tests {
                 &api_client_stub,
                 data_handler,
                 false,
+                retry_timeout,
             )
             .await?;
 
@@ -1980,6 +2000,7 @@ mod tests {
             let mut node_config = NodeConfig::testing();
             node_config.sync_mode = SyncMode::Full;
             let config = Config::new(node_config);
+            let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let api_client_stub = ApiClientStub::new();
             api_client_stub.set_node_info_handler(move |_api| {
@@ -2052,6 +2073,7 @@ mod tests {
                 &api_client_stub,
                 data_handler,
                 false,
+                retry_timeout,
             )
             .await?;
 
