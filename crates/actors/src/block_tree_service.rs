@@ -437,13 +437,13 @@ impl BlockTreeServiceInner {
                 .get(&block.previous_block_hash)
                 .unwrap_or_else(|| {
                     panic!(
-                        "block needs to be in cache {} at height: {}",
+                        "block {} needs to be in cache at height: {}",
                         block.previous_block_hash,
                         block.height - 1
                     )
                 });
 
-        // Get te parent block's commitment snapshot
+        // Get the parent block's commitment snapshot
         let prev_commitment_snapshot = parent_block_entry.commitment_snapshot.clone();
 
         // Create epoch snapshot for this block
