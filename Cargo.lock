@@ -5074,6 +5074,7 @@ dependencies = [
  "assert_matches",
  "base58",
  "core_affinity",
+ "dotenvy",
  "eyre",
  "futures",
  "hex",
@@ -5445,6 +5446,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "color-eyre",
+ "irys-utils",
  "libc",
  "rand 0.8.5",
  "tempfile",
@@ -5465,6 +5467,7 @@ dependencies = [
  "dirs 5.0.1",
  "eyre",
  "futures",
+ "irys-types",
  "ratatui 0.28.1",
  "reqwest 0.12.15",
  "serde",

@@ -85,6 +85,14 @@ pub async fn post_tx(
                 Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
                     .body(format!("Unable to verify balance for {address}: {reason}")))
             }
+            TxIngressError::MempoolFull(reason) => {
+                tracing::warn!("API: Mempool at capacity: {}", reason);
+                Ok(
+                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
+                        "Mempool is at capacity. Please try again later. {reason}"
+                    )),
+                )
+            }
         };
     }
 

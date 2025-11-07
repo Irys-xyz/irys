@@ -76,7 +76,7 @@ impl Inner {
         tx: &DataTransactionHeader,
         expiry_height: u64,
     ) -> Result<(), TxIngressError> {
-        self.insert_tx_and_mark_valid(tx).await;
+        self.insert_tx_and_mark_valid(tx).await?;
         self.cache_data_root_with_expiry(tx, expiry_height);
         self.process_pending_chunks_for_root(tx.data_root).await?;
         self.broadcast_tx_gossip(tx);
@@ -373,10 +373,15 @@ impl Inner {
     }
 
     /// Inserts tx into the mempool and marks it as recently valid.
-    async fn insert_tx_and_mark_valid(&mut self, tx: &DataTransactionHeader) {
+    /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
+    async fn insert_tx_and_mark_valid(
+        &mut self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
-        guard.valid_submit_ledger_tx.insert(tx.id, tx.clone());
+        guard.bounded_insert_data_tx(tx.clone())?;
         guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
     }
 
     /// Caches data_root with expiry, logging success/failure.

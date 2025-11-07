@@ -6,6 +6,7 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
+use futures::stream::{self, StreamExt as _};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
     CriticalChunkIngressError, MempoolFacade,
@@ -19,12 +20,16 @@ use irys_types::{
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
     IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
+use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::log::warn;
-use tracing::{debug, error, Span};
+use tracing::{debug, error, instrument, Span};
+
+pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
+pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -393,6 +398,7 @@ where
         .await
     }
 
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), err)]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -452,8 +458,10 @@ where
                 ))
             );
 
-            self.peer_list
-                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
+            self.peer_list.decrease_peer_score(
+                &source_miner_address,
+                ScoreDecreaseReason::BogusData("Invalid block signature".into()),
+            );
 
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
@@ -482,6 +490,10 @@ where
             self.gossip_client.mining_address, block_header.block_hash
         );
 
+        debug!(
+            "Collecting missing/invalid data transactions for block {:?}",
+            block_hash
+        );
         let mut missing_invalid_tx_ids = Vec::new();
 
         for tx_id in block_header
@@ -493,6 +505,10 @@ where
                 missing_invalid_tx_ids.push(tx_id);
             }
         }
+        debug!(
+            "Collected missing data tx ids: {:?}",
+            missing_invalid_tx_ids
+        );
 
         for system_tx_id in block_header
             .system_ledgers
@@ -506,6 +522,10 @@ where
                 missing_invalid_tx_ids.push(system_tx_id);
             }
         }
+        debug!(
+            "Collected missing commitment tx ids: {:?}",
+            missing_invalid_tx_ids
+        );
 
         if !missing_invalid_tx_ids.is_empty() {
             debug!(
@@ -519,95 +539,125 @@ where
             .remove_from_blacklist(missing_invalid_tx_ids.clone())
             .await
             .map_err(|error| {
-                error!("Failed to remove txs from mempool blacklist");
+                error!("Failed to remove txs from the mempool blacklist");
                 GossipError::unknown(&error)
             })?;
 
-        // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
-        // Fetch and process each missing transaction one-by-one with retries
-        for tx_id_to_fetch in missing_invalid_tx_ids {
-            // Try source peer first
-            let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
-            let mut last_err: Option<String> = None;
+        debug!(
+            "Fetching missing transactions from the network for block {:?}",
+            block_hash
+        );
 
-            match self
-                .api_client
-                .get_transaction(source_api_address, tx_id_to_fetch)
-                .await
-            {
-                Ok(resp) => {
-                    fetched = Some((resp, source_miner_address));
+        // Fetch missing transactions in parallel with a concurrency limit of 10
+        let fetch_results: Vec<_> = stream::iter(missing_invalid_tx_ids)
+            .map(|tx_id_to_fetch| async move {
+                // Try source peer first
+                let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
+                let mut last_err: Option<String> = None;
+
+                match self
+                    .api_client
+                    .get_transaction(source_api_address, tx_id_to_fetch)
+                    .await
+                {
+                    Ok(resp) => {
+                        fetched = Some((resp, source_miner_address));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to fetch tx {:?} from source peer {}: {:?}",
+                            tx_id_to_fetch, source_api_address, e
+                        );
+                        last_err = Some(e.to_string());
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch tx {:?} from source peer {}: {:?}",
-                        tx_id_to_fetch, source_api_address, e
-                    );
-                    last_err = Some(e.to_string());
-                }
-            }
 
-            // If source failed, try top 5 active peers (excluding the source)
-            if fetched.is_none() {
-                let mut exclude = std::collections::HashSet::new();
-                exclude.insert(source_miner_address);
-                let top_peers = self.peer_list.top_active_peers(Some(5), Some(exclude));
+                // If the source failed, try random 7 out of the top 15 active peers (excluding the source)
+                if fetched.is_none() {
+                    let mut exclude = std::collections::HashSet::new();
+                    exclude.insert(source_miner_address);
+                    let mut top_peers = self
+                        .peer_list
+                        .top_active_peers(Some(MAX_PEERS_TO_SELECT_FROM), Some(exclude));
+                    top_peers.shuffle(&mut rand::thread_rng());
+                    top_peers.truncate(MAX_TX_PEERS_TO_TRY);
 
-                for (peer_addr, peer_item) in top_peers {
-                    match self
-                        .api_client
-                        .get_transaction(peer_item.address.api, tx_id_to_fetch)
-                        .await
-                    {
-                        Ok(resp) => {
-                            fetched = Some((resp, peer_addr));
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to fetch tx {:?} from peer {}: {:?}",
-                                tx_id_to_fetch, peer_item.address.api, e
-                            );
-                            last_err = Some(e.to_string());
-                            continue;
+                    for (peer_addr, peer_item) in top_peers {
+                        match self
+                            .api_client
+                            .get_transaction(peer_item.address.api, tx_id_to_fetch)
+                            .await
+                        {
+                            Ok(resp) => {
+                                fetched = Some((resp, peer_addr));
+                                break;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to fetch tx {:?} from peer {}: {:?}",
+                                    tx_id_to_fetch, peer_item.address.api, e
+                                );
+                                last_err = Some(e.to_string());
+                                continue;
+                            }
                         }
                     }
                 }
+
+                match fetched {
+                    Some((tx_response, from_miner_addr)) => Ok((tx_response, from_miner_addr)),
+                    None => {
+                        let err_msg = format!(
+                            "Failed to fetch transaction {:?} from source {} and top peers{}",
+                            tx_id_to_fetch,
+                            source_api_address,
+                            last_err
+                                .as_ref()
+                                .map(|e| format!("; last error: {}", e))
+                                .unwrap_or_default()
+                        );
+                        Err(err_msg)
+                    }
+                }
+            })
+            .buffer_unordered(10)
+            .collect()
+            .await;
+
+        // Process results and store fetched transactions
+        for result in fetch_results {
+            match result {
+                Ok((tx_response, from_miner_addr)) => {
+                    // Store the fetched transaction in the BlockPool's per-block cache
+                    let tx_id = match &tx_response {
+                        IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
+                        IrysTransactionResponse::Storage(tx) => tx.id,
+                    };
+
+                    self.block_pool
+                        .add_tx_for_block(block_hash, tx_response)
+                        .await;
+
+                    // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
+                    debug!(
+                        "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
+                        tx_id, block_hash
+                    );
+                    // Record that we have seen this transaction from the peer that served it
+                    self.cache
+                        .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
+                }
+                Err(err_msg) => {
+                    error!("{:?}", err_msg);
+                    return Err(GossipError::Network(err_msg));
+                }
             }
-
-            let Some((tx_response, from_miner_addr)) = fetched else {
-                let err_msg = format!(
-                    "Failed to fetch transaction {:?} from source {} and top peers{:?}",
-                    tx_id_to_fetch,
-                    source_api_address,
-                    last_err
-                        .as_ref()
-                        .map(|e| format!("; last error: {}", e))
-                        .unwrap_or_default()
-                );
-                error!("{:?}", err_msg);
-                return Err(GossipError::Network(err_msg));
-            };
-
-            // Store the fetched transaction in the BlockPool's per-block cache
-            let tx_id = match &tx_response {
-                IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
-                IrysTransactionResponse::Storage(tx) => tx.id,
-            };
-
-            self.block_pool
-                .add_tx_for_block(block_hash, tx_response)
-                .await;
-
-            // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
-            debug!(
-                "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
-                tx_id, block_hash
-            );
-            // Record that we have seen this transaction from the peer that served it
-            self.cache
-                .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
         }
+
+        debug!(
+            "Got all missing transactions for block {:?}, sending to processing",
+            block_hash
+        );
 
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
         let is_in_the_trusted_sync_range = self
@@ -622,8 +672,7 @@ where
 
         self.block_pool
             .process_block::<A>(Arc::new(block_header), skip_block_validation)
-            .await
-            .map_err(GossipError::BlockPool)?;
+            .await?;
         Ok(())
     }
 
@@ -776,9 +825,7 @@ where
 
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let block_result = self.block_pool.get_block_data(&block_hash).await;
-
-                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
 
                 match maybe_block {
                     Some(block) => {
@@ -840,11 +887,7 @@ where
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let maybe_block = self
-                    .block_pool
-                    .get_block_data(&block_hash)
-                    .await
-                    .map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
                 Ok(maybe_block.map(GossipData::Block))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {

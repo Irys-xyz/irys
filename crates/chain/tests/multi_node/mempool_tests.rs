@@ -1671,7 +1671,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .expect("shared tx should be accepted");
 
     // mine a block
-    let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
+    let (_block, reth_exec_env) = genesis.mine_block_with_payload().await?;
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 

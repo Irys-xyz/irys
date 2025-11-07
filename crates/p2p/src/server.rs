@@ -2,11 +2,11 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::block_pool::CriticalBlockPoolError;
 use crate::types::{GossipResponse, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
-    BlockPoolError,
 };
 use actix_web::{
     dev::Server,
@@ -397,11 +397,20 @@ where
         peer_list: &PeerList,
     ) {
         match error {
-            GossipError::InvalidData(_) => {
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            GossipError::InvalidData(invalid_data_error) => {
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::BogusData(format!(
+                        "Invalid data: {:?}",
+                        invalid_data_error
+                    )),
+                );
             }
-            GossipError::BlockPool(BlockPoolError::BlockError(_)) => {
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            GossipError::BlockPool(CriticalBlockPoolError::BlockError(msg)) => {
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::BogusData(format!("Block pool error: {:?}", msg)),
+                );
             }
             _ => {}
         };
@@ -574,7 +583,7 @@ mod tests {
         let miner = Address::new([1_u8; 20]);
         peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
 
-        let error = GossipError::BlockPool(BlockPoolError::BlockError("bad".into()));
+        let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         GossipServer::<MempoolStub, BlockDiscoveryStub, ApiClientStub>::handle_invalid_data(
             &miner, &error, &peer_list,
         );
