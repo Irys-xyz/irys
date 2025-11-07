@@ -708,6 +708,10 @@ impl PeerListDataInner {
 
     pub fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
         if !self.config.node_config.p2p_gossip.enable_scoring {
+            warn!(
+                "Would've decreased score for peer {:?}, reason: {:?}",
+                mining_addr, reason
+            );
             return;
         }
         warn!(
