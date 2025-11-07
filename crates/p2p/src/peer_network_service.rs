@@ -731,6 +731,27 @@ where
                                     )),
                                 ));
                             }
+                            RejectionReason::InvalidData => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(
+                                        "Peer reported invalid data".to_string(),
+                                    ),
+                                ));
+                            }
+                            RejectionReason::RateLimited => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(
+                                        "Peer rate limited the request".to_string(),
+                                    ),
+                                ));
+                            }
+                            RejectionReason::UnableToVerifyOrigin => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(
+                                        "Peer unable to verify our origin".to_string(),
+                                    ),
+                                ));
+                            }
                         }
                     }
                     Err(err) => {

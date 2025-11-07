@@ -136,15 +136,17 @@ impl IrysApiClient {
                 if text.trim().is_empty() {
                     return Ok(None);
                 }
-                let body: RESBODY = serde_json::from_str(&text)
-                    .map_err(|e| eyre::eyre!("Failed to parse JSON: {} - Response: {}", e, text))?;
+                let body: RESBODY = serde_json::from_str(&text).map_err(|e| {
+                    eyre::eyre!("{}: Failed to parse JSON: {} - Response: {}", url, e, text)
+                })?;
                 Ok(Some(body))
             }
             StatusCode::NOT_FOUND => Ok(None),
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
                 Err(eyre::eyre!(
-                    "API request failed with status: {} - {}",
+                    "API request {} failed with status: {} - {}",
+                    url,
                     status,
                     error_text
                 ))

@@ -142,6 +142,12 @@ impl GossipClient {
                     RejectionReason::GossipDisabled => {
                         return Ok(false);
                     }
+                    _ => {
+                        warn!(
+                            "Unexpected rejection reason for the health check: {:?}",
+                            reason
+                        );
+                    }
                 };
                 Ok(true)
             }
@@ -243,8 +249,8 @@ impl GossipClient {
 
                 let body = serde_json::from_str(&text).map_err(|e| {
                     GossipError::Network(format!(
-                        "Failed to parse JSON: {} - Response: {}",
-                        e, text
+                        "{}: Failed to parse JSON: {} - Response: {}",
+                        url, e, text
                     ))
                 })?;
                 Ok(body)
@@ -252,8 +258,8 @@ impl GossipClient {
             _ => {
                 let error_text = response.text().await.unwrap_or_default();
                 Err(GossipError::Network(format!(
-                    "API request failed with status: {} - {}",
-                    status, error_text
+                    "API request {} failed with status: {} - {}",
+                    url, status, error_text
                 )))
             }
         }
@@ -469,6 +475,7 @@ impl GossipClient {
                         RejectionReason::GossipDisabled => {
                             peer_list.set_is_online(&peer.0, false);
                         }
+                        _ => {}
                     }
                     Err(PeerNetworkError::FailedToRequestData(format!(
                         "Peer {:?} rejected the request: {:?}",
@@ -601,6 +608,24 @@ impl GossipClient {
                                         format!("Peer {:?} has gossip disabled", address),
                                     )));
                             }
+                            RejectionReason::InvalidData => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} reported invalid data", address),
+                                    )));
+                            }
+                            RejectionReason::RateLimited => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} rate limited the request", address),
+                                    )));
+                            }
+                            RejectionReason::UnableToVerifyOrigin => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} unable to verify our origin", address),
+                                    )));
+                            }
                         }
                         // Do not retry the same peer on rejection
                     }
@@ -712,8 +737,8 @@ impl GossipClient {
 
                         let gossip_response = serde_json::from_str(&text).map_err(|e| {
                             PeerNetworkError::FailedToRequestData(format!(
-                                "Failed to parse JSON: {} - Response: {}",
-                                e, text
+                                "{}: Failed to parse JSON: {} - Response: {}",
+                                url, e, text
                             ))
                         })?;
                         Ok(gossip_response)
@@ -721,8 +746,8 @@ impl GossipClient {
                     _ => {
                         let error_text = response.text().await.unwrap_or_default();
                         Err(PeerNetworkError::FailedToRequestData(format!(
-                            "API request failed with status: {} - {}",
-                            status, error_text
+                            "API request {} failed with status: {} - {}",
+                            url, status, error_text
                         ))
                         .into())
                     }
@@ -748,6 +773,27 @@ impl GossipClient {
                                         format!("Peer {:?} has gossip disabled", peer.0),
                                     )));
                                 peer_list.set_is_online(&peer.0, false);
+                            }
+                            RejectionReason::InvalidData => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} reported invalid data when updating the stake and pledge list", peer.0),
+                                    )));
+                            }
+                            RejectionReason::RateLimited => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!("Peer {:?} rate limited the request when updating the stake and pledge list", peer.0),
+                                    )));
+                            }
+                            RejectionReason::UnableToVerifyOrigin => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!(
+                                            "Peer {:?} unable to verify our origin when updating the stake and pledge list",
+                                            peer.0
+                                        ),
+                                    )));
                             }
                         },
                     },

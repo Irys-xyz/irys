@@ -208,4 +208,7 @@ impl GossipResponse<()> {
 pub enum RejectionReason {
     HandshakeRequired,
     GossipDisabled,
+    InvalidData,
+    RateLimited,
+    UnableToVerifyOrigin,
 }
