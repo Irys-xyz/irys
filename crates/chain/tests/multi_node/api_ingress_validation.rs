@@ -58,7 +58,7 @@ async fn test_api_rejects_underpriced_term_fee() -> eyre::Result<()> {
 
     // Assert that it was rejected with the appropriate error
     match result {
-        Err(AddTxError::TxIngress(TxIngressError::Other(msg))) => {
+        Err(AddTxError::TxIngress(TxIngressError::FundMisalignment(msg))) => {
             assert!(
                 msg.contains("Insufficient term fee"),
                 "Expected 'Insufficient term fee' error, got: {}",
@@ -71,7 +71,7 @@ async fn test_api_rejects_underpriced_term_fee() -> eyre::Result<()> {
         }
         Err(e) => {
             panic!(
-                "Expected TxIngressError::Other with 'Insufficient term fee', got: {:?}",
+                "Expected TxIngressError::FundMisalignment with 'Insufficient term fee', got: {:?}",
                 e
             );
         }
@@ -135,7 +135,7 @@ async fn test_api_rejects_underpriced_perm_fee() -> eyre::Result<()> {
 
     // Assert that it was rejected with the appropriate error
     match result {
-        Err(AddTxError::TxIngress(TxIngressError::Other(msg))) => {
+        Err(AddTxError::TxIngress(TxIngressError::FundMisalignment(msg))) => {
             assert!(
                 msg.contains("Insufficient perm fee"),
                 "Expected 'Insufficient perm fee' error, got: {}",
@@ -148,7 +148,7 @@ async fn test_api_rejects_underpriced_perm_fee() -> eyre::Result<()> {
         }
         Err(e) => {
             panic!(
-                "Expected TxIngressError::Other with 'Insufficient perm fee', got: {:?}",
+                "Expected TxIngressError::FundMisalignment with 'Insufficient perm fee', got: {:?}",
                 e
             );
         }

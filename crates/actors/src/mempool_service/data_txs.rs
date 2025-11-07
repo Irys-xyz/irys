@@ -301,7 +301,9 @@ impl Inner {
             &self.config.consensus,
             pricing_ema,
         )
-        .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))?;
+        .map_err(|e| {
+            TxIngressError::FundMisalignment(format!("Failed to calculate term fee: {}", e))
+        })?;
 
         // Validate term fee: user-provided must be >= expected
         if tx.term_fee < expected_term_fee {
@@ -313,7 +315,7 @@ impl Inner {
                 "Data tx insufficient term_fee"
             );
 
-            return Err(TxIngressError::Other(format!(
+            return Err(TxIngressError::FundMisalignment(format!(
                 "Insufficient term fee: provided {}, required {}",
                 tx.term_fee, expected_term_fee
             )));
@@ -321,9 +323,9 @@ impl Inner {
 
         // For Publish ledger, validate perm fee
         if let Ok(DataLedger::Publish) = DataLedger::try_from(tx.ledger_id) {
-            let perm_fee = tx
-                .perm_fee
-                .ok_or_else(|| TxIngressError::Other("Publish tx missing perm_fee".to_string()))?;
+            let perm_fee = tx.perm_fee.ok_or_else(|| {
+                TxIngressError::FundMisalignment("Publish tx missing perm_fee".to_string())
+            })?;
 
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
@@ -331,7 +333,9 @@ impl Inner {
                 pricing_ema,
                 expected_term_fee,
             )
-            .map_err(|e| TxIngressError::Other(format!("Failed to calculate perm fee: {}", e)))?;
+            .map_err(|e| {
+                TxIngressError::FundMisalignment(format!("Failed to calculate perm fee: {}", e))
+            })?;
 
             // Validate perm fee: user-provided must be >= expected
             if perm_fee < expected_perm_fee.amount {
@@ -343,7 +347,7 @@ impl Inner {
                     "Data tx insufficient perm_fee"
                 );
 
-                return Err(TxIngressError::Other(format!(
+                return Err(TxIngressError::FundMisalignment(format!(
                     "Insufficient perm fee: provided {}, required {}",
                     perm_fee, expected_perm_fee.amount
                 )));
@@ -464,15 +468,18 @@ impl Inner {
 
         let actual_term_fee = tx.term_fee;
 
-        TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config())
-            .map_err(|e| TxIngressError::Other(format!("Invalid term fee structure: {}", e)))?;
+        TermFeeCharges::new(actual_term_fee, &self.config.node_config.consensus_config()).map_err(
+            |e| TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e)),
+        )?;
 
         PublishFeeCharges::new(
             actual_perm_fee,
             actual_term_fee,
             &self.config.node_config.consensus_config(),
         )
-        .map_err(|e| TxIngressError::Other(format!("Invalid perm fee structure: {}", e)))?;
+        .map_err(|e| {
+            TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))
+        })?;
 
         Ok(())
     }
