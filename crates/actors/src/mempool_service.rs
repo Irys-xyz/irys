@@ -32,7 +32,6 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
-use irys_types::CommitmentType;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
     H256, U256,
@@ -46,6 +45,7 @@ use irys_types::{
     Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{BlockHash, CommitmentType};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -522,7 +522,7 @@ impl Inner {
 
         let current_height = self.get_latest_block_height()?;
         let min_anchor_height = current_height.saturating_sub(
-            (self.config.consensus.mempool.anchor_expiry_depth as u64)
+            (self.config.consensus.mempool.tx_anchor_expiry_depth as u64)
                 .saturating_sub(self.config.consensus.block_migration_depth as u64),
         );
 
@@ -1269,8 +1269,8 @@ impl Inner {
 
         // is this anchor too old?
 
-        let min_anchor_height =
-            latest_height.saturating_sub(self.config.consensus.mempool.anchor_expiry_depth as u64);
+        let min_anchor_height = latest_height
+            .saturating_sub(self.config.consensus.mempool.tx_anchor_expiry_depth as u64);
 
         let too_old = anchor_height < min_anchor_height;
 
@@ -1812,6 +1812,9 @@ pub enum IngressProofError {
     /// The proof does not come from a staked address
     #[error("Unstaked address")]
     UnstakedAddress,
+    /// The ingress proof is anchored to an unknown/expired anchor
+    #[error("Invalid anchor: {0}")]
+    InvalidAnchor(BlockHash),
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),

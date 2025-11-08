@@ -180,7 +180,7 @@ async fn slow_heavy_sync_chain_state_then_gossip_blocks() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 20;
+        .tx_anchor_expiry_depth = 20;
 
     testing_config_genesis
         .consensus
