@@ -27,7 +27,7 @@ async fn slow_heavy_ema_intervals_roll_over_in_forks() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 40;
+        .tx_anchor_expiry_depth = 40;
     genesis_config
         .consensus
         .get_mut()

@@ -1115,7 +1115,6 @@ mod tests {
         let proof_signer1 = IrysSigner::random_signer(&config);
         let proof_signer2 = IrysSigner::random_signer(&config);
         let proof_signer3 = IrysSigner::random_signer(&config);
-        let anchor = H256::zero();
 
         // Create 4 proofs - signer2 has 2 proofs to test aggregation
         let proofs = vec![

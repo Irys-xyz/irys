@@ -247,7 +247,7 @@ impl Inner {
             }
         };
 
-        let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
+        let effective_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32
             + self.config.consensus.block_migration_depth
             + 5;
 

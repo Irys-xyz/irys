@@ -366,15 +366,19 @@ impl Inner {
                     },
                 )
                 .map_err(|_e| {
-                    ChunkIngressError::Other("Block index communication failure".to_string())
+                    CriticalChunkIngressError::Other(
+                        "Block index communication failure".to_string(),
+                    )
                 })?;
             let latest_migrated = rx
                 .await
                 .map_err(|_e| {
-                    ChunkIngressError::Other("Block index communication failure".to_string())
+                    CriticalChunkIngressError::Other(
+                        "Block index communication failure".to_string(),
+                    )
                 })?
                 .ok_or_else(|| {
-                    ChunkIngressError::Other("Invalid block index (no entries)".to_string())
+                    CriticalChunkIngressError::Other("Invalid block index (no entries)".to_string())
                 })?;
 
             self.exec.clone().spawn_blocking(async move {
