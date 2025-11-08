@@ -1384,7 +1384,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db, None)
                     .await?
             }
             [] => {
@@ -1526,7 +1526,7 @@ pub async fn commitment_txs_are_valid(
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db)
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db, None)
             .await
             .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 

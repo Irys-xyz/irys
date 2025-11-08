@@ -442,8 +442,13 @@ impl BlockDiscoveryServiceInner {
             );
             // TODO: we can't get these from the database
             // if we can, something has gone wrong!
-            match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
-                .await
+            match get_commitment_tx_in_parallel(
+                &commitment_ledger.tx_ids.0,
+                &mempool_sender,
+                &db,
+                None,
+            )
+            .await
             {
                 Ok(tx) => {
                     commitments = tx;
@@ -717,11 +722,14 @@ impl BlockDiscoveryServiceInner {
     }
 }
 
+pub const DEFAULT_MEMPOOL_TX_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Get all commitment transactions from the mempool and database
 pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
+    fetch_timeout: Option<Duration>,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
     let tx_ids_clone = commitment_tx_ids;
 
@@ -736,13 +744,19 @@ pub async fn get_commitment_tx_in_parallel(
                 response: tx,
             }) {
                 Ok(()) => {
+                    let response = if let Some(duration) = fetch_timeout {
+                        // Message was sent successfully, wait for response with timeout
+                        timeout(duration, rx)
+                            .await
+                            .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
+                    } else {
+                        rx.await
+                    };
                     // Message was sent successfully, wait for response with timeout
-                    let result = timeout(Duration::from_secs(5), rx)
-                    .await
-                    .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
-                    .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
+                    let transactions = response
+                        .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
 
-                    Ok(result)
+                    Ok(transactions)
                 }
                 Err(_) => {
                     // Channel is closed - either no receiver was ever created or it was dropped
