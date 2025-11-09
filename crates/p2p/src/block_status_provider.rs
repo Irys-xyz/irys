@@ -3,7 +3,9 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_types::{IrysBlockHeader, IrysBlockHeaderV1, NodeConfig},
+    irys_types::{
+        irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig,
+    },
     std::sync::{Arc, RwLock},
     tracing::warn,
 };
@@ -256,8 +258,10 @@ impl BlockStatusProvider {
     pub fn produce_mock_chain(
         num_blocks: u64,
         starting_block: Option<&IrysBlockHeader>,
+        consensus_config: &ConsensusConfig,
     ) -> Vec<IrysBlockHeader> {
-        let first_block = starting_block
+        let random_signer = IrysSigner::random_signer(consensus_config);
+        let mut first_block = starting_block
             .map(|parent| {
                 IrysBlockHeader::V1(IrysBlockHeaderV1 {
                     block_hash: BlockHash::random(),
@@ -273,17 +277,23 @@ impl BlockStatusProvider {
                     ..IrysBlockHeaderV1::new_mock_header()
                 })
             });
+        random_signer
+            .sign_block_header(&mut first_block)
+            .expect("to sign block");
 
         let mut blocks = vec![first_block];
 
         for _ in 1..num_blocks {
             let prev_block = blocks.last().expect("to have at least one block");
-            let block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+            let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
                 block_hash: BlockHash::random(),
                 height: prev_block.height + 1,
                 previous_block_hash: prev_block.block_hash,
                 ..IrysBlockHeaderV1::new_mock_header()
             });
+            random_signer
+                .sign_block_header(&mut block)
+                .expect("to sign block");
             blocks.push(block);
         }
 

@@ -1,3 +1,4 @@
+use crate::block_pool::{BlockRemovalReason, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
@@ -90,6 +91,7 @@ pub enum SyncChainServiceMessage {
         use_trusted_peers_only: bool,
         response: oneshot::Sender<GossipResult<()>>,
     },
+    AttemptReprocessingBlock(BlockHash),
 }
 
 /// Inner service containing the sync logic
@@ -419,7 +421,14 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
 
             if !err.is_advisory() {
                 self.block_pool.remove_requested_block(&block_hash).await;
-                self.block_pool.remove_block_from_cache(&block_hash).await;
+                self.block_pool
+                    .remove_block_from_cache(
+                        &block_hash,
+                        BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
+                            err.clone(),
+                        )),
+                    )
+                    .await;
             }
 
             Err(ChainSyncError::Internal(format!(
@@ -590,6 +599,25 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                         .await;
                     if let Err(e) = response.send(result) {
                         tracing::error!("Failed to send response: {:?}", e);
+                    }
+                });
+            }
+            SyncChainServiceMessage::AttemptReprocessingBlock(block_hash) => {
+                debug!(
+                    "SyncChainService: Received a request to attempt reprocessing block {:?}",
+                    block_hash
+                );
+                let inner = self.inner.clone();
+                tokio::spawn(async move {
+                    if let Err(block_pool_error) =
+                        inner.block_pool.reprocess_block::<T>(block_hash).await
+                    {
+                        // Just log the error - no need to send it back anywhere, block pool will
+                        //  handle cache cleanup internally
+                        error!(
+                            "Failed to reprocess block {:?}: {:?}",
+                            block_hash, block_pool_error
+                        );
                     }
                 });
             }
