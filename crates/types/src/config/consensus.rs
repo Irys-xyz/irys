@@ -376,7 +376,7 @@ pub struct MempoolConsensusConfig {
 
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
-    pub ingress_proof_anchor_expiry_depth: u8,
+    pub ingress_proof_anchor_expiry_depth: u16,
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
