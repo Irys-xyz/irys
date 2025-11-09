@@ -2,8 +2,8 @@ use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, data_handler_with_stubbed_pool, ApiClientStub, BlockDiscoveryStub,
-    FakeGossipServer, MempoolStub,
+    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, ApiClientStub,
+    BlockDiscoveryStub, FakeGossipServer, MempoolStub,
 };
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
@@ -433,7 +433,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .expect("can't process block");
 
     // Wait for the block to be processed
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_block(&sync_state, block3.height as usize, Duration::from_secs(5)).await;
 
     // The blocks should be received in order of processing: first block2, then block3
     let discovered_block2 = block_discovery_stub.get_blocks().first().unwrap().clone();
@@ -609,7 +609,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         .await
         .expect("can't process block");
 
-    // Wait for the block to be processed
+    // Wait a little for processing - there's no specific event we're waiting for here
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     // Couldn't fetch block2, so block3 is not processed
@@ -630,7 +630,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         .expect("can't process block");
 
     // Wait for the block to be processed
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for_block(&sync_state, block4.height as usize, Duration::from_secs(5)).await;
 
     let discovered_block2 = block_discovery_stub.get_blocks().first().unwrap().clone();
     let discovered_block3 = block_discovery_stub

@@ -215,10 +215,7 @@ impl BlockCacheGuard {
     }
 
     async fn remove_block(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
-        debug!(
-            "Block {block_hash:?} has been removed from BlockPool because {}",
-            reason
-        );
+        debug!("Block {block_hash:?} has been removed from BlockPool because {reason}",);
         self.inner.write().await.remove_block(block_hash);
     }
 

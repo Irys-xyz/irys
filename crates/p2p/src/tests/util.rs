@@ -963,3 +963,23 @@ pub(crate) async fn data_handler_with_stubbed_pool<T: ApiClient>(
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
     })
 }
+
+pub(crate) async fn wait_for_block(
+    sync_state: &ChainSyncState,
+    block_height: usize,
+    timeout: Duration,
+) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let highest_block = sync_state.highest_processed_block();
+        if highest_block >= block_height {
+            break;
+        }
+
+        if tokio::time::Instant::now().duration_since(start) > timeout {
+            panic!("Timeout waiting for block at height {}", block_height);
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
