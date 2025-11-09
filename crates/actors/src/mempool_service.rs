@@ -368,7 +368,7 @@ impl Inner {
                     }
                 }
                 MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                    let response_value = self.handle_ingest_ingress_proof(ingress_proof).await;
+                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
                     if let Err(e) = response.send(response_value) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -506,6 +506,39 @@ impl Inner {
             Ok(false)
         } else {
             eyre::bail!("SHOULDNT HAPPEN: {tx_id} anchor {anchor} has height {anchor_height}, min: {min_anchor_height}, max: {max_anchor_height}");
+        }
+    }
+
+    #[instrument(skip_all)]
+    pub fn validate_ingress_proof_anchor_for_inclusion(
+        &self,
+        min_anchor_height: u64,
+        ingress_proof: &IngressProof,
+    ) -> eyre::Result<bool> {
+        let anchor = ingress_proof.anchor;
+        let anchor_height = match self
+            .get_anchor_height(anchor)
+            .map_err(|_e| TxIngressError::DatabaseError)?
+        {
+            Some(height) => height,
+            None => {
+                // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                return Ok(false);
+            }
+        };
+
+        // these have to be inclusive so we handle txs near height 0 correctly
+        let new_enough = anchor_height >= min_anchor_height;
+
+        // note: we don't need old_enough as we're part of the block header
+        // so there's no need to go through the mempool
+        // let old_enough: bool = anchor_height <= max_anchor_height;
+        if new_enough {
+            Ok(true)
+        } else {
+            // TODO: recover the signer's address here? (or compute an ID)
+            warn!("ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}", &ingress_proof.data_root, &ingress_proof.signature);
+            Ok(false)
         }
     }
 
@@ -904,7 +937,7 @@ impl Inner {
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
         let publish_txs_and_proofs = self
-            .get_publish_txs_and_proofs(&canonical, &submit_tx)
+            .get_publish_txs_and_proofs(&canonical, &submit_tx, current_height)
             .await?;
 
         // Calculate total fees and log final summary
@@ -963,9 +996,18 @@ impl Inner {
         &self,
         canonical: &[BlockTreeEntry],
         submit_tx: &[DataTransactionHeader],
+        current_height: u64,
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
+
+        // only max anchor age is constrained for ingress proofs
+        let min_ingress_proof_anchor_height = current_height.saturating_sub(
+            self.config
+                .consensus
+                .mempool
+                .ingress_proof_anchor_expiry_depth as u64,
+        );
 
         {
             let read_tx = self
@@ -1092,11 +1134,21 @@ impl Inner {
                     continue;
                 }
 
-                // Convert to IngressProof vector for assignment checking
-                let all_tx_proofs: Vec<IngressProof> = all_proofs
-                    .iter()
-                    .map(|(_, proof_entry)| proof_entry.proof.clone())
-                    .collect();
+                let mut all_tx_proofs: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
+
+                //filter all these ingress proofs by their anchor validity
+                for (_hash, proof) in all_proofs {
+                    let proof = proof.0.proof;
+                    // validate the anchor is still valid
+                    let anchor_is_valid = self.validate_ingress_proof_anchor_for_inclusion(
+                        min_ingress_proof_anchor_height,
+                        &proof,
+                    )?;
+                    if anchor_is_valid {
+                        all_tx_proofs.push(proof)
+                    }
+                    // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
+                }
 
                 // Get assigned and unassigned proofs using the existing utility function
                 let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
@@ -1473,6 +1525,7 @@ impl Inner {
 
     // Helper to get the canonical chain and latest height
     fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
+        // TODO: `get_canonical_chain` clones the entire canonical chain, we can make do with a ref here
         let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
         let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),

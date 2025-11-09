@@ -6,7 +6,7 @@ use tracing::warn;
 use crate::mempool_service::{IngressProofError, Inner};
 
 impl Inner {
-    pub async fn handle_ingest_ingress_proof(
+    pub fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,
     ) -> Result<(), IngressProofError> {
@@ -27,30 +27,40 @@ impl Inner {
         }
 
         // validate the anchor
-        let latest_height = self.get_latest_block_height().map_err(|_e| {
-            IngressProofError::Other("unable to get canonical chain from block tree ".to_owned())
-        })?;
+        {
+            let latest_height = self.get_latest_block_height().map_err(|_e| {
+                IngressProofError::Other(
+                    "unable to get canonical chain from block tree ".to_owned(),
+                )
+            })?;
 
-        // TODO: rework this so mark_tx_as_invalid is external
-        let anchor_height = self
-            .get_anchor_height(ingress_proof.proof, ingress_proof.anchor)
-            .await
-            .map_err(|_| IngressProofError::DatabaseError)?;
+            // TODO: add an ingress proof invalid LRU, like we have for txs
+            let anchor_height = match self
+                .get_anchor_height(ingress_proof.anchor)
+                .map_err(|_e| IngressProofError::DatabaseError)?
+            {
+                Some(height) => height,
+                None => {
+                    // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                    return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+                }
+            };
 
-        // check consensus config
+            // check consensus config
 
-        let min_anchor_height = latest_height.saturating_sub(
-            self.config
-                .consensus
-                .mempool
-                .ingress_proof_anchor_expiry_depth as u64,
-        );
+            let min_anchor_height = latest_height.saturating_sub(
+                self.config
+                    .consensus
+                    .mempool
+                    .ingress_proof_anchor_expiry_depth as u64,
+            );
 
-        let too_old = anchor_height < min_anchor_height;
+            let too_old = anchor_height < min_anchor_height;
 
-        if too_old {
-            warn!("Ingress proof anchor is too old");
-            return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+            if too_old {
+                warn!("Ingress proof anchor is too old");
+                return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+            }
         }
 
         let db = self.irys_db.clone();
