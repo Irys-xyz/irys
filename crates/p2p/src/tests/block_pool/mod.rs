@@ -2,7 +2,8 @@ use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, ApiClientStub, BlockDiscoveryStub, FakeGossipServer, MempoolStub,
+    data_handler_stub, data_handler_with_stubbed_pool, ApiClientStub, BlockDiscoveryStub,
+    FakeGossipServer, MempoolStub,
 };
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
@@ -25,7 +26,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 #[derive(Clone, Default, Debug)]
 struct MockApiClient {
@@ -247,11 +248,11 @@ async fn should_process_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        config,
+        config.clone(),
         service_senders,
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 
@@ -293,7 +294,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // block1: in database
     // block2: in API client
     // block3: test block to be processed
-    let test_chain = BlockStatusProvider::produce_mock_chain(3, None);
+    let test_chain = BlockStatusProvider::produce_mock_chain(3, None, &config.consensus);
 
     // Create block1 (will be in the database)
     let block1 = test_chain[0].clone();
@@ -449,6 +450,208 @@ async fn should_process_block_with_intermediate_block_in_api() {
 }
 
 #[tokio::test]
+async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives() {
+    let config = create_test_config();
+
+    let gossip_server = FakeGossipServer::new();
+    let (server_handle, fake_peer_gossip_addr) =
+        gossip_server.run(SocketAddr::from(([127, 0, 0, 1], 0)));
+
+    tokio::spawn(server_handle);
+
+    // Wait for the server to start
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
+    // block1: in database
+    // block2: in API client, but fails. It doesn't make it all the way to the block pool
+    // block3: test block to be processed - getting stuck when processing block2
+    // block4: new block that should trigger reprocessing of block2 and then block3
+    let test_chain = BlockStatusProvider::produce_mock_chain(4, None, &config.consensus);
+
+    // Create block1 (will be in the database)
+    let block1 = test_chain[0].clone();
+    // Create block2 (will be in the API client)
+    let block2 = test_chain[1].clone();
+    // Create block3 (test block)
+    let block3 = test_chain[2].clone();
+    // Create block4 (new block that should trigger reprocessing of block2 and then block3)
+    let block4 = test_chain[3].clone();
+
+    debug!("Block 1: {:?}", block1.block_hash);
+    debug!("Block 2: {:?}", block2.block_hash);
+    debug!("Block 3: {:?}", block3.block_hash);
+    debug!("Block 4: {:?}", block4.block_hash);
+    debug!(
+        "Block 1 previous_block_hash: {:?}",
+        block1.previous_block_hash
+    );
+    debug!(
+        "Block 2 previous_block_hash: {:?}",
+        block2.previous_block_hash
+    );
+    debug!(
+        "Block 3 previous_block_hash: {:?}",
+        block3.previous_block_hash
+    );
+    debug!(
+        "Block 4 previous_block_hash: {:?}",
+        block4.previous_block_hash
+    );
+
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_data_guard,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        service_senders,
+        is_vdf_mining_enabled,
+    } = MockedServices::new(&config).await;
+
+    // Create a direct channel for the sync service
+    let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+    let peer_list_guard = peer_list_data_guard.clone();
+    // Set the mock client to return block2 when requested
+    // Adding a peer so we can send a request to the mock client
+    peer_list_guard.add_or_update_peer(
+        Address::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
+        PeerListItem {
+            reputation_score: PeerScore::new(100),
+            response_time: 0,
+            address: PeerAddress {
+                gossip: fake_peer_gossip_addr,
+                ..PeerAddress::default()
+            },
+            last_seen: 0,
+            is_online: true,
+        },
+        true,
+    );
+
+    let api_client_stub = MockApiClient {
+        block_response: Some(CombinedBlockHeader {
+            irys: block2.clone(),
+            execution: Default::default(),
+        }),
+    };
+
+    let sync_state = ChainSyncState::new(false, false);
+
+    let block_pool = Arc::new(BlockPool::new(
+        db.clone(),
+        block_discovery_stub.clone(),
+        mempool_stub.clone(),
+        sync_sender,
+        sync_state.clone(),
+        block_status_provider_mock.clone(),
+        execution_payload_provider.clone(),
+        config.clone(),
+        service_senders,
+    ));
+
+    let data_handler = data_handler_with_stubbed_pool(
+        &peer_list_guard,
+        api_client_stub.clone(),
+        sync_state.clone(),
+        block_pool.clone(),
+    )
+    .await;
+
+    let sync_service_inner = ChainSyncServiceInner::new_with_client(
+        sync_state.clone(),
+        api_client_stub.clone(),
+        peer_list_guard.clone(),
+        config.clone(),
+        block_status_provider_mock.block_index(),
+        block_pool.clone(),
+        data_handler,
+        None,
+        is_vdf_mining_enabled,
+    );
+
+    let sync_service_handle = ChainSyncService::spawn_service(
+        sync_service_inner,
+        sync_receiver,
+        tokio::runtime::Handle::current(),
+    );
+
+    // Set the fake server to mimic get_data -> gossip_service sends a message to the block pool
+    let block_for_server = Arc::new(RwLock::new(None));
+    let block_for_server_clone = block_for_server.clone();
+    gossip_server.set_on_pull_data_request(move |data_request| match data_request {
+        GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
+        GossipDataRequest::Block(block_hash) => {
+            debug!("Received a request to pull the block: {:?}", block_hash);
+            let block_for_server = block_for_server_clone
+                .read()
+                .unwrap()
+                .clone()
+                .map(|b| GossipData::Block(Arc::new(b)));
+            GossipResponse::Accepted(block_for_server)
+        }
+        GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+    });
+
+    let block2 = Arc::new(block2.clone());
+    let block3 = Arc::new(block3.clone());
+    let block4 = Arc::new(block4.clone());
+
+    info!("Block1 hash: {:?}", block1.block_hash);
+    // Insert block1 into the database
+    block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
+
+    // Process block3
+    block_pool
+        .process_block::<ApiClientStub>(Arc::clone(&block3), false)
+        .await
+        .expect("can't process block");
+
+    // Wait for the block to be processed
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Couldn't fetch block2, so block3 is not processed
+    assert!(block_discovery_stub.get_blocks().is_empty());
+    assert!(!block_pool.contains_block(&block2.block_hash).await);
+    assert!(block_pool.contains_block(&block3.block_hash).await);
+    // Assert that both blocks are not marked as processing
+    assert!(!block_pool.is_block_processing(&block2.block_hash).await);
+    assert!(!block_pool.is_block_processing(&block3.block_hash).await);
+
+    info!("Adding block2 to the server and processing block4 to trigger reprocessing");
+    // Add a previously missing block to the server
+    *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
+    // Process block4 to trigger reprocessing of block2 and then block3
+    block_pool
+        .process_block::<ApiClientStub>(Arc::clone(&block4), false)
+        .await
+        .expect("can't process block");
+
+    // Wait for the block to be processed
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let discovered_block2 = block_discovery_stub.get_blocks().first().unwrap().clone();
+    let discovered_block3 = block_discovery_stub
+        .get_blocks()
+        .get(1)
+        .expect("to get block3 message")
+        .clone();
+    let discovered_block4 = block_discovery_stub
+        .get_blocks()
+        .get(2)
+        .expect("to get block4 message")
+        .clone();
+
+    assert_eq!(discovered_block2, block2);
+    assert_eq!(discovered_block3, block3);
+    assert_eq!(discovered_block4, block4);
+
+    sync_service_handle.shutdown_signal.fire();
+}
+
+#[tokio::test]
 async fn should_warn_about_mismatches_for_very_old_block() {
     let config = create_test_config();
 
@@ -476,11 +679,11 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider,
-        config,
+        config.clone(),
         service_senders,
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
 
     // Test case: 5 older blocks are in the index, but pruned from the tree;
     // 5 newer blocks are in the tree and in the index
@@ -506,7 +709,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     block_status_provider_mock.delete_mocked_blocks_older_than(10);
 
     let header_building_on_very_old_block =
-        BlockStatusProvider::produce_mock_chain(1, old_blocks.get(1))[0].clone();
+        BlockStatusProvider::produce_mock_chain(1, old_blocks.get(1), &config.consensus)[0].clone();
 
     debug!(
         "Sending bogus block: {:?}",
@@ -616,7 +819,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         tokio::runtime::Handle::current(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None);
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
 
     // Test case: 5 older blocks are in the index, but pruned from the tree;
     // 5 newer blocks are in the tree and in the index
@@ -644,9 +847,12 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let bogus_block_parent_index = 1;
 
     // Fresh block that is trying to build on the old chain
-    let bogus_block =
-        BlockStatusProvider::produce_mock_chain(1, old_blocks.get(bogus_block_parent_index))[0]
-            .clone();
+    let bogus_block = BlockStatusProvider::produce_mock_chain(
+        1,
+        old_blocks.get(bogus_block_parent_index),
+        &config.consensus,
+    )[0]
+    .clone();
 
     let oldest_block = block_status_provider_mock.oldest_tree_height();
     assert_eq!(oldest_block, 5);
@@ -733,11 +939,11 @@ async fn should_not_fast_track_block_already_in_index() {
         sync_state,
         block_status_provider_mock.clone(),
         execution_payload_provider.clone(),
-        config,
+        config.clone(),
         service_senders,
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None);
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 
