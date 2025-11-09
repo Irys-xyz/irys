@@ -59,7 +59,7 @@ impl Inner {
         self.validate_signature(tx).await?;
 
         // Validate anchor and compute expiry
-        let anchor_height = self.validate_anchor(tx).await?;
+        let anchor_height = self.validate_tx_anchor(tx).await?;
         let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
 
         // Validate and parse ledger type

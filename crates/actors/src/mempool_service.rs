@@ -474,7 +474,7 @@ impl Inner {
     }
 
     #[instrument(skip_all)]
-    pub async fn validate_anchor_for_inclusion(
+    pub async fn validate_tx_anchor_for_inclusion(
         &self,
         min_anchor_height: u64,
         max_anchor_height: u64,
@@ -482,7 +482,16 @@ impl Inner {
     ) -> eyre::Result<bool> {
         let tx_id = tx.id();
         let anchor = tx.anchor();
-        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+        let anchor_height = match self
+            .get_anchor_height(anchor)
+            .map_err(|_e| TxIngressError::DatabaseError)?
+        {
+            Some(height) => height,
+            None => {
+                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                return Err(TxIngressError::InvalidAnchor.into());
+            }
+        };
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
@@ -663,7 +672,7 @@ impl Inner {
             }
 
             if !self
-                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
+                .validate_tx_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
                 .await?
             {
                 continue;
@@ -857,7 +866,7 @@ impl Inner {
             }
 
             if !self
-                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
+                .validate_tx_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
                 .await?
             {
                 continue;
@@ -1225,38 +1234,34 @@ impl Inner {
     }
 
     // Resolves an anchor (block hash) to it's height
-    pub async fn get_anchor_height(
-        &self,
-        tx_id: IrysTransactionId,
-        anchor: H256,
-    ) -> Result<u64, TxIngressError> {
+    // if it couldn't find the anchor, returns None
+    pub fn get_anchor_height(&self, anchor: H256) -> eyre::Result<Option<u64>> {
         // check the mempool, then block tree, then DB
-        Ok(
-            if let Some(height) = {
-                // in a block so rust doesn't complain about it being held across an await point
-                // I suspect if let Some desugars to something that lint doesn't like
-                let guard = self.block_tree_read_guard.read();
-                guard.get_block(&anchor).map(|h| h.height)
-            } {
-                height
-            } else if let Some(hdr) = {
-                let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
-                irys_database::block_header_by_hash(&read_tx, &anchor, false)
-                    .map_err(|_| TxIngressError::DatabaseError)?
-            } {
-                hdr.height
-            } else {
-                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
-                return Err(TxIngressError::InvalidAnchor);
-            },
-        )
+
+        if let Some(height) = {
+            // in a block so rust doesn't complain about it being held across an await point
+            // I suspect if let Some desugars to something that lint doesn't like
+            let guard = self.block_tree_read_guard.read();
+            guard.get_block(&anchor).map(|h| h.height)
+        } {
+            Ok(Some(height))
+        } else if let Some(hdr) = {
+            let read_tx = self.read_tx()?;
+            irys_database::block_header_by_hash(&read_tx, &anchor, false)?
+        } {
+            Ok(Some(hdr.height))
+        } else {
+            // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+            // return Err(TxIngressError::InvalidAnchor);
+            Ok(None)
+        }
     }
 
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
     // if the anchor is valid, returns anchor block height
     #[instrument(skip_all, fields(tx.id = %tx.id(), anchor = %tx.anchor()))]
-    pub async fn validate_anchor(
+    pub async fn validate_tx_anchor(
         &self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
@@ -1265,7 +1270,18 @@ impl Inner {
 
         let latest_height = self.get_latest_block_height()?;
 
-        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+        // let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+
+        let anchor_height = match self
+            .get_anchor_height(anchor)
+            .map_err(|_e| TxIngressError::DatabaseError)?
+        {
+            Some(height) => height,
+            None => {
+                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                return Err(TxIngressError::InvalidAnchor);
+            }
+        };
 
         // is this anchor too old?
 
