@@ -238,7 +238,9 @@ impl Inner {
         current_height: u64,
         tx: &impl IrysTransactionCommon,
     ) -> bool {
-        let anchor_height = match self.get_anchor_height(tx.anchor()) {
+        let anchor_height = match self
+            .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
+        {
             Ok(Some(h)) => h,
             // if we don't know about the anchor, we should prune
             // note: this can happen, i.e if we did a block rollback.

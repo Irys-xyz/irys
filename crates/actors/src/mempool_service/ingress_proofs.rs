@@ -36,7 +36,10 @@ impl Inner {
 
             // TODO: add an ingress proof invalid LRU, like we have for txs
             let anchor_height = match self
-                .get_anchor_height(ingress_proof.anchor)
+                .get_anchor_height(
+                    ingress_proof.anchor,
+                    false, /* does not need to be canonical */
+                )
                 .map_err(|_e| IngressProofError::DatabaseError)?
             {
                 Some(height) => height,

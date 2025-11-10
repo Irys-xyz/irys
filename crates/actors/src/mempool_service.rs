@@ -482,8 +482,9 @@ impl Inner {
     ) -> eyre::Result<bool> {
         let tx_id = tx.id();
         let anchor = tx.anchor();
+        // ingress proof anchors must be canonical for inclusion
         let anchor_height = match self
-            .get_anchor_height(anchor)
+            .get_anchor_height(anchor, true)
             .map_err(|_e| TxIngressError::DatabaseError)?
         {
             Some(height) => height,
@@ -517,7 +518,7 @@ impl Inner {
     ) -> eyre::Result<bool> {
         let anchor = ingress_proof.anchor;
         let anchor_height = match self
-            .get_anchor_height(anchor)
+            .get_anchor_height(anchor, true)
             .map_err(|_e| TxIngressError::DatabaseError)?
         {
             Some(height) => height,
@@ -1287,14 +1288,24 @@ impl Inner {
 
     // Resolves an anchor (block hash) to it's height
     // if it couldn't find the anchor, returns None
-    pub fn get_anchor_height(&self, anchor: H256) -> eyre::Result<Option<u64>> {
+    // set canonical to true to enforce that the anchor must be part of the current canonical chain
+    pub fn get_anchor_height(&self, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
         // check the mempool, then block tree, then DB
 
         if let Some(height) = {
             // in a block so rust doesn't complain about it being held across an await point
             // I suspect if let Some desugars to something that lint doesn't like
             let guard = self.block_tree_read_guard.read();
-            guard.get_block(&anchor).map(|h| h.height)
+            if canonical {
+                guard
+                    .get_canonical_chain()
+                    .0
+                    .iter()
+                    .find(|b| b.block_hash == anchor)
+                    .map(|b| b.height)
+            } else {
+                guard.get_block(&anchor).map(|h| h.height)
+            }
         } {
             Ok(Some(height))
         } else if let Some(hdr) = {
@@ -1325,7 +1336,7 @@ impl Inner {
         // let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
 
         let anchor_height = match self
-            .get_anchor_height(anchor)
+            .get_anchor_height(anchor, false /* does not need to be canonical */)
             .map_err(|_e| TxIngressError::DatabaseError)?
         {
             Some(height) => height,
