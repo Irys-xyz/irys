@@ -1383,7 +1383,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     // Configure a node with specified block_tree_depth
     let config = NodeConfig::testing().with_consensus(|c| {
         c.block_tree_depth = block_tree_depth;
-        c.mempool.anchor_expiry_depth = 2;
+        c.mempool.tx_anchor_expiry_depth = 2;
         c.block_migration_depth = 2;
     });
 

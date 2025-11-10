@@ -47,7 +47,7 @@ impl Config {
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         ensure!(
             std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
-                <= (self.consensus.mempool.anchor_expiry_depth)
+                <= (self.consensus.mempool.tx_anchor_expiry_depth)
         );
 
         if matches!(self.node_config.node_mode, NodeMode::Peer) {
@@ -123,7 +123,7 @@ impl From<&NodeConfig> for MempoolConfig {
             // consensus
             max_data_txs_per_block: consensus.max_data_txs_per_block,
             max_commitment_txs_per_block: consensus.max_commitment_txs_per_block,
-            anchor_expiry_depth: consensus.anchor_expiry_depth,
+            anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
         }
     }
@@ -485,7 +485,8 @@ mod tests {
         [mempool]
         max_data_txs_per_block = 100
         max_commitment_txs_per_block = 100
-        anchor_expiry_depth = 20
+        tx_anchor_expiry_depth = 20
+        ingress_proof_anchor_expiry_depth = 200
         commitment_fee = 100
 
 

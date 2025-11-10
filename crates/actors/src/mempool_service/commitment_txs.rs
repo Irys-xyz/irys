@@ -63,7 +63,7 @@ impl Inner {
         }
 
         // Validate anchor (height is unused at this stage)
-        self.validate_anchor(commitment_tx).await?;
+        self.validate_tx_anchor(commitment_tx).await?;
 
         Ok(())
     }
