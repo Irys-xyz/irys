@@ -44,7 +44,6 @@ impl CircuitBreaker {
         let now_nanos = get_current_time_nanos();
         let current_state = CircuitState::from(self.state.load(Ordering::Acquire));
 
-        // HalfOpen: single failure → reopen (conservative recovery)
         if current_state == CircuitState::HalfOpen {
             self.half_open_trial_count.store(0, Ordering::Relaxed);
             self.last_failure_time_nanos
