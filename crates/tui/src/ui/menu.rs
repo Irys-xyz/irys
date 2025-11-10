@@ -1439,7 +1439,7 @@ impl MainMenu {
                             Span::raw("  "),
                             Span::styled("Anchor Expiry: ", Style::default()),
                             Span::styled(
-                                format!("{}", config.mempool.anchor_expiry_depth),
+                                format!("{}", config.mempool.tx_anchor_expiry_depth),
                                 Style::default().fg(Color::Yellow),
                             ),
                         ]));

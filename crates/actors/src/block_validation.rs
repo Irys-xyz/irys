@@ -1801,7 +1801,7 @@ pub async fn data_txs_are_valid(
     get_previous_tx_inclusions(
         &mut txs_to_check,
         block,
-        config.consensus.mempool.anchor_expiry_depth as u64,
+        config.consensus.mempool.tx_anchor_expiry_depth as u64,
         service_senders,
         db,
     )

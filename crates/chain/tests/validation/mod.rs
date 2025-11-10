@@ -711,6 +711,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let chunk_size = 256_usize;
     let data_bytes = vec![0_u8; chunk_size * 2];
     let chunks: Vec<Vec<u8>> = data_bytes.chunks(chunk_size).map(Vec::from).collect();
+    let anchor = genesis_node.get_anchor().await?;
 
     // Generate data root
     let leaves =
@@ -721,7 +722,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     // Create data transaction header
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
         id: H256::random(),
-        anchor: H256::zero(),
+        anchor,
         signer: test_signer.address(),
         data_root,
         data_size: data_bytes.len() as u64,
@@ -742,6 +743,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         data_root,
         chunks.clone().into_iter().map(Ok),
         chain_id,
+        anchor,
     )?;
 
     // IMPORTANT: Create a second proof with the same signer but make it slightly different
@@ -752,6 +754,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         data_root,
         chunks.into_iter().map(Ok),
         chain_id,
+        anchor,
     )?;
 
     // Verify both proofs have the same data_root and can recover the same signer

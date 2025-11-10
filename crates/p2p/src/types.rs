@@ -51,6 +51,9 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
             }
+            IngressProofError::InvalidAnchor(_anchor) => {
+                Self::InvalidData(InvalidDataError::TransactionAnchor)
+            }
         }
     }
 }
@@ -160,6 +163,8 @@ pub enum InvalidDataError {
     ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
+    #[error("Invalid ingress proof anchor")]
+    IngressProofAnchor,
 }
 
 #[derive(Debug, Error, Clone)]

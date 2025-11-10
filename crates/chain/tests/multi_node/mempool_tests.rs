@@ -476,7 +476,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 100; // don't care about anchor expiry
+        .tx_anchor_expiry_depth = 100; // don't care about anchor expiry
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     // Create a signer (keypair) for the peer and fund it

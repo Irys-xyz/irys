@@ -59,7 +59,7 @@ impl Inner {
         self.validate_signature(tx).await?;
 
         // Validate anchor and compute expiry
-        let anchor_height = self.validate_anchor(tx).await?;
+        let anchor_height = self.validate_tx_anchor(tx).await?;
         let expiry_height = self.compute_expiry_height_from_anchor(anchor_height);
 
         // Validate and parse ledger type
@@ -366,7 +366,7 @@ impl Inner {
 
     /// Computes the pre-confirmation expiry height given a resolved anchor height.
     fn compute_expiry_height_from_anchor(&self, anchor_height: u64) -> u64 {
-        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u64;
         anchor_height + anchor_expiry_depth
     }
 
@@ -604,7 +604,7 @@ impl Inner {
 
         // Calculate the minimum block height we need to check for transaction conflicts
         // Only transactions anchored within this depth window are considered valid
-        let anchor_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u64;
         let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
 
         // Start with all valid Submit ledger transactions - we'll filter out already-included ones

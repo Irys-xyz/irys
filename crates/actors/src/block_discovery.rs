@@ -474,7 +474,7 @@ impl BlockDiscoveryServiceInner {
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
-        let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
         let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
         let mut parent_block = previous_block_header.clone();
 

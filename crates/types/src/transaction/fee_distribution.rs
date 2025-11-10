@@ -434,6 +434,7 @@ mod tests {
         let signer1 = IrysSigner::random_signer(&config);
         let signer2 = IrysSigner::random_signer(&config);
         let data_root = H256::random();
+        let anchor = H256::random();
 
         // Generate actual ingress proofs
         let proof1 = generate_ingress_proof(
@@ -441,6 +442,7 @@ mod tests {
             data_root,
             [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
             config.chain_id,
+            anchor,
         )
         .unwrap();
 
@@ -449,6 +451,7 @@ mod tests {
             data_root,
             [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
             config.chain_id,
+            anchor,
         )
         .unwrap();
 
@@ -532,6 +535,7 @@ mod tests {
         // Create 3 test ingress proofs
         let signers: Vec<_> = (0..3).map(|_| IrysSigner::random_signer(&config)).collect();
         let data_root = H256::random();
+        let anchor = H256::random();
 
         let proofs: Vec<_> = signers
             .iter()
@@ -541,6 +545,7 @@ mod tests {
                     data_root,
                     [vec![0_u8; 32]].iter().map(|c| Ok(c.as_slice())),
                     config.chain_id,
+                    anchor,
                 )
                 .unwrap()
             })

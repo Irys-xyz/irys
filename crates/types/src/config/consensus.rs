@@ -372,7 +372,11 @@ pub struct MempoolConsensusConfig {
 
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
-    pub anchor_expiry_depth: u8,
+    pub tx_anchor_expiry_depth: u8,
+
+    /// The number of blocks a given anchor (tx or block hash) is valid for.
+    /// The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
+    pub ingress_proof_anchor_expiry_depth: u16,
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
@@ -482,7 +486,8 @@ impl ConsensusConfig {
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 20,
+                tx_anchor_expiry_depth: 20,
+                ingress_proof_anchor_expiry_depth: 200,
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {

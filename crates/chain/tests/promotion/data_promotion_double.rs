@@ -25,7 +25,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     // Testnet / single node config
     config.consensus.get_mut().block_migration_depth = 1;
     let anchor_expiry_depth = 10;
-    config.consensus.get_mut().mempool.anchor_expiry_depth = anchor_expiry_depth;
+    config.consensus.get_mut().mempool.tx_anchor_expiry_depth = anchor_expiry_depth;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![

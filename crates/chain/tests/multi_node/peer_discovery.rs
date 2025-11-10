@@ -379,7 +379,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 20;
+        .tx_anchor_expiry_depth = 20;
 
     testing_config_genesis
         .consensus
