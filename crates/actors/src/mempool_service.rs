@@ -1450,7 +1450,6 @@ impl Inner {
         err_reason: impl ToString,
     ) {
         warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
-        // let mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState> = self.mempool_state.write().await;
         state.recent_invalid_tx.put(tx_id, ());
         state.recent_valid_tx.pop(&tx_id);
     }
