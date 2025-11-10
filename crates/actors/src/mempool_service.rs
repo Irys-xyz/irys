@@ -414,6 +414,44 @@ impl Inner {
 
         let mempool_config = &self.config.node_config.consensus_config().mempool;
 
+        // Calculate capacity utilization
+        let data_tx_capacity_pct = if state.max_submit_txs > 0 {
+            (state.valid_submit_ledger_tx.len() as f64 / state.max_submit_txs as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let commitment_address_capacity_pct = if state.max_commitment_addresses > 0 {
+            (state.valid_commitment_tx.len() as f64 / state.max_commitment_addresses as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Log capacity warnings
+        if data_tx_capacity_pct > 90.0 {
+            warn!(
+                mempool.data_tx_capacity = data_tx_capacity_pct,
+                mempool.data_tx_count = state.valid_submit_ledger_tx.len(),
+                mempool.data_tx_max = state.max_submit_txs,
+                "Data tx mempool approaching capacity"
+            );
+        }
+
+        if commitment_address_capacity_pct > 90.0 {
+            warn!(
+                mempool.commitment_address_capacity = commitment_address_capacity_pct,
+                mempool.commitment_address_count = state.valid_commitment_tx.len(),
+                mempool.commitment_address_max = state.max_commitment_addresses,
+                "Commitment address mempool approaching capacity"
+            );
+        }
+
+        debug!(
+            mempool.data_tx_capacity = data_tx_capacity_pct,
+            mempool.commitment_address_capacity = commitment_address_capacity_pct,
+            "Mempool capacity utilization"
+        );
+
         Ok(MempoolStatus {
             data_tx_count: state.valid_submit_ledger_tx.len(),
             commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
@@ -423,6 +461,8 @@ impl Inner {
             recent_invalid_tx_count: state.recent_invalid_tx.len(),
             data_tx_total_size,
             config: mempool_config.clone(),
+            data_tx_capacity_pct,
+            commitment_address_capacity_pct,
         })
     }
 
@@ -1474,9 +1514,13 @@ impl Inner {
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
 #[derive(Debug)]
 pub struct MempoolState {
-    /// valid submit txs
+    /// bounded map with manual capacity enforcement
     pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
+    pub max_submit_txs: usize,
+    /// bounded map with manual capacity enforcement
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
+    pub max_commitment_addresses: usize,
+    pub max_commitments_per_address: usize,
     /// The miner's signer instance, used to sign ingress proofs
     pub recent_invalid_tx: LruCache<H256, ()>,
     /// Tracks recent invalid payload fingerprints (e.g., keccak(prehash + signature)) for signature-invalid payloads
@@ -1498,7 +1542,10 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
         valid_submit_ledger_tx: BTreeMap::new(),
+        max_submit_txs: config.max_valid_submit_txs,
         valid_commitment_tx: BTreeMap::new(),
+        max_commitment_addresses: config.max_valid_commitment_addresses,
+        max_commitments_per_address: config.max_commitments_per_address,
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
         recent_invalid_payload_fingerprints: LruCache::new(
             NonZeroUsize::new(config.max_invalid_items).unwrap(),
@@ -1507,6 +1554,165 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
+    }
+}
+
+impl MempoolState {
+    /// Insert data tx with bounds enforcement.
+    /// Evicts lowest fee tx if at capacity.
+    /// Returns error only if capacity is exceeded and no transaction can be evicted.
+    pub fn bounded_insert_data_tx(
+        &mut self,
+        tx: DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        use std::collections::btree_map::Entry;
+        // If tx already exists we still update it.
+        // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
+        if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx.id) {
+            value.insert(tx);
+            return Ok(());
+        }
+
+        // If at capacity, evict lowest fee tx
+        if self.valid_submit_ledger_tx.len() >= self.max_submit_txs {
+            if let Some((evict_id, evicted_fee)) = self.find_lowest_fee_data_tx() {
+                let new_fee = tx.user_fee();
+                // Only evict if new tx has higher fee
+                if new_fee <= evicted_fee {
+                    warn!(
+                        new.tx_id = ?tx.id,
+                        new.fee = ?new_fee,
+                        lowest.fee = ?evicted_fee,
+                        "Rejecting lower-fee tx: mempool full"
+                    );
+                    return Err(TxIngressError::MempoolFull(
+                        "Mempool full and new transaction fee too low".to_string(),
+                    ));
+                }
+
+                self.valid_submit_ledger_tx.remove(&evict_id);
+                warn!(
+                    evicted.tx_id = ?evict_id,
+                    evicted.fee = ?evicted_fee,
+                    new.tx_id = ?tx.id,
+                    new.fee = ?new_fee,
+                    "Mempool full: evicted lowest fee data tx"
+                );
+            } else {
+                return Err(TxIngressError::MempoolFull(
+                    "Mempool full and no evictable data tx found".to_string(),
+                ));
+            }
+        }
+
+        self.valid_submit_ledger_tx.insert(tx.id, tx);
+        Ok(())
+    }
+
+    /// Find lowest fee data transaction for eviction.
+    /// Returns (tx_id, fee) tuple.
+    fn find_lowest_fee_data_tx(&self) -> Option<(H256, U256)> {
+        self.valid_submit_ledger_tx
+            .iter()
+            .min_by_key(|(_, tx)| tx.user_fee())
+            .map(|(id, tx)| (*id, tx.user_fee()))
+    }
+
+    /// Insert commitment tx with bounds enforcement.
+    /// Enforces per-address limit and global address limit.
+    /// Rejects new commitments when per-address limit is exceeded (preserves existing commitments).
+    /// Evicts lowest-value addresses when global address limit is exceeded.
+    pub fn bounded_insert_commitment_tx(
+        &mut self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let address = tx.signer;
+
+        // Check for duplicate tx.id - if already exists, just return Ok()
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
+            if existing_txs.iter().any(|t| t.id == tx.id) {
+                return Ok(()); // Duplicate, already have this commitment
+            }
+        }
+
+        // Check if we need to create a new address entry
+        let address_exists = self.valid_commitment_tx.contains_key(&address);
+
+        // If address doesn't exist and we're at global address limit, evict lowest value address
+        if !address_exists && self.valid_commitment_tx.len() >= self.max_commitment_addresses {
+            if let Some((evict_address, evict_total_value)) = self.find_lowest_value_address() {
+                let new_value = tx.total_cost();
+
+                // Only evict if new commitment has higher value than the address being evicted
+                if new_value <= evict_total_value {
+                    warn!(
+                        new.address = ?address,
+                        new.value = ?new_value,
+                        evict.address = ?evict_address,
+                        evict.total_value = ?evict_total_value,
+                        "Rejecting new commitment: value not higher than lowest existing address"
+                    );
+                    return Err(TxIngressError::MempoolFull(format!(
+                        "Mempool address limit reached. New commitment value {} not higher than lowest address value {}",
+                        new_value,
+                        evict_total_value
+                    )));
+                }
+
+                let evicted_txs = self.valid_commitment_tx.remove(&evict_address);
+                warn!(
+                    evicted.address = ?evict_address,
+                    evicted.total_value = ?evict_total_value,
+                    evicted.count = ?evicted_txs.as_ref().map(std::vec::Vec::len),
+                    new.address = ?address,
+                    new.value = ?new_value,
+                    "Mempool address limit reached: evicted lowest value address"
+                );
+            } else {
+                return Err(TxIngressError::MempoolFull(
+                    "Mempool address limit reached and no evictable address found".to_string(),
+                ));
+            }
+        }
+
+        // Get or create vec for this address
+        let txs = self.valid_commitment_tx.entry(address).or_default();
+
+        // Check if address vec is at capacity - reject new commitment rather than evicting old ones
+        // This preserves the stake/pledge lifecycle and prevents breaking protocol invariants
+        if txs.len() >= self.max_commitments_per_address {
+            warn!(
+                address = ?address,
+                current_count = txs.len(),
+                max_allowed = self.max_commitments_per_address,
+                new.tx_id = ?tx.id,
+                "Address commitment pool full: rejecting new commitment"
+            );
+            return Err(TxIngressError::MempoolFull(format!(
+                "Address {} has reached maximum commitments limit ({}/{})",
+                address,
+                txs.len(),
+                self.max_commitments_per_address
+            )));
+        }
+
+        txs.push(tx.clone());
+        Ok(())
+    }
+
+    /// Find address with lowest total commitment value for eviction.
+    /// Returns (Address, total_value) tuple.
+    fn find_lowest_value_address(&self) -> Option<(Address, U256)> {
+        self.valid_commitment_tx
+            .iter()
+            .map(|(addr, txs)| {
+                let total = txs
+                    .iter()
+                    .map(irys_types::CommitmentTransaction::total_cost)
+                    .fold(U256::zero(), irys_types::U256::saturating_add);
+                (*addr, total)
+            })
+            .min_by_key(|(_, total)| *total)
     }
 }
 
@@ -1560,9 +1766,15 @@ pub enum TxIngressError {
     /// The service is uninitialized
     #[error("Mempool service is not initialized")]
     ServiceUninitialized,
+    /// Mempool is at capacity and cannot accept new transactions
+    #[error("Mempool is at capacity: {0}")]
+    MempoolFull(String),
     /// Catch-all variant for other errors.
     #[error("Transaction ingress error: {0}")]
     Other(String),
+    /// Transaction has encountered a fee calculation issue
+    #[error("Transaction misaligned funds: {0}")]
+    FundMisalignment(String),
     /// Commitment transaction validation error
     #[error("Commitment validation failed: {0}")]
     CommitmentValidationError(#[from] CommitmentValidationError),
@@ -1767,5 +1979,303 @@ pub fn handle_broadcast_recv<T>(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_mempool_tests {
+    use super::*;
+    use irys_types::{
+        CommitmentTransactionV1, CommitmentType, DataLedger, DataTransactionHeaderV1, IrysSignature,
+    };
+
+    // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    /// Creates a test data transaction with specified fee
+    fn create_test_data_tx(fee: u64) -> DataTransactionHeader {
+        DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            id: H256::random(),
+            anchor: H256::zero(),
+            signer: Address::random(),
+            data_root: H256::random(),
+            data_size: 1024,
+            header_size: 0,
+            term_fee: U256::from(fee),
+            perm_fee: Some(U256::from(100)),
+            ledger_id: DataLedger::Publish as u32,
+            bundle_format: Some(0),
+            promoted_height: None,
+            signature: IrysSignature::default(),
+            chain_id: 1,
+        })
+    }
+
+    /// Creates a test commitment transaction with specified signer and value
+    fn create_test_commitment_tx(signer: Address, value: u64) -> CommitmentTransaction {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
+            id: H256::random(), // Random ID for testing
+            anchor: H256::zero(),
+            signer,
+            signature: IrysSignature::default(),
+            fee: 100,
+            value: U256::from(value),
+            commitment_type: CommitmentType::Stake,
+            chain_id: 1,
+        })
+    }
+
+    /// Creates a test mempool state with specified capacities
+    fn create_test_mempool_state(
+        max_data: usize,
+        max_addresses: usize,
+        max_per_address: usize,
+    ) -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: BTreeMap::new(),
+            max_submit_txs: max_data,
+            valid_commitment_tx: BTreeMap::new(),
+            max_commitment_addresses: max_addresses,
+            max_commitments_per_address: max_per_address,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_chunks: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+        }
+    }
+
+    // ========================================================================
+    // Data Transaction Capacity Tests
+    // ========================================================================
+
+    #[test]
+    fn test_data_tx_evicts_lowest_fee_when_full() {
+        // Setup: Fill mempool to capacity with 3 txs
+        let mut state = create_test_mempool_state(3, 10, 10);
+
+        let tx1 = create_test_data_tx(100); // Lowest fee - should be evicted
+        let tx2 = create_test_data_tx(200);
+        let tx3 = create_test_data_tx(300);
+        let tx_new = create_test_data_tx(250); // Higher than lowest
+
+        state.bounded_insert_data_tx(tx1.clone()).unwrap();
+        state.bounded_insert_data_tx(tx2.clone()).unwrap();
+        state.bounded_insert_data_tx(tx3.clone()).unwrap();
+
+        assert_eq!(state.valid_submit_ledger_tx.len(), 3);
+
+        // Act: Insert new tx with fee 250 (should evict tx1 with fee 100)
+        let result = state.bounded_insert_data_tx(tx_new.clone());
+
+        // Assert: Insertion succeeded
+        assert!(result.is_ok(), "Should successfully evict lowest fee tx");
+
+        // Assert: Mempool still at capacity
+        assert_eq!(state.valid_submit_ledger_tx.len(), 3);
+
+        // Assert: Lowest fee tx evicted
+        assert!(!state.valid_submit_ledger_tx.contains_key(&tx1.id));
+
+        // Assert: New tx inserted
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx_new.id));
+
+        // Assert: Other txs preserved
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx2.id));
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx3.id));
+    }
+
+    #[test]
+    fn test_data_tx_rejects_lower_fee_when_full() {
+        // Setup: Fill mempool to capacity
+        let mut state = create_test_mempool_state(3, 10, 10);
+
+        let tx1 = create_test_data_tx(100);
+        let tx2 = create_test_data_tx(200);
+        let tx3 = create_test_data_tx(300);
+        let tx_low_fee = create_test_data_tx(50); // Lower than all existing
+
+        state.bounded_insert_data_tx(tx1.clone()).unwrap();
+        state.bounded_insert_data_tx(tx2.clone()).unwrap();
+        state.bounded_insert_data_tx(tx3.clone()).unwrap();
+
+        // Act: Try to insert tx with lower fee than all existing
+        let result = state.bounded_insert_data_tx(tx_low_fee.clone());
+
+        // Assert: Insertion rejected
+        assert!(matches!(result, Err(TxIngressError::MempoolFull(_))));
+
+        // Assert: Mempool unchanged
+        assert_eq!(state.valid_submit_ledger_tx.len(), 3);
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx1.id));
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx2.id));
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx3.id));
+        assert!(!state.valid_submit_ledger_tx.contains_key(&tx_low_fee.id));
+    }
+
+    // ========================================================================
+    // Commitment Transaction Per-Address Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_commitment_tx_rejects_when_address_limit_reached() {
+        // Setup: Create state with max 3 commitments per address
+        let mut state = create_test_mempool_state(10, 10, 3);
+
+        let address = Address::random();
+        let tx1 = create_test_commitment_tx(address, 100);
+        let tx2 = create_test_commitment_tx(address, 200);
+        let tx3 = create_test_commitment_tx(address, 300);
+        let tx4 = create_test_commitment_tx(address, 400); // Should be rejected
+
+        // Act: Insert 3 commitments (fill address limit)
+        state.bounded_insert_commitment_tx(&tx1).unwrap();
+        state.bounded_insert_commitment_tx(&tx2).unwrap();
+        state.bounded_insert_commitment_tx(&tx3).unwrap();
+
+        // Assert: 3 commitments stored
+        assert_eq!(state.valid_commitment_tx.get(&address).unwrap().len(), 3);
+
+        // Act: Try to insert 4th commitment for same address
+        let result = state.bounded_insert_commitment_tx(&tx4);
+
+        // Assert: Rejected with MempoolFull error
+        assert!(matches!(result, Err(TxIngressError::MempoolFull(_))));
+
+        // Assert: Original 3 commitments preserved (no eviction)
+        let txs = state.valid_commitment_tx.get(&address).unwrap();
+        assert_eq!(txs.len(), 3);
+        assert!(txs.iter().any(|t| t.id == tx1.id));
+        assert!(txs.iter().any(|t| t.id == tx2.id));
+        assert!(txs.iter().any(|t| t.id == tx3.id));
+        assert!(!txs.iter().any(|t| t.id == tx4.id));
+    }
+
+    #[test]
+    fn test_commitment_tx_different_addresses_independent_limits() {
+        // Setup: Max 2 commitments per address
+        let mut state = create_test_mempool_state(10, 10, 2);
+
+        let addr_a = Address::random();
+        let addr_b = Address::random();
+
+        let tx_a1 = create_test_commitment_tx(addr_a, 100);
+        let tx_a2 = create_test_commitment_tx(addr_a, 200);
+        let tx_a3 = create_test_commitment_tx(addr_a, 300);
+
+        let tx_b1 = create_test_commitment_tx(addr_b, 100);
+        let tx_b2 = create_test_commitment_tx(addr_b, 200);
+        let tx_b3 = create_test_commitment_tx(addr_b, 300);
+
+        // Act: Fill both addresses to limit
+        state.bounded_insert_commitment_tx(&tx_a1).unwrap();
+        state.bounded_insert_commitment_tx(&tx_a2).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b1).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b2).unwrap();
+
+        // Assert: Both addresses have 2 commitments
+        assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
+        assert_eq!(state.valid_commitment_tx.get(&addr_b).unwrap().len(), 2);
+
+        // Act: Try to add 3rd to each address
+        let result_a3 = state.bounded_insert_commitment_tx(&tx_a3);
+        let result_b3 = state.bounded_insert_commitment_tx(&tx_b3);
+
+        // Assert: Both rejected independently
+        assert!(matches!(result_a3, Err(TxIngressError::MempoolFull(_))));
+        assert!(matches!(result_b3, Err(TxIngressError::MempoolFull(_))));
+
+        // Assert: Limits still at 2 per address
+        assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
+        assert_eq!(state.valid_commitment_tx.get(&addr_b).unwrap().len(), 2);
+    }
+
+    // ========================================================================
+    // Commitment Transaction Global Address Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_commitment_tx_evicts_lowest_value_address_when_global_limit_reached() {
+        // Setup: Max 3 addresses globally
+        let mut state = create_test_mempool_state(10, 3, 10);
+
+        let addr_a = Address::random();
+        let addr_b = Address::random();
+        let addr_c = Address::random();
+        let addr_d = Address::random();
+
+        // Create commitments with different total values per address
+        let tx_a = create_test_commitment_tx(addr_a, 100); // Lowest total value
+        let tx_b1 = create_test_commitment_tx(addr_b, 200);
+        let tx_b2 = create_test_commitment_tx(addr_b, 300); // Total: 500
+        let tx_c = create_test_commitment_tx(addr_c, 300);
+        let tx_d = create_test_commitment_tx(addr_d, 200); // Should evict addr_a
+
+        // Act: Fill 3 addresses
+        state.bounded_insert_commitment_tx(&tx_a).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b1).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b2).unwrap();
+        state.bounded_insert_commitment_tx(&tx_c).unwrap();
+
+        assert_eq!(state.valid_commitment_tx.len(), 3); // 3 addresses
+
+        // Act: Insert commitment for 4th address (should evict addr_a with lowest value)
+        let result = state.bounded_insert_commitment_tx(&tx_d);
+
+        // Assert: Insertion succeeded
+        assert!(result.is_ok());
+
+        // Assert: Still 3 addresses total
+        assert_eq!(state.valid_commitment_tx.len(), 3);
+
+        // Assert: Lowest value address (addr_a) evicted
+        assert!(!state.valid_commitment_tx.contains_key(&addr_a));
+
+        // Assert: New address inserted
+        assert!(state.valid_commitment_tx.contains_key(&addr_d));
+
+        // Assert: Other addresses preserved
+        assert!(state.valid_commitment_tx.contains_key(&addr_b));
+        assert!(state.valid_commitment_tx.contains_key(&addr_c));
+
+        // Assert: addr_b still has both commitments
+        assert_eq!(state.valid_commitment_tx.get(&addr_b).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_commitment_tx_updates_existing_address_no_global_limit_check() {
+        // Setup: Fill global address limit
+        let mut state = create_test_mempool_state(10, 3, 10);
+
+        let addr_a = Address::random();
+        let addr_b = Address::random();
+        let addr_c = Address::random();
+
+        state
+            .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_a, 100))
+            .unwrap();
+        state
+            .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_b, 200))
+            .unwrap();
+        state
+            .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_c, 300))
+            .unwrap();
+
+        assert_eq!(state.valid_commitment_tx.len(), 3);
+
+        // Act: Add another commitment to existing address
+        let tx_a2 = create_test_commitment_tx(addr_a, 150);
+        let result = state.bounded_insert_commitment_tx(&tx_a2);
+
+        // Assert: Succeeds without triggering global limit check
+        assert!(result.is_ok());
+
+        // Assert: Still 3 addresses
+        assert_eq!(state.valid_commitment_tx.len(), 3);
+
+        // Assert: Address A now has 2 commitments
+        assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
     }
 }

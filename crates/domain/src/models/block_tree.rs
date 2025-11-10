@@ -53,9 +53,9 @@ pub struct BlockTree {
 pub struct BlockMetadata {
     // todo: wrap into Arc to avoid expensive clones
     pub block: IrysBlockHeader,
-    chain_state: ChainState,
-    timestamp: SystemTime,
-    children: HashSet<H256>,
+    pub chain_state: ChainState,
+    pub timestamp: SystemTime,
+    pub children: HashSet<H256>,
     pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,

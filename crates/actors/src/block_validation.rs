@@ -1005,6 +1005,7 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
+#[tracing::instrument(skip_all, fields(block = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -1018,6 +1019,7 @@ pub async fn shadow_transactions_are_valid(
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
+        .in_current_span()
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
@@ -1382,7 +1384,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db, None)
                     .await?
             }
             [] => {
@@ -1524,7 +1526,7 @@ pub async fn commitment_txs_are_valid(
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db)
+        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db, None)
             .await
             .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 

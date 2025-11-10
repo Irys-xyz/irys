@@ -78,11 +78,16 @@ impl Inner {
                     header.promoted_height = Some(block.height);
                 }
 
-                // Update mempool
+                // Update mempool with bounded insert
+                // For confirmed blocks, we log warnings but don't fail if mempool is full
                 let mut mempool_guard = self.mempool_state.write().await;
-                mempool_guard
-                    .valid_submit_ledger_tx
-                    .insert(header.id, header.clone());
+                if let Err(e) = mempool_guard.bounded_insert_data_tx(header.clone()) {
+                    warn!(
+                        tx.id = ?header.id,
+                        error = ?e,
+                        "Failed to insert confirmed promoted tx into mempool (likely at capacity)"
+                    );
+                }
                 mempool_guard.recent_valid_tx.put(header.id, ());
                 drop(mempool_guard);
 

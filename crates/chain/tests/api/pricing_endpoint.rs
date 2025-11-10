@@ -241,3 +241,165 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     ctx.node_ctx.stop().await;
     Ok(())
 }
+
+#[test_log::test(tokio::test)]
+async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
+    // Setup: Configure with interval of 12 blocks
+    // Last 25% = 3 blocks (blocks_until_boundary <= 3)
+    let price_adjustment_interval = 12;
+    let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+
+    // Configure mock oracle with consistent price increases (smoothing_interval = 999999)
+    // This ensures ema_price_1_interval_ago > ema_price_2_intervals_ago throughout the test
+    config.oracles = vec![irys_types::OracleConfig::Mock {
+        initial_price: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0))
+            .unwrap(),
+        incremental_change: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(
+            0.05
+        ))
+        .unwrap(),
+        smoothing_interval: 999999,
+        poll_interval_ms: 500,
+    }];
+
+    let ctx = crate::utils::IrysNodeTest::new_genesis(config)
+        .start()
+        .await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
+
+    // Mine to block 27 - NOT in last quarter
+    // At block 27: next_block=28, position=4, blocks_until=8
+    // 8 > 3 -> NOT in last quarter -> should use ema_price_2_intervals_ago
+    let mut last_block = ctx.mine_block().await?;
+    for _ in 2..=27 {
+        last_block = ctx.mine_block().await?;
+    }
+
+    let ema_stage1 = ctx
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_ema_snapshot(&last_block.block_hash)
+        .expect("EMA snapshot should exist");
+
+    assert!(
+        ema_stage1.ema_price_1_interval_ago.amount > ema_stage1.ema_price_2_intervals_ago.amount,
+        "With consistent price increases, newer EMA should be higher"
+    );
+
+    verify_pricing_uses_ema(
+        &ctx,
+        &address,
+        data_size_bytes,
+        ema_stage1.ema_price_2_intervals_ago, // Standard pricing (lower EMA)
+        "Block 27 (NOT in last quarter): should use lower ema_price_2_intervals_ago",
+    )
+    .await?;
+
+    // Mine to block 32 - first block OF last quarter (boundary!)
+    // At block 32: position=9, blocks_until=3
+    // 3 <= 3 -> IN last quarter -> should use max(ema_1_interval, ema_2_intervals)
+    for _ in 28..=32 {
+        last_block = ctx.mine_block().await?;
+    }
+
+    let ema_stage2 = ctx
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_ema_snapshot(&last_block.block_hash)
+        .expect("EMA snapshot should exist");
+
+    assert!(
+        ema_stage2.ema_price_1_interval_ago.amount > ema_stage2.ema_price_2_intervals_ago.amount,
+        "With consistent price increases, newer EMA should be higher"
+    );
+
+    verify_pricing_uses_ema(
+        &ctx,
+        &address,
+        data_size_bytes,
+        ema_stage2.ema_price_1_interval_ago, // Max pricing (higher EMA)
+        "Block 32 (first of last quarter): should use higher ema_price_1_interval_ago",
+    )
+    .await?;
+
+    // STAGE 3: Mine 2 more blocks to block 34 - last block of last quarter
+    // At block 34: position=11, blocks_until=1
+    // 1 <= 3 -> Still IN last quarter -> should still use max EMA
+    for _ in 33..=34 {
+        last_block = ctx.mine_block().await?;
+    }
+
+    let ema_stage3 = ctx
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_ema_snapshot(&last_block.block_hash)
+        .expect("EMA snapshot should exist");
+
+    assert!(
+        ema_stage3.ema_price_1_interval_ago.amount > ema_stage3.ema_price_2_intervals_ago.amount,
+        "With consistent price increases, newer EMA should still be higher"
+    );
+
+    verify_pricing_uses_ema(
+        &ctx,
+        &address,
+        data_size_bytes,
+        ema_stage3.ema_price_1_interval_ago, // Still using max pricing (higher EMA)
+        "Block 34 (deep in last quarter): should still use higher ema_price_1_interval_ago",
+    )
+    .await?;
+
+    ctx.node_ctx.stop().await;
+    Ok(())
+}
+
+/// Helper function to verify pricing API uses the expected EMA value
+async fn verify_pricing_uses_ema(
+    ctx: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    address: &str,
+    data_size_bytes: u64,
+    expected_ema: irys_types::IrysTokenPrice,
+    block_description: &str,
+) -> eyre::Result<()> {
+    // Calculate expected fees using the provided EMA
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        expected_ema,
+    )?;
+
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size_bytes,
+        &ctx.node_ctx.config.consensus,
+        expected_ema,
+        expected_term_fee,
+    )?;
+
+    // Query the pricing API
+    let response = price_endpoint_request(address, DataLedger::Publish, data_size_bytes).await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let price_info = response.json::<PriceInfo>().await?;
+
+    // Validate the API response matches our expected calculation
+    assert_eq!(
+        price_info.perm_fee, expected_perm_fee.amount,
+        "{} - perm_fee mismatch",
+        block_description
+    );
+    assert_eq!(
+        price_info.term_fee, expected_term_fee,
+        "{} - term_fee mismatch",
+        block_description
+    );
+
+    Ok(())
+}

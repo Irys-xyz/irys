@@ -336,7 +336,7 @@ impl ValidationServiceInner {
 
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
-    #[tracing::instrument(err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
     pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
         block: &IrysBlockHeader,
