@@ -644,7 +644,6 @@ pub fn safe_mod(lhs: U256, rhs: U256) -> Result<U256> {
 }
 
 /// computes (a * b) / c in 256-bit arithmetic with checks.
-#[tracing::instrument]
 pub fn mul_div(mul_lhs: U256, mul_rhs: U256, div: U256) -> Result<U256> {
     let prod = safe_mul(mul_lhs, mul_rhs)?;
     safe_div(prod, div)

@@ -243,7 +243,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn heavy_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
+async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
     // Setup: Configure with interval of 12 blocks
     // Last 25% = 3 blocks (blocks_until_boundary <= 3)
     let price_adjustment_interval = 12;

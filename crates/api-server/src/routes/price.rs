@@ -53,15 +53,19 @@ pub async fn get_price(
 
     match data_ledger {
         DataLedger::Publish => {
-            // Get the latest EMA for pricing calculations and the tip block
+            // Get the latest EMA for pricing calculations from the canonical chain
             let tree = state.block_tree.read();
-            let tip = tree.tip;
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block = canonical
+                .last()
+                .ok_or_else(|| ErrorBadRequest("Empty canonical chain"))?;
             let ema = tree
-                .get_ema_snapshot(&tip)
+                .get_ema_snapshot(&last_block.block_hash)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+            drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height
-            let tip_height = tree.get_block(&tip).map(|b| b.height).unwrap_or(0);
+            let tip_height = last_block.height;
             let next_block_height = tip_height + 1;
 
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -69,8 +73,6 @@ pub async fn get_price(
                 state.config.consensus.epoch.num_blocks_in_epoch,
                 state.config.consensus.epoch.submit_ledger_epoch_length,
             );
-
-            drop(tree);
 
             // Determine pricing EMA based on proximity to interval boundary
             // When near the end of an interval, use max pricing to ensure transaction
