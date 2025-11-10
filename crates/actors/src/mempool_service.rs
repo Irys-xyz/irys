@@ -710,7 +710,7 @@ impl Inner {
             }
 
             if !self
-                .validate_tx_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
                 .await?
             {
                 continue;
@@ -904,7 +904,7 @@ impl Inner {
             }
 
             if !self
-                .validate_tx_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
                 .await?
             {
                 continue;
