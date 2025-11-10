@@ -20,7 +20,6 @@ pub use manager::CircuitBreakerManager;
 pub use metrics::CircuitBreakerMetrics;
 pub use state::CircuitState;
 
-// Time utilities for circuit breaker operations
 static BASE_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 
 #[cfg(test)]
@@ -68,8 +67,6 @@ mod time_tests {
     use proptest::prelude::*;
 
     proptest! {
-        /// Invariant: Instant ↔ nanos conversion is lossless (< 1ns precision).
-        /// Failures indicate BASE_TIME race conditions or arithmetic overflow.
         #[test]
         fn prop_instant_nanos_roundtrip_lossless(
             offset_nanos in 0_u64..1_000_000_000_000  // 0 to ~16 minutes
@@ -85,8 +82,6 @@ mod time_tests {
             prop_assert!(recovered.duration_since(instant) < Duration::from_nanos(1));
         }
 
-        /// Invariant: Zero timestamp always returns false (safety fallback).
-        /// Zero = uninitialized or instant < BASE_TIME race condition.
         #[test]
         fn prop_zero_nanos_never_times_out(timeout_ms in 1_u64..10000) {
             reset_test_time();

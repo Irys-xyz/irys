@@ -26,7 +26,6 @@ impl From<u8> for CircuitState {
                     "Invalid CircuitState byte value: {}. Defaulting to Open for safety.",
                     invalid
                 );
-                // Fail-safe: Open state denies requests rather than allowing corrupt state to pass traffic
                 Self::Open
             }
         }

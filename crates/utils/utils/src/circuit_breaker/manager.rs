@@ -72,7 +72,6 @@ where
 
     /// Atomically reserve a slot using CAS.
     fn try_reserve_slot(&self, key: &K) -> bool {
-        // First attempt to reserve atomically
         let result =
             self.active_count
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
@@ -83,7 +82,6 @@ where
             return true;
         }
 
-        // At capacity - try cleanup and retry once
         self.cleanup_stale();
 
         let result =
@@ -107,22 +105,18 @@ where
     fn get_or_create_breaker(
         &self,
         key: &K,
-    ) -> Option<dashmap::mapref::one::Ref<K, CircuitBreaker>> {
-        // Fast path: breaker already exists
+    ) -> Option<dashmap::mapref::one::Ref<'_, K, CircuitBreaker>> {
         if let Some(breaker) = self.breakers.get(key) {
             return Some(breaker);
         }
 
-        // Try to atomically reserve a slot
         if !self.try_reserve_slot(key) {
-            return None; // Capacity reached
+            return None;
         }
 
-        // Try to insert the breaker
         use dashmap::mapref::entry::Entry;
         match self.breakers.entry(key.clone()) {
             Entry::Occupied(entry) => {
-                // Another thread inserted it first - undo reservation
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
                 Some(entry.into_ref().downgrade())
             }
