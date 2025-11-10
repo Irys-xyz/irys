@@ -54,4 +54,13 @@ impl CircuitBreakerConfig {
             recovery_attempts: RecoveryAttempts::new(NonZeroU32::new(3).unwrap()),
         }
     }
+
+    pub fn testing() -> Self {
+        Self {
+            failure_threshold: FailureThreshold::new(NonZeroU32::new(100).unwrap()),
+            cooldown_duration: Duration::from_millis(100),
+            stale_timeout: Duration::from_secs(60),
+            recovery_attempts: RecoveryAttempts::new(NonZeroU32::new(50).unwrap()),
+        }
+    }
 }

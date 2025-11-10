@@ -45,6 +45,8 @@ pub enum GossipClientError {
     HealthCheck(String, reqwest::StatusCode),
     #[error("Failed to get json response payload from {0} with reason {1}")]
     GetJsonResponsePayload(String, String),
+    #[error("Circuit breaker open for peer {0}")]
+    CircuitBreakerOpen(IrysAddress),
 }
 
 #[derive(Debug, Clone)]
@@ -59,7 +61,19 @@ impl GossipClient {
 
     #[must_use]
     pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
-        let circuit_config = CircuitBreakerConfig::p2p_defaults();
+        Self::with_circuit_breaker_config(
+            timeout,
+            mining_address,
+            CircuitBreakerConfig::p2p_defaults(),
+        )
+    }
+
+    #[must_use]
+    pub fn with_circuit_breaker_config(
+        timeout: Duration,
+        mining_address: IrysAddress,
+        circuit_config: CircuitBreakerConfig,
+    ) -> Self {
         let circuit_breaker = CircuitBreakerManager::new(
             NonZeroUsize::new(1000).expect("capacity is non-zero"),
             circuit_config,
@@ -91,6 +105,14 @@ impl GossipClient {
         self.circuit_breaker.cleanup_stale();
     }
 
+    fn check_circuit_breaker(&self, peer: &IrysAddress) -> GossipResult<()> {
+        if self.circuit_breaker.is_available(peer) {
+            return Ok(());
+        }
+        tracing::debug!(?peer, "circuit breaker open, skipping request");
+        Err(GossipError::CircuitBreakerOpen(*peer))
+    }
+
     /// Send data to a peer and update their score based on the result
     ///
     /// # Errors
@@ -105,17 +127,7 @@ impl GossipClient {
         let peer_miner_address = peer.0;
         let peer = peer.1;
 
-        // Check circuit breaker before sending
-        if !self.circuit_breaker.is_available(peer_miner_address) {
-            tracing::warn!(
-                peer = ?peer_miner_address,
-                "circuit breaker open, skipping request"
-            );
-            return Err(GossipError::Network(format!(
-                "Circuit breaker open for peer {:?}",
-                peer_miner_address
-            )));
-        }
+        self.check_circuit_breaker(peer_miner_address)?;
 
         let res = self.send_data(peer, data).await;
         Self::handle_score(peer_list, &res, peer_miner_address, &self.circuit_breaker);
@@ -130,17 +142,7 @@ impl GossipClient {
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
-        // Check circuit breaker before sending
-        if !self.circuit_breaker.is_available(&peer.0) {
-            tracing::warn!(
-                peer = ?peer.0,
-                "circuit breaker open, skipping get_data request"
-            );
-            return Err(GossipError::Network(format!(
-                "Circuit breaker open for peer {:?}",
-                peer.0
-            )));
-        }
+        self.check_circuit_breaker(&peer.0)?;
 
         let start_time = std::time::Instant::now();
 
@@ -305,17 +307,7 @@ impl GossipClient {
         fallback_header: Option<&IrysBlockHeader>,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
-        // Check circuit breaker before sending
-        if !self.circuit_breaker.is_available(&peer.0) {
-            tracing::debug!(
-                peer = ?peer.0,
-                "circuit breaker open, skipping pull_data request"
-            );
-            return Err(GossipError::Network(format!(
-                "Circuit breaker open for peer {:?}",
-                peer.0
-            )));
-        }
+        self.check_circuit_breaker(&peer.0)?;
 
         if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
             if let GossipDataRequestV2::BlockBody(_block_hash) = requested_data {
@@ -555,13 +547,9 @@ impl GossipClient {
         peer: PeerAddress,
         peer_list: &PeerList,
     ) -> Result<bool, GossipClientError> {
-        // Check circuit breaker before making health check request
         if !self.circuit_breaker.is_available(peer_addr) {
-            tracing::debug!(
-                peer = ?peer_addr,
-                "circuit breaker open, skipping health check"
-            );
-            return Ok(false);
+            tracing::debug!(?peer_addr, "circuit breaker open, skipping health check");
+            return Err(GossipClientError::CircuitBreakerOpen(*peer_addr));
         }
 
         let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Health);
@@ -604,7 +592,6 @@ impl GossipClient {
 
         match response {
             GossipResponse::Accepted(val) => {
-                // Record success for healthy peers, failure for unhealthy
                 if val {
                     self.circuit_breaker.record_success(peer_addr);
                 } else {
@@ -898,10 +885,8 @@ impl GossipClient {
     ) {
         match &result {
             Ok(_) => {
-                // Successful send, increase score for data request
                 peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
                 peer_list.set_is_online(peer_miner_address, true);
-                // Record success in circuit breaker
                 circuit_breaker.record_success(peer_miner_address);
             }
             Err(err) => {
@@ -912,12 +897,10 @@ impl GossipClient {
                     );
                     peer_list.set_is_online(peer_miner_address, false);
                 }
-                // Failed to send, decrease score
                 peer_list.decrease_peer_score(
                     peer_miner_address,
                     ScoreDecreaseReason::NetworkError(format!("{:?}", err)),
                 );
-                // Record failure in circuit breaker
                 circuit_breaker.record_failure(peer_miner_address);
             }
         }
@@ -933,26 +916,20 @@ impl GossipClient {
     ) {
         match result {
             Ok(_) => {
-                // Successful response - reward based on speed
                 if response_time <= FAST_RESPONSE_THRESHOLD {
-                    // Fast response deserves extra reward
                     peer_list.increase_peer_score(
                         peer_miner_address,
                         ScoreIncreaseReason::TimelyResponse,
                     );
                 } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
-                    // Normal response gets standard reward
                     peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online);
                 } else {
-                    // Slow but successful response gets minimal penalty
                     peer_list
                         .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::SlowResponse);
                 }
-                // Record success in circuit breaker
                 circuit_breaker.record_success(peer_miner_address);
             }
             Err(err) => {
-                // Failed to respond - severe penalty
                 peer_list.decrease_peer_score(
                     peer_miner_address,
                     ScoreDecreaseReason::NetworkError(format!(
@@ -960,7 +937,6 @@ impl GossipClient {
                         err
                     )),
                 );
-                // Record failure in circuit breaker
                 circuit_breaker.record_failure(peer_miner_address);
             }
         }
@@ -1770,13 +1746,21 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             Self {
-                client: GossipClient::new(Duration::from_secs(1), IrysAddress::from([1_u8; 20])),
+                client: GossipClient::with_circuit_breaker_config(
+                    Duration::from_secs(1),
+                    IrysAddress::from([1_u8; 20]),
+                    CircuitBreakerConfig::testing(),
+                ),
             }
         }
 
         fn with_timeout(timeout: Duration) -> Self {
             Self {
-                client: GossipClient::new(timeout, IrysAddress::from([1_u8; 20])),
+                client: GossipClient::with_circuit_breaker_config(
+                    timeout,
+                    IrysAddress::from([1_u8; 20]),
+                    CircuitBreakerConfig::testing(),
+                ),
             }
         }
     }
@@ -1904,7 +1888,7 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", unreachable_port);
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let miner_addr = Address::from([1_u8; 20]);
+            let miner_addr = IrysAddress::from([1_u8; 20]);
             let result = fixture
                 .client
                 .check_health(&miner_addr, peer, &mock_list)
@@ -1931,7 +1915,7 @@ mod tests {
             let peer = create_peer_address("192.0.2.1", 8080);
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let miner_addr = Address::from([1_u8; 20]);
+            let miner_addr = IrysAddress::from([1_u8; 20]);
             let result = fixture
                 .client
                 .check_health(&miner_addr, peer, &mock_list)
@@ -1957,7 +1941,7 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let miner_addr = Address::from([1_u8; 20]);
+            let miner_addr = IrysAddress::from([1_u8; 20]);
             let result = fixture
                 .client
                 .check_health(&miner_addr, peer, &mock_list)
@@ -1999,7 +1983,7 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let miner_addr = Address::from([1_u8; 20]);
+            let miner_addr = IrysAddress::from([1_u8; 20]);
             let result = fixture
                 .client
                 .check_health(&miner_addr, peer, &mock_list)
@@ -2033,7 +2017,7 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let miner_addr = Address::from([1_u8; 20]);
+            let miner_addr = IrysAddress::from([1_u8; 20]);
             let result = fixture
                 .client
                 .check_health(&miner_addr, peer, &mock_list)
@@ -2273,39 +2257,40 @@ mod tests {
 
     mod circuit_breaker_tests {
         use super::*;
-        use irys_types::Address;
 
         #[tokio::test]
         async fn test_health_check_respects_circuit_breaker() {
             let fixture = TestFixture::new();
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let miner_addr = Address::from([40_u8; 20]);
+            let miner_addr = IrysAddress::from([40_u8; 20]);
             let peer_address = create_peer_address("127.0.0.1", 8080);
 
-            // Open the circuit by recording 5 failures
-            for _ in 0..5 {
+            // Open the circuit by recording failures (100 to match testing config threshold)
+            for _ in 0..100 {
                 fixture.client.circuit_breaker.record_failure(&miner_addr);
             }
 
             // Verify circuit is open
             assert!(
                 !fixture.client.circuit_breaker.is_available(&miner_addr),
-                "Circuit breaker should be open after 5 failures"
+                "Circuit breaker should be open after failures"
             );
 
-            // Health check should return false without making a request
+            // Health check should return error without making a request
             let result = fixture
                 .client
                 .check_health(&miner_addr, peer_address, &peer_list)
                 .await;
 
             assert!(
-                result.is_ok(),
-                "Health check should succeed when circuit is open"
+                result.is_err(),
+                "Health check should return error when circuit is open"
             );
+            let err = result.unwrap_err();
             assert!(
-                !result.unwrap(),
-                "Health check should return false when circuit is open"
+                matches!(err, GossipClientError::CircuitBreakerOpen(_)),
+                "Error should indicate circuit breaker is open, got: {:?}",
+                err
             );
         }
     }

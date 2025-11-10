@@ -4,8 +4,6 @@ use std::time::{Duration, Instant};
 
 use super::config::{CircuitBreakerConfig, FailureThreshold, RecoveryAttempts};
 
-/// Global test time override for deterministic testing.
-/// When non-zero, overrides real time in circuit breaker operations.
 pub(crate) static TEST_TIME_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn set_test_time(nanos: u64) {
