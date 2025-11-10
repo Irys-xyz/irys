@@ -146,7 +146,7 @@ pub struct BlockDiscoveryService {
 }
 
 impl BlockDiscoveryService {
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_discovery")]
     pub fn spawn_service(
         inner: Arc<BlockDiscoveryServiceInner>,
         rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
@@ -178,7 +178,7 @@ impl BlockDiscoveryService {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block discovery service");
 
@@ -210,7 +210,7 @@ impl BlockDiscoveryService {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
@@ -242,6 +242,7 @@ pub enum BlockDiscoveryMessage {
 }
 
 impl BlockDiscoveryServiceInner {
+    #[tracing::instrument(level = "trace", skip_all, fields(block.height = %block.height, block.hash = %block.block_hash))]
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
@@ -832,6 +833,7 @@ pub async fn get_data_tx_in_parallel(
 
 /// Get all data transactions from the mempool and database
 /// with a custom get_data_txs function (this is used by the mempool)
+#[tracing::instrument(level = "trace", skip_all, fields(tx.count = data_tx_ids.len()))]
 pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,

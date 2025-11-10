@@ -6,6 +6,7 @@ use tracing::warn;
 use crate::mempool_service::{IngressProofError, Inner};
 
 impl Inner {
+    #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
     pub fn handle_ingest_ingress_proof(
         &self,
         ingress_proof: IngressProof,

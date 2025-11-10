@@ -13,6 +13,7 @@ use irys_utils::telemetry;
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 #[tokio::main]
+#[tracing::instrument(level = "trace", skip_all)]
 async fn main() -> eyre::Result<()> {
     // Load .env file if present (silently ignore if not found)
     let _ = dotenvy::dotenv();

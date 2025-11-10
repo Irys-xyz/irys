@@ -286,7 +286,7 @@ impl ValidationCoordinator {
     }
 
     /// Calculate priority for a block
-    #[instrument(skip_all, fields(block.hash = %block.block_hash, block.height = %block.height))]
+    #[instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = %block.height))]
     pub(super) fn calculate_priority(&self, block: &IrysBlockHeader) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
@@ -307,7 +307,7 @@ impl ValidationCoordinator {
     }
 
     /// Check if block extends canonical tip
-    #[instrument(skip_all, fields(block.hash = %block_hash))]
+    #[instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;
@@ -381,7 +381,7 @@ impl ValidationCoordinator {
     }
 
     /// Reevaluate all priorities after reorg
-    #[instrument(skip_all)]
+    #[instrument(level = "trace", skip_all)]
     pub(super) fn reevaluate_priorities(&mut self) {
         info!("Reevaluating priorities after reorg");
 

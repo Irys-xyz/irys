@@ -368,7 +368,7 @@ where
     B: BlockDiscoveryFacade,
     M: MempoolFacade,
 {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn fcu_markers(&self) -> eyre::Result<ForkChoiceMarkers> {
         let migration_depth = self.config.consensus.block_migration_depth as usize;
         let prune_depth = self.config.consensus.block_tree_depth as usize;

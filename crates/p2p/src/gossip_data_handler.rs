@@ -80,6 +80,7 @@ where
     B: BlockDiscoveryFacade,
     A: ApiClient,
 {
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_chunk(
         &self,
         chunk_request: GossipRequest<UnpackedChunk>,
@@ -154,6 +155,7 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_transaction(
         &self,
         transaction_request: GossipRequest<DataTransactionHeader>,
@@ -217,6 +219,7 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_ingress_proof(
         &self,
         proof_request: GossipRequest<IngressProof>,
@@ -266,6 +269,7 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_commitment_tx(
         &self,
         transaction_request: GossipRequest<CommitmentTransaction>,
@@ -333,6 +337,7 @@ where
     }
 
     /// Pulls a block from the network and sends it to the BlockPool for processing
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_process_block(
         &self,
         block_hash: BlockHash,
@@ -369,6 +374,7 @@ where
     }
 
     /// Pulls a block from a specific peer and sends it to the BlockPool for processing
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_process_block_from_peer(
         &self,
         block_hash: BlockHash,
@@ -676,6 +682,7 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_add_execution_payload_to_cache(
         &self,
         evm_block_hash: EvmBlockHash,
@@ -714,6 +721,7 @@ where
         Err(last_err.expect("Error must be set after 3 attempts"))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_execution_payload(
         &self,
         execution_payload_request: GossipRequest<Block>,
@@ -803,6 +811,7 @@ where
             .map(|s| s.is_known_valid_and_present())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data(
         &self,
         peer_info: &PeerListItem,
@@ -881,6 +890,7 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data_sync(
         &self,
         request: GossipRequest<GossipDataRequest>,
@@ -902,6 +912,7 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
         self.mempool
             .get_stake_and_pledge_whitelist()
@@ -910,6 +921,7 @@ where
             .collect()
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn pull_and_process_stake_and_pledge_whitelist(&self) -> GossipResult<()> {
         let allowed_miner_addresses = self
             .gossip_client

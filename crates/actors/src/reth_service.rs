@@ -57,6 +57,7 @@ pub struct ForkChoiceUpdate {
     pub finalized_hash: B256,
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 async fn evm_block_hash_from_block_hash(
     mempool_service: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
@@ -132,7 +133,7 @@ impl RethService {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn run(mut self) -> eyre::Result<()> {
         info!("Starting Reth service");
 
@@ -178,6 +179,7 @@ impl RethService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn handle_forkchoice(&mut self, update: ForkChoiceUpdateMessage) -> eyre::Result<()> {
         debug!(?update, "Received fork choice update command");
 
@@ -186,7 +188,7 @@ impl RethService {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), err, ret)]
+    #[tracing::instrument(level = "trace", skip_all, err, ret)]
     async fn resolve_new_fcu(
         &self,
         new_fcu: ForkChoiceUpdateMessage,
@@ -284,6 +286,7 @@ impl RethService {
         Ok(fcu)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn connect_to_peer(&self, peer: RethPeerInfo) -> eyre::Result<()> {
         info!(
             reth_peer.id = %peer.peer_id,
@@ -298,6 +301,7 @@ impl RethService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn get_peering_info(&self) -> eyre::Result<RethPeerInfo> {
         let handle = self.handle.clone();
         let peer_id = *handle.inner.network.peer_id();

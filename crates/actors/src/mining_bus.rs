@@ -86,6 +86,7 @@ impl MiningBus {
     }
 
     /// Send a seed/checkpoints/global step update to all subscribers.
+    #[tracing::instrument(level = "trace", skip_all, fields(vdf.seed = ?seed, vdf.global_step = %global_step, vdf.subscriber_count))]
     pub fn send_seed(&self, seed: Seed, checkpoints: H256List, global_step: u64) -> usize {
         Self::with_span(&self.0.span, || {
             let total = self.0.subscribers.lock().map(|s| s.len()).unwrap_or(0);
@@ -106,6 +107,7 @@ impl MiningBus {
     }
 
     /// Send partition expiration notice to all subscribers.
+    #[tracing::instrument(level = "trace", skip_all, fields(partition.expired_count = msg.0.len()))]
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
         debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
