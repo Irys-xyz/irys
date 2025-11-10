@@ -338,7 +338,7 @@ impl ValidationCoordinator {
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
-            match result {
+            match &result {
                 VdfValidationResult::Valid => {
                     let block_hash = task.block.block_hash;
 
@@ -364,7 +364,8 @@ impl ValidationCoordinator {
                     let priority = self.calculate_priority(&task.block);
                     self.vdf_scheduler.pending.push(task, priority);
                 }
-                VdfValidationResult::Invalid(_) => {
+                VdfValidationResult::Invalid(error) => {
+                    tracing::error!(block.hash =? hash, "invalid vdf {error}");
                     // Invalid tasks are not re-queued
                 }
             }
