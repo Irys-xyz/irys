@@ -179,7 +179,9 @@ async fn heavy_api_client_all_endpoints_should_work() {
     check_get_block_index_endpoint(&api_client, api_address, &ctx).await;
     check_info_endpoint(&api_client, api_address, &ctx).await;
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
 }
 
 /// Ensures wait_for_promotion returns an error when the tx was never posted or is otherwise missing.
@@ -211,7 +213,9 @@ async fn api_client_wait_for_promotion_errors_for_missing_tx() {
         "wait_for_promotion should error for a missing/unposted tx"
     );
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
 }
 
 /// Ensures wait_for_promotion succeeds for a properly posted tx after uploading chunks and mining.
@@ -258,5 +262,7 @@ async fn api_client_wait_for_promotion_happy_path() {
         .await
         .expect("wait_for_promotion should succeed for a properly posted tx");
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
 }

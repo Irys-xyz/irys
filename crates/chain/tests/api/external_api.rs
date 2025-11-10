@@ -131,6 +131,8 @@ async fn heavy_external_api() -> eyre::Result<()> {
         }
     }
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
     Ok(())
 }

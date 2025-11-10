@@ -54,7 +54,9 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
         "for the test to be accurate, the requested size must be larger to the configs chunk size"
     );
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
     Ok(())
 }
 
@@ -135,7 +137,9 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         "for the test to be accurate, the requested size must be smaller to the configs chunk size"
     );
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
     Ok(())
 }
 
@@ -157,7 +161,9 @@ async fn heavy_pricing_endpoint_submit_ledger_rejected() -> eyre::Result<()> {
     let body_str = response.text().await?;
     assert!(body_str.contains("Term ledger not supported"));
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
     Ok(())
 }
 
@@ -238,7 +244,9 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     );
     assert_ne!(data_size_bytes, ctx.node_ctx.config.consensus.chunk_size, "for the test to be accurate, the requested size must not be equal to the configs chunk size");
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
     Ok(())
 }
 
@@ -357,7 +365,9 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
     )
     .await?;
 
-    ctx.node_ctx.stop().await;
+    ctx.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
     Ok(())
 }
 

@@ -263,7 +263,9 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     )
     .await;
 
-    node.node_ctx.stop().await;
+    node.node_ctx
+        .stop(irys_types::ShutdownReason::TestComplete)
+        .await;
 
     Ok(())
 }

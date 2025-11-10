@@ -27,7 +27,7 @@ pub const PACKING_TYPE: PackingType = PackingType::CUDA;
 pub async fn start_worker(
     config: PackingWorkerConfig,
     listener: TcpListener,
-    stop_rx: Receiver<()>,
+    stop_rx: Receiver<irys_types::ShutdownReason>,
 ) -> eyre::Result<()> {
     // this limits the concurrency across *all* requests
     let packing_semaphore = Semaphore::new(if matches!(PACKING_TYPE, PackingType::CUDA) {
@@ -152,7 +152,7 @@ mod tests {
 
         assert_eq!(remote_packed, local_packed);
 
-        tx.send(()).await?;
+        tx.send(irys_types::ShutdownReason::TestComplete).await?;
         exit_handle.await??;
         Ok(())
     }

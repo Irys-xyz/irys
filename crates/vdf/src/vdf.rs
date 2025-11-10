@@ -57,7 +57,7 @@ pub fn run_vdf<B: BlockProvider>(
     initial_reset_seed: H256,
     mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
     is_mining_enabled: Arc<AtomicBool>,
-    mut shutdown_listener: Receiver<()>,
+    mut shutdown_listener: Receiver<irys_types::ShutdownReason>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
@@ -78,10 +78,10 @@ pub fn run_vdf<B: BlockProvider>(
     let vdf_reset_frequency = config.reset_frequency as u64;
 
     loop {
-        if shutdown_listener.try_recv().is_ok() {
-            tracing::info!("VDF loop shutdown signal received");
+        if let Ok(reason) = shutdown_listener.try_recv() {
+            tracing::info!("VDF loop shutdown signal received: {}", reason);
             break;
-        };
+        }
 
         // check for VDF fast forward step
         while let Ok(proposed_ff_step) = fast_forward_receiver.try_recv() {
@@ -329,7 +329,7 @@ mod tests {
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<irys_types::ShutdownReason>(1);
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -421,7 +421,10 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx.send(()).await.unwrap();
+        shutdown_tx
+            .send(irys_types::ShutdownReason::Vdf)
+            .await
+            .unwrap();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();
@@ -447,7 +450,7 @@ mod tests {
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<irys_types::ShutdownReason>(1);
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -531,7 +534,10 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx.send(()).await.unwrap();
+        shutdown_tx
+            .send(irys_types::ShutdownReason::Vdf)
+            .await
+            .unwrap();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();
