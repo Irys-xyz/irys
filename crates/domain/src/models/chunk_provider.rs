@@ -103,7 +103,7 @@ impl ChunkProvider {
             })
             .collect::<Vec<_>>();
 
-        // TODO: see if we should check the metadata data_size here too
+        // TODO: see if we should check the DataRootInfo.data_size here too
 
         // find a SM that contains this data root, return the start_offsets once we find it
         for sm in sms {

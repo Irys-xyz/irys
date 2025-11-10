@@ -268,9 +268,6 @@ impl Inner {
         // Note: get_writeable_offsets() only returns offsets within the data_size
         // bounds for the data_root stored at that location in the storage module.
         for sm in self.storage_modules_guard.read().iter() {
-            let wo = sm.get_writeable_offsets(&chunk).ok();
-            info!("writable offsets = {:#?}", wo);
-
             if !sm
                 .get_writeable_offsets(&chunk)
                 .unwrap_or_default()

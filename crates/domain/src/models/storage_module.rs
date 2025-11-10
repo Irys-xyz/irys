@@ -1063,6 +1063,7 @@ impl StorageModule {
 
                 if chunk_byte_offset >= info.data_size {
                     // Skip any chunks that go past the data_size (don't error, just filter out)
+                    warn!("Skipping chunk with tx_offset {:?} for data_root {:?} with start_offset {:?} because the tx_offset is larger than the data_size {:?}",tx_offset, chunk.data_root, info.start_offset, info.data_size );
                     None
                 } else {
                     // Calculate the relative partition offset, this can sometimes be negative if the
