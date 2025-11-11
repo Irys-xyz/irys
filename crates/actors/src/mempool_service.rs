@@ -1036,7 +1036,7 @@ impl Inner {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
                     let txids = cached_data_root.txid_set;
-                    debug!(tx.ids = ?txids, "Publish candidates");
+                    trace!(tx.ids = ?txids, "Publish candidates");
                     publish_txids.extend(txids)
                 }
             }
