@@ -55,7 +55,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, error_span, info, warn, Instrument as _};
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
@@ -594,7 +594,9 @@ pub trait BlockProdStrategy {
         )>,
     > {
         let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
+        let block_hash = prev_block_header.block_hash;
         self.produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
+            .instrument(error_span!("produce_block_with_parent", parent.block = ?block_hash))
             .await
     }
 
@@ -856,6 +858,7 @@ pub trait BlockProdStrategy {
             .map_err(|e| eyre!("Failed to build payload: {}", e))?;
 
         let evm_block_hash = built_payload.block().hash();
+        debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
         let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
             panic!(
