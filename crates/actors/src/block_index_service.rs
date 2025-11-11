@@ -5,7 +5,7 @@ use irys_types::{
     TokioServiceHandle, H256, U256,
 };
 use std::sync::{Arc, RwLock};
-use tokio::sync::{mpsc::Receiver, oneshot};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, info, instrument, warn, Instrument as _};
 
 /// Messages supported by the BlockIndex Tokio service
@@ -33,7 +33,7 @@ pub enum BlockIndexServiceMessage {
 #[derive(Debug)]
 pub struct BlockIndexService {
     shutdown: reth::tasks::shutdown::Shutdown,
-    msg_rx: Receiver<BlockIndexServiceMessage>,
+    msg_rx: UnboundedReceiver<BlockIndexServiceMessage>,
     inner: BlockIndexServiceInner,
 }
 
@@ -206,7 +206,7 @@ impl BlockIndexService {
     ///
     /// Returns a handle that can be used to shut down the service.
     pub fn spawn_service(
-        rx: Receiver<BlockIndexServiceMessage>,
+        rx: UnboundedReceiver<BlockIndexServiceMessage>,
         block_index: Arc<RwLock<BlockIndex>>,
         consensus_config: &ConsensusConfig,
         runtime_handle: tokio::runtime::Handle,

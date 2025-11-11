@@ -26,7 +26,7 @@ use std::{
     sync::{Arc, RwLock},
     time::SystemTime,
 };
-use tokio::sync::{mpsc::Receiver, oneshot};
+use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{debug, error, info, warn, Instrument as _};
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -54,7 +54,7 @@ pub enum BlockTreeServiceMessage {
 #[derive(Debug)]
 pub struct BlockTreeService {
     shutdown: Shutdown,
-    msg_rx: Receiver<BlockTreeServiceMessage>,
+    msg_rx: UnboundedReceiver<BlockTreeServiceMessage>,
     inner: BlockTreeServiceInner,
 }
 
@@ -103,7 +103,7 @@ pub struct BlockStateUpdated {
 impl BlockTreeService {
     /// Spawn a new BlockTree service
     pub fn spawn_service(
-        rx: Receiver<BlockTreeServiceMessage>,
+        rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
         block_index_guard: BlockIndexReadGuard,
         epoch_replay_data: &EpochReplayData,
@@ -290,8 +290,7 @@ impl BlockTreeServiceInner {
                 block_header: arc_block.clone(),
                 all_txs: arc_all_txs.clone(),
                 response: tx,
-            })
-            .await?;
+            })?;
         rx.await
             .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
             .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
