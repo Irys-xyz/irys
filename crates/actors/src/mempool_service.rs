@@ -576,56 +576,6 @@ impl Inner {
 
         let mut balances: HashMap<Address, U256> = HashMap::new();
 
-        // Helper function that verifies transaction funding and tracks cumulative fees
-        // Returns true if the transaction can be funded based on current account balance
-        // and previously included transactions in this block
-        let mut check_funding =
-            |tx: &dyn IrysTransactionCommon, balances: &HashMap<Address, U256>| -> bool {
-                let signer = tx.signer();
-
-                // Skip transactions from addresses with previously unfunded transactions
-                // This ensures we don't include any transactions (including pledges) from
-                // addresses that couldn't afford their stake commitments
-                if unfunded_address.contains(&signer) {
-                    return false;
-                }
-
-                let fee = tx.total_cost();
-                let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
-
-                // Calculate total required balance including previously selected transactions
-
-                // get balance state for the block we're building off of
-                // let balance: U256 = self
-                //     .reth_node_adapter
-                //     .rpc
-                //     .get_balance_irys(signer, parent_evm_block_id);
-                let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
-
-                let has_funds = balance >= current_spent + fee;
-
-                // Track fees for this address regardless of whether this specific transaction is included
-                fees_spent_per_address
-                    .entry(signer)
-                    .and_modify(|val| *val += fee)
-                    .or_insert(fee);
-
-                // If transaction cannot be funded, mark the entire address as unfunded
-                // Since stakes are processed before pledges, this prevents inclusion of
-                // pledge commitments when their associated stake commitment is unfunded
-                if !has_funds {
-                    debug!(
-                        tx.signer = ?signer,
-                        account.balance = ?balance,
-                        "Transaction funding check failed"
-                    );
-                    unfunded_address.insert(signer);
-                    return false;
-                }
-
-                has_funds
-            };
-
         // Get all necessary snapshots and canonical chain info in a single read operation
         let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
             let tree = self.block_tree_read_guard.read();
@@ -924,7 +874,12 @@ impl Inner {
                 tx.fee = ?tx.total_cost(),
                 "Checking funding for data transaction"
             );
-            if check_funding(&tx, &balances) {
+            if check_funding(
+                &tx,
+                &balances,
+                &mut unfunded_address,
+                &mut fees_spent_per_address,
+            ) {
                 trace!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
@@ -2108,6 +2063,56 @@ fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
         .reth_node
         .rpc
         .get_balances_irys(&signers, block_id)
+}
+
+// Helper function that verifies transaction funding and tracks cumulative fees
+// Returns true if the transaction can be funded based on current account balance
+// and previously included transactions in this block
+fn check_funding<T: IrysTransactionCommon>(
+    tx: &T,
+    balances: &HashMap<Address, U256>,
+    unfunded_address: &mut HashSet<Address>,
+    fees_spent_per_address: &mut HashMap<Address, U256>,
+) -> bool {
+    let signer = tx.signer();
+
+    // Skip transactions from addresses with previously unfunded transactions
+    // This ensures we don't include any transactions (including pledges) from
+    // addresses that couldn't afford their stake commitments
+    if unfunded_address.contains(&signer) {
+        return false;
+    }
+
+    let fee = tx.total_cost();
+    let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
+
+    // Calculate total required balance including previously selected transactions
+
+    // get balance state for the block we're building off of
+    let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
+
+    let has_funds = balance >= current_spent + fee;
+
+    // Track fees for this address regardless of whether this specific transaction is included
+    fees_spent_per_address
+        .entry(signer)
+        .and_modify(|val| *val += fee)
+        .or_insert(fee);
+
+    // If transaction cannot be funded, mark the entire address as unfunded
+    // Since stakes are processed before pledges, this prevents inclusion of
+    // pledge commitments when their associated stake commitment is unfunded
+    if !has_funds {
+        debug!(
+        tx.signer = ?signer,
+        account.balance = ?balance,
+        "Transaction funding check failed"
+        );
+        unfunded_address.insert(signer);
+        return false;
+    }
+
+    has_funds
 }
 
 #[cfg(test)]
