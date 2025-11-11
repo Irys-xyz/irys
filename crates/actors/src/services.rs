@@ -21,8 +21,20 @@ use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
     broadcast,
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
 };
+
+/// Channel capacity constants for bounded mpsc channels.
+pub mod caps {
+    /// Block index service control messages
+    pub const BLOCK_INDEX: usize = 8;
+
+    /// Block tree service control/messages
+    pub const BLOCK_TREE: usize = 16;
+
+    /// Packing requests (used by PackingService::channel)
+    pub const PACKING_REQUESTS: usize = 128;
+}
 
 // Only contains senders, thread-safe to clone and share
 #[derive(Debug, Clone)]
@@ -100,8 +112,8 @@ pub struct ServiceReceivers {
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
-    pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
-    pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
+    pub block_tree: Receiver<BlockTreeServiceMessage>,
+    pub block_index: Receiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reth_service: UnboundedReceiver<RethServiceMessage>,
@@ -123,8 +135,8 @@ pub struct ServiceSendersInner {
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
-    pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
-    pub block_index: UnboundedSender<BlockIndexServiceMessage>,
+    pub block_tree: Sender<BlockTreeServiceMessage>,
+    pub block_index: Sender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reth_service: UnboundedSender<RethServiceMessage>,
@@ -151,9 +163,9 @@ impl ServiceSendersInner {
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
-            unbounded_channel::<BlockTreeServiceMessage>();
+            channel::<BlockTreeServiceMessage>(caps::BLOCK_TREE);
         let (block_index_sender, block_index_receiver) =
-            unbounded_channel::<BlockIndexServiceMessage>();
+            channel::<BlockIndexServiceMessage>(caps::BLOCK_INDEX);
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
@@ -170,7 +182,7 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
-        let (packing_sender, packing_receiver) = PackingService::channel(5_000);
+        let (packing_sender, packing_receiver) = PackingService::channel(caps::PACKING_REQUESTS);
 
         let mining_bus = MiningBus::new(None);
         let senders = Self {

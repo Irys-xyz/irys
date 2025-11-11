@@ -242,7 +242,7 @@ impl ValidationService {
                                         block_hash: hash,
                                         validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
                                     }
-                                ) {
+                                ).await {
                                     error!(
                                         custom.error = ?e,
                                         "Failed to send VDF failure to block tree service"
@@ -267,7 +267,7 @@ impl ValidationService {
                                     block_hash: validation.block_hash,
                                     validation_result: validation.validation_result,
                                 }
-                            ) {
+                            ).await {
                                 error!(custom.error = ?e, "Failed to send validation result to block tree service");
                             }
                         }
