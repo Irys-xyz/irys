@@ -18,7 +18,6 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
-use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
@@ -259,147 +258,142 @@ pub enum MempoolServiceMessage {
 impl Inner {
     #[tracing::instrument(skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
-    pub fn handle_message<'a>(
-        &'a self,
-        msg: MempoolServiceMessage,
-    ) -> BoxFuture<'a, eyre::Result<()>> {
-        Box::pin(async move {
-            match msg {
-                MempoolServiceMessage::GetDataTxs(txs, response) => {
-                    let response_message = self.handle_get_data_tx_message(txs).await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::BlockConfirmed(block) => {
-                    if let Err(e) = self.handle_block_confirmed_message(block).await {
-                        tracing::error!("Failed to handle block confirmed message: {:#}", e);
-                    }
-                }
-                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
-                    let response_message = self
-                        .handle_ingress_commitment_tx_message_api(commitment_tx)
-                        .await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
-                    let response_message = self
-                        .handle_ingress_commitment_tx_message_gossip(commitment_tx)
-                        .await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestChunk(chunk, response) => {
-                    let response_value: Result<(), ChunkIngressError> =
-                        self.handle_chunk_ingress_message(chunk).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!(
-                            "handle_chunk_ingress_message response.send() error: {:?}",
-                            e
-                        );
-                    };
-                }
-                MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
-                    let result = self.handle_chunk_ingress_message(chunk).await;
-                    if let Err(e) = result {
-                        tracing::error!("handle_chunk_ingress_message error: {:?}", e);
-                    }
-                }
-                MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
-                    let response_value = self.handle_get_best_mempool_txs(block_id).await;
-                    // Return selected transactions grouped by type
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids,
-                    response,
-                } => {
-                    let response_value = self
-                        .handle_get_commitment_tx_message(commitment_tx_ids)
-                        .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::DataTxExists(txid, response) => {
-                    let response_value = self.handle_data_tx_exists_message(txid).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
-                    let response_value = self
-                        .handle_get_block_header_message(hash, include_chunk)
-                        .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::CommitmentTxExists(txid, response) => {
-                    let response_value = self.handle_commitment_tx_exists_message(txid).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message_api(tx).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-
-                MempoolServiceMessage::GetState(response) => {
-                    if let Err(e) = response
-                        .send(Arc::clone(&self.mempool_state))
-                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
-                    {
-                        tracing::error!("response.send() error: {:?}", e);
-                    }
-                }
-                MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
-                    let response_value = self.remove_from_blacklists(tx_ids).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetMempoolStatus(response) => {
-                    let response_value = self.handle_get_mempool_status().await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
-                    self.extend_stake_and_pledge_whitelist(new_entries).await;
-                    if let Err(e) = response.send(()) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx) => {
-                    let whitelist = self.get_stake_and_pledge_whitelist_cloned().await;
-                    if let Err(e) = tx.send(whitelist) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
+    pub async fn handle_message(&self, msg: MempoolServiceMessage) -> eyre::Result<()> {
+        match msg {
+            MempoolServiceMessage::GetDataTxs(txs, response) => {
+                let response_message = self.handle_get_data_tx_message(txs).await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::BlockConfirmed(block) => {
+                if let Err(e) = self.handle_block_confirmed_message(block).await {
+                    tracing::error!("Failed to handle block confirmed message: {:#}", e);
                 }
             }
-            Ok(())
-        })
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
+                let response_message = self
+                    .handle_ingress_commitment_tx_message_api(commitment_tx)
+                    .await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+                let response_message = self
+                    .handle_ingress_commitment_tx_message_gossip(commitment_tx)
+                    .await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestChunk(chunk, response) => {
+                let response_value: Result<(), ChunkIngressError> =
+                    self.handle_chunk_ingress_message(chunk).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!(
+                        "handle_chunk_ingress_message response.send() error: {:?}",
+                        e
+                    );
+                };
+            }
+            MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
+                let result = self.handle_chunk_ingress_message(chunk).await;
+                if let Err(e) = result {
+                    tracing::error!("handle_chunk_ingress_message error: {:?}", e);
+                }
+            }
+            MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
+                let response_value = self.handle_get_best_mempool_txs(block_id).await;
+                // Return selected transactions grouped by type
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids,
+                response,
+            } => {
+                let response_value = self
+                    .handle_get_commitment_tx_message(commitment_tx_ids)
+                    .await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::DataTxExists(txid, response) => {
+                let response_value = self.handle_data_tx_exists_message(txid).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
+                let response_value = self
+                    .handle_get_block_header_message(hash, include_chunk)
+                    .await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::CommitmentTxExists(txid, response) => {
+                let response_value = self.handle_commitment_tx_exists_message(txid).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
+                let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
+                let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+
+            MempoolServiceMessage::GetState(response) => {
+                if let Err(e) = response
+                    .send(Arc::clone(&self.mempool_state))
+                    .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
+                {
+                    tracing::error!("response.send() error: {:?}", e);
+                }
+            }
+            MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
+                let response_value = self.handle_ingest_ingress_proof(ingress_proof);
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
+                let response_value = self.remove_from_blacklists(tx_ids).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetMempoolStatus(response) => {
+                let response_value = self.handle_get_mempool_status().await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
+                self.extend_stake_and_pledge_whitelist(new_entries).await;
+                if let Err(e) = response.send(()) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx) => {
+                let whitelist = self.get_stake_and_pledge_whitelist_cloned().await;
+                if let Err(e) = tx.send(whitelist) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+        }
+        Ok(())
     }
 
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {

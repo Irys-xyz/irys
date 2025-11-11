@@ -423,8 +423,9 @@ impl Inner {
             for chunk in chunks {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 if let Err(e) = self
-                    .handle_message(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
-                    .await
+                    .service_senders
+                    .mempool
+                    .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
                 {
                     warn!("Failed to send chunk to mempool: {:?}", e);
                 }
