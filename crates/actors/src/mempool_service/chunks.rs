@@ -1,5 +1,6 @@
 use crate::mempool_service::Inner;
 use eyre::eyre;
+use futures::TryFutureExt as _;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::data_size_to_chunk_count,
@@ -369,7 +370,8 @@ impl Inner {
                     CriticalChunkIngressError::Other(
                         "Block index communication failure".to_string(),
                     )
-                })?;
+                })
+                .await?;
             let latest_migrated = rx
                 .await
                 .map_err(|_e| {
