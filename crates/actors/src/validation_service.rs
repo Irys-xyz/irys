@@ -13,6 +13,7 @@
 use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
     block_validation::{is_seed_data_valid, ValidationError},
+    mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
 };
 use eyre::{bail, ensure};
@@ -83,6 +84,8 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) db: DatabaseProvider,
     /// Block tree read guard to get access to the canonical chain
     pub(crate) block_tree_guard: BlockTreeReadGuard,
+    /// Read only view of the mempool state
+    pub(crate) mempool_guard: MempoolReadGuard,
     /// Rayon thread pool that executes vdf steps
     pub(crate) pool: rayon::ThreadPool,
     /// Execution payload provider for shadow transaction validation
@@ -96,6 +99,7 @@ impl ValidationService {
     pub fn spawn_service(
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
+        mempool_guard: MempoolReadGuard,
         vdf_state_readonly: VdfStateReadonly,
         config: &Config,
         service_senders: &ServiceSenders,
@@ -133,6 +137,7 @@ impl ValidationService {
                         config,
                         service_senders,
                         block_tree_guard,
+                        mempool_guard,
                         reth_node_adapter,
                         db,
                         execution_payload_provider,
