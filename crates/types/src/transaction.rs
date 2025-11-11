@@ -20,7 +20,10 @@ use std::ops::{Deref, DerefMut};
 use thiserror::Error;
 use tracing::error;
 
+pub mod bounded_fee;
 pub mod fee_distribution;
+
+pub use bounded_fee::BoundedFee;
 
 pub type IrysTransactionId = H256;
 
