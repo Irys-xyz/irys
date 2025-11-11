@@ -29,40 +29,41 @@ impl MempoolReadGuard {
     /// - `pending_pledges`: Out-of-order pledge transactions waiting for dependencies
     ///
     /// Returns a HashMap containing only the requested transactions that were found.
+    ///
+    /// Complexity: O(n + m) where n is the number of requested IDs and m is the total
+    /// number of transactions in the mempool.
+    #[must_use]
     pub async fn get_commitment_txs(
         &self,
         commitment_tx_ids: &[IrysTransactionId],
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+        const PRESUMED_PLEDGES_PER_ACCOUNT: usize = 4;
         let mempool_state_guard = self.mempool_state.read().await;
 
-        let mut result = HashMap::with_capacity(commitment_tx_ids.len());
+        // Build lookup map of ALL transactions in mempool - O(m)
+        let mut all_txs = HashMap::with_capacity(
+            mempool_state_guard.valid_commitment_tx.len()
+                + mempool_state_guard.pending_pledges.len() * PRESUMED_PLEDGES_PER_ACCOUNT,
+        );
 
-        for tx_id in commitment_tx_ids {
-            // First, search in valid_commitment_tx
-            let found = mempool_state_guard
-                .valid_commitment_tx
-                .values()
-                .flat_map(|txs| txs.iter())
-                .find(|tx| tx.id == *tx_id);
-
-            if let Some(tx) = found {
-                result.insert(*tx_id, tx.clone());
-                continue;
-            }
-
-            // If not found, search in pending_pledges
-            let found = mempool_state_guard
-                .pending_pledges
-                .iter()
-                .flat_map(|(_, inner)| inner.iter())
-                .find(|(id, _)| **id == *tx_id)
-                .map(|(_, tx)| tx);
-
-            if let Some(tx) = found {
-                result.insert(*tx_id, tx.clone());
+        // Collect from valid_commitment_tx
+        for txs in mempool_state_guard.valid_commitment_tx.values() {
+            for tx in txs {
+                all_txs.insert(tx.id, tx);
             }
         }
 
-        result
+        // Collect from pending_pledges
+        for (_, inner_cache) in mempool_state_guard.pending_pledges.iter() {
+            for (id, tx) in inner_cache.iter() {
+                all_txs.insert(*id, tx);
+            }
+        }
+
+        // Lookup requested transactions - O(n)
+        commitment_tx_ids
+            .iter()
+            .filter_map(|tx_id| all_txs.get(tx_id).map(|tx| (*tx_id, (*tx).clone())))
+            .collect()
     }
 }

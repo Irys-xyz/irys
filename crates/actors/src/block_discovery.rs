@@ -24,7 +24,7 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
     mpsc::{self, error::SendError, UnboundedSender},
     oneshot::{self, error::RecvError},
@@ -446,7 +446,6 @@ impl BlockDiscoveryServiceInner {
                 &commitment_ledger.tx_ids.0,
                 &self.mempool_guard,
                 &db,
-                None,
             )
             .await
             {
@@ -684,7 +683,6 @@ impl BlockDiscoveryServiceInner {
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })
-                    .await
                     .map_err(|channel_error| {
                         BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
                             "Failed to send BlockPreValidated message: {}",
@@ -722,8 +720,6 @@ impl BlockDiscoveryServiceInner {
         }
     }
 }
-
-pub const DEFAULT_MEMPOOL_TX_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Query database for commitment transactions by IDs
 async fn query_commitment_txs_from_db(
@@ -779,7 +775,6 @@ pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: &[IrysTransactionId],
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
-    _fetch_timeout: Option<Duration>,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
     let mempool_future = {
         let guard = mempool_guard.clone();

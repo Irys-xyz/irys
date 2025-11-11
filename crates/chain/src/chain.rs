@@ -1096,7 +1096,7 @@ impl IrysNode {
         service_senders
             .block_index
             .send(irys_actors::block_index_service::BlockIndexServiceMessage::GetBlockIndexReadGuard { response: block_index_tx })
-            .await.expect("BlockIndex service should be running");
+            .expect("BlockIndex service should be running");
         let block_index_guard = block_index_rx
             .await
             .expect("to receive BlockIndexReadGuard from BlockIndex service");
@@ -1131,12 +1131,9 @@ impl IrysNode {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
-        if let Err(e) = block_tree_sender
-            .send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
-                response: oneshot_tx,
-            })
-            .await
-        {
+        if let Err(e) = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+            response: oneshot_tx,
+        }) {
             error!(
                 "Failed to send GetBlockTreeReadGuard message to block tree service: {}",
                 e

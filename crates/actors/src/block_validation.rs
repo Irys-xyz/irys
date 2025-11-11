@@ -1388,7 +1388,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db, None).await?
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db).await?
             }
             [] => {
                 // this is valid as we can have a block that contains 0 system ledgers
@@ -1528,7 +1528,7 @@ pub async fn commitment_txs_are_valid(
         .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
-    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db, None)
+    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db)
         .await
         .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 
@@ -2387,8 +2387,7 @@ async fn get_previous_tx_inclusions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .block_tree
-        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })
-        .await?;
+        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
@@ -2691,7 +2690,7 @@ mod tests {
 
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
-        pub block_index_tx: tokio::sync::mpsc::Sender<BlockIndexServiceMessage>,
+        pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
         #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
@@ -2748,8 +2747,7 @@ mod tests {
         ));
 
         // Spawn Tokio BlockIndex service
-        let (block_index_tx, block_index_rx) =
-            tokio::sync::mpsc::channel(crate::services::caps::BLOCK_INDEX);
+        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
@@ -2779,7 +2777,6 @@ mod tests {
                 all_txs: Arc::new(vec![]),
                 response: tx,
             })
-            .await
             .expect("send migrate block");
         rx.await
             .expect("Failed to receive migration result")
@@ -3049,9 +3046,7 @@ mod tests {
                 all_txs: Arc::clone(&txs),
                 response: tx_migrate,
             })
-            .await
             .expect("send migrate block");
-
         rx_migrate
             .await
             .expect("Failed to receive migration result")
@@ -3061,9 +3056,7 @@ mod tests {
         context
             .block_index_tx
             .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .await
-            .expect("send get block index read guard");
-
+            .expect("send get guard");
         let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
@@ -3312,9 +3305,7 @@ mod tests {
                 all_txs: Arc::clone(&txs),
                 response: tx_migrate,
             })
-            .await
             .expect("send migrate block");
-
         rx_migrate
             .await
             .expect("Failed to receive migration result")
@@ -3324,9 +3315,7 @@ mod tests {
         context
             .block_index_tx
             .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .await
-            .expect("send get block index read guard");
-
+            .expect("send get guard");
         let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
