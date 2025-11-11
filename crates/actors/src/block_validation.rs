@@ -1,7 +1,8 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
-    block_discovery::{get_commitment_tx_in_parallel_via_mpsc, get_data_tx_in_parallel},
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
+    mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
@@ -1009,6 +1010,7 @@ pub fn poa_is_valid(
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
@@ -1131,6 +1133,7 @@ pub async fn shadow_transactions_are_valid(
     let expected_txs = generate_expected_shadow_transactions_from_db(
         config,
         service_senders,
+        mempool_guard,
         block,
         db,
         parent_epoch_snapshot,
@@ -1253,6 +1256,7 @@ pub async fn submit_payload_to_reth(
 async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
@@ -1278,7 +1282,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     };
 
     // Look up commitment txs
-    let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
+    let commitment_txs = extract_commitment_txs(config, mempool_guard, block, db).await?;
 
     // Lookup data txs
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
@@ -1368,7 +1372,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 
 async fn extract_commitment_txs(
     config: &Config,
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
@@ -1384,13 +1388,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel_via_mpsc(
-                    &ledger.tx_ids.0,
-                    &service_senders.mempool,
-                    db,
-                    None,
-                )
-                .await?
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db, None).await?
             }
             [] => {
                 // this is valid as we can have a block that contains 0 system ledgers
@@ -1516,7 +1514,7 @@ pub fn is_seed_data_valid(
 #[tracing::instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
@@ -1530,10 +1528,9 @@ pub async fn commitment_txs_are_valid(
         .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
-    let actual_commitments =
-        get_commitment_tx_in_parallel_via_mpsc(block_tx_ids, &service_senders.mempool, db, None)
-            .await
-            .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
+    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db, None)
+        .await
+        .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {

@@ -235,6 +235,7 @@ pub enum MempoolServiceMessage {
     /// Filtering based on funding status etc based on the provided EVM block ID
     /// If `None` is provided, the latest canonical block is used
     GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<eyre::Result<MempoolTxs>>),
+    // todo update the test utils to use the read guard instead. Then this can be deleted
     /// Retrieves a list of CommitmentTransactions based on the provided tx ids
     GetCommitmentTxs {
         commitment_tx_ids: Vec<IrysTransactionId>,

@@ -7,7 +7,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::block_discovery::DEFAULT_MEMPOOL_TX_TIMEOUT;
 use irys_actors::{
-    block_discovery::{get_commitment_tx_in_parallel_via_mpsc, get_data_tx_in_parallel},
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     mempool_service::{MempoolServiceMessage, TxIngressError},
 };
 use irys_database::{database, db::IrysDatabaseExt as _};
@@ -156,9 +156,9 @@ pub async fn get_transaction(
     tx_id: H256,
 ) -> Result<IrysTransactionResponse, ApiError> {
     let vec = vec![tx_id];
-    if let Ok(mut result) = get_commitment_tx_in_parallel_via_mpsc(
+    if let Ok(mut result) = get_commitment_tx_in_parallel(
         &vec,
-        &state.mempool_service,
+        &state.mempool_guard,
         &state.db,
         Some(DEFAULT_MEMPOOL_TX_TIMEOUT),
     )

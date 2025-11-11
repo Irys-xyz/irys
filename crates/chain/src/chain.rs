@@ -107,6 +107,7 @@ pub struct IrysNodeCtx {
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
+    pub mempool_guard: MempoolReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub partition_controllers: Vec<PartitionMiningController>,
@@ -133,6 +134,7 @@ impl IrysNodeCtx {
     pub fn get_api_state(&self) -> ApiState {
         ApiState {
             mempool_service: self.service_senders.mempool.clone(),
+            mempool_guard: self.mempool_guard.clone(),
             chunk_provider: self.chunk_provider.clone(),
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
@@ -1229,6 +1231,7 @@ impl IrysNode {
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
+            mempool_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
             &service_senders,
@@ -1406,6 +1409,7 @@ impl IrysNode {
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_state_readonly,
+            mempool_guard: mempool_guard.clone(),
             service_senders: service_senders.clone(),
             partition_controllers,
             packing_waiter: packing_handle.waiter(),
@@ -1500,6 +1504,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
+                mempool_guard: mempool_guard.clone(),
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_guard,
                 db: irys_db,

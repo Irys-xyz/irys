@@ -37,7 +37,6 @@ impl MempoolReadGuard {
 
         let mut result = HashMap::with_capacity(commitment_tx_ids.len());
 
-        // Optimize: Only search for the specific IDs we need instead of building a full hashmap
         for tx_id in commitment_tx_ids {
             // First, search in valid_commitment_tx
             let found = mempool_state_guard

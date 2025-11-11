@@ -25,12 +25,9 @@ use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{
-    sync::{
-        mpsc::{self, error::SendError, UnboundedSender},
-        oneshot::{self, error::RecvError},
-    },
-    time::timeout,
+use tokio::sync::{
+    mpsc::{self, error::SendError, UnboundedSender},
+    oneshot::{self, error::RecvError},
 };
 use tracing::{debug, error, info, warn, Instrument as _};
 
@@ -792,56 +789,6 @@ pub async fn get_commitment_tx_in_parallel(
         }
     };
 
-    let (mempool_result, db_result) = tokio::join!(
-        mempool_future,
-        query_commitment_txs_from_db(commitment_tx_ids, db)
-    );
-
-    merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
-}
-
-/// Backward-compatible version that uses mpsc message passing.
-/// This is maintained for callers that don't have access to MempoolReadGuard.
-/// Prefer using `get_commitment_tx_in_parallel` with a guard when possible.
-pub async fn get_commitment_tx_in_parallel_via_mpsc(
-    commitment_tx_ids: &[IrysTransactionId],
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
-    db: &DatabaseProvider,
-    fetch_timeout: Option<Duration>,
-) -> eyre::Result<Vec<CommitmentTransaction>> {
-    // Query mempool via mpsc message passing
-    let mempool_future = {
-        let tx_ids = commitment_tx_ids.to_vec();
-        let sender = mempool_sender.clone();
-        async move {
-            let (tx, rx) = oneshot::channel();
-
-            sender
-                .send(MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids: tx_ids,
-                    response: tx,
-                })
-                .map_err(|_| {
-                    eyre::eyre!(
-                        "Mempool service is not available (channel closed - service may not be running)"
-                    )
-                })?;
-
-            let response = if let Some(duration) = fetch_timeout {
-                timeout(duration, rx).await.map_err(|_| {
-                    eyre::eyre!(
-                        "Mempool request timed out after 5 seconds - service may be unresponsive"
-                    )
-                })?
-            } else {
-                rx.await
-            };
-
-            response.map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))
-        }
-    };
-
-    // Query database and mempool in parallel
     let (mempool_result, db_result) = tokio::join!(
         mempool_future,
         query_commitment_txs_from_db(commitment_tx_ids, db)
