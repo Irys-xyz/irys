@@ -543,7 +543,7 @@ impl Inner {
         }
     }
 
-    #[instrument(skip(self), fields(parent_block.id = ?parent_evm_block_id), err)]
+    #[instrument(skip(self), fields(block.parent_evm_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
         &self,
         parent_evm_block_id: Option<BlockId>,
@@ -574,10 +574,12 @@ impl Inner {
 
         debug!("Anchor bounds for inclusion @ {current_height}: >= {min_anchor_height}, <= {max_anchor_height}");
 
+        let mut balances: HashMap<Address, U256> = HashMap::new();
+
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
         // and previously included transactions in this block
-        let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
+        let mut check_funding = |tx: &dyn IrysTransactionCommon, balances: &HashMap<Address, U256>| -> bool {
             let signer = tx.signer();
 
             // Skip transactions from addresses with previously unfunded transactions
@@ -593,10 +595,11 @@ impl Inner {
             // Calculate total required balance including previously selected transactions
 
             // get balance state for the block we're building off of
-            let balance: U256 = self
-                .reth_node_adapter
-                .rpc
-                .get_balance_irys(signer, parent_evm_block_id);
+            // let balance: U256 = self
+            //     .reth_node_adapter
+            //     .rpc
+            //     .get_balance_irys(signer, parent_evm_block_id);
+            let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
 
             let has_funds = balance >= current_spent + fee;
 
@@ -668,14 +671,17 @@ impl Inner {
         }
 
         // Process commitments in the mempool in priority order
-        let mempool_state_guard = mempool_state.read().await;
 
         // Collect all stake and pledge commitments from mempool
-        let mut sorted_commitments = mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter().cloned())
-            .collect::<Vec<_>>();
+        let mut sorted_commitments = {
+            let mempool_state_guard = mempool_state.read().await;
+
+            mempool_state_guard
+                .valid_commitment_tx
+                .values()
+                .flat_map(|txs| txs.iter().cloned())
+                .collect::<Vec<_>>()
+        };
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
@@ -759,7 +765,6 @@ impl Inner {
                 break;
             }
         }
-        drop(mempool_state_guard);
 
         // Log commitment selection summary
         if !commitment_tx.is_empty() {
@@ -803,6 +808,8 @@ impl Inner {
             .max_data_txs_per_block
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
+
+        balances.extend(fetch_balances_for_transactions(&self.reth_node_adapter, parent_evm_block_id, &submit_ledger_txs));
 
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
@@ -912,7 +919,7 @@ impl Inner {
                 tx.fee = ?tx.total_cost(),
                 "Checking funding for data transaction"
             );
-            if check_funding(&tx) {
+            if check_funding(&tx, &balances) {
                 trace!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
@@ -2081,6 +2088,15 @@ pub fn handle_broadcast_recv<T>(
             None
         }
     }
+}
+
+fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
+    reth_adapter: &IrysRethNodeAdapter,
+    block_id: Option<BlockId>,
+    txs: &[T],
+) -> HashMap<Address, U256> {
+    let signers: Vec<Address> = txs.iter().map(|tx| tx.signer()).collect();
+    reth_adapter.reth_node.rpc.get_balances_irys(&signers, block_id)
 }
 
 #[cfg(test)]

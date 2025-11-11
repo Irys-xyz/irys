@@ -5397,6 +5397,7 @@ dependencies = [
  "irys-database",
  "irys-reth",
  "irys-types",
+ "rayon",
  "reth",
  "reth-chainspec",
  "reth-cli-commands",

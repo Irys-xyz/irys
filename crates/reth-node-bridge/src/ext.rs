@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use alloy_eips::BlockId;
 use alloy_primitives::U256;
 
@@ -8,6 +9,7 @@ use reth_node_api::{BlockTy, FullNodeComponents, NodeTypes};
 use reth_provider::{BlockReader, StateProviderBox};
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, TraceExt};
 use tracing::warn;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 pub trait IrysRethLoadStateExt: LoadState {
     /// Get the account balance.
@@ -37,6 +39,8 @@ where
     fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256>;
 
     fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
+
+    fn get_balances_irys(&self, addresses: &[Address], block_id: Option<BlockId>) -> HashMap<Address, irys_types::U256>;
 
     fn get_balance_irys_canonical_and_pending(
         &self,
@@ -71,6 +75,10 @@ where
                 )
             })
             .unwrap_or(irys_types::U256::zero())
+    }
+
+    fn get_balances_irys(&self, addresses: &[Address], block_id: Option<BlockId>) -> HashMap<Address, irys_types::U256> {
+        addresses.into_par_iter().map(|address| (*address, self.get_balance_irys(*address, block_id))).collect()
     }
 
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.
