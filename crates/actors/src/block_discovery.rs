@@ -5,6 +5,7 @@ use crate::{
     MempoolServiceMessage,
 };
 
+use crate::mempool_guard::MempoolReadGuard;
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
@@ -125,6 +126,8 @@ pub struct BlockDiscoveryServiceInner {
     pub block_index_guard: BlockIndexReadGuard,
     /// Read only view of the block_tree
     pub block_tree_guard: BlockTreeReadGuard,
+    /// Read only view of the mempool state
+    pub mempool_guard: MempoolReadGuard,
     /// Reference to the global config
     pub config: Config,
     /// The block reward curve
@@ -444,7 +447,7 @@ impl BlockDiscoveryServiceInner {
             // if we can, something has gone wrong!
             match get_commitment_tx_in_parallel(
                 &commitment_ledger.tx_ids.0,
-                &mempool_sender,
+                &self.mempool_guard,
                 &db,
                 None,
             )
@@ -724,73 +727,38 @@ impl BlockDiscoveryServiceInner {
 
 pub const DEFAULT_MEMPOOL_TX_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Get all commitment transactions from the mempool and database
-pub async fn get_commitment_tx_in_parallel(
+/// Query database for commitment transactions by IDs
+async fn query_commitment_txs_from_db(
     commitment_tx_ids: &[IrysTransactionId],
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
-    fetch_timeout: Option<Duration>,
+) -> eyre::Result<HashMap<IrysTransactionId, CommitmentTransaction>> {
+    let db_ref = db.clone();
+    let tx_ids = commitment_tx_ids.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        let db_tx = db_ref.tx()?;
+        let mut results = HashMap::new();
+        for tx_id in &tx_ids {
+            if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
+                results.insert(*tx_id, header);
+            }
+        }
+        Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
+    })
+    .await
+    .map_err(|e| eyre::eyre!("Database task join error: {}", e))?
+}
+
+/// Merge commitment transactions from mempool and database, returning ordered vec
+fn merge_commitment_tx_results(
+    commitment_tx_ids: &[IrysTransactionId],
+    mempool_map: HashMap<IrysTransactionId, CommitmentTransaction>,
+    db_map: HashMap<IrysTransactionId, CommitmentTransaction>,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let tx_ids_clone = commitment_tx_ids;
-
-    // Set up a function to query the mempool for commitment transactions
-    let mempool_future = {
-        let tx_ids = tx_ids_clone;
-        async move {
-            let (tx, rx) = oneshot::channel();
-
-            match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: tx_ids.to_vec(),
-                response: tx,
-            }) {
-                Ok(()) => {
-                    let response = if let Some(duration) = fetch_timeout {
-                        // Message was sent successfully, wait for response with timeout
-                        timeout(duration, rx)
-                            .await
-                            .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
-                    } else {
-                        rx.await
-                    };
-                    // Message was sent successfully, wait for response with timeout
-                    let transactions = response
-                        .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
-
-                    Ok(transactions)
-                }
-                Err(_) => {
-                    // Channel is closed - either no receiver was ever created or it was dropped
-                    Err(eyre::eyre!("Mempool service is not available (channel closed - service may not be running)"))
-                }
-            }
-        }
-    };
-
-    // Set up a function to query the database for commitment transactions
-    let db_future = {
-        let tx_ids = commitment_tx_ids;
-        let db_ref = db.clone();
-        async move {
-            let db_tx = db_ref.tx()?;
-            let mut results = HashMap::new();
-            for tx_id in tx_ids {
-                if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
-                    results.insert(*tx_id, header);
-                }
-            }
-            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
-        }
-    };
-
-    // Query mempool and database in parallel
-    let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
-    let mempool_map = mempool_results?;
-    let db_map = db_results?;
-
-    // Combine results, preferring mempool
     let mut headers = Vec::with_capacity(commitment_tx_ids.len());
     let mut missing = Vec::new();
 
+    // Combine results, preferring mempool over database
     for tx_id in commitment_tx_ids {
         if let Some(header) = mempool_map.get(tx_id) {
             headers.push(header.clone());
@@ -806,6 +774,80 @@ pub async fn get_commitment_tx_in_parallel(
     } else {
         Err(eyre::eyre!("Missing transactions: {:?}", missing))
     }
+}
+
+/// Get all commitment transactions from the mempool and database using direct read guard access.
+pub async fn get_commitment_tx_in_parallel(
+    commitment_tx_ids: &[IrysTransactionId],
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+    _fetch_timeout: Option<Duration>,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let mempool_future = {
+        let guard = mempool_guard.clone();
+        let tx_ids = commitment_tx_ids.to_vec();
+        async move {
+            let mempool_map = guard.get_commitment_txs(&tx_ids).await;
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(mempool_map)
+        }
+    };
+
+    let (mempool_result, db_result) = tokio::join!(
+        mempool_future,
+        query_commitment_txs_from_db(commitment_tx_ids, db)
+    );
+
+    merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
+}
+
+/// Backward-compatible version that uses mpsc message passing.
+/// This is maintained for callers that don't have access to MempoolReadGuard.
+/// Prefer using `get_commitment_tx_in_parallel` with a guard when possible.
+pub async fn get_commitment_tx_in_parallel_via_mpsc(
+    commitment_tx_ids: &[IrysTransactionId],
+    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    db: &DatabaseProvider,
+    fetch_timeout: Option<Duration>,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    // Query mempool via mpsc message passing
+    let mempool_future = {
+        let tx_ids = commitment_tx_ids.to_vec();
+        let sender = mempool_sender.clone();
+        async move {
+            let (tx, rx) = oneshot::channel();
+
+            sender
+                .send(MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: tx_ids,
+                    response: tx,
+                })
+                .map_err(|_| {
+                    eyre::eyre!(
+                        "Mempool service is not available (channel closed - service may not be running)"
+                    )
+                })?;
+
+            let response = if let Some(duration) = fetch_timeout {
+                timeout(duration, rx).await.map_err(|_| {
+                    eyre::eyre!(
+                        "Mempool request timed out after 5 seconds - service may be unresponsive"
+                    )
+                })?
+            } else {
+                rx.await
+            };
+
+            response.map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))
+        }
+    };
+
+    // Query database and mempool in parallel
+    let (mempool_result, db_result) = tokio::join!(
+        mempool_future,
+        query_commitment_txs_from_db(commitment_tx_ids, db)
+    );
+
+    merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
 }
 
 /// Get all data transactions from the mempool and database

@@ -15,6 +15,7 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
+    mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
@@ -1194,6 +1195,9 @@ impl IrysNode {
             .await
             .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
 
+        // Create the MempoolReadGuard for block discovery service
+        let mempool_guard = MempoolReadGuard::new(mempool_state.clone());
+
         // Create the MempoolPledgeProvider
         let mempool_pledge_provider = Arc::new(MempoolPledgeProvider::new(
             mempool_state,
@@ -1249,6 +1253,7 @@ impl IrysNode {
             &service_senders,
             &block_index_guard,
             &block_tree_guard,
+            &mempool_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
             receivers.block_discovery,
@@ -1768,6 +1773,7 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
+        mempool_guard: &MempoolReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
         block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
@@ -1776,6 +1782,7 @@ impl IrysNode {
         let block_discovery_inner = BlockDiscoveryServiceInner {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
+            mempool_guard: mempool_guard.clone(),
             db: irys_db.clone(),
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),

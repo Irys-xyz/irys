@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
-    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    block_discovery::{get_commitment_tx_in_parallel_via_mpsc, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
@@ -1384,8 +1384,13 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db, None)
-                    .await?
+                get_commitment_tx_in_parallel_via_mpsc(
+                    &ledger.tx_ids.0,
+                    &service_senders.mempool,
+                    db,
+                    None,
+                )
+                .await?
             }
             [] => {
                 // this is valid as we can have a block that contains 0 system ledgers
@@ -1526,7 +1531,7 @@ pub async fn commitment_txs_are_valid(
 
     // Fetch all actual commitment transactions from the block
     let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db, None)
+        get_commitment_tx_in_parallel_via_mpsc(block_tx_ids, &service_senders.mempool, db, None)
             .await
             .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 
