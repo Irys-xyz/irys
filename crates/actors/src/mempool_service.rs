@@ -183,7 +183,6 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
-    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -252,7 +251,7 @@ pub enum MempoolServiceMessage {
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
     UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
-    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
+    CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
 }
@@ -261,7 +260,7 @@ impl Inner {
     #[tracing::instrument(skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
     pub fn handle_message<'a>(
-        &'a mut self,
+        &'a self,
         msg: MempoolServiceMessage,
     ) -> BoxFuture<'a, eyre::Result<()>> {
         Box::pin(async move {
@@ -387,13 +386,13 @@ impl Inner {
                     };
                 }
                 MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
-                    self.stake_and_pledge_whitelist.extend(new_entries);
+                    self.extend_stake_and_pledge_whitelist(new_entries).await;
                     if let Err(e) = response.send(()) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
                 }
-                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
-                    let whitelist = self.stake_and_pledge_whitelist.clone();
+                MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx) => {
+                    let whitelist = self.get_stake_and_pledge_whitelist_cloned().await;
                     if let Err(e) = tx.send(whitelist) {
                         tracing::error!("response.send() error: {:?}", e);
                     };
@@ -467,7 +466,7 @@ impl Inner {
         })
     }
 
-    async fn remove_from_blacklists(&mut self, tx_ids: Vec<H256>) {
+    async fn remove_from_blacklists(&self, tx_ids: Vec<H256>) {
         let mut state = self.mempool_state.write().await;
         for tx_id in tx_ids {
             state.recent_invalid_tx.pop(&tx_id);
@@ -546,7 +545,7 @@ impl Inner {
 
     #[instrument(skip(self), fields(parent_block.id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
-        &mut self,
+        &self,
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
@@ -1419,7 +1418,7 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn restore_mempool_from_disk(&mut self) {
+    pub async fn restore_mempool_from_disk(&self) {
         let recovered =
             RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
                 .await;
@@ -1459,7 +1458,7 @@ impl Inner {
 
     // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
     // right now this only wipes `recent_invalid_tx`
-    pub async fn wipe_blacklists(&mut self) {
+    pub async fn wipe_blacklists(&self) {
         let mut write = self.mempool_state.write().await;
         write.recent_invalid_tx.clear();
         write.recent_invalid_payload_fingerprints.clear();
@@ -1485,7 +1484,7 @@ impl Inner {
             + std::fmt::Debug
             + serde::Serialize,
     >(
-        &mut self,
+        &self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
@@ -1589,6 +1588,16 @@ impl Inner {
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
+
+    async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+        let mut state = self.mempool_state.write().await;
+        state.stake_and_pledge_whitelist.extend(new_entries);
+    }
+
+    async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+        let state = self.mempool_state.read().await;
+        state.stake_and_pledge_whitelist.clone()
+    }
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -1613,11 +1622,15 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
-pub fn create_state(config: &MempoolConfig) -> MempoolState {
+pub fn create_state(
+    config: &MempoolConfig,
+    stake_and_pledge_whitelist: &[Address],
+) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
@@ -1634,6 +1647,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
+        stake_and_pledge_whitelist: HashSet::from_iter(stake_and_pledge_whitelist.iter().copied()),
     }
 }
 
@@ -1907,7 +1921,7 @@ pub struct MempoolService {
     msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
     block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
-    inner: Inner,
+    inner: Arc<Inner>,
 }
 
 impl Default for MempoolService {
@@ -1932,18 +1946,18 @@ impl MempoolService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let block_tree_read_guard = block_tree_read_guard.clone();
-        let config = config.clone();
-        let mempool_config = &config.mempool;
-        let mempool_state = create_state(mempool_config);
-        let storage_modules_guard = storage_modules_guard;
-        let service_senders = service_senders.clone();
-        let reorg_rx = service_senders.subscribe_reorgs();
-        let block_migrated_rx = service_senders.subscribe_block_migrated();
         let initial_stake_and_pledge_whitelist = config
             .node_config
             .initial_stake_and_pledge_whitelist
             .clone();
+        let block_tree_read_guard = block_tree_read_guard.clone();
+        let config = config.clone();
+        let mempool_config = &config.mempool;
+        let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
+        let storage_modules_guard = storage_modules_guard;
+        let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
+        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
         let handle = runtime_handle.spawn(
             async move {
@@ -1961,7 +1975,7 @@ impl MempoolService {
                     msg_rx: rx,
                     reorg_rx,
                     block_migrated_rx,
-                    inner: Inner {
+                    inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
                         exec: TaskExecutor::current(),
@@ -1971,8 +1985,7 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
-                        stake_and_pledge_whitelist,
-                    },
+                    }),
                 };
                 mempool_service
                     .start()
@@ -2001,10 +2014,15 @@ impl MempoolService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            self.inner.handle_message(msg).await?;
+                            let inner = Arc::clone(&self.inner);
+                            tokio::spawn(async move {
+                                if let Err(err) = inner.handle_message(msg).await {
+                                    error!("Error handling mempool message: {:?}", err);
+                                }
+                            });
                         }
                         None => {
-                            tracing::warn!("receiver channel closed");
+                            warn!("receiver channel closed");
                             break;
                         }
                     }
@@ -2127,6 +2145,7 @@ mod bounded_mempool_tests {
             recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
             pending_chunks: LruCache::new(NonZeroUsize::new(10).unwrap()),
             pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
         }
     }
 

@@ -18,7 +18,7 @@ impl Inner {
     // Performs signature validation, whitelist check, mempool/db duplicate detection, and anchor validation.
     #[inline]
     async fn precheck_commitment_ingress_common(
-        &mut self,
+        &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
@@ -47,7 +47,7 @@ impl Inner {
         }
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted
-        self.check_commitment_whitelist(commitment_tx)?;
+        self.check_commitment_whitelist(commitment_tx).await?;
 
         // Early out if we already know about this transaction (invalid/recent valid/valid_commitment_tx)
         if self
@@ -74,7 +74,7 @@ impl Inner {
     // The warn_on_unstaked flag controls whether we emit a warning on Unstaked status (true for API only).
     #[inline]
     async fn process_commitment_after_prechecks(
-        &mut self,
+        &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         // Check pending commitments and cached commitments and active commitments of the canonical chain
@@ -124,7 +124,7 @@ impl Inner {
 
     #[instrument(skip_all)]
     pub async fn handle_ingress_commitment_tx_message_gossip(
-        &mut self,
+        &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
@@ -163,7 +163,7 @@ impl Inner {
 
     #[instrument(skip_all)]
     pub async fn handle_ingress_commitment_tx_message_api(
-        &mut self,
+        &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
@@ -196,11 +196,12 @@ impl Inner {
     }
 
     /// Check stake/pledge whitelist; reject if address is not whitelisted.
-    fn check_commitment_whitelist(
+    async fn check_commitment_whitelist(
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        let whitelist = &self.stake_and_pledge_whitelist;
+        let read_guard = self.mempool_state.read().await;
+        let whitelist = &read_guard.stake_and_pledge_whitelist;
         if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
             warn!(
                 "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
@@ -241,7 +242,7 @@ impl Inner {
     /// Inserts a commitment into the mempool valid map and marks it as recently valid.
     /// Uses bounded insertion which may evict transactions when limits are exceeded.
     async fn insert_commitment_and_mark_valid(
-        &mut self,
+        &self,
         tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
@@ -251,7 +252,7 @@ impl Inner {
     }
 
     /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.
-    async fn process_pending_pledges_for_new_stake(&mut self, signer: Address) {
+    async fn process_pending_pledges_for_new_stake(&self, signer: Address) {
         let mut guard = self.mempool_state.write().await;
         let pop = guard.pending_pledges.pop(&signer);
         drop(guard);
@@ -292,7 +293,7 @@ impl Inner {
     }
 
     /// Caches an unstaked pledge in the two-level LRU structure.
-    async fn cache_unstaked_pledge(&mut self, tx: &CommitmentTransaction) {
+    async fn cache_unstaked_pledge(&self, tx: &CommitmentTransaction) {
         let mut guard = self.mempool_state.write().await;
         if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer) {
             // Address already exists in cache - add this pledge transaction to its lru cache
@@ -457,7 +458,7 @@ impl Inner {
 
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
-    pub async fn remove_commitment_tx(&mut self, txid: &H256) -> bool {
+    pub async fn remove_commitment_tx(&self, txid: &H256) -> bool {
         let mut found = false;
 
         let mempool_state = &self.mempool_state;

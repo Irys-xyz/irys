@@ -17,7 +17,7 @@ impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
     #[instrument(skip_all, fields(block.hash= %block.block_hash(), block.height = %block.height()), err)]
     pub async fn handle_block_confirmed_message(
-        &mut self,
+        &self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
@@ -133,7 +133,7 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn handle_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
+    pub async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
             &event.old_fork.len(),
@@ -165,7 +165,7 @@ impl Inner {
     /// Re-process all currently valid mempool txs
     /// all this does is take all valid submit & commitment txs, and passes them back through ingress
     #[instrument(skip_all)]
-    pub async fn reprocess_all_txs(&mut self) -> eyre::Result<()> {
+    pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
         // re-process all valid txs
         let (valid_submit_ledger_tx, valid_commitment_tx) = {
             let mut state = self.mempool_state.write().await;
@@ -233,11 +233,7 @@ impl Inner {
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
     /// swallows errors from get_anchor_height (but does log them)
-    pub fn should_prune_tx(
-        &mut self,
-        current_height: u64,
-        tx: &impl IrysTransactionCommon,
-    ) -> bool {
+    pub fn should_prune_tx(&self, current_height: u64, tx: &impl IrysTransactionCommon) -> bool {
         let anchor_height = match self
             .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
         {
@@ -273,7 +269,7 @@ impl Inner {
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
     /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
     #[instrument(skip_all)]
-    pub async fn prune_pending_txs(&mut self) {
+    pub async fn prune_pending_txs(&self) {
         let current_height = match self.get_latest_block_height() {
             Ok(height) => height,
             Err(e) => {
@@ -362,7 +358,7 @@ impl Inner {
     /// 3) reduce down to a set of SystemLedger specific orphaned transactions
     /// 4) resubmit these orphaned commitment transactions to the mempool
     pub async fn handle_confirmed_commitment_tx_reorg(
-        &mut self,
+        &self,
         event: &ReorgEvent,
     ) -> eyre::Result<()> {
         let ReorgEvent {
@@ -495,7 +491,7 @@ impl Inner {
     /// 6) handle double promotions (when a publish tx is promoted in both forks)
     ///     6.1) get the associated proof from the new fork
     ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
-    pub async fn handle_confirmed_data_tx_reorg(&mut self, event: &ReorgEvent) -> eyre::Result<()> {
+    pub async fn handle_confirmed_data_tx_reorg(&self, event: &ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
@@ -676,7 +672,7 @@ impl Inner {
     /// When a block is migrated from the block_tree to the block_index at the migration depth
     /// it moves from "the cache" (largely the mempool) to "the index" (long term storage, usually
     /// in a database or disk)
-    pub async fn handle_block_migrated(&mut self, event: BlockMigratedEvent) -> eyre::Result<()> {
+    pub async fn handle_block_migrated(&self, event: BlockMigratedEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing block migrated broadcast: {} height: {}",
             event.block.block_hash,

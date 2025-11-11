@@ -24,7 +24,7 @@ impl Inner {
     // and ledger parsing. Returns the resolved ledger and the computed expiry height.
     #[inline]
     async fn precheck_data_ingress_common(
-        &mut self,
+        &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
@@ -72,7 +72,7 @@ impl Inner {
     // process any pending chunks, and gossip the transaction.
     #[inline]
     async fn postprocess_data_ingress(
-        &mut self,
+        &self,
         tx: &DataTransactionHeader,
         expiry_height: u64,
     ) -> Result<(), TxIngressError> {
@@ -127,7 +127,7 @@ impl Inner {
     }
 
     pub async fn handle_data_tx_ingress_message_gossip(
-        &mut self,
+        &self,
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
@@ -174,7 +174,7 @@ impl Inner {
     }
 
     pub async fn handle_data_tx_ingress_message_api(
-        &mut self,
+        &self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
@@ -379,7 +379,7 @@ impl Inner {
     /// Inserts tx into the mempool and marks it as recently valid.
     /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
     async fn insert_tx_and_mark_valid(
-        &mut self,
+        &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
@@ -413,10 +413,7 @@ impl Inner {
     }
 
     /// Processes any pending chunks that arrived before their parent transaction.
-    async fn process_pending_chunks_for_root(
-        &mut self,
-        data_root: H256,
-    ) -> Result<(), TxIngressError> {
+    async fn process_pending_chunks_for_root(&self, data_root: H256) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
         let option_chunks_map = guard.pending_chunks.pop(&data_root);
         drop(guard);
