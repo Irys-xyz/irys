@@ -1,0 +1,19 @@
+[package]
+name = "stress-test"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+irys-chain = { workspace = true, features = ["test-utils"] }
+irys-types = { workspace = true, features = ["test-utils"] }
+tokio.workspace = true
+alloy-genesis = { workspace = true }
+alloy-primitives = { workspace = true }
+
+[lints]
+workspace = true
