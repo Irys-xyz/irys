@@ -1,4 +1,3 @@
-use crate::channel_caps::{CAP_BLOCK_INDEX, CAP_BLOCK_TREE, CAP_PACKING_REQUESTS};
 use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
@@ -24,6 +23,18 @@ use tokio::sync::{
     broadcast,
     mpsc::{channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender},
 };
+
+/// Channel capacity constants for bounded mpsc channels.
+pub mod caps {
+    /// Block index service control messages
+    pub const BLOCK_INDEX: usize = 8;
+
+    /// Block tree service control/messages
+    pub const BLOCK_TREE: usize = 16;
+
+    /// Packing requests (used by PackingService::channel)
+    pub const PACKING_REQUESTS: usize = 128;
+}
 
 // Only contains senders, thread-safe to clone and share
 #[derive(Debug, Clone)]
@@ -152,9 +163,9 @@ impl ServiceSendersInner {
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
             unbounded_channel::<GossipBroadcastMessage>();
         let (block_tree_sender, block_tree_receiver) =
-            channel::<BlockTreeServiceMessage>(CAP_BLOCK_TREE);
+            channel::<BlockTreeServiceMessage>(caps::BLOCK_TREE);
         let (block_index_sender, block_index_receiver) =
-            channel::<BlockIndexServiceMessage>(CAP_BLOCK_INDEX);
+            channel::<BlockIndexServiceMessage>(caps::BLOCK_INDEX);
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
@@ -171,7 +182,7 @@ impl ServiceSendersInner {
         let (peer_network_sender, peer_network_receiver) = tokio::sync::mpsc::unbounded_channel();
         let (block_discovery_sender, block_discovery_receiver) =
             unbounded_channel::<BlockDiscoveryMessage>();
-        let (packing_sender, packing_receiver) = PackingService::channel(CAP_PACKING_REQUESTS);
+        let (packing_sender, packing_receiver) = PackingService::channel(caps::PACKING_REQUESTS);
 
         let mining_bus = MiningBus::new(None);
         let senders = Self {

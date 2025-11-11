@@ -757,7 +757,7 @@ async fn epoch_blocks_reinitialization_test() {
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
     let (block_index_tx, block_index_rx) =
-        tokio::sync::mpsc::channel(irys_actors::channel_caps::CAP_BLOCK_INDEX);
+        tokio::sync::mpsc::channel(irys_actors::services::caps::BLOCK_INDEX);
     let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
         block_index_rx,
         Arc::new(RwLock::new(
