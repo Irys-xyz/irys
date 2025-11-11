@@ -399,7 +399,7 @@ pub struct DataTransactionHeaderV1 {
     pub header_size: u64,
 
     /// Funds the storage of the transaction data during the storage term (protocol-enforced cost)
-    pub term_fee: U256,
+    pub term_fee: BoundedFee,
 
     /// Destination ledger for the transaction, default is 0 - Permanent Ledger
     pub ledger_id: u32,
@@ -419,7 +419,7 @@ pub struct DataTransactionHeaderV1 {
 
     /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
     #[serde(default)]
-    pub perm_fee: Option<U256>,
+    pub perm_fee: Option<BoundedFee>,
 
     /// INTERNAL: Tracks what block this transaction was promoted in, can look up ingress proofs there
     #[rlp(skip)]
@@ -514,7 +514,7 @@ impl DataTransactionHeaderV1 {
             data_root: H256::zero(),
             data_size: 0,
             header_size: 0,
-            term_fee: U256::zero(),
+            term_fee: BoundedFee::zero(),
             perm_fee: None,
             ledger_id: 0,
             bundle_format: None,
@@ -541,11 +541,11 @@ impl DataTransactionHeaderV1 {
         self.anchor
     }
 
-    pub fn user_fee(&self) -> U256 {
+    pub fn user_fee(&self) -> BoundedFee {
         self.term_fee
     }
 
-    pub fn total_cost(&self) -> U256 {
+    pub fn total_cost(&self) -> BoundedFee {
         self.perm_fee.unwrap_or_default() + self.term_fee
     }
 }
@@ -911,13 +911,13 @@ pub trait IrysTransactionCommon {
 }
 
 impl DataTransactionHeader {
-    pub fn user_fee(&self) -> U256 {
+    pub fn user_fee(&self) -> BoundedFee {
         // Return term_fee as the user fee for prioritization
         // todo: use TermFeeCharges to get the fee that will go to the miner
         self.term_fee
     }
 
-    pub fn total_cost(&self) -> U256 {
+    pub fn total_cost(&self) -> BoundedFee {
         self.perm_fee.unwrap_or_default() + self.term_fee
     }
 }
@@ -934,7 +934,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn total_cost(&self) -> U256 {
-        Self::total_cost(self)
+        Self::total_cost(self).into()
     }
 
     fn signer(&self) -> Address {
@@ -950,7 +950,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn user_fee(&self) -> U256 {
-        Self::user_fee(self)
+        Self::user_fee(self).into()
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
@@ -1128,14 +1128,14 @@ impl IrysTransactionCommon for IrysTransaction {
 
     fn total_cost(&self) -> U256 {
         match self {
-            Self::Data(tx) => tx.total_cost(),
+            Self::Data(tx) => tx.total_cost().into(),
             Self::Commitment(tx) => tx.total_cost(),
         }
     }
 
     fn user_fee(&self) -> U256 {
         match self {
-            Self::Data(tx) => tx.user_fee(),
+            Self::Data(tx) => tx.user_fee().into(),
             Self::Commitment(tx) => tx.user_fee(),
         }
     }
@@ -1315,8 +1315,8 @@ mod tests {
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
             header_size: 0,
-            term_fee: U256::from(100),
-            perm_fee: Some(U256::from(200)),
+            term_fee: BoundedFee::from(100_u64),
+            perm_fee: Some(BoundedFee::from(200_u64)),
             ledger_id: 1,
             bundle_format: None,
             chain_id: 1,
@@ -1604,8 +1604,8 @@ mod tests {
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
             header_size: 0,
-            term_fee: U256::from(100),
-            perm_fee: Some(U256::from(200)),
+            term_fee: BoundedFee::from(100_u64),
+            perm_fee: Some(BoundedFee::from(200_u64)),
             ledger_id: 1,
             bundle_format: None,
             chain_id: config.chain_id,

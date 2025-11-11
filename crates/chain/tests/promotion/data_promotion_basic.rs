@@ -68,8 +68,8 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 node.get_anchor().await?,
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
@@ -321,8 +321,8 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 blk5.block_hash, // anchor
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .map_err(AddTxError::CreateTx)?;
 

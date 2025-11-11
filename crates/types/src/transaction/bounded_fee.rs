@@ -1,17 +1,25 @@
-//! BoundedFee newtype with saturating addition.
+//! Fee amount with saturating arithmetic that prevents overflow attacks.
 //!
-//! Prevents overflow attack where `term_fee + perm_fee` wraps to zero,
-//! bypassing balance checks. Instead, addition saturates at U256::MAX.
+//! Wraps [`U256`] to ensure `term_fee + perm_fee` saturates at MAX instead
+//! of wrapping to zero, which would bypass balance checks.
 
 use crate::U256;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::ops::{Add, AddAssign};
 
-/// Fee amount with saturating arithmetic.
-///
-/// Wraps U256 and ensures addition saturates at U256::MAX instead of wrapping to zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    arbitrary::Arbitrary,
+    reth_codecs::Compact,
+)]
 #[repr(transparent)]
 pub struct BoundedFee(U256);
 
@@ -35,6 +43,16 @@ impl BoundedFee {
     pub const fn get(&self) -> U256 {
         self.0
     }
+
+    #[inline]
+    pub const fn from_u64(amount: u64) -> Self {
+        Self(U256([amount, 0, 0, 0]))
+    }
+
+    #[inline]
+    pub const fn max_value() -> Self {
+        Self(U256::MAX)
+    }
 }
 
 impl fmt::Display for BoundedFee {
@@ -49,7 +67,6 @@ impl Default for BoundedFee {
     }
 }
 
-// Saturating addition - key security feature
 impl Add for BoundedFee {
     type Output = Self;
 
@@ -118,7 +135,23 @@ impl<'de> Deserialize<'de> for BoundedFee {
     }
 }
 
-// Conversion Traits
+impl alloy_rlp::Encodable for BoundedFee {
+    fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
+        self.0.encode(out);
+    }
+
+    fn length(&self) -> usize {
+        self.0.length()
+    }
+}
+
+impl alloy_rlp::Decodable for BoundedFee {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let amount = U256::decode(buf)?;
+        Ok(Self(amount))
+    }
+}
+
 impl From<U256> for BoundedFee {
     #[inline]
     fn from(amount: U256) -> Self {
@@ -147,6 +180,34 @@ impl From<u128> for BoundedFee {
     }
 }
 
+impl PartialEq<U256> for BoundedFee {
+    #[inline]
+    fn eq(&self, other: &U256) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<BoundedFee> for U256 {
+    #[inline]
+    fn eq(&self, other: &BoundedFee) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialOrd<U256> for BoundedFee {
+    #[inline]
+    fn partial_cmp(&self, other: &U256) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other)
+    }
+}
+
+impl PartialOrd<BoundedFee> for U256 {
+    #[inline]
+    fn partial_cmp(&self, other: &BoundedFee) -> Option<std::cmp::Ordering> {
+        self.partial_cmp(&other.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,16 +222,55 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::op_ref)]
-    fn test_reference_addition() {
-        let a = BoundedFee::new(U256::from(1000));
-        let b = BoundedFee::new(U256::from(2000));
+    fn test_cross_type_comparisons() {
+        let fee = BoundedFee::new(U256::from(1000));
+        let amount = U256::from(1000);
+        let larger = U256::from(2000);
+        let smaller = U256::from(500);
 
-        // All combinations should work
-        assert_eq!((a + b).get(), U256::from(3000));
-        assert_eq!((&a + &b).get(), U256::from(3000));
-        assert_eq!((a + &b).get(), U256::from(3000));
-        assert_eq!((&a + b).get(), U256::from(3000));
+        // Equality
+        assert_eq!(fee, amount);
+        assert_eq!(amount, fee);
+        assert_ne!(fee, larger);
+        assert_ne!(larger, fee);
+
+        // Ordering: BoundedFee compared with U256
+        assert!(fee < larger);
+        assert!(fee <= larger);
+        assert!(fee <= amount);
+        assert!(fee > smaller);
+        assert!(fee >= smaller);
+        assert!(fee >= amount);
+
+        // Ordering: U256 compared with BoundedFee
+        assert!(larger > fee);
+        assert!(larger >= fee);
+        assert!(amount >= fee);
+        assert!(smaller < fee);
+        assert!(smaller <= fee);
+        assert!(amount <= fee);
+    }
+
+    #[test]
+    fn test_rlp_encoding_matches_u256() {
+        use alloy_rlp::{Decodable as _, Encodable as _};
+
+        let amount = U256::from(99_u64);
+        let bounded_fee = BoundedFee::from(99_u64);
+
+        // Encode both
+        let mut u256_buf = Vec::new();
+        amount.encode(&mut u256_buf);
+
+        let mut bounded_fee_buf = Vec::new();
+        bounded_fee.encode(&mut bounded_fee_buf);
+
+        // RLP encodings should be identical
+        assert_eq!(u256_buf, bounded_fee_buf, "RLP encoding must match U256");
+
+        // Verify round-trip
+        let decoded = BoundedFee::decode(&mut &bounded_fee_buf[..]).unwrap();
+        assert_eq!(decoded, bounded_fee);
     }
 }
 

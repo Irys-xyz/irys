@@ -33,8 +33,8 @@ use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
-    app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
-    H256, U256,
+    app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
+    IrysTransactionId, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -1699,7 +1699,7 @@ impl MempoolState {
 
     /// Find lowest fee data transaction for eviction.
     /// Returns (tx_id, fee) tuple.
-    fn find_lowest_fee_data_tx(&self) -> Option<(H256, U256)> {
+    fn find_lowest_fee_data_tx(&self) -> Option<(H256, BoundedFee)> {
         self.valid_submit_ledger_tx
             .iter()
             .min_by_key(|(_, tx)| tx.user_fee())
@@ -2093,8 +2093,8 @@ mod bounded_mempool_tests {
             data_root: H256::random(),
             data_size: 1024,
             header_size: 0,
-            term_fee: U256::from(fee),
-            perm_fee: Some(U256::from(100)),
+            term_fee: U256::from(fee).into(),
+            perm_fee: Some(U256::from(100).into()),
             ledger_id: DataLedger::Publish as u32,
             bundle_format: Some(0),
             promoted_height: None,

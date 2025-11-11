@@ -335,9 +335,11 @@ impl LedgerExpiryTestContext {
             let tx = self.post_data_tx(anchor, data, &self.signer).await;
 
             // Track fees
-            self.total_term_fees = self.total_term_fees.saturating_add(tx.header.term_fee);
+            self.total_term_fees = self
+                .total_term_fees
+                .saturating_add(tx.header.term_fee.into());
             if let Some(perm_fee) = tx.header.perm_fee {
-                self.total_perm_fees = self.total_perm_fees.saturating_add(perm_fee);
+                self.total_perm_fees = self.total_perm_fees.saturating_add(perm_fee.into());
             }
 
             self.transactions.push(tx.clone());
