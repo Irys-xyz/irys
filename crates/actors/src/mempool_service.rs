@@ -579,51 +579,52 @@ impl Inner {
         // Helper function that verifies transaction funding and tracks cumulative fees
         // Returns true if the transaction can be funded based on current account balance
         // and previously included transactions in this block
-        let mut check_funding = |tx: &dyn IrysTransactionCommon, balances: &HashMap<Address, U256>| -> bool {
-            let signer = tx.signer();
+        let mut check_funding =
+            |tx: &dyn IrysTransactionCommon, balances: &HashMap<Address, U256>| -> bool {
+                let signer = tx.signer();
 
-            // Skip transactions from addresses with previously unfunded transactions
-            // This ensures we don't include any transactions (including pledges) from
-            // addresses that couldn't afford their stake commitments
-            if unfunded_address.contains(&signer) {
-                return false;
-            }
+                // Skip transactions from addresses with previously unfunded transactions
+                // This ensures we don't include any transactions (including pledges) from
+                // addresses that couldn't afford their stake commitments
+                if unfunded_address.contains(&signer) {
+                    return false;
+                }
 
-            let fee = tx.total_cost();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
+                let fee = tx.total_cost();
+                let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
 
-            // Calculate total required balance including previously selected transactions
+                // Calculate total required balance including previously selected transactions
 
-            // get balance state for the block we're building off of
-            // let balance: U256 = self
-            //     .reth_node_adapter
-            //     .rpc
-            //     .get_balance_irys(signer, parent_evm_block_id);
-            let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
+                // get balance state for the block we're building off of
+                // let balance: U256 = self
+                //     .reth_node_adapter
+                //     .rpc
+                //     .get_balance_irys(signer, parent_evm_block_id);
+                let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
 
-            let has_funds = balance >= current_spent + fee;
+                let has_funds = balance >= current_spent + fee;
 
-            // Track fees for this address regardless of whether this specific transaction is included
-            fees_spent_per_address
-                .entry(signer)
-                .and_modify(|val| *val += fee)
-                .or_insert(fee);
+                // Track fees for this address regardless of whether this specific transaction is included
+                fees_spent_per_address
+                    .entry(signer)
+                    .and_modify(|val| *val += fee)
+                    .or_insert(fee);
 
-            // If transaction cannot be funded, mark the entire address as unfunded
-            // Since stakes are processed before pledges, this prevents inclusion of
-            // pledge commitments when their associated stake commitment is unfunded
-            if !has_funds {
-                debug!(
-                    tx.signer = ?signer,
-                    account.balance = ?balance,
-                    "Transaction funding check failed"
-                );
-                unfunded_address.insert(signer);
-                return false;
-            }
+                // If transaction cannot be funded, mark the entire address as unfunded
+                // Since stakes are processed before pledges, this prevents inclusion of
+                // pledge commitments when their associated stake commitment is unfunded
+                if !has_funds {
+                    debug!(
+                        tx.signer = ?signer,
+                        account.balance = ?balance,
+                        "Transaction funding check failed"
+                    );
+                    unfunded_address.insert(signer);
+                    return false;
+                }
 
-            has_funds
-        };
+                has_funds
+            };
 
         // Get all necessary snapshots and canonical chain info in a single read operation
         let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
@@ -809,7 +810,11 @@ impl Inner {
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
 
-        balances.extend(fetch_balances_for_transactions(&self.reth_node_adapter, parent_evm_block_id, &submit_ledger_txs));
+        balances.extend(fetch_balances_for_transactions(
+            &self.reth_node_adapter,
+            parent_evm_block_id,
+            &submit_ledger_txs,
+        ));
 
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
@@ -2096,7 +2101,10 @@ fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     txs: &[T],
 ) -> HashMap<Address, U256> {
     let signers: Vec<Address> = txs.iter().map(|tx| tx.signer()).collect();
-    reth_adapter.reth_node.rpc.get_balances_irys(&signers, block_id)
+    reth_adapter
+        .reth_node
+        .rpc
+        .get_balances_irys(&signers, block_id)
 }
 
 #[cfg(test)]
