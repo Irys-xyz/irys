@@ -683,6 +683,7 @@ impl BlockDiscoveryServiceInner {
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })
+                    .await
                     .map_err(|channel_error| {
                         BlockDiscoveryInternalError::BlockTreeRequestFailed(format!(
                             "Failed to send BlockPreValidated message: {}",

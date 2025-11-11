@@ -34,7 +34,8 @@ async fn send_block_to_block_tree(
             commitment_txs: Arc::new(commitment_txs),
             response: response_tx,
             skip_vdf_validation: false,
-        })?;
+        })
+        .await?;
 
     Ok(response_rx.await??)
 }

@@ -2387,7 +2387,8 @@ async fn get_previous_tx_inclusions(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .block_tree
-        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })?;
+        .send(BlockTreeServiceMessage::GetBlockTreeReadGuard { response: tx })
+        .await?;
     let block_tree_guard = rx.await?;
     let block_tree_guard = block_tree_guard.read();
 
@@ -2690,7 +2691,7 @@ mod tests {
 
     pub(super) struct TestContext {
         pub block_index: Arc<RwLock<BlockIndex>>,
-        pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
+        pub block_index_tx: tokio::sync::mpsc::Sender<BlockIndexServiceMessage>,
         #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
         pub miner_address: Address,
@@ -2747,7 +2748,8 @@ mod tests {
         ));
 
         // Spawn Tokio BlockIndex service
-        let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (block_index_tx, block_index_rx) =
+            tokio::sync::mpsc::channel(crate::services::caps::BLOCK_INDEX);
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
@@ -2777,6 +2779,7 @@ mod tests {
                 all_txs: Arc::new(vec![]),
                 response: tx,
             })
+            .await
             .expect("send migrate block");
         rx.await
             .expect("Failed to receive migration result")
@@ -3046,7 +3049,9 @@ mod tests {
                 all_txs: Arc::clone(&txs),
                 response: tx_migrate,
             })
+            .await
             .expect("send migrate block");
+
         rx_migrate
             .await
             .expect("Failed to receive migration result")
@@ -3056,7 +3061,9 @@ mod tests {
         context
             .block_index_tx
             .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .expect("send get guard");
+            .await
+            .expect("send get block index read guard");
+
         let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
@@ -3305,7 +3312,9 @@ mod tests {
                 all_txs: Arc::clone(&txs),
                 response: tx_migrate,
             })
+            .await
             .expect("send migrate block");
+
         rx_migrate
             .await
             .expect("Failed to receive migration result")
@@ -3315,7 +3324,9 @@ mod tests {
         context
             .block_index_tx
             .send(BlockIndexServiceMessage::GetBlockIndexReadGuard { response: tx })
-            .expect("send get guard");
+            .await
+            .expect("send get block index read guard");
+
         let block_index_guard = rx.await.expect("receive block index guard");
 
         let ledger_chunk_offset = context
