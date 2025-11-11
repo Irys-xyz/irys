@@ -233,13 +233,18 @@ impl Inner {
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
     /// swallows errors from get_anchor_height (but does log them)
-    pub async fn should_prune_tx(
+    pub fn should_prune_tx(
         &mut self,
         current_height: u64,
         tx: &impl IrysTransactionCommon,
     ) -> bool {
-        let anchor_height = match self.get_anchor_height(tx.id(), tx.anchor()).await {
-            Ok(h) => h,
+        let anchor_height = match self
+            .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
+        {
+            Ok(Some(h)) => h,
+            // if we don't know about the anchor, we should prune
+            // note: this can happen, i.e if we did a block rollback.
+            Ok(None) => return true,
             Err(e) => {
                 // we can't tell due to an error
                 error!("Error checking if we should prune tx {} - {}", &tx.id(), e);
@@ -247,7 +252,7 @@ impl Inner {
             }
         };
 
-        let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
+        let effective_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32
             + self.config.consensus.block_migration_depth
             + 5;
 
@@ -297,7 +302,7 @@ impl Inner {
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
-                if self.should_prune_tx(current_height, &tx).await {
+                if self.should_prune_tx(current_height, &tx) {
                     let mut state = self.mempool_state.write().await;
                     state.valid_submit_ledger_tx.remove(&tx_id);
                     Self::mark_tx_as_invalid(state, tx_id, TxIngressError::InvalidAnchor);
@@ -324,7 +329,7 @@ impl Inner {
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
-                    if self.should_prune_tx(current_height, &tx).await {
+                    if self.should_prune_tx(current_height, &tx) {
                         self.remove_commitment_tx(&tx.id).await;
                         Self::mark_tx_as_invalid(
                             self.mempool_state.write().await,

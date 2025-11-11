@@ -2,6 +2,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Deserialize a number from either a string or a number
+fn deserialize_number_from_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        String(String),
+        Number(u64),
+    }
+
+    match StringOrNum::deserialize(deserializer)? {
+        StringOrNum::String(s) => s.parse().map_err(serde::de::Error::custom),
+        StringOrNum::Number(n) => Ok(n),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub version: String,
@@ -21,6 +39,7 @@ pub struct NodeInfo {
     #[serde(rename = "isSyncing")]
     pub is_syncing: bool,
     #[serde(rename = "currentSyncHeight")]
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub current_sync_height: u64,
 }
 
