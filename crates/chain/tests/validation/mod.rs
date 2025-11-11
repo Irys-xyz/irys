@@ -49,8 +49,7 @@ pub async fn send_block_to_block_tree(
             skip_vdf_validation,
             response: response_tx,
         })
-        .await
-        .expect("failed to send BlockPreValidated to block tree");
+        .unwrap();
 
     response_rx.await.unwrap()
 }
