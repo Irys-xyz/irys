@@ -19,4 +19,8 @@ pub struct MempoolStatus {
     pub data_tx_total_size: u64,
     /// Memory pool configuration
     pub config: MempoolConsensusConfig,
+    /// Capacity utilization percentage for data transactions (0-100)
+    pub data_tx_capacity_pct: f64,
+    /// Capacity utilization percentage for commitment addresses (0-100)
+    pub commitment_address_capacity_pct: f64,
 }

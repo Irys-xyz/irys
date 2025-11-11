@@ -2,6 +2,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Deserialize a number from either a string or a number
+fn deserialize_number_from_string<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        String(String),
+        Number(u64),
+    }
+
+    match StringOrNum::deserialize(deserializer)? {
+        StringOrNum::String(s) => s.parse().map_err(serde::de::Error::custom),
+        StringOrNum::Number(n) => Ok(n),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub version: String,
@@ -21,6 +39,7 @@ pub struct NodeInfo {
     #[serde(rename = "isSyncing")]
     pub is_syncing: bool,
     #[serde(rename = "currentSyncHeight")]
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub current_sync_height: u64,
 }
 
@@ -214,56 +233,5 @@ pub struct BlockTreeForksResponse {
     pub total_fork_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NodeConfig {
-    pub consensus: ConsensusConfig,
-    pub mempool: MempoolConfig,
-    pub vdf: VdfConfig,
-    pub node: NodeBasicConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConsensusConfig {
-    pub chain_id: u64,
-    pub chunk_size: u64,
-    pub num_chunks_in_partition: u64,
-    pub num_chunks_in_recall_range: u64,
-    pub num_partitions_per_slot: u64,
-    pub entropy_packing_iterations: u32,
-    pub block_migration_depth: u32,
-    pub block_tree_depth: u64,
-    pub max_data_txs_per_block: u64,
-    pub max_commitment_txs_per_block: u64,
-    pub anchor_expiry_depth: u8,
-    pub commitment_fee: u64,
-    pub block_time: u64,
-    pub num_blocks_in_epoch: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MempoolConfig {
-    pub anchor_expiry_depth: u8,
-    pub block_migration_depth: u32,
-    pub max_data_txs_per_block: u64,
-    pub max_commitment_txs_per_block: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VdfConfig {
-    pub parallel_verification_thread_limit: usize,
-    pub reset_frequency: usize,
-    pub num_checkpoints_in_vdf_step: usize,
-    pub max_allowed_vdf_fork_steps: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NodeBasicConfig {
-    pub node_mode: String,
-    pub http_port: u16,
-    pub p2p_port: u16,
-}
+// Re-export ConsensusConfig from irys_types as NodeConfig for compatibility
+pub use irys_types::config::ConsensusConfig as NodeConfig;

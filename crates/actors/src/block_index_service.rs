@@ -76,7 +76,9 @@ impl BlockIndexServiceInner {
         match msg {
             BlockIndexServiceMessage::GetBlockIndexReadGuard { response } => {
                 let guard = BlockIndexReadGuard::new(self.block_index.clone());
-                let _ = response.send(guard);
+                if let Err(_guard) = response.send(guard) {
+                    tracing::warn!("Block index guard response channel was closed by receiver");
+                }
                 Ok(())
             }
             BlockIndexServiceMessage::MigrateBlock {
@@ -84,18 +86,26 @@ impl BlockIndexServiceInner {
                 all_txs,
                 response,
             } => {
-                // Maintain simple ordering invariant (sequential heights)
+                // Maintain simple ordering invariant (sequential heights and consistent children)
                 if let Some((prev_height, prev_hash)) = &self.last_received_block {
-                    if block_header.height != prev_height + 1 {
+                    if block_header.height != prev_height + 1
+                        || &block_header.previous_block_hash != prev_hash
+                    {
                         let err = eyre!(
-                            "Block migration out of order or with a gap: prev_height={}, prev_hash={:x}, current_height={}, current_hash={:x}",
+                            "Block migration out of order or with a gap: prev_height={}, prev_hash={}, current_height={}, current_hash={}",
                             prev_height,
                             prev_hash,
                             block_header.height,
                             block_header.block_hash
                         );
                         // notify caller, then exit service by returning Err
-                        let _ = response.send(Err(eyre!(err.to_string())));
+                        if let Err(send_err) = response.send(Err(eyre!(err.to_string()))) {
+                            tracing::warn!(
+                                custom.migration_error = %err,
+                                custom.send_error = ?send_err,
+                                "Failed to send migration error to caller - receiver dropped"
+                            );
+                        }
                         return Err(err);
                     }
                 } else {
@@ -108,12 +118,27 @@ impl BlockIndexServiceInner {
                 // Perform the migration; if it fails, notify caller and exit service
                 match self.migrate_block(&block_header, &all_txs) {
                     Ok(()) => {
-                        let _ = response.send(Ok(()));
+                        if let Err(send_err) = response.send(Ok(())) {
+                            tracing::warn!(
+                                block.height = block_header.height,
+                                block.hash = ?block_header.block_hash,
+                                custom.send_error = ?send_err,
+                                "Failed to send migration success response - receiver dropped"
+                            );
+                        }
                         Ok(())
                     }
                     Err(e) => {
                         // notify caller, then exit service by returning Err
-                        let _ = response.send(Err(eyre!(e.to_string())));
+                        if let Err(send_err) = response.send(Err(eyre!(e.to_string()))) {
+                            tracing::warn!(
+                                block.height = block_header.height,
+                                block.hash = ?block_header.block_hash,
+                                custom.migration_error = %e,
+                                custom.send_error = ?send_err,
+                                "Failed to send migration error to caller - receiver dropped"
+                            );
+                        }
                         Err(e)
                     }
                 }
@@ -125,7 +150,13 @@ impl BlockIndexServiceInner {
                     .map_err(|_| eyre!("block_index read lock poisoned"))?;
                 let block_height = bi.num_blocks().max(1) - 1;
                 let resp = bi.get_item(block_height).cloned();
-                let _ = response.send(resp);
+                if let Err(send_err) = response.send(resp) {
+                    tracing::warn!(
+                        block.height = block_height,
+                        custom.send_error = ?send_err,
+                        "Failed to send block index item response - receiver dropped"
+                    );
+                }
                 Ok(())
             }
         }

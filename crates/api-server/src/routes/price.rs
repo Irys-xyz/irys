@@ -53,15 +53,19 @@ pub async fn get_price(
 
     match data_ledger {
         DataLedger::Publish => {
-            // Get the latest EMA for pricing calculations and the tip block
+            // Get the latest EMA for pricing calculations from the canonical chain
             let tree = state.block_tree.read();
-            let tip = tree.tip;
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block = canonical
+                .last()
+                .ok_or_else(|| ErrorBadRequest("Empty canonical chain"))?;
             let ema = tree
-                .get_ema_snapshot(&tip)
+                .get_ema_snapshot(&last_block.block_hash)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+            drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height
-            let tip_height = tree.get_block(&tip).map(|b| b.height).unwrap_or(0);
+            let tip_height = last_block.height;
             let next_block_height = tip_height + 1;
 
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -70,18 +74,39 @@ pub async fn get_price(
                 state.config.consensus.epoch.submit_ledger_epoch_length,
             );
 
-            drop(tree);
+            // Determine pricing EMA based on proximity to interval boundary
+            // When near the end of an interval, use max pricing to ensure transaction
+            // fees remain sufficient even if the transaction is included after the interval rolls over
+            let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
+            let position_in_interval = next_block_height % price_adjustment_interval;
+
+            // Last 25% of interval: use max(current_pricing, next_interval_pricing)
+            let last_quarter_start =
+                price_adjustment_interval - price_adjustment_interval.div_ceil(4);
+            let in_last_quarter = position_in_interval >= last_quarter_start;
+
+            let pricing_ema = if in_last_quarter {
+                // Protect against price increases when interval boundary is crossed
+                // Use the higher of current or next interval's pricing
+                if ema.ema_price_1_interval_ago.amount > ema.ema_price_2_intervals_ago.amount {
+                    ema.ema_price_1_interval_ago
+                } else {
+                    ema.ema_price_2_intervals_ago
+                }
+            } else {
+                // Normal case: use standard public pricing (2 intervals ago)
+                ema.ema_for_public_pricing()
+            };
 
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
                 &state.config.consensus,
-                ema.ema_for_public_pricing(),
+                pricing_ema,
             )
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
 
-            // Debug logging for fee calculation
             tracing::debug!(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
                 bytes_to_store,
@@ -94,7 +119,7 @@ pub async fn get_price(
             let total_perm_cost = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &state.config.consensus,
-                ema.ema_for_public_pricing(),
+                pricing_ema,
                 term_fee,
             )
             .map_err(|e| ErrorBadRequest(format!("{e:?}")))?;

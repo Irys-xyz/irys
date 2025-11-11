@@ -1439,7 +1439,7 @@ impl MainMenu {
                             Span::raw("  "),
                             Span::styled("Anchor Expiry: ", Style::default()),
                             Span::styled(
-                                format!("{}", config.mempool.anchor_expiry_depth),
+                                format!("{}", config.mempool.tx_anchor_expiry_depth),
                                 Style::default().fg(Color::Yellow),
                             ),
                         ]));
@@ -1448,7 +1448,7 @@ impl MainMenu {
                             Span::raw("  "),
                             Span::styled("Migration Depth: ", Style::default()),
                             Span::styled(
-                                format!("{}", config.mempool.block_migration_depth),
+                                format!("{}", config.block_migration_depth),
                                 Style::default().fg(Color::Yellow),
                             ),
                         ]));
@@ -1459,30 +1459,6 @@ impl MainMenu {
                             Span::styled(
                                 format!("{}", config.mempool.max_data_txs_per_block),
                                 Style::default().fg(Color::Yellow),
-                            ),
-                        ]));
-
-                        // Node Config section
-                        custom_lines.push(Line::from(vec![Span::styled(
-                            "Network:",
-                            Style::default().add_modifier(Modifier::BOLD),
-                        )]));
-
-                        custom_lines.push(Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled("Mode: ", Style::default()),
-                            Span::styled(&config.node.node_mode, Style::default().fg(Color::Cyan)),
-                            Span::raw(" | "),
-                            Span::styled("HTTP: ", Style::default()),
-                            Span::styled(
-                                format!("{}", config.node.http_port),
-                                Style::default().fg(Color::Cyan),
-                            ),
-                            Span::raw(" | "),
-                            Span::styled("P2P: ", Style::default()),
-                            Span::styled(
-                                format!("{}", config.node.p2p_port),
-                                Style::default().fg(Color::Cyan),
                             ),
                         ]));
                     } else {

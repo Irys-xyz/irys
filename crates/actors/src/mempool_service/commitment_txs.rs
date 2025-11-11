@@ -63,7 +63,7 @@ impl Inner {
         }
 
         // Validate anchor (height is unused at this stage)
-        self.validate_anchor(commitment_tx).await?;
+        self.validate_tx_anchor(commitment_tx).await?;
 
         Ok(())
     }
@@ -93,7 +93,7 @@ impl Inner {
             | CommitmentSnapshotStatus::UnstakePending
             | CommitmentSnapshotStatus::HasActivePledges => {
                 // Add to valid set and mark recent
-                self.insert_commitment_and_mark_valid(commitment_tx).await;
+                self.insert_commitment_and_mark_valid(commitment_tx).await?;
 
                 // Process any pending pledges for this newly staked address
                 self.process_pending_pledges_for_new_stake(commitment_tx.signer)
@@ -239,14 +239,15 @@ impl Inner {
     }
 
     /// Inserts a commitment into the mempool valid map and marks it as recently valid.
-    async fn insert_commitment_and_mark_valid(&mut self, tx: &CommitmentTransaction) {
+    /// Uses bounded insertion which may evict transactions when limits are exceeded.
+    async fn insert_commitment_and_mark_valid(
+        &mut self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
-        guard
-            .valid_commitment_tx
-            .entry(tx.signer)
-            .or_default()
-            .push(tx.clone());
+        guard.bounded_insert_commitment_tx(tx)?;
         guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
     }
 
     /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.

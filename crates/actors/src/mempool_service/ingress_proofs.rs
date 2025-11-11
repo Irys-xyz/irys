@@ -1,6 +1,7 @@
 use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_types::{ingress::CachedIngressProof, GossipBroadcastMessage, IngressProof};
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
+use tracing::warn;
 
 use crate::mempool_service::{IngressProofError, Inner};
 
@@ -23,6 +24,46 @@ impl Inner {
 
         if !epoch_snapshot.is_staked(address) && !commitment_snapshot.is_staked(address) {
             return Err(IngressProofError::UnstakedAddress);
+        }
+
+        // validate the anchor
+        {
+            let latest_height = self.get_latest_block_height().map_err(|_e| {
+                IngressProofError::Other(
+                    "unable to get canonical chain from block tree ".to_owned(),
+                )
+            })?;
+
+            // TODO: add an ingress proof invalid LRU, like we have for txs
+            let anchor_height = match self
+                .get_anchor_height(
+                    ingress_proof.anchor,
+                    false, /* does not need to be canonical */
+                )
+                .map_err(|_e| IngressProofError::DatabaseError)?
+            {
+                Some(height) => height,
+                None => {
+                    // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                    return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+                }
+            };
+
+            // check consensus config
+
+            let min_anchor_height = latest_height.saturating_sub(
+                self.config
+                    .consensus
+                    .mempool
+                    .ingress_proof_anchor_expiry_depth as u64,
+            );
+
+            let too_old = anchor_height < min_anchor_height;
+
+            if too_old {
+                warn!("Ingress proof anchor is too old");
+                return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+            }
         }
 
         let db = self.irys_db.clone();

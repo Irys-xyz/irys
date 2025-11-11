@@ -1134,6 +1134,7 @@ mod tests {
                 signature: Default::default(), // signature is ignored by RLP & substituted with the default value
                 data_root: H256::random(),
                 chain_id: 1,
+                anchor: H256::from([10_u8; 32]),
             })])),
             required_proof_count: None,
         };

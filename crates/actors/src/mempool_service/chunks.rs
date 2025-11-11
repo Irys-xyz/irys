@@ -16,6 +16,7 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display, num::NonZeroUsize};
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
@@ -49,7 +50,7 @@ impl Inner {
         // Check to see if we have a cached data_root for this chunk
         let read_tx = self
             .read_tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
         let binding = self.storage_modules_guard.read().clone();
         let candidate_sms = binding
@@ -62,7 +63,7 @@ impl Inner {
             .collect::<Vec<_>>();
 
         let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
             .map(|cdr| cdr.data_size)
             .or_else(|| {
                 debug!(
@@ -90,7 +91,7 @@ impl Inner {
                 // Pre-header sanity checks to reduce DoS risk.
                 let chunk_size = self.config.consensus.chunk_size;
                 let chunk_len_u64 = u64::try_from(chunk.bytes.len())
-                    .map_err(|_| ChunkIngressError::PreHeaderOversizedBytes)?;
+                    .map_err(|_| AdvisoryChunkIngressError::PreHeaderOversizedBytes)?;
                 if chunk_len_u64 > chunk_size {
                     warn!(
                         "Dropping pre-header chunk for {} at offset {}: bytes.len() {} exceeds chunk_size {}",
@@ -99,7 +100,7 @@ impl Inner {
                         chunk.bytes.len(),
                         chunk_size
                     );
-                    return Err(ChunkIngressError::PreHeaderOversizedBytes);
+                    return Err(AdvisoryChunkIngressError::PreHeaderOversizedBytes.into());
                 }
                 let preheader_data_path_max_bytes =
                     self.config.mempool.max_preheader_data_path_bytes;
@@ -113,7 +114,7 @@ impl Inner {
                         chunk.data_path.0.len(),
                         preheader_data_path_max_bytes
                     );
-                    return Err(ChunkIngressError::PreHeaderOversizedDataPath);
+                    return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath.into());
                 }
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
@@ -127,7 +128,7 @@ impl Inner {
                         *chunk.tx_offset,
                         preheader_chunks_per_item
                     );
-                    return Err(ChunkIngressError::PreHeaderOffsetExceedsCap);
+                    return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
                 if let Some(chunks_map) = mempool_state_write_guard
                     .pending_chunks
@@ -156,11 +157,11 @@ impl Inner {
         if data_size != chunk.data_size {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                ChunkIngressError::InvalidDataSize,
+                CriticalChunkIngressError::InvalidDataSize,
                 data_size,
                 chunk.data_size
             );
-            return Err(ChunkIngressError::InvalidDataSize);
+            return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
 
         // Validate the data_path/proof for the chunk, linking
@@ -169,10 +170,10 @@ impl Inner {
         if data_size == 0 {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
-                ChunkIngressError::InvalidDataSize,
+                CriticalChunkIngressError::InvalidDataSize,
                 chunk.data_root,
             );
-            return Err(ChunkIngressError::InvalidDataSize);
+            return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
 
         let root_hash = chunk.data_root.0;
@@ -185,19 +186,19 @@ impl Inner {
         );
 
         let path_result = match validate_path(root_hash, path_buff, target_offset)
-            .map_err(|_| ChunkIngressError::InvalidProof)
+            .map_err(|_| CriticalChunkIngressError::InvalidProof)
         {
             Err(e) => {
                 error!("error validating path: {:?}", e);
-                return Err(e);
+                return Err(e.into());
             }
             Ok(v) => v,
         };
 
         // Use data_size to identify and validate that only the last chunk
         // can be less than chunk_size
-        let chunk_len =
-            u64::try_from(chunk.bytes.len()).map_err(|_| ChunkIngressError::InvalidChunkSize)?;
+        let chunk_len = u64::try_from(chunk.bytes.len())
+            .map_err(|_| CriticalChunkIngressError::InvalidChunkSize)?;
 
         // TODO: Mark the data_root as invalid if the chunk is an incorrect size
         // Someone may have created a data_root that seemed valid, but if the
@@ -211,10 +212,10 @@ impl Inner {
         if num_chunks_in_tx == 0 {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}",
-                ChunkIngressError::InvalidDataSize,
+                CriticalChunkIngressError::InvalidDataSize,
                 chunk.data_root,
             );
-            return Err(ChunkIngressError::InvalidDataSize);
+            return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
         // Is this chunk index any of the chunks before the last in the tx?
         let last_index = num_chunks_in_tx - 1;
@@ -223,7 +224,7 @@ impl Inner {
             if chunk_len != chunk_size {
                 error!(
                     "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
-                    ChunkIngressError::InvalidChunkSize,
+                    CriticalChunkIngressError::InvalidChunkSize,
                     chunk.tx_offset,
                     chunk_len
                 );
@@ -234,7 +235,7 @@ impl Inner {
             if chunk_len > chunk_size {
                 error!(
                     "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                    ChunkIngressError::InvalidChunkSize,
+                    CriticalChunkIngressError::InvalidChunkSize,
                     chunk.tx_offset,
                     chunk_len
                 );
@@ -247,19 +248,19 @@ impl Inner {
         if path_result.leaf_hash != hash_256 {
             warn!(
                 "{:?}: leaf_hash does not match hashed chunk_bytes",
-                ChunkIngressError::InvalidDataHash,
+                CriticalChunkIngressError::InvalidDataHash,
             );
-            return Err(ChunkIngressError::InvalidDataHash);
+            return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
         if let Err(e) = self
             .irys_db
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-            .map_err(|_| ChunkIngressError::DatabaseError)
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)
         {
             error!("Database error: {:?}", e);
-            return Err(e);
+            return Err(e.into());
         }
 
         // Add to recent valid chunks cache to prevent re-processing
@@ -279,10 +280,10 @@ impl Inner {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
                 let result = sm
                     .write_data_chunk(&chunk)
-                    .map_err(|_| ChunkIngressError::Other("Internal error".to_owned()));
+                    .map_err(|_| CriticalChunkIngressError::Other("Internal error".to_owned()));
                 if let Err(e) = result {
                     error!("Internal error: {:?}", e);
-                    return Err(e);
+                    return Err(e.into());
                 }
             }
         }
@@ -312,26 +313,26 @@ impl Inner {
             }
             Err(e) => {
                 error!("Database error: {:?}", e);
-                return Err(ChunkIngressError::DatabaseError);
+                return Err(CriticalChunkIngressError::DatabaseError.into());
             }
         }
 
         // check if we have all the chunks for this tx
         let read_tx = self
             .read_tx()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
         let mut cursor = read_tx
             .cursor_dup_read::<CachedChunksIndex>()
-            .map_err(|_| ChunkIngressError::DatabaseError)?;
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
         // get the number of dupsort values (aka the number of chunks)
         // this ASSUMES that the index isn't corrupt (no double values etc)
         // the ingress proof generation task does a more thorough check
         let chunk_count = cursor
             .dup_count(root_hash)
-            .map_err(|_| ChunkIngressError::DatabaseError)?
-            .ok_or(ChunkIngressError::DatabaseError)?;
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
+            .ok_or(CriticalChunkIngressError::DatabaseError)?;
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
@@ -340,10 +341,10 @@ impl Inner {
             Err(_) => {
                 error!(
                     "Error: {:?}. Invalid data_size for data_root: {:?}",
-                    ChunkIngressError::InvalidDataSize,
+                    CriticalChunkIngressError::InvalidDataSize,
                     chunk.data_root,
                 );
-                return Err(ChunkIngressError::InvalidDataSize);
+                return Err(CriticalChunkIngressError::InvalidDataSize.into());
             }
         };
 
@@ -355,6 +356,30 @@ impl Inner {
             let signer = self.config.irys_signer();
             let chain_id = self.config.consensus.chain_id;
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let (tx, rx) = oneshot::channel();
+
+            self.service_senders
+                .block_index
+                .send(
+                    crate::block_index_service::BlockIndexServiceMessage::GetLatestBlockIndex {
+                        response: tx,
+                    },
+                )
+                .map_err(|_e| {
+                    CriticalChunkIngressError::Other(
+                        "Block index communication failure".to_string(),
+                    )
+                })?;
+            let latest_migrated = rx
+                .await
+                .map_err(|_e| {
+                    CriticalChunkIngressError::Other(
+                        "Block index communication failure".to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    CriticalChunkIngressError::Other("Invalid block index (no entries)".to_string())
+                })?;
 
             self.exec.clone().spawn_blocking(async move {
                 let proof = generate_ingress_proof(
@@ -364,6 +389,7 @@ impl Inner {
                     chunk_size,
                     signer,
                     chain_id,
+                    latest_migrated.block_hash,
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
@@ -390,22 +416,52 @@ impl Inner {
 /// Reasons why Chunk Ingress might fail
 #[derive(Debug, Clone)]
 pub enum ChunkIngressError {
+    Critical(CriticalChunkIngressError),
+    Advisory(AdvisoryChunkIngressError),
+}
+
+impl ChunkIngressError {
+    /// Returns an other error with the given message.
+    pub fn other(err: impl Into<String>, critical: bool) -> Self {
+        if critical {
+            Self::Critical(CriticalChunkIngressError::Other(err.into()))
+        } else {
+            Self::Advisory(AdvisoryChunkIngressError::Other(err.into()))
+        }
+    }
+    /// Allows converting an error that implements Display into an Other error
+    pub fn other_display(err: impl Display, critical: bool) -> Self {
+        if critical {
+            Self::Critical(CriticalChunkIngressError::Other(err.to_string()))
+        } else {
+            Self::Advisory(AdvisoryChunkIngressError::Other(err.to_string()))
+        }
+    }
+}
+
+impl From<CriticalChunkIngressError> for ChunkIngressError {
+    fn from(value: CriticalChunkIngressError) -> Self {
+        Self::Critical(value)
+    }
+}
+
+impl From<AdvisoryChunkIngressError> for ChunkIngressError {
+    fn from(value: AdvisoryChunkIngressError) -> Self {
+        Self::Advisory(value)
+    }
+}
+
+/// Reasons why Chunk Ingress might fail
+#[derive(Debug, Clone)]
+pub enum CriticalChunkIngressError {
     /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
     /// The data hash does not match the chunk data
     InvalidDataHash,
-    /// This chunk is for an unknown transaction
-    UnknownTransaction,
     /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
-    /// Oversized chunk bytes submitted before header arrival
-    PreHeaderOversizedBytes,
-    /// Oversized data_path submitted before header arrival
-    PreHeaderOversizedDataPath,
-    /// tx_offset exceeds pre-header capacity bound
-    PreHeaderOffsetExceedsCap,
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
@@ -414,15 +470,17 @@ pub enum ChunkIngressError {
     Other(String),
 }
 
-impl ChunkIngressError {
-    /// Returns an other error with the given message.
-    pub fn other(err: impl Into<String>) -> Self {
-        Self::Other(err.into())
-    }
-    /// Allows converting an error that implements Display into an Other error
-    pub fn other_display(err: impl Display) -> Self {
-        Self::Other(err.to_string())
-    }
+// non-critical reasons why chunk ingress might fail
+#[derive(Debug, Clone)]
+pub enum AdvisoryChunkIngressError {
+    /// Oversized chunk bytes submitted before header arrival
+    PreHeaderOversizedBytes,
+    /// Oversized data_path submitted before header arrival
+    PreHeaderOversizedDataPath,
+    /// tx_offset exceeds pre-header capacity bound
+    PreHeaderOffsetExceedsCap,
+    /// Catch-all variant for other errors.
+    Other(String),
 }
 
 /// Generates an ingress proof for a specific `data_root`
@@ -434,6 +492,7 @@ pub fn generate_ingress_proof(
     chunk_size: u64,
     signer: IrysSigner,
     chain_id: ChainId,
+    anchor: H256,
 ) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
@@ -493,7 +552,8 @@ pub fn generate_ingress_proof(
     });
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(&signer, data_root, iter, chain_id)?;
+    let proof =
+        irys_types::ingress::generate_ingress_proof(&signer, data_root, iter, chain_id, anchor)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root

@@ -307,7 +307,7 @@ impl ValidationCoordinator {
     }
 
     /// Check if block extends canonical tip
-    #[instrument(skip_all, fields(%block_hash))]
+    #[instrument(skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;
@@ -338,7 +338,7 @@ impl ValidationCoordinator {
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
-            match result {
+            match &result {
                 VdfValidationResult::Valid => {
                     let block_hash = task.block.block_hash;
 
@@ -364,7 +364,8 @@ impl ValidationCoordinator {
                     let priority = self.calculate_priority(&task.block);
                     self.vdf_scheduler.pending.push(task, priority);
                 }
-                VdfValidationResult::Invalid(_) => {
+                VdfValidationResult::Invalid(error) => {
+                    tracing::error!(block.hash =? hash, "invalid vdf {error}");
                     // Invalid tasks are not re-queued
                 }
             }

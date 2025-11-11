@@ -5,6 +5,7 @@ use actix_web::{
     HttpResponse, Result,
 };
 use awc::http::StatusCode;
+use irys_actors::block_discovery::DEFAULT_MEMPOOL_TX_TIMEOUT;
 use irys_actors::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     mempool_service::{MempoolServiceMessage, TxIngressError},
@@ -85,6 +86,19 @@ pub async fn post_tx(
                 Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
                     .body(format!("Unable to verify balance for {address}: {reason}")))
             }
+            TxIngressError::MempoolFull(reason) => {
+                tracing::warn!("API: Mempool at capacity: {}", reason);
+                Ok(
+                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
+                        "Mempool is at capacity. Please try again later. {reason}"
+                    )),
+                )
+            }
+            TxIngressError::FundMisalignment(reason) => {
+                tracing::debug!("Tx has invalid funding params: {}", reason);
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Funding for tx is invalid. {reason}")))
+            }
         };
     }
 
@@ -142,8 +156,13 @@ pub async fn get_transaction(
     tx_id: H256,
 ) -> Result<IrysTransactionResponse, ApiError> {
     let vec = vec![tx_id];
-    if let Ok(mut result) =
-        get_commitment_tx_in_parallel(&vec, &state.mempool_service, &state.db).await
+    if let Ok(mut result) = get_commitment_tx_in_parallel(
+        &vec,
+        &state.mempool_service,
+        &state.db,
+        Some(DEFAULT_MEMPOOL_TX_TIMEOUT),
+    )
+    .await
     {
         if let Some(tx) = result.pop() {
             return Ok(IrysTransactionResponse::Commitment(tx));

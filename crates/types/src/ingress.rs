@@ -134,6 +134,7 @@ pub struct IngressProofV1 {
     pub data_root: H256,
     pub proof: H256,
     pub chain_id: ChainId,
+    pub anchor: H256,
 }
 
 impl Versioned for IngressProofV1 {
@@ -172,6 +173,7 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
     data_root: DataRoot,
     chunks: impl Iterator<Item = eyre::Result<C>>,
     chain_id: u64,
+    anchor: H256,
 ) -> eyre::Result<IngressProof> {
     let (root, _) = generate_ingress_proof_tree(chunks, signer.address(), false)?;
     let proof = H256(root.id);
@@ -181,6 +183,7 @@ pub fn generate_ingress_proof<C: AsRef<[u8]>>(
         data_root,
         proof,
         chain_id,
+        anchor,
     });
 
     signer.sign_ingress_proof(&mut proof)?;
@@ -218,6 +221,7 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
         data_root,
         proof: H256(proof_root.id),
         chain_id,
+        anchor: proof.anchor,
     })
     .signature_hash();
 
@@ -247,6 +251,7 @@ mod tests {
             proof: H256::from([12_u8; 32]),
             chain_id: 1_u64,
             data_root: H256::from([13_u8; 32]),
+            anchor: H256::from([14_u8; 32]),
         });
 
         let mut buf = BytesMut::new();
@@ -307,11 +312,13 @@ mod tests {
             .map(Vec::from)
             .collect();
         let chain_id = 1; // Example chain_id for testing
+        let anchor = H256::random(); // example anchor for testing
         let proof = generate_ingress_proof(
             &signer,
             data_root,
             chunks.iter().map(|c| Ok(c.as_slice())),
             chain_id,
+            anchor,
         )?;
 
         // Verify the ingress proof
@@ -354,13 +361,16 @@ mod tests {
             .map(Vec::from)
             .collect();
 
-        // Generate proof for testnet (chain_id = 1)
+        let anchor = H256::random(); // example anchor for testing
+                                     // Generate proof for testnet (chain_id = 1)
         let testnet_chain_id = 1;
+
         let testnet_proof = generate_ingress_proof(
             &signer,
             data_root,
             chunks.iter().map(|c| Ok(c.as_slice())),
             testnet_chain_id,
+            anchor,
         )?;
 
         // Generate proof for mainnet (chain_id = 2)
@@ -370,6 +380,7 @@ mod tests {
             data_root,
             chunks.iter().map(|c| Ok(c.as_slice())),
             mainnet_chain_id,
+            anchor,
         )?;
 
         // Verify that testnet proof is valid for testnet
