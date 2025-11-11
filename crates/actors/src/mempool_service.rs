@@ -2100,7 +2100,10 @@ fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     block_id: Option<BlockId>,
     txs: &[T],
 ) -> HashMap<Address, U256> {
-    let signers: Vec<Address> = txs.iter().map(|tx| tx.signer()).collect();
+    let signers: Vec<Address> = txs
+        .iter()
+        .map(irys_types::IrysTransactionCommon::signer)
+        .collect();
     reth_adapter
         .reth_node
         .rpc
