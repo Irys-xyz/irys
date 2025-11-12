@@ -75,6 +75,10 @@ max_chunks_per_item = 500
 max_valid_items = 10000
 max_invalid_items = 10000
 max_valid_chunks = 10000
+# Bounded mempool settings - prevent unbounded memory growth
+max_valid_submit_txs = 3000  # Conservative: max_data_txs_per_block * block_migration_depth * 3
+max_valid_commitment_addresses = 300  # Conservative: ~100 miners * 3
+max_commitments_per_address = 20  # Limit per-address resource consumption
 
 [vdf]
 parallel_verification_thread_limit = 4
@@ -141,7 +145,8 @@ balance = "0x152cf4e72a974f1c0000"
 [consensus.Custom.mempool]
 max_data_txs_per_block = 100
 max_commitment_txs_per_block = 100
-anchor_expiry_depth = 20
+tx_anchor_expiry_depth = 20
+ingress_proof_anchor_expiry_depth = 200
 commitment_fee = 100
 
 [consensus.Custom.difficulty_adjustment]

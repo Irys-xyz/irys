@@ -15,10 +15,11 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display, num::NonZeroUsize};
+use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
-    #[instrument(skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "trace", skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -352,6 +353,30 @@ impl Inner {
             let signer = self.config.irys_signer();
             let chain_id = self.config.consensus.chain_id;
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let (tx, rx) = oneshot::channel();
+
+            self.service_senders
+                .block_index
+                .send(
+                    crate::block_index_service::BlockIndexServiceMessage::GetLatestBlockIndex {
+                        response: tx,
+                    },
+                )
+                .map_err(|_e| {
+                    CriticalChunkIngressError::Other(
+                        "Block index communication failure".to_string(),
+                    )
+                })?;
+            let latest_migrated = rx
+                .await
+                .map_err(|_e| {
+                    CriticalChunkIngressError::Other(
+                        "Block index communication failure".to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    CriticalChunkIngressError::Other("Invalid block index (no entries)".to_string())
+                })?;
 
             self.exec.clone().spawn_blocking(async move {
                 let proof = generate_ingress_proof(
@@ -361,6 +386,7 @@ impl Inner {
                     chunk_size,
                     signer,
                     chain_id,
+                    latest_migrated.block_hash,
                 )
                 // TODO: handle results instead of unwrapping
                 .unwrap();
@@ -463,6 +489,7 @@ pub fn generate_ingress_proof(
     chunk_size: u64,
     signer: IrysSigner,
     chain_id: ChainId,
+    anchor: H256,
 ) -> eyre::Result<IngressProof> {
     // load the chunks from the DB
     // TODO: for now we assume the chunks all all in the DB chunk cache
@@ -522,7 +549,8 @@ pub fn generate_ingress_proof(
     });
 
     // generate the ingress proof hash
-    let proof = irys_types::ingress::generate_ingress_proof(&signer, data_root, iter, chain_id)?;
+    let proof =
+        irys_types::ingress::generate_ingress_proof(&signer, data_root, iter, chain_id, anchor)?;
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root

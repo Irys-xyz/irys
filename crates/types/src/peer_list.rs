@@ -57,6 +57,10 @@ impl PeerScore {
         self.increase_by(1);
     }
 
+    pub fn set_to_max(&mut self) {
+        self.0 = Self::MAX;
+    }
+
     pub fn is_active(&self) -> bool {
         self.0 >= Self::ACTIVE_THRESHOLD
     }

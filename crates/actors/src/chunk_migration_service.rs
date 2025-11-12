@@ -74,6 +74,7 @@ pub enum ChunkMigrationServiceMessage {
 }
 
 impl ChunkMigrationServiceInner {
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn new(
         block_index: Arc<RwLock<BlockIndex>>,
         storage_modules_guard: &StorageModulesReadGuard,
@@ -81,7 +82,7 @@ impl ChunkMigrationServiceInner {
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
-        println!("service started: chunk_migration");
+        tracing::info!("service started: chunk_migration");
         Self {
             block_index,
             config,
@@ -91,6 +92,7 @@ impl ChunkMigrationServiceInner {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) -> eyre::Result<()> {
         match msg {
             ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
@@ -208,6 +210,7 @@ impl ChunkMigrationServiceInner {
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 pub fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
@@ -305,6 +308,7 @@ fn process_transaction_chunks(
 /// # Returns
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
+#[tracing::instrument(level = "trace", skip_all, fields(block.height = block.height, ledger = ?ledger))]
 fn get_block_offsets_in_ledger(
     block: &IrysBlockHeader,
     ledger: DataLedger,
@@ -369,6 +373,7 @@ fn get_tx_path_pairs<'a>(
         .collect())
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn update_storage_module_indexes(
     data_tx: &DataTransactionHeader,
     tx_path_proof: &[u8],
@@ -422,6 +427,7 @@ fn find_storage_module(
     })
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
     chunk_info: (CachedChunkIndexMetadata, CachedChunk),
@@ -487,6 +493,7 @@ impl ChunkMigrationService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 

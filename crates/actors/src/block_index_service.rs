@@ -71,7 +71,7 @@ impl BlockIndexServiceInner {
     }
 
     /// Handle an inbound service message
-    #[instrument(skip_all, err)]
+    #[instrument(level = "trace", skip_all, err)]
     pub fn handle_message(&mut self, msg: BlockIndexServiceMessage) -> eyre::Result<()> {
         match msg {
             BlockIndexServiceMessage::GetBlockIndexReadGuard { response } => {
@@ -86,9 +86,11 @@ impl BlockIndexServiceInner {
                 all_txs,
                 response,
             } => {
-                // Maintain simple ordering invariant (sequential heights)
+                // Maintain simple ordering invariant (sequential heights and consistent children)
                 if let Some((prev_height, prev_hash)) = &self.last_received_block {
-                    if block_header.height != prev_height + 1 {
+                    if block_header.height != prev_height + 1
+                        || &block_header.previous_block_hash != prev_hash
+                    {
                         let err = eyre!(
                             "Block migration out of order or with a gap: prev_height={}, prev_hash={}, current_height={}, current_hash={}",
                             prev_height,
@@ -165,7 +167,7 @@ impl BlockIndexServiceInner {
     /// Safety
     /// - Expects `all_txs` to contain transaction headers for every transaction ID in the block's
     ///   Submit and Publish ledgers. This is normally guaranteed by prior validation.
-    #[instrument(skip_all, err, fields(block.height = %block.height, block.hash = %block.block_hash))]
+    #[instrument(level = "trace", skip_all, err, fields(block.height = %block.height, block.hash = %block.block_hash))]
     pub fn migrate_block(
         &mut self,
         block: &Arc<IrysBlockHeader>,
@@ -203,6 +205,7 @@ impl BlockIndexService {
     /// Spawns the BlockIndex service on the provided Tokio runtime handle
     ///
     /// Returns a handle that can be used to shut down the service.
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_index")]
     pub fn spawn_service(
         rx: UnboundedReceiver<BlockIndexServiceMessage>,
         block_index: Arc<RwLock<BlockIndex>>,
@@ -236,6 +239,7 @@ impl BlockIndexService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting BlockIndex service");
 

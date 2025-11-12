@@ -53,9 +53,9 @@ pub struct BlockTree {
 pub struct BlockMetadata {
     // todo: wrap into Arc to avoid expensive clones
     pub block: IrysBlockHeader,
-    chain_state: ChainState,
-    timestamp: SystemTime,
-    children: HashSet<H256>,
+    pub chain_state: ChainState,
+    pub timestamp: SystemTime,
+    pub children: HashSet<H256>,
     pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,
@@ -974,7 +974,7 @@ impl BlockTree {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
-                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+                "get_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}",
                 prev_entry.chain_state, prev_hash, prev_entry.block.height
             );
             match prev_entry.chain_state {

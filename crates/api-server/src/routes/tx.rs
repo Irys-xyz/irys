@@ -85,6 +85,19 @@ pub async fn post_tx(
                 Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
                     .body(format!("Unable to verify balance for {address}: {reason}")))
             }
+            TxIngressError::MempoolFull(reason) => {
+                tracing::warn!("API: Mempool at capacity: {}", reason);
+                Ok(
+                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
+                        "Mempool is at capacity. Please try again later. {reason}"
+                    )),
+                )
+            }
+            TxIngressError::FundMisalignment(reason) => {
+                tracing::debug!("Tx has invalid funding params: {}", reason);
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Funding for tx is invalid. {reason}")))
+            }
         };
     }
 
@@ -143,7 +156,7 @@ pub async fn get_transaction(
 ) -> Result<IrysTransactionResponse, ApiError> {
     let vec = vec![tx_id];
     if let Ok(mut result) =
-        get_commitment_tx_in_parallel(&vec, &state.mempool_service, &state.db).await
+        get_commitment_tx_in_parallel(&vec, &state.mempool_guard, &state.db).await
     {
         if let Some(tx) = result.pop() {
             return Ok(IrysTransactionResponse::Commitment(tx));

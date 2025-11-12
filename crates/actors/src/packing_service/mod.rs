@@ -37,6 +37,7 @@ const CONTROL_CHANNEL_CAPACITY: usize = 64;
 const PER_SM_CHANNEL_CAPACITY: usize = 100;
 
 /// Sync pending chunks with warning on error
+#[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module.id, custom.context = context))]
 pub(crate) fn sync_with_warning(storage_module: &irys_domain::StorageModule, context: &str) {
     if let Err(e) = storage_module.sync_pending_chunks() {
         warn!(
@@ -49,6 +50,7 @@ pub(crate) fn sync_with_warning(storage_module: &irys_domain::StorageModule, con
 
 /// Log packing progress at regular intervals
 #[inline]
+#[tracing::instrument(level = "trace", skip_all, fields(packing.strategy = strategy, chunk.current_offset = current_offset, storage_module.id = storage_module_id, partition.hash = %partition_hash))]
 pub(crate) fn log_packing_progress(
     strategy: &str,
     current_offset: u32,
@@ -302,6 +304,7 @@ impl PackingService {
     }
 
     /// Check if the packing system is idle
+    #[tracing::instrument(level = "trace", skip_all, fields(packing.has_queued_jobs, packing.active_workers, packing.available_permits))]
     fn is_system_idle(internals: &Internals) -> bool {
         let has_queued_jobs = internals.pending_jobs.iter().any(|entry| {
             let (_sm_id, (tx, _rx)) = entry.pair();
@@ -316,6 +319,7 @@ impl PackingService {
     }
 
     /// Flush all pending waiters
+    #[tracing::instrument(level = "trace", skip_all, fields(packing.waiter_count))]
     fn flush_waiters(pending_waiters: &Mutex<Vec<oneshot::Sender<()>>>) {
         let mut guard = pending_waiters.lock().unwrap();
         for tx in guard.drain(..) {

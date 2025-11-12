@@ -272,7 +272,7 @@ impl EmaSnapshot {
 /// - Input $1.15 → Returns $1.10 (capped at max)
 /// - Input $0.85 → Returns $0.90 (capped at min)
 /// - Input $1.05 → Returns $1.05 (within range)
-#[tracing::instrument(skip_all, fields(
+#[tracing::instrument(level = "trace", skip_all, fields(
     price.desired = ?desired_price,
     price.base = ?base_price,
     price.safe_range = ?safe_range

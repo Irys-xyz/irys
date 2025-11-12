@@ -17,6 +17,7 @@ impl Inner {
     // Shared pre-checks for both API and Gossip commitment ingress paths.
     // Performs signature validation, whitelist check, mempool/db duplicate detection, and anchor validation.
     #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %commitment_tx.id, tx.signer = %commitment_tx.signer))]
     async fn precheck_commitment_ingress_common(
         &mut self,
         commitment_tx: &CommitmentTransaction,
@@ -63,7 +64,7 @@ impl Inner {
         }
 
         // Validate anchor (height is unused at this stage)
-        self.validate_anchor(commitment_tx).await?;
+        self.validate_tx_anchor(commitment_tx).await?;
 
         Ok(())
     }
@@ -73,6 +74,7 @@ impl Inner {
     // The log_status_debug flag controls whether the status log is at debug (API) or trace (Gossip) level.
     // The warn_on_unstaked flag controls whether we emit a warning on Unstaked status (true for API only).
     #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %commitment_tx.id, tx.signer = %commitment_tx.signer))]
     async fn process_commitment_after_prechecks(
         &mut self,
         commitment_tx: &CommitmentTransaction,
@@ -93,7 +95,7 @@ impl Inner {
             | CommitmentSnapshotStatus::UnstakePending
             | CommitmentSnapshotStatus::HasActivePledges => {
                 // Add to valid set and mark recent
-                self.insert_commitment_and_mark_valid(commitment_tx).await;
+                self.insert_commitment_and_mark_valid(commitment_tx).await?;
 
                 // Process any pending pledges for this newly staked address
                 self.process_pending_pledges_for_new_stake(commitment_tx.signer)
@@ -196,6 +198,7 @@ impl Inner {
     }
 
     /// Check stake/pledge whitelist; reject if address is not whitelisted.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %commitment_tx.id, tx.signer = %commitment_tx.signer))]
     fn check_commitment_whitelist(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -239,17 +242,19 @@ impl Inner {
     }
 
     /// Inserts a commitment into the mempool valid map and marks it as recently valid.
-    async fn insert_commitment_and_mark_valid(&mut self, tx: &CommitmentTransaction) {
+    /// Uses bounded insertion which may evict transactions when limits are exceeded.
+    async fn insert_commitment_and_mark_valid(
+        &mut self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
-        guard
-            .valid_commitment_tx
-            .entry(tx.signer)
-            .or_default()
-            .push(tx.clone());
+        guard.bounded_insert_commitment_tx(tx)?;
         guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
     }
 
     /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.
+    #[tracing::instrument(level = "trace", skip_all, fields(account.signer = %signer))]
     async fn process_pending_pledges_for_new_stake(&mut self, signer: Address) {
         let mut guard = self.mempool_state.write().await;
         let pop = guard.pending_pledges.pop(&signer);
@@ -377,7 +382,7 @@ impl Inner {
     }
 
     /// read specified commitment txs from mempool
-    #[instrument(skip_all, name = "get_commitment_tx")]
+    #[instrument(level = "trace", skip_all, name = "get_commitment_tx", fields(tx.count = commitment_tx_ids.len()))]
     pub async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
@@ -495,7 +500,7 @@ impl Inner {
         found
     }
 
-    #[tracing::instrument(skip_all, fields(tx.id = ?commitment_tx.id))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,

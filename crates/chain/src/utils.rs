@@ -2,6 +2,7 @@ use irys_types::{NodeConfig, NodeMode};
 use std::path::PathBuf;
 use tracing::debug;
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub fn load_config() -> eyre::Result<NodeConfig> {
     // load the config
     let config_path = std::env::var("CONFIG")

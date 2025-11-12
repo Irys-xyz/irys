@@ -99,7 +99,8 @@ where
         if let Err(error) = server.data_handler.handle_chunk(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
@@ -111,9 +112,10 @@ where
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
-            let msg = "Failed to get peer address from gossip POST request";
-            debug!(msg);
-            return Err(HttpResponse::BadRequest().reason(msg).finish());
+            warn!("Failed to get peer address from gossip POST request");
+            return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            )));
         };
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
@@ -160,9 +162,9 @@ where
         let gossip_request = irys_block_header_json.0;
         let source_miner_address = gossip_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest()
-                .reason("Failed to get a request source")
-                .finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            ));
         };
 
         let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
@@ -181,11 +183,12 @@ where
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-                error!(
-                    "Node {:?}: Failed to process the block {:?}: {:?}",
-                    this_node_id, block_hash_string, error
-                );
-                // return HttpResponse::InternalServerError().finish();
+                if !error.is_advisory() {
+                    error!(
+                        "Node {:?}: Failed to process the block {:?}: {:?}",
+                        this_node_id, block_hash_string, error
+                    );
+                }
             } else {
                 info!(
                     "Node {:?}: Server handler handled block {:?}",
@@ -234,7 +237,8 @@ where
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip execution payload handled");
@@ -269,7 +273,8 @@ where
         if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip data handled");
@@ -308,7 +313,8 @@ where
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip data handled");
@@ -347,7 +353,8 @@ where
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send ingress proof: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip data handled");
@@ -360,9 +367,9 @@ where
     )]
     async fn handle_health_check(server: Data<Self>, req: actix_web::HttpRequest) -> HttpResponse {
         let Some(peer_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest()
-                .reason("Failed to get the source address from the request")
-                .finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            ));
         };
 
         match server.peer_list.peer_by_gossip_address(peer_addr) {
@@ -459,11 +466,13 @@ where
             Ok(has_data) => HttpResponse::Ok().json(GossipResponse::Accepted(has_data)),
             Err(GossipError::RateLimited) => {
                 debug!("Rate limited data request from peer");
-                HttpResponse::TooManyRequests().finish()
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
             }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
-                HttpResponse::InternalServerError().finish()
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
             }
         }
     }
@@ -496,7 +505,8 @@ where
             Ok(maybe_data) => HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data)),
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
-                HttpResponse::InternalServerError().finish()
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
             }
         }
     }

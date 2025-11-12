@@ -78,11 +78,16 @@ impl Inner {
                     header.promoted_height = Some(block.height);
                 }
 
-                // Update mempool
+                // Update mempool with bounded insert
+                // For confirmed blocks, we log warnings but don't fail if mempool is full
                 let mut mempool_guard = self.mempool_state.write().await;
-                mempool_guard
-                    .valid_submit_ledger_tx
-                    .insert(header.id, header.clone());
+                if let Err(e) = mempool_guard.bounded_insert_data_tx(header.clone()) {
+                    warn!(
+                        tx.id = ?header.id,
+                        error = ?e,
+                        "Failed to insert confirmed promoted tx into mempool (likely at capacity)"
+                    );
+                }
                 mempool_guard.recent_valid_tx.put(header.id, ());
                 drop(mempool_guard);
 
@@ -128,6 +133,7 @@ impl Inner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
     pub async fn handle_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
@@ -208,6 +214,7 @@ impl Inner {
     /// - Do not call from normal ingress paths; promotion state should be preserved during ingress.
     /// - Intended usage is within reorg handlers (e.g., `handle_confirmed_data_tx_reorg`) to
     ///   revert promotion for txs promoted on orphaned forks.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %txid))]
     async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
         // Try fast-path: clear in-place if present in the mempool
         {
@@ -228,13 +235,19 @@ impl Inner {
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
     /// swallows errors from get_anchor_height (but does log them)
-    pub async fn should_prune_tx(
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id(), current_height = current_height))]
+    pub fn should_prune_tx(
         &mut self,
         current_height: u64,
         tx: &impl IrysTransactionCommon,
     ) -> bool {
-        let anchor_height = match self.get_anchor_height(tx.id(), tx.anchor()).await {
-            Ok(h) => h,
+        let anchor_height = match self
+            .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
+        {
+            Ok(Some(h)) => h,
+            // if we don't know about the anchor, we should prune
+            // note: this can happen, i.e if we did a block rollback.
+            Ok(None) => return true,
             Err(e) => {
                 // we can't tell due to an error
                 error!("Error checking if we should prune tx {} - {}", &tx.id(), e);
@@ -242,7 +255,7 @@ impl Inner {
             }
         };
 
-        let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
+        let effective_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32
             + self.config.consensus.block_migration_depth
             + 5;
 
@@ -292,7 +305,7 @@ impl Inner {
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
-                if self.should_prune_tx(current_height, &tx).await {
+                if self.should_prune_tx(current_height, &tx) {
                     let mut state = self.mempool_state.write().await;
                     state.valid_submit_ledger_tx.remove(&tx_id);
                     Self::mark_tx_as_invalid(state, tx_id, TxIngressError::InvalidAnchor);
@@ -319,7 +332,7 @@ impl Inner {
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
-                    if self.should_prune_tx(current_height, &tx).await {
+                    if self.should_prune_tx(current_height, &tx) {
                         self.remove_commitment_tx(&tx.id).await;
                         Self::mark_tx_as_invalid(
                             self.mempool_state.write().await,
@@ -351,6 +364,7 @@ impl Inner {
     /// 2) reduce down both forks to a `HashMap<SystemLedger, HashSet<IrysTransactionId>>`
     /// 3) reduce down to a set of SystemLedger specific orphaned transactions
     /// 4) resubmit these orphaned commitment transactions to the mempool
+    #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
     pub async fn handle_confirmed_commitment_tx_reorg(
         &mut self,
         event: &ReorgEvent,
@@ -485,6 +499,7 @@ impl Inner {
     /// 6) handle double promotions (when a publish tx is promoted in both forks)
     ///     6.1) get the associated proof from the new fork
     ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
+    #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
     pub async fn handle_confirmed_data_tx_reorg(&mut self, event: &ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
@@ -666,6 +681,7 @@ impl Inner {
     /// When a block is migrated from the block_tree to the block_index at the migration depth
     /// it moves from "the cache" (largely the mempool) to "the index" (long term storage, usually
     /// in a database or disk)
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %event.block.block_hash, block.height = event.block.height))]
     pub async fn handle_block_migrated(&mut self, event: BlockMigratedEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing block migrated broadcast: {} height: {}",

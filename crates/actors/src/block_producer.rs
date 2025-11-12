@@ -48,6 +48,7 @@ use reth::{
     rpc::types::BlockId,
     tasks::shutdown::Shutdown,
 };
+use reth_payload_primitives::PayloadBuilderError;
 use reth_transaction_pool::EthPooledTransaction;
 use std::time::UNIX_EPOCH;
 use std::{
@@ -55,7 +56,44 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, error_span, info, warn, Instrument as _};
+
+/// Error type for block production that distinguishes between retryable and irrecoverable errors
+#[derive(Debug, thiserror::Error)]
+pub enum BlockProductionError {
+    /// Retryable errors that should trigger a rebuild attempt with a new parent
+    #[error("retryable error during block production")]
+    Retryable {
+        #[source]
+        source: eyre::Error,
+    },
+    /// Irrecoverable errors that should abort block production
+    #[error("irrecoverable error during block production")]
+    Irrecoverable {
+        #[source]
+        source: eyre::Error,
+    },
+}
+
+impl From<eyre::Report> for BlockProductionError {
+    fn from(source: eyre::Report) -> Self {
+        Self::Irrecoverable { source }
+    }
+}
+
+/// Classifies PayloadBuilderError into retryable or irrecoverable categories
+fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
+    match err {
+        // Retryable errors - parent block/header not yet available
+        e @ (PayloadBuilderError::MissingParentHeader(_)
+        | PayloadBuilderError::MissingParentBlock(_)) => {
+            BlockProductionError::Retryable { source: e.into() }
+        }
+
+        // All other errors are irrecoverable
+        e => BlockProductionError::Irrecoverable { source: e.into() },
+    }
+}
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
@@ -210,7 +248,7 @@ pub struct MempoolTxsBundle {
 
 impl BlockProducerService {
     /// Spawn a new block producer service
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_producer")]
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
@@ -246,7 +284,7 @@ impl BlockProducerService {
         }
     }
 
-    #[tracing::instrument(skip_all, ret, err)]
+    #[tracing::instrument(level = "trace", skip_all, ret, err)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block producer service");
         debug!(
@@ -281,7 +319,7 @@ impl BlockProducerService {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
@@ -388,7 +426,7 @@ impl BlockProducerService {
     }
 
     /// Internal method to produce a block without the non-Send trait
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(level = "trace", skip_all, fields(
         solution.hash = %solution.solution_hash,
         solution.vdf_step = solution.vdf_step,
         solution.mining_address = %solution.mining_address
@@ -406,7 +444,15 @@ impl BlockProducerService {
         let production_strategy = ProductionStrategy { inner };
         let candidate = production_strategy
             .fully_produce_new_block_candidate(solution)
-            .await?;
+            .await
+            .map_err(|e| match e {
+                BlockProductionError::Retryable { source } => {
+                    eyre::eyre!("retryable error during block production").wrap_err(source)
+                }
+                BlockProductionError::Irrecoverable { source } => {
+                    eyre::eyre!("irrecoverable error during block production").wrap_err(source)
+                }
+            })?;
         Ok(candidate.map(|(b, _stats, p)| (b, p)))
     }
 }
@@ -508,12 +554,13 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
         prev_block_header: IrysBlockHeader,
         prev_block_ema_snapshot: Arc<EmaSnapshot>,
-    ) -> eyre::Result<
+    ) -> Result<
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
+        BlockProductionError,
     > {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
@@ -561,7 +608,7 @@ pub trait BlockProdStrategy {
     /// the latest validated block on timeout to ensure production continues.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
-    #[tracing::instrument(skip(self), level = "debug")]
+    #[tracing::instrument(skip_all, level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
@@ -586,16 +633,79 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block_without_gossip(
         &self,
         solution: &SolutionContext,
-    ) -> eyre::Result<
+    ) -> Result<
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
+        BlockProductionError,
     > {
-        let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
-        self.produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
-            .await
+        const MAX_RETRY_ATTEMPTS: usize = 5;
+        let mut retry_count = 0;
+
+        loop {
+            // Fetch the current best parent block
+            let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
+            let block_hash = prev_block_header.block_hash;
+
+            // Attempt to produce the block
+            match self
+                .produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
+                .instrument(error_span!("produce_block_with_parent", parent.block = ?block_hash))
+                .await
+            {
+                Ok(result) => {
+                    if retry_count > 0 {
+                        info!(
+                            solution.hash = %solution.solution_hash,
+                            solution.vdf_step = solution.vdf_step,
+                            retry.count = retry_count,
+                            "RETRY_SUCCESS: Block produced after retryable errors"
+                        );
+                    }
+                    return Ok(result);
+                }
+                Err(BlockProductionError::Retryable { source }) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRY_ATTEMPTS {
+                        error!(
+                            solution.hash = %solution.solution_hash,
+                            solution.vdf_step = solution.vdf_step,
+                            error.type = "retryable",
+                            error.source = %source,
+                            retry.count = retry_count,
+                            retry.max_attempts = MAX_RETRY_ATTEMPTS,
+                            "Max retry attempts reached for retryable error, aborting"
+                        );
+                        return Err(BlockProductionError::Irrecoverable {
+                            source: source
+                                .wrap_err(format!("max retries ({}) exceeded", MAX_RETRY_ATTEMPTS)),
+                        });
+                    }
+
+                    warn!(
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        error.type = "retryable",
+                        error.source = %source,
+                        retry.attempt = retry_count,
+                        retry.max_attempts = MAX_RETRY_ATTEMPTS,
+                        "Retryable error during block production, will retry with new parent"
+                    );
+                    // Continue loop to retry with fresh parent
+                }
+                Err(e @ BlockProductionError::Irrecoverable { .. }) => {
+                    error!(
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        error.type = "irrecoverable",
+                        "Irrecoverable error during block production, aborting"
+                    );
+                    return Err(e);
+                }
+            }
+        }
     }
 
     /// Produces a new block candidate with automatic parent chain rebuild capability.
@@ -607,15 +717,17 @@ pub trait BlockProdStrategy {
     ///
     /// After producing a block, we check if the parent is still the best canonical block.
     /// If not, we rebuild the block on the new parent, reusing the same solution hash.
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn fully_produce_new_block_candidate(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<
+    ) -> Result<
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
+        BlockProductionError,
     > {
         let mut rebuild_attempts = 0;
 
@@ -732,7 +844,7 @@ pub trait BlockProdStrategy {
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         timestamp_ms: u128,
         solution_hash: H256,
-    ) -> eyre::Result<(EthBuiltPayload, U256)> {
+    ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
 
@@ -789,7 +901,7 @@ pub trait BlockProdStrategy {
         Ok((payload, final_treasury_balance))
     }
 
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(level = "trace", skip_all, fields(
         payload.parent_evm_hash = %prev_block_header.evm_block_hash,
         payload.timestamp_sec = timestamp_ms / 1000,
         payload.shadow_tx_count = shadow_txs.len()
@@ -800,7 +912,7 @@ pub trait BlockProdStrategy {
         timestamp_ms: u128,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
-    ) -> eyre::Result<EthBuiltPayload> {
+    ) -> Result<EthBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
         // generate payload attributes
@@ -840,7 +952,7 @@ pub trait BlockProdStrategy {
             .send_new_payload(attributes.clone())
             .await
             .map_err(|e| eyre!("Failed to send payload to builder: {}", e))?
-            .map_err(|e| eyre!("Payload builder returned error: {}", e))?;
+            .map_err(classify_payload_error)?;
 
         debug!(
             payload.id = %payload_id,
@@ -853,9 +965,10 @@ pub trait BlockProdStrategy {
             .ok_or_else(|| {
                 eyre!("Failed to resolve payload future - payload builder returned None")
             })?
-            .map_err(|e| eyre!("Failed to build payload: {}", e))?;
+            .map_err(classify_payload_error)?;
 
         let evm_block_hash = built_payload.block().hash();
+        debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
         let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
             panic!(
@@ -868,13 +981,16 @@ pub trait BlockProdStrategy {
                 payload: ExecutionPayload::V3(payload.execution_payload),
                 sidecar,
             })
-            .await?;
+            .await
+            .map_err(|e| BlockProductionError::Irrecoverable {
+                source: eyre::eyre!("beacon engine error: {}", e),
+            })?;
 
-        eyre::ensure!(
-            new_payload_result.status == PayloadStatusEnum::Valid,
-            "Reth has gone out of sync {:?}",
-            new_payload_result.status
-        );
+        if new_payload_result.status != PayloadStatusEnum::Valid {
+            return Err(BlockProductionError::Irrecoverable {
+                source: eyre::eyre!("Reth has gone out of sync: {:?}", new_payload_result.status),
+            });
+        }
 
         info!(
             payload.block_hash = %built_payload.block().hash(),
@@ -885,6 +1001,7 @@ pub trait BlockProdStrategy {
         Ok(built_payload)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn produce_block_without_broadcasting(
         &self,
         solution: &SolutionContext,
@@ -1093,6 +1210,7 @@ pub trait BlockProdStrategy {
         Ok(Some((block, stats)))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn broadcast_block(
         &self,
         block: Arc<IrysBlockHeader>,
@@ -1212,6 +1330,7 @@ pub trait BlockProdStrategy {
         Ok(ema_calculation)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1268,7 +1387,7 @@ pub trait BlockProdStrategy {
         height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn fetch_best_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1285,7 +1404,7 @@ pub trait BlockProdStrategy {
         rx.await.expect("to receive txns")
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn fetch_parent_snapshots(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1305,7 +1424,7 @@ pub trait BlockProdStrategy {
         Ok((epoch, commit))
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn build_commitment_ledger_epoch(
         &self,
         commit_snapshot: &CommitmentSnapshot,
@@ -1325,7 +1444,7 @@ pub trait BlockProdStrategy {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn derive_unpledge_refunds(
         &self,
         commit_snapshot: &CommitmentSnapshot,
@@ -1348,6 +1467,7 @@ pub trait BlockProdStrategy {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn get_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1433,6 +1553,7 @@ fn millis_since_epoch(time: SystemTime) -> u128 {
 }
 
 #[inline]
+#[tracing::instrument(level = "trace", skip_all)]
 fn choose_oracle_price(
     parent_ts_ms: u128,
     parent_price: IrysTokenPrice,
@@ -1468,6 +1589,7 @@ impl BlockProdStrategy for ProductionStrategy {
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 

@@ -15,7 +15,7 @@ use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Structure holding publish ledger transactions with their proofs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
     pub proofs: Option<IngressProofsList>,
@@ -129,6 +129,7 @@ impl Iterator for ShadowTxGenerator<'_> {
 }
 
 impl<'a> ShadowTxGenerator<'a> {
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a Address,
@@ -239,6 +240,7 @@ impl<'a> ShadowTxGenerator<'a> {
     }
 
     // Static helper methods for initialization
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn create_expired_ledger_shadow_txs(
         &self,
         balance_delta: &LedgerExpiryBalanceDelta,
@@ -720,11 +722,11 @@ impl RollingHash {
 mod tests {
     use super::*;
     use irys_types::ingress::IngressProofV1;
-    use irys_types::CommitmentType;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
         IrysBlockHeader, IrysSignature, Signature, H256,
     };
+    use irys_types::{BlockHash, CommitmentType};
     use itertools::Itertools as _;
 
     fn create_test_commitment(
@@ -777,12 +779,17 @@ mod tests {
         header
     }
 
-    fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
+    fn create_test_ingress_proof(
+        signer: &IrysSigner,
+        data_root: H256,
+        anchor: BlockHash,
+    ) -> IngressProof {
         let mut proof = IngressProof::V1(IngressProofV1 {
             signature: Default::default(),
             data_root,
             proof: H256::from([12_u8; 32]),
             chain_id: 1_u64,
+            anchor,
         });
 
         signer
@@ -1113,10 +1120,26 @@ mod tests {
 
         // Create 4 proofs - signer2 has 2 proofs to test aggregation
         let proofs = vec![
-            create_test_ingress_proof(&proof_signer1, H256::from([10_u8; 32])),
-            create_test_ingress_proof(&proof_signer2, H256::from([11_u8; 32])),
-            create_test_ingress_proof(&proof_signer3, H256::from([12_u8; 32])),
-            create_test_ingress_proof(&proof_signer2, H256::from([13_u8; 32])), // Extra proof for signer2
+            create_test_ingress_proof(
+                &proof_signer1,
+                H256::from([10_u8; 32]),
+                H256::from([14_u8; 32]),
+            ),
+            create_test_ingress_proof(
+                &proof_signer2,
+                H256::from([11_u8; 32]),
+                H256::from([15_u8; 32]),
+            ),
+            create_test_ingress_proof(
+                &proof_signer3,
+                H256::from([12_u8; 32]),
+                H256::from([16_u8; 32]),
+            ),
+            create_test_ingress_proof(
+                &proof_signer2,
+                H256::from([13_u8; 32]),
+                H256::from([17_u8; 32]),
+            ), // Extra proof for signer2
         ];
 
         let block_height = 101;

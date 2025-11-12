@@ -51,6 +51,9 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
             }
+            IngressProofError::InvalidAnchor(_anchor) => {
+                Self::InvalidData(InvalidDataError::TransactionAnchor)
+            }
         }
     }
 }
@@ -86,6 +89,7 @@ impl From<TxIngressError> for GossipError {
                 Self::Internal(InternalGossipError::ServiceUninitialized)
             }
             TxIngressError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            // todo: `CommitmentValidationError` should  probably be made into an external error
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Self::CommitmentValidation(commitment_validation_error)
             }
@@ -94,6 +98,13 @@ impl From<TxIngressError> for GossipError {
                     "Failed to fetch balance for {}: {}",
                     address, reason
                 )))
+            }
+            TxIngressError::MempoolFull(reason) => {
+                // Mempool at capacity - treat as internal/temporary issue
+                Self::Internal(InternalGossipError::MempoolFull(reason))
+            }
+            TxIngressError::FundMisalignment(reason) => {
+                Self::Internal(InternalGossipError::FundMisalignment(reason))
             }
         }
     }
@@ -152,6 +163,8 @@ pub enum InvalidDataError {
     ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
+    #[error("Invalid ingress proof anchor")]
+    IngressProofAnchor,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -160,6 +173,10 @@ pub enum InternalGossipError {
     Unknown(String),
     #[error("Database error")]
     Database,
+    #[error("Mempool is full")]
+    MempoolFull(String),
+    #[error("Fund misalignment")]
+    FundMisalignment(String),
     #[error("Service uninitialized")]
     ServiceUninitialized,
     #[error("Cache cleanup error")]
@@ -202,4 +219,7 @@ impl GossipResponse<()> {
 pub enum RejectionReason {
     HandshakeRequired,
     GossipDisabled,
+    InvalidData,
+    RateLimited,
+    UnableToVerifyOrigin,
 }

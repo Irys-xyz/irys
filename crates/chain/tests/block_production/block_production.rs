@@ -1060,7 +1060,10 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
+        ) -> Result<
+            (EthBuiltPayload, irys_types::U256),
+            irys_actors::block_producer::BlockProductionError,
+        > {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
             let mut tampered_mempool = mempool.clone();
             if tampered_mempool.submit_txs.len() >= 2 {
@@ -1383,7 +1386,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     // Configure a node with specified block_tree_depth
     let config = NodeConfig::testing().with_consensus(|c| {
         c.block_tree_depth = block_tree_depth;
-        c.mempool.anchor_expiry_depth = 2;
+        c.mempool.tx_anchor_expiry_depth = 2;
         c.block_migration_depth = 2;
     });
 
@@ -1471,7 +1474,10 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             _solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
+        ) -> Result<
+            (EthBuiltPayload, irys_types::U256),
+            irys_actors::block_producer::BlockProductionError,
+        > {
             // Deliberately use an incorrect solution hash (all zeros)
             // This should cause the block to be rejected during validation
             let invalid_solution_hash = H256::zero();

@@ -239,7 +239,7 @@ impl EpochSnapshot {
     }
 
     /// Main worker function
-    #[tracing::instrument(skip_all, err, fields(
+    #[tracing::instrument(level = "trace", skip_all, err, fields(
         block.hash = ?new_epoch_block.block_hash
     ))]
     pub fn perform_epoch_tasks(
