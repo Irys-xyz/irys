@@ -105,6 +105,7 @@ pub struct ValidatePathResult {
     pub leaf_hash: [u8; HASH_SIZE],
     pub left_bound: u128,
     pub right_bound: u128,
+    pub is_rightmost_chunk: bool,
 }
 
 pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
@@ -147,6 +148,7 @@ pub fn validate_path(
 
     let mut left_bound: u128 = 0;
     let mut expected_path_hash = root_hash;
+    let mut is_rightmost_chunk = true;
 
     // Validate branches.
     for branch_proof in branch_proofs.iter() {
@@ -176,6 +178,8 @@ pub fn validate_path(
         // Keep track of left bound as we traverse down the branches
         if is_right_of_offset {
             left_bound = offset;
+        } else {
+            is_rightmost_chunk = false;
         }
 
         debug!(
@@ -221,6 +225,7 @@ pub fn validate_path(
         leaf_hash: leaf_proof.data_hash,
         left_bound,
         right_bound,
+        is_rightmost_chunk,
     })
 }
 
@@ -288,12 +293,19 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
     Ok((leaf_proof.data_hash, left_bound, right_bound))
 }
 
+/// (is_rightmost_chunk, max_byte_offset)
+pub type ChunkInfo = (bool, u64);
+
 /// Validates chunk of data against provided [`Proof`].
+/// Returns a [ChunkInfo] if successful `(is_rightmost_chunk, max_byte_offset)`
 pub fn validate_chunk(
     mut root_id: [u8; HASH_SIZE],
     chunk_node: &Node,
     proof: &Proof,
-) -> Result<(), Error> {
+) -> Result<ChunkInfo, Error> {
+    let mut is_rightmost_chunk = true;
+    let max_byte_offset: u64;
+
     match chunk_node {
         Node {
             data_hash: Some(data_hash),
@@ -342,6 +354,7 @@ pub fn validate_chunk(
                 root_id = if max_byte_range > &branch_proof.offset() {
                     branch_proof.right_id
                 } else {
+                    is_rightmost_chunk = false;
                     branch_proof.left_id
                 }
             }
@@ -356,12 +369,14 @@ pub fn validate_chunk(
             if id != root_id {
                 return Err(eyre!("Invalid Leaf Proof: root mismatch"));
             }
+
+            max_byte_offset = (*max_byte_range).try_into().unwrap();
         }
         _ => {
             unreachable!()
         }
     }
-    Ok(())
+    Ok((is_rightmost_chunk, max_byte_offset))
 }
 
 /// Generates data chunks from which the calculation of root id starts.
