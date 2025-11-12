@@ -597,7 +597,6 @@ where
         skip_all,
         target = "BlockPool",
         fields(block.hash = ?block_header.block_hash, block.height = block_header.height),
-        err
     )]
     pub(crate) async fn process_block<A: ApiClient>(
         &self,
