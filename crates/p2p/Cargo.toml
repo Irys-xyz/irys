@@ -12,6 +12,7 @@ irys-api-client.workspace = true
 irys-database.workspace = true
 irys-vdf.workspace = true
 irys-reth-node-bridge.workspace = true
+irys-utils.workspace = true
 # Other dependencies
 actix-web = { workspace = true }
 tokio = { workspace = true }

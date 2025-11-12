@@ -11,11 +11,13 @@ use irys_types::{
     Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
     IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
 };
+use irys_utils::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerManager};
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -39,22 +41,42 @@ pub enum GossipClientError {
 pub struct GossipClient {
     pub mining_address: Address,
     client: Client,
+    circuit_breaker: CircuitBreakerManager<Address>,
 }
 
 impl GossipClient {
     #[must_use]
     pub fn new(timeout: Duration, mining_address: Address) -> Self {
+        let circuit_config = CircuitBreakerConfig::p2p_defaults();
+        let circuit_breaker = CircuitBreakerManager::new(
+            NonZeroUsize::new(1000).expect("capacity is non-zero"),
+            circuit_config,
+        );
+
         Self {
             mining_address,
             client: Client::builder()
                 .timeout(timeout)
                 .build()
                 .expect("Failed to create reqwest client"),
+            circuit_breaker,
         }
     }
 
     pub fn internal_client(&self) -> &Client {
         &self.client
+    }
+
+    /// Get circuit breaker metrics for monitoring
+    pub fn circuit_breaker_metrics(
+        &self,
+    ) -> irys_utils::circuit_breaker::CircuitBreakerMetrics<Address> {
+        self.circuit_breaker.metrics()
+    }
+
+    /// Cleanup stale circuit breakers that haven't been accessed recently
+    pub fn cleanup_stale_circuit_breakers(&self) {
+        self.circuit_breaker.cleanup_stale();
     }
 
     /// Send data to a peer and update their score based on the result
@@ -71,8 +93,20 @@ impl GossipClient {
         let peer_miner_address = peer.0;
         let peer = peer.1;
 
+        // Check circuit breaker before sending
+        if !self.circuit_breaker.is_available(peer_miner_address) {
+            tracing::warn!(
+                peer = ?peer_miner_address,
+                "circuit breaker open, skipping request"
+            );
+            return Err(GossipError::Network(format!(
+                "Circuit breaker open for peer {:?}",
+                peer_miner_address
+            )));
+        }
+
         let res = self.send_data(peer, data).await;
-        Self::handle_score(peer_list, &res, peer_miner_address);
+        Self::handle_score(peer_list, &res, peer_miner_address, &self.circuit_breaker);
         res.map(|_| ())
     }
 
@@ -84,11 +118,29 @@ impl GossipClient {
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
+        // Check circuit breaker before sending
+        if !self.circuit_breaker.is_available(&peer.0) {
+            tracing::warn!(
+                peer = ?peer.0,
+                "circuit breaker open, skipping get_data request"
+            );
+            return Err(GossipError::Network(format!(
+                "Circuit breaker open for peer {:?}",
+                peer.0
+            )));
+        }
+
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
         let res = self.send_data_internal(url, &requested_data).await;
         let response_time = start_time.elapsed();
-        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
+        Self::handle_data_retrieval_score(
+            peer_list,
+            &res,
+            &peer.0,
+            response_time,
+            &self.circuit_breaker,
+        );
         res
     }
 
@@ -100,41 +152,98 @@ impl GossipClient {
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipData>>> {
+        // Check circuit breaker before sending
+        if !self.circuit_breaker.is_available(&peer.0) {
+            tracing::debug!(
+                peer = ?peer.0,
+                "circuit breaker open, skipping pull_data request"
+            );
+            return Err(GossipError::Network(format!(
+                "Circuit breaker open for peer {:?}",
+                peer.0
+            )));
+        }
+
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
         let res = self.send_data_internal(url, &requested_data).await;
         let response_time = start_time.elapsed();
-        Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
+        Self::handle_data_retrieval_score(
+            peer_list,
+            &res,
+            &peer.0,
+            response_time,
+            &self.circuit_breaker,
+        );
         res
     }
 
     pub async fn check_health(
         &self,
+        peer_addr: &Address,
         peer: PeerAddress,
         peer_list: &PeerList,
     ) -> Result<bool, GossipClientError> {
-        let url = format!("http://{}/gossip/health", peer.gossip);
-        let peer_addr = peer.gossip.to_string();
-
-        let response = self
-            .internal_client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| GossipClientError::GetRequest(peer_addr.clone(), error.to_string()))?;
-
-        if !response.status().is_success() {
-            return Err(GossipClientError::HealthCheck(peer_addr, response.status()));
+        // Check circuit breaker before making health check request
+        if !self.circuit_breaker.is_available(peer_addr) {
+            tracing::debug!(
+                peer = ?peer_addr,
+                "circuit breaker open, skipping health check"
+            );
+            return Ok(false);
         }
 
-        let response: GossipResponse<bool> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer_addr, error.to_string())
-        })?;
+        let url = format!("http://{}/gossip/health", peer.gossip);
+        let peer_addr_str = peer.gossip.to_string();
+
+        let response = match self.internal_client().get(&url).send().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                tracing::debug!(
+                    peer = ?peer_addr,
+                    error = %error,
+                    "health check request failed, recording circuit breaker failure"
+                );
+                self.circuit_breaker.record_failure(peer_addr);
+                return Err(GossipClientError::GetRequest(
+                    peer_addr_str,
+                    error.to_string(),
+                ));
+            }
+        };
+
+        if !response.status().is_success() {
+            self.circuit_breaker.record_failure(peer_addr);
+            return Err(GossipClientError::HealthCheck(
+                peer_addr_str,
+                response.status(),
+            ));
+        }
+
+        let response: GossipResponse<bool> = match response.json().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                self.circuit_breaker.record_failure(peer_addr);
+                return Err(GossipClientError::GetJsonResponsePayload(
+                    peer_addr_str,
+                    error.to_string(),
+                ));
+            }
+        };
 
         match response {
-            GossipResponse::Accepted(val) => Ok(val),
+            GossipResponse::Accepted(val) => {
+                // Record success for healthy peers, failure for unhealthy
+                if val {
+                    self.circuit_breaker.record_success(peer_addr);
+                } else {
+                    self.circuit_breaker.record_failure(peer_addr);
+                }
+                Ok(val)
+            }
             GossipResponse::Rejected(reason) => {
                 warn!("Health check rejected with reason: {:?}", reason);
+                self.circuit_breaker.record_failure(peer_addr);
                 match reason {
                     RejectionReason::HandshakeRequired => {
                         peer_list.initiate_handshake(peer.api, true);
@@ -269,12 +378,15 @@ impl GossipClient {
         peer_list: &PeerList,
         result: &GossipResult<GossipResponse<T>>,
         peer_miner_address: &Address,
+        circuit_breaker: &CircuitBreakerManager<Address>,
     ) {
         match &result {
             Ok(_) => {
                 // Successful send, increase score for data request
                 peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::DataRequest);
                 peer_list.set_is_online(peer_miner_address, true);
+                // Record success in circuit breaker
+                circuit_breaker.record_success(peer_miner_address);
             }
             Err(err) => {
                 if let GossipError::Network(_message) = err {
@@ -289,6 +401,8 @@ impl GossipClient {
                     peer_miner_address,
                     ScoreDecreaseReason::NetworkError(format!("{:?}", err)),
                 );
+                // Record failure in circuit breaker
+                circuit_breaker.record_failure(peer_miner_address);
             }
         }
     }
@@ -299,6 +413,7 @@ impl GossipClient {
         result: &GossipResult<T>,
         peer_miner_address: &Address,
         response_time: Duration,
+        circuit_breaker: &CircuitBreakerManager<Address>,
     ) {
         match result {
             Ok(_) => {
@@ -317,6 +432,8 @@ impl GossipClient {
                     peer_list
                         .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::SlowResponse);
                 }
+                // Record success in circuit breaker
+                circuit_breaker.record_success(peer_miner_address);
             }
             Err(err) => {
                 // Failed to respond - severe penalty
@@ -327,6 +444,8 @@ impl GossipClient {
                         err
                     )),
                 );
+                // Record failure in circuit breaker
+                circuit_breaker.record_failure(peer_miner_address);
             }
         }
     }
@@ -673,7 +792,7 @@ impl GossipClient {
         debug!("Hydrating peers online status");
         let peers = peer_list.all_peers_sorted_by_score();
         for peer in peers {
-            match self.check_health(peer.1.address, peer_list).await {
+            match self.check_health(&peer.0, peer.1.address, peer_list).await {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
                     peer_list.set_is_online(&peer.0, is_healthy);
@@ -764,7 +883,7 @@ impl GossipClient {
                 };
 
                 // Update score for the peer based on the result
-                Self::handle_score(peer_list, &res, &peer.0);
+                Self::handle_score(peer_list, &res, &peer.0, &self.circuit_breaker);
 
                 match res {
                     Ok(response) => match response {
@@ -979,7 +1098,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", unreachable_port);
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let miner_addr = Address::from([1_u8; 20]);
+            let result = fixture
+                .client
+                .check_health(&miner_addr, peer, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1002,7 +1125,11 @@ mod tests {
             let peer = create_peer_address("192.0.2.1", 8080);
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let miner_addr = Address::from([1_u8; 20]);
+            let result = fixture
+                .client
+                .check_health(&miner_addr, peer, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1024,7 +1151,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let miner_addr = Address::from([1_u8; 20]);
+            let result = fixture
+                .client
+                .check_health(&miner_addr, peer, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1062,7 +1193,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let miner_addr = Address::from([1_u8; 20]);
+            let result = fixture
+                .client
+                .check_health(&miner_addr, peer, &mock_list)
+                .await;
 
             assert!(result.is_err());
             match result.unwrap_err() {
@@ -1092,7 +1227,11 @@ mod tests {
             let peer = create_peer_address("127.0.0.1", server.port());
             let mock_list = PeerList::test_mock().expect("to create peer list mock");
 
-            let result = fixture.client.check_health(peer, &mock_list).await;
+            let miner_addr = Address::from([1_u8; 20]);
+            let result = fixture
+                .client
+                .check_health(&miner_addr, peer, &mock_list)
+                .await;
 
             assert!(result.is_err());
             assert!(matches!(
@@ -1145,6 +1284,7 @@ mod tests {
 
             for (response_time, should_increase) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
+                let fixture = TestFixture::new();
                 let (addr, peer) = create_test_peer(1);
                 peer_list.add_or_update_peer(addr, peer, true);
 
@@ -1155,6 +1295,7 @@ mod tests {
                     &Ok(()),
                     &addr,
                     response_time,
+                    &fixture.client.circuit_breaker,
                 );
 
                 let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
@@ -1181,6 +1322,7 @@ mod tests {
 
             for (response_time, expected_decrease) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
+                let fixture = TestFixture::new();
                 let (addr, peer) = create_test_peer(1);
                 peer_list.add_or_update_peer(addr, peer, true);
 
@@ -1191,6 +1333,7 @@ mod tests {
                     &Ok(()),
                     &addr,
                     response_time,
+                    &fixture.client.circuit_breaker,
                 );
 
                 let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
@@ -1207,6 +1350,7 @@ mod tests {
         #[test]
         fn test_handle_data_retrieval_score_failed_response() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let fixture = TestFixture::new();
             let (addr, peer) = create_test_peer(1);
             peer_list.add_or_update_peer(addr, peer, true);
 
@@ -1218,6 +1362,7 @@ mod tests {
                 &Err(GossipError::Network("timeout".to_string())),
                 &addr,
                 response_time,
+                &fixture.client.circuit_breaker,
             );
 
             let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
@@ -1231,6 +1376,7 @@ mod tests {
         #[test]
         fn test_multiple_score_updates_in_sequence() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let fixture = TestFixture::new();
             let (addr, peer) = create_test_peer(1);
             peer_list.add_or_update_peer(addr, peer, true);
 
@@ -1253,6 +1399,7 @@ mod tests {
                             &Ok(()),
                             &addr,
                             response_time,
+                            &fixture.client.circuit_breaker,
                         );
                     }
                     Err(e) => {
@@ -1261,6 +1408,7 @@ mod tests {
                             &Err(e),
                             &addr,
                             response_time,
+                            &fixture.client.circuit_breaker,
                         );
                     }
                 }
@@ -1316,6 +1464,45 @@ mod tests {
         }
     }
 
+    mod circuit_breaker_tests {
+        use super::*;
+        use irys_types::Address;
+
+        #[tokio::test]
+        async fn test_health_check_respects_circuit_breaker() {
+            let fixture = TestFixture::new();
+            let peer_list = PeerList::test_mock().expect("to create peer list mock");
+            let miner_addr = Address::from([40_u8; 20]);
+            let peer_address = create_peer_address("127.0.0.1", 8080);
+
+            // Open the circuit by recording 5 failures
+            for _ in 0..5 {
+                fixture.client.circuit_breaker.record_failure(&miner_addr);
+            }
+
+            // Verify circuit is open
+            assert!(
+                !fixture.client.circuit_breaker.is_available(&miner_addr),
+                "Circuit breaker should be open after 5 failures"
+            );
+
+            // Health check should return false without making a request
+            let result = fixture
+                .client
+                .check_health(&miner_addr, peer_address, &peer_list)
+                .await;
+
+            assert!(
+                result.is_ok(),
+                "Health check should succeed when circuit is open"
+            );
+            assert!(
+                !result.unwrap(),
+                "Health check should return false when circuit is open"
+            );
+        }
+    }
+
     mod concurrent_scoring_tests {
         use super::*;
         use irys_types::Address;
@@ -1326,6 +1513,7 @@ mod tests {
         #[tokio::test]
         async fn test_concurrent_score_updates() {
             let peer_list = Arc::new(PeerList::test_mock().expect("to create peer list mock"));
+            let fixture = Arc::new(TestFixture::new());
             let addr = Address::from([1_u8; 20]);
             let peer = PeerListItem::default();
             peer_list.add_or_update_peer(addr, peer, true);
@@ -1334,6 +1522,7 @@ mod tests {
 
             for i in 0..20 {
                 let peer_list_clone = peer_list.clone();
+                let fixture_clone = fixture.clone();
                 let addr_copy = addr;
 
                 join_set.spawn(async move {
@@ -1351,6 +1540,7 @@ mod tests {
                             &Err(GossipError::Network("test".to_string())),
                             &addr_copy,
                             response_time,
+                            &fixture_clone.client.circuit_breaker,
                         );
                     } else {
                         GossipClient::handle_data_retrieval_score(
@@ -1358,6 +1548,7 @@ mod tests {
                             &Ok(()),
                             &addr_copy,
                             response_time,
+                            &fixture_clone.client.circuit_breaker,
                         );
                     }
                 });
