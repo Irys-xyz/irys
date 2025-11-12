@@ -148,12 +148,17 @@ pub fn init_telemetry() -> Result<()> {
     // Take any other pre-existig panic hook to chain after flushing
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        let message = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or(panic_info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+
         // Log panic information with current span context
         tracing::error!(
             panic.location = %panic_info.location().unwrap_or_else(|| std::panic::Location::caller()),
-            panic.message = %panic_info.payload().downcast_ref::<&str>()
-                .or_else(|| panic_info.payload().downcast_ref::<String>().map(|s| s.as_str()))
-                .unwrap_or("<non-string panic>"),
+            panic.message = %message,
             "Process panicked - flushing telemetry and closing spans before exit"
         );
 
