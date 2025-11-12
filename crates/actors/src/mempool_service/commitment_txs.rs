@@ -1,6 +1,4 @@
-use crate::mempool_service::{
-    validate_commitment_transaction, Inner, MempoolServiceMessage, TxIngressError, TxReadError,
-};
+use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_types::CommitmentType;
@@ -78,7 +76,8 @@ impl Inner {
     async fn process_commitment_after_prechecks(
         &self,
         commitment_tx: &CommitmentTransaction,
-    ) -> Result<(), TxIngressError> {
+    ) -> Result<bool, TxIngressError> {
+        let mut need_to_process_pending_pledges_and_then_gossip = false;
         // Check pending commitments and cached commitments and active commitments of the canonical chain
         let commitment_status = self.get_commitment_status(commitment_tx).await;
         debug!(
@@ -97,12 +96,7 @@ impl Inner {
                 // Add to valid set and mark recent
                 self.insert_commitment_and_mark_valid(commitment_tx).await?;
 
-                // Process any pending pledges for this newly staked address
-                self.process_pending_pledges_for_new_stake(commitment_tx.signer)
-                    .await;
-
-                // Gossip transaction
-                self.broadcast_commitment_gossip(commitment_tx);
+                need_to_process_pending_pledges_and_then_gossip = true;
             }
             CommitmentSnapshotStatus::Unstaked => {
                 warn!(
@@ -121,7 +115,7 @@ impl Inner {
             }
         }
 
-        Ok(())
+        Ok(need_to_process_pending_pledges_and_then_gossip)
     }
 
     #[instrument(skip_all)]
@@ -129,6 +123,25 @@ impl Inner {
         &self,
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
+        let need_to_process_pending_pledges_and_then_gossip =
+            self.ingress_commitment_tx_gossip(&commitment_tx).await?;
+
+        if need_to_process_pending_pledges_and_then_gossip {
+            // Process any pending pledges for this newly staked address
+            self.process_pending_pledges_for_new_stake(commitment_tx.signer)
+                .await;
+            // Gossip transaction
+            self.broadcast_commitment_gossip(&commitment_tx);
+        }
+
+        Ok(())
+    }
+
+    #[instrument(skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+    async fn ingress_commitment_tx_gossip(
+        &self,
+        commitment_tx: &CommitmentTransaction,
+    ) -> Result<bool, TxIngressError> {
         debug!(
             tx.id = ?commitment_tx.id,
             tx.signer = ?commitment_tx.signer,
@@ -136,7 +149,7 @@ impl Inner {
         );
 
         // Common pre-checks shared with API path
-        self.precheck_commitment_ingress_common(&commitment_tx)
+        self.precheck_commitment_ingress_common(commitment_tx)
             .await?;
 
         // Gossip path: check only static fields from config (shape).
@@ -159,7 +172,7 @@ impl Inner {
         }
 
         // Post-processing shared with API path (trace-level status, no warn on unstaked)
-        self.process_commitment_after_prechecks(&commitment_tx)
+        self.process_commitment_after_prechecks(commitment_tx)
             .await
     }
 
@@ -193,8 +206,19 @@ impl Inner {
         }
 
         // Post-processing shared with Gossip path (debug-level status, warn on unstaked)
-        self.process_commitment_after_prechecks(&commitment_tx)
-            .await
+        let need_to_process_pending_pledges_and_then_gossip = self
+            .process_commitment_after_prechecks(&commitment_tx)
+            .await?;
+
+        if need_to_process_pending_pledges_and_then_gossip {
+            // Process any pending pledges for this newly staked address
+            self.process_pending_pledges_for_new_stake(commitment_tx.signer)
+                .await;
+            // Gossip transaction
+            self.broadcast_commitment_gossip(&commitment_tx);
+        }
+
+        Ok(())
     }
 
     /// Check stake/pledge whitelist; reject if address is not whitelisted.
@@ -269,21 +293,7 @@ impl Inner {
 
             for pledge_tx in pledges {
                 let tx_id = pledge_tx.id;
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                if let Err(e) = self.service_senders.mempool.send(
-                    MempoolServiceMessage::IngestCommitmentTxFromGossip(pledge_tx, oneshot_tx),
-                ) {
-                    warn!(
-                        tx.id = ?tx_id,
-                        tx.err = ?e,
-                        "Failed to process pending pledge for newly staked address"
-                    );
-                }
-
-                if let Err(e) = oneshot_rx
-                    .await
-                    .expect("to process pending pledge for newly staked address")
-                {
+                if let Err(e) = self.ingress_commitment_tx_gossip(&pledge_tx).await {
                     warn!(
                         tx.id = ?tx_id,
                         tx.err = ?e,

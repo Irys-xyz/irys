@@ -1,5 +1,5 @@
 use crate::mempool_service::{Inner, TxReadError};
-use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
+use crate::mempool_service::TxIngressError;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
@@ -430,18 +430,7 @@ impl Inner {
         if let Some(chunks_map) = option_chunks_map {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
             for chunk in chunks {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                if let Err(e) = self
-                    .service_senders
-                    .mempool
-                    .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
-                {
-                    warn!("Failed to send chunk to mempool: {:?}", e);
-                }
-
-                let msg_result = oneshot_rx
-                    .await
-                    .expect("pending chunks should be processed by the mempool");
+                let msg_result = self.handle_chunk_ingress_message(chunk).await;
 
                 if let Err(err) = msg_result {
                     tracing::error!("oneshot failure: {:?}", err);
