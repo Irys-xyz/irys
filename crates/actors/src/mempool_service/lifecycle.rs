@@ -235,7 +235,8 @@ impl Inner {
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
     /// swallows errors from get_anchor_height (but does log them)
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), current_height = current_height))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), current_height = current_height
+    ))]
     pub fn should_prune_tx(&self, current_height: u64, tx: &impl IrysTransactionCommon) -> bool {
         let anchor_height = match self
             .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
