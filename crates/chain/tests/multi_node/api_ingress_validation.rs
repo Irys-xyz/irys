@@ -2,7 +2,7 @@ use crate::utils::*;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use irys_actors::mempool_service::TxIngressError;
-use irys_types::{DataLedger, NodeConfig};
+use irys_types::{BoundedFee, DataLedger, NodeConfig};
 
 /// Test that API rejects data transactions with insufficient term fee
 /// This validates the EMA pricing check that uses `ema_for_public_pricing()`
@@ -33,16 +33,14 @@ async fn test_api_rejects_underpriced_term_fee() -> eyre::Result<()> {
     );
 
     // Create transaction with INSUFFICIENT term_fee (10% below expected)
-    let term_fee_u256 = irys_types::U256::from_le_bytes(price_info.term_fee.to_le_bytes());
-    let insufficient_term_fee =
-        (term_fee_u256 * irys_types::U256::from(9)) / irys_types::U256::from(10);
+    let insufficient_term_fee = BoundedFee::new((price_info.term_fee * 9) / 10);
 
     let tx = signer
         .create_publish_transaction(
             data,
             genesis_node.get_anchor().await?,
-            price_info.perm_fee.into(),   // perm_fee is correct
-            insufficient_term_fee.into(), // term_fee is too low
+            price_info.perm_fee.into(), // perm_fee is correct
+            insufficient_term_fee,      // term_fee is too low
         )
         .expect("Expect to create a storage transaction");
     let tx = signer
@@ -112,16 +110,14 @@ async fn test_api_rejects_underpriced_perm_fee() -> eyre::Result<()> {
     );
 
     // Create transaction with INSUFFICIENT perm_fee (10% below expected)
-    let perm_fee_u256 = irys_types::U256::from_le_bytes(price_info.perm_fee.to_le_bytes());
-    let insufficient_perm_fee =
-        (perm_fee_u256 * irys_types::U256::from(9)) / irys_types::U256::from(10);
+    let insufficient_perm_fee = BoundedFee::new((price_info.perm_fee * 9) / 10);
 
     let tx = signer
         .create_publish_transaction(
             data,
             genesis_node.get_anchor().await?,
-            insufficient_perm_fee.into(), // perm_fee is too low
-            price_info.term_fee.into(),   // term_fee is correct
+            insufficient_perm_fee,      // perm_fee is too low
+            price_info.term_fee.into(), // term_fee is correct
         )
         .expect("Expect to create a storage transaction");
     let tx = signer
@@ -403,10 +399,8 @@ async fn test_api_accepts_higher_fees() -> eyre::Result<()> {
         .expect("Failed to get price");
 
     // Use 150% of required fees
-    let perm_fee_u256 = irys_types::U256::from_le_bytes(price_info.perm_fee.to_le_bytes());
-    let higher_perm_fee = (perm_fee_u256 * irys_types::U256::from(15)) / irys_types::U256::from(10);
-    let term_fee_u256 = irys_types::U256::from_le_bytes(price_info.term_fee.to_le_bytes());
-    let higher_term_fee = (term_fee_u256 * irys_types::U256::from(15)) / irys_types::U256::from(10);
+    let higher_perm_fee = BoundedFee::new((price_info.perm_fee * 15) / 10);
+    let higher_term_fee = BoundedFee::new((price_info.term_fee * 15) / 10);
 
     tracing::info!(
         "Using HIGHER fees - perm_fee: {} (required: {}), term_fee: {} (required: {})",
@@ -421,8 +415,8 @@ async fn test_api_accepts_higher_fees() -> eyre::Result<()> {
         .create_publish_transaction(
             data,
             genesis_node.get_anchor().await?,
-            higher_perm_fee.into(),
-            higher_term_fee.into(),
+            higher_perm_fee,
+            higher_term_fee,
         )
         .expect("Expect to create a storage transaction");
     let tx = signer
