@@ -599,6 +599,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validate_is_rightmost_chunk() {
+        // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
+        // Create two simple leaves using data roots to avoid chunked input complexity
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeaf {
+                data_root: H256([1_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeaf {
+                data_root: H256([2_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+
+        let leaf_node1 = leaves[0].clone();
+        let leaf_node2 = leaves[1].clone();
+
+        let root = generate_data_root(vec![leaf_node1, leaf_node2]).expect("expected data root");
+        let proofs = resolve_proofs(root.clone(), None).expect("expected proofs");
+
+        let proof1 = Base64::from(proofs[0].proof.clone());
+        let proof2 = Base64::from(proofs[1].proof.clone());
+
+        let left_result =
+            validate_path(root.id, &proof1, 0).expect("left leaf should validate at offset: 0");
+        let right_result =
+            validate_path(root.id, &proof2, 7).expect("left leaf should validate at offset: 7");
+
+        // Rightmost chunk detection
+        assert!(left_result.is_rightmost_chunk == false);
+        assert!(right_result.is_rightmost_chunk == true);
+
+        // Last byte offset validation
+        assert_eq!(left_result.right_bound, 5);
+        assert_eq!(right_result.right_bound, 5 + 7);
+
+        // Build a 3 leaf data_root to validate we can still detect the rightmost chunk in an unbalanced binary tree
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeaf {
+                data_root: H256([1_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeaf {
+                data_root: H256([2_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+            DataRootLeaf {
+                data_root: H256([3_u8; HASH_SIZE]),
+                tx_size: 11,
+            },
+        ])
+        .expect("expected valid leaves");
+
+        let leaf_node1 = leaves[0].clone();
+        let leaf_node2 = leaves[1].clone();
+        let leaf_node3 = leaves[2].clone();
+
+        let root = generate_data_root(vec![leaf_node1, leaf_node2, leaf_node3])
+            .expect("expected data root");
+        let proofs = resolve_proofs(root.clone(), None).expect("expected proofs");
+
+        let proof1 = Base64::from(proofs[0].proof.clone());
+        let proof2 = Base64::from(proofs[1].proof.clone());
+        let proof3 = Base64::from(proofs[2].proof.clone());
+
+        let left_result =
+            validate_path(root.id, &proof1, 0).expect("left leaf should validate at offset: 0");
+        let center_result =
+            validate_path(root.id, &proof2, 7).expect("left leaf should validate at offset: 7");
+        let right_result =
+            validate_path(root.id, &proof3, 23).expect("left leaf should validate at offset: 23");
+
+        // Rightmost chunk detection
+        assert!(left_result.is_rightmost_chunk == false);
+        assert!(center_result.is_rightmost_chunk == false);
+        assert!(right_result.is_rightmost_chunk == true);
+
+        // Last byte offset validation
+        assert_eq!(left_result.right_bound, 5);
+        assert_eq!(center_result.right_bound, 5 + 7);
+        assert_eq!(right_result.right_bound, 5 + 7 + 11);
+    }
+
+    #[test]
     fn branch_metadata_invariants_and_proof_offset() {
         // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
         // Create two simple leaves using data roots to avoid chunked input complexity
