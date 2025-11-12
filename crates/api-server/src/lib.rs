@@ -170,6 +170,9 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     info!(custom.port = ?port, "Starting API server");
     let state = web::Data::new(app_state);
     HttpServer::new(move || {
+        let span = tracing::info_span!(target: "irys-api-http", "api_server");
+        let _guard = span.enter();
+
         let awc_client = awc::Client::new();
         App::new()
             .app_data(state.clone())

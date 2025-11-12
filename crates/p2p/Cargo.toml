@@ -17,6 +17,7 @@ actix-web = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-actix-web = "0.7"
 eyre.workspace = true
 rand = "0.8"
 reqwest = { version = "0.11", features = ["json"] }
