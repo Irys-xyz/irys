@@ -1,5 +1,5 @@
-use crate::mempool_service::{Inner, TxReadError};
 use crate::mempool_service::TxIngressError;
+use crate::mempool_service::{Inner, TxReadError};
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,

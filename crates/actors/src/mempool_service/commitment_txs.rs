@@ -172,8 +172,7 @@ impl Inner {
         }
 
         // Post-processing shared with API path (trace-level status, no warn on unstaked)
-        self.process_commitment_after_prechecks(commitment_tx)
-            .await
+        self.process_commitment_after_prechecks(commitment_tx).await
     }
 
     #[instrument(skip_all)]
