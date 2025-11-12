@@ -1297,8 +1297,7 @@ impl Inner {
     // set canonical to true to enforce that the anchor must be part of the current canonical chain
     #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor,canonical = canonical))]
     pub fn get_anchor_height(&self, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
-        // check the mempool, then block tree, then DB
-
+        // check the block tree, then DB
         if let Some(height) = {
             // in a block so rust doesn't complain about it being held across an await point
             // I suspect if let Some desugars to something that lint doesn't like
@@ -1368,7 +1367,7 @@ impl Inner {
                 self.mempool_state.write().await,
                 tx_id,
                 format!(
-                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height}"
+                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height})"
                 ),
             );
 

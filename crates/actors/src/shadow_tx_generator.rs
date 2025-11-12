@@ -15,7 +15,7 @@ use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Structure holding publish ledger transactions with their proofs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
     pub proofs: Option<IngressProofsList>,
