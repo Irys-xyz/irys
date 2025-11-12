@@ -322,10 +322,13 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         "Posting a stake tx from a non-whitelisted account should fail"
     );
     let err_string = response2.err().unwrap().to_string();
-    if err_string.contains("ForbiddenSigner") {
+    if err_string.contains("Signer address is not allowed to stake/pledge") {
         debug!("Received expected ForbiddenSigner error");
     } else {
-        panic!("Expected ForbiddenSigner error, got: {}", err_string);
+        panic!(
+            "Expected 'Signer address is not allowed to stake/pledge' error, got: {}",
+            err_string
+        );
     }
 
     let blocks_to_be_mined = block_migration_depth + 2;
@@ -425,10 +428,13 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         "Posting a stake tx from a non-whitelisted account should fail"
     );
     let err_string = response3.err().unwrap().to_string();
-    if err_string.contains("ForbiddenSigner") {
+    if err_string.contains("Signer address is not allowed to stake/pledge") {
         debug!("Received expected ForbiddenSigner error");
     } else {
-        panic!("Expected ForbiddenSigner error, got: {}", err_string);
+        panic!(
+            "Expected 'Signer address is not allowed to stake/pledge' error, got: {}",
+            err_string
+        );
     }
 
     tokio::join!(genesis_node.stop(), peer.stop(),);

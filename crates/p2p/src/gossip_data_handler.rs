@@ -25,8 +25,7 @@ use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::log::warn;
-use tracing::{debug, error, instrument, Span};
+use tracing::{debug, error, instrument, warn, Span};
 
 pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
 pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
@@ -213,7 +212,7 @@ where
                 Ok(())
             }
             Err(error) => {
-                error!("Error when sending transaction to mempool: {:?}", error);
+                error!("Error when sending transaction to mempool: {}", error);
                 Err(error)
             }
         }
@@ -263,7 +262,7 @@ where
                 Ok(())
             }
             Err(error) => {
-                error!("Error when sending ingress proof to mempool: {:?}", error);
+                error!("Error when sending ingress proof to mempool: {}", error);
                 Err(error)
             }
         }
@@ -328,7 +327,7 @@ where
             }
             Err(error) => {
                 error!(
-                    "Error when sending commitment transaction to mempool: {:?}",
+                    "Error when sending commitment transaction to mempool: {}",
                     error
                 );
                 Err(error)
@@ -569,7 +568,7 @@ where
                     }
                     Err(e) => {
                         warn!(
-                            "Failed to fetch tx {:?} from source peer {}: {:?}",
+                            "Failed to fetch tx {} from source peer {}: {}",
                             tx_id_to_fetch, source_api_address, e
                         );
                         last_err = Some(e.to_string());
@@ -598,7 +597,7 @@ where
                             }
                             Err(e) => {
                                 warn!(
-                                    "Failed to fetch tx {:?} from peer {}: {:?}",
+                                    "Failed to fetch tx {} from peer {}: {}",
                                     tx_id_to_fetch, peer_item.address.api, e
                                 );
                                 last_err = Some(e.to_string());
@@ -652,7 +651,7 @@ where
                         .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
                 }
                 Err(err_msg) => {
-                    error!("{:?}", err_msg);
+                    error!("{}", err_msg);
                     return Err(GossipError::Network(err_msg));
                 }
             }
@@ -934,7 +933,7 @@ where
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "get_stake_and_pledge_whitelist() errored: {:?}",
+                    "get_stake_and_pledge_whitelist() errored: {}",
                     e
                 )))
             })
