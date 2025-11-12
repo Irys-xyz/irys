@@ -62,7 +62,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
@@ -184,6 +184,7 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
+    message_handler_semaphore: Arc<Semaphore>,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -1954,6 +1955,8 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
+                        // Placeholder - move to config or a constant
+                        message_handler_semaphore: Arc::new(Semaphore::new(50)),
                     }),
                 };
                 mempool_service
@@ -1984,11 +1987,39 @@ impl MempoolService {
                     match msg {
                         Some(msg) => {
                             let inner = Arc::clone(&self.inner);
-                            tokio::spawn(async move {
-                                if let Err(err) = inner.handle_message(msg).await {
-                                    error!("Error handling mempool message: {:?}", err);
+                            let permit = inner.message_handler_semaphore.clone().try_acquire_owned();
+
+                            match permit {
+                                Ok(permit) => {
+                                    tokio::spawn(async move {
+                                        let _permit = permit; // Hold until task completes
+                                        if let Err(err) = inner.handle_message(msg).await {
+                                            error!("Error handling mempool message: {:?}", err);
+                                        }
+                                    });
                                 }
-                            });
+                                Err(_) => {
+                                    // Semaphore at capacity - spawn task that waits for permit
+                                    tokio::spawn(async move {
+                                        let res = inner.message_handler_semaphore.clone()
+                                            .acquire_owned()
+                                            .await;
+
+                                        let permit = match res {
+                                            Ok(permit) => permit,
+                                            Err(err) => {
+                                                error!("Semaphore closed unexpectedly: {:?}", err);
+                                                return;
+                                            }
+                                        };
+
+                                        let _permit = permit;
+                                        if let Err(err) = inner.handle_message(msg).await {
+                                            error!("Error handling mempool message: {:?}", err);
+                                        }
+                                    });
+                                }
+                            }
                         }
                         None => {
                             warn!("receiver channel closed");
