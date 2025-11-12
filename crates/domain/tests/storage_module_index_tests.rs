@@ -2,10 +2,7 @@ use irys_database::{
     cache_chunk, cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     open_or_create_db,
-    submodule::{
-        get_data_size_by_data_root, get_full_tx_path, get_path_hashes_by_offset,
-        get_start_offsets_by_data_root,
-    },
+    submodule::{get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset},
     tables::IrysTables,
 };
 use irys_domain::{ChunkType, StorageModule, StorageModuleInfo, StorageSubmodule};
@@ -163,8 +160,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     let data_root = tx_headers[0].data_root;
     let data_size = tx_headers[0].data_size;
-    let _ =
-        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
+    let _ = storage_modules[0].index_transaction_data(&tx_headers[0], tx_path, tx_ledger_range);
 
     // Get the submodule reference
     let submodule = storage_modules[0]
@@ -195,8 +191,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let data_root = tx_headers[1].data_root;
     let data_size = tx_headers[1].data_size;
     assert_eq!(data_size, bytes_in_tx);
-    let _ =
-        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
+    let _ = storage_modules[0].index_transaction_data(&tx_headers[1], tx_path, tx_ledger_range);
 
     // Get the both submodule references
     let submodule = storage_modules[0]
@@ -239,8 +234,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         bytes_in_tx,
         config.consensus.chunk_size,
     );
-    let _ =
-        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
+    let _ = storage_modules[0].index_transaction_data(&tx_headers[2], tx_path, tx_ledger_range);
 
     let submodule3 = storage_modules[0]
         .get_submodule(tx_partition_range.end())
@@ -287,10 +281,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
     // Update both storage modules with the tx data
-    let _ =
-        storage_modules[0].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
-    let _ =
-        storage_modules[1].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
+    let _ = storage_modules[0].index_transaction_data(&tx_headers[3], tx_path, tx_ledger_range);
+    let _ = storage_modules[1].index_transaction_data(&tx_headers[3], tx_path, tx_ledger_range);
 
     // The first submodule of the second StorageModule/Partition
     let submodule4 = storage_modules[1]
@@ -336,8 +328,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         config.consensus.chunk_size,
     );
 
-    let _ =
-        storage_modules[1].index_transaction_data(tx_path, data_root, tx_ledger_range, data_size);
+    let _ = storage_modules[1].index_transaction_data(&tx_headers[4], tx_path, tx_ledger_range);
 
     let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
     verify_tx_path_in_submodule(submodule4, tx_path, tx_path_hash);
@@ -585,11 +576,11 @@ fn verify_data_root_start_offset(
     submodule
         .db
         .view(|tx| {
-            let relative_start_offsets = get_start_offsets_by_data_root(tx, data_root)
+            let data_root_infos = get_data_root_infos_for_data_root(tx, data_root)
                 .unwrap()
                 .expect("start offsets not found");
-            assert_eq!(relative_start_offsets.0.len(), 1);
-            assert_eq!(relative_start_offsets.0[0], expected_offset.into());
+            assert_eq!(data_root_infos.0.len(), 1);
+            assert_eq!(data_root_infos.0[0].start_offset, expected_offset.into());
         })
         .unwrap();
 }
@@ -598,7 +589,13 @@ fn verify_data_root_data_size(submodule: &StorageSubmodule, data_root: H256, exp
     assert_eq!(
         submodule
             .db
-            .view_eyre(|tx| get_data_size_by_data_root(tx, data_root))
+            .view_eyre(|tx| {
+                let data_root_infos = get_data_root_infos_for_data_root(tx, data_root)
+                    .unwrap()
+                    .expect("to find metadata for data_root");
+                assert!(!data_root_infos.0.is_empty());
+                Ok(Some(data_root_infos.0[0].data_size))
+            })
             .unwrap(),
         Some(expected_size)
     );
