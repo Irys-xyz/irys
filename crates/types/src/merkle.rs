@@ -629,8 +629,8 @@ mod tests {
             validate_path(root.id, &proof2, 7).expect("left leaf should validate at offset: 7");
 
         // Rightmost chunk detection
-        assert!(left_result.is_rightmost_chunk == false);
-        assert!(right_result.is_rightmost_chunk == true);
+        assert!(!left_result.is_rightmost_chunk);
+        assert!(right_result.is_rightmost_chunk);
 
         // Last byte offset validation
         assert_eq!(left_result.right_bound, 5);
@@ -673,9 +673,9 @@ mod tests {
             validate_path(root.id, &proof3, 23).expect("left leaf should validate at offset: 23");
 
         // Rightmost chunk detection
-        assert!(left_result.is_rightmost_chunk == false);
-        assert!(center_result.is_rightmost_chunk == false);
-        assert!(right_result.is_rightmost_chunk == true);
+        assert!(!left_result.is_rightmost_chunk);
+        assert!(!center_result.is_rightmost_chunk);
+        assert!(right_result.is_rightmost_chunk);
 
         // Last byte offset validation
         assert_eq!(left_result.right_bound, 5);
