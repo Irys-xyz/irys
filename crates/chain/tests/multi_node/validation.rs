@@ -412,10 +412,6 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .testing_peer_with_assignments(&peer_signer)
         .await?;
 
-    // mine some blocks
-    // genesis_node.mine_blocks(5).await?;
-    // let blk5 = genesis_node.get_block_by_height(5).await?;
-
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
     for chunk in &chunks {

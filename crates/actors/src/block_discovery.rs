@@ -31,7 +31,7 @@ use tokio::{
     },
     time::timeout,
 };
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, trace, warn, Instrument as _};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -482,6 +482,10 @@ impl BlockDiscoveryServiceInner {
             new_block_header.get_data_ledger_tx_ids()
         );
 
+        //====================================
+        // Anchor validation
+        //------------------------------------
+
         // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
@@ -565,36 +569,39 @@ impl BlockDiscoveryServiceInner {
         {
             // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
             let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
-            error!("JESSEDEBUG mipah {min_ingress_proof_anchor_height} block_height {} bt_finished_height {bt_finished_height} remaining {remaining}", &new_block_header.height);
+            debug!(target = "preval-anchor", "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height);
 
             // get from the block index
             let block_index = self.block_index_guard.read();
+            // this is the last block header we got from the above loop
+            // we use this to ensure that
+            let last_bt_safe_parent_height = parent_block.height.checked_sub(1);
             for height in min_ingress_proof_anchor_height..bt_finished_height {
-                let block_index_item = block_index.get_item(height).unwrap(); // TODO: fix
-                error!("JESSEDEBUG {height} {block_index_item:?}");
+                // these block index assertions should always be true, which is why we panic (we enforce that the block tree must at least go to the boundary for migration in Config::validate)
+                let block_index_item =
+                    block_index
+                        .get_item(height)
+                        .unwrap_or_else(|| panic!("Internal critical assertion failed: Unable to get entry for height {height} from block index\nDEBUG: min ingress proof anchor height {min_ingress_proof_anchor_height} validating block: height {}, hash {} - block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash));
 
-                let safe_sub = parent_block.height.checked_sub(1);
-                if safe_sub.is_some_and(|s| s == height)
+                if last_bt_safe_parent_height.is_some_and(|s| s == height)
                     && block_index_item.block_hash != parent_block.previous_block_hash
                 {
                     // this indicates some sort of block index corruption
-                    panic!("Internal assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}", &parent_block.height - 1, &parent_block.previous_block_hash, &height, &block_index_item.block_hash)
+                    panic!("Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}", &parent_block.height - 1, &parent_block.previous_block_hash, &height, &block_index_item.block_hash)
                 }
                 valid_ingress_anchor_blocks.push(block_index_item.block_hash);
-                error!(
-                    "JESSEDEBUG ADD_ANCHOR {}, {}",
-                    height, block_index_item.block_hash
-                )
             }
         }
-        error!(
-            "JESSEDEBUG ANCHORS {} {:?}",
-            &new_block_header.block_hash, &valid_ingress_anchor_blocks
+        trace!(
+            "Valid ingress proof anchors for {}: {:?}",
+            &new_block_header.block_hash,
+            &valid_ingress_anchor_blocks
         );
 
         // validate anchors for submit, publish, commitments, and ingress proofs
         // (in this context, it means that anchors must be part of the fork/chain that the currently validating block is on)
-        // NOTE: these will probably be collapsed into the validation logic above
+        // all txs (commitment, data) use the same anchor
+        // ingress proofs have a different, oftentimes longer, anchor
 
         // check anchors for submit ledger
         for tx in submit_txs.iter() {
