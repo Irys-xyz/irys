@@ -65,6 +65,8 @@ use std::{
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
+const MAX_CONCURRENT_MEMPOOL_TASKS: usize = 50;
+
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
 /// covers the total cost (value + fee) of the transaction.
@@ -1929,6 +1931,7 @@ impl MempoolService {
         let reorg_rx = service_senders.subscribe_reorgs();
         let block_migrated_rx = service_senders.subscribe_block_migrated();
 
+        let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
                 let mempool_state = Arc::new(RwLock::new(mempool_state));
@@ -1956,11 +1959,13 @@ impl MempoolService {
                         storage_modules_guard,
                         pledge_provider,
                         // Placeholder - move to config or a constant
-                        message_handler_semaphore: Arc::new(Semaphore::new(50)),
+                        message_handler_semaphore: Arc::new(Semaphore::new(
+                            MAX_CONCURRENT_MEMPOOL_TASKS,
+                        )),
                     }),
                 };
                 mempool_service
-                    .start()
+                    .start(handle_for_inner)
                     .await
                     .expect("Mempool service encountered an irrecoverable error")
             }
@@ -1974,7 +1979,7 @@ impl MempoolService {
         })
     }
 
-    async fn start(mut self) -> eyre::Result<()> {
+    async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {
         tracing::info!("starting Mempool service");
 
         self.inner.restore_mempool_from_disk().await;
@@ -1991,7 +1996,7 @@ impl MempoolService {
 
                             match permit {
                                 Ok(permit) => {
-                                    tokio::spawn(async move {
+                                    runtime_handle.spawn(async move {
                                         let _permit = permit; // Hold until task completes
                                         if let Err(err) = inner.handle_message(msg).await {
                                             error!("Error handling mempool message: {:?}", err);
@@ -2000,7 +2005,7 @@ impl MempoolService {
                                 }
                                 Err(_) => {
                                     // Semaphore at capacity - spawn task that waits for permit
-                                    tokio::spawn(async move {
+                                    runtime_handle.spawn(async move {
                                         let res = inner.message_handler_semaphore.clone()
                                             .acquire_owned()
                                             .await;
