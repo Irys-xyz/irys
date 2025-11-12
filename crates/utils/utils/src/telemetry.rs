@@ -148,7 +148,7 @@ pub fn init_telemetry() -> Result<()> {
     // Take any other pre-existig panic hook to chain after flushing
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        // Log panic information with current span context 
+        // Log panic information with current span context
         tracing::error!(
             panic.location = %panic_info.location().unwrap_or_else(|| std::panic::Location::caller()),
             panic.message = %panic_info.payload().downcast_ref::<&str>()
@@ -160,7 +160,7 @@ pub fn init_telemetry() -> Result<()> {
         if let Err(e) = flush_telemetry() {
             eprintln!("Failed to flush telemetry on panic: {}", e);
         }
-        
+
         original_hook(panic_info);
     }));
 
@@ -179,7 +179,7 @@ pub fn init_telemetry() -> Result<()> {
 #[cfg(feature = "telemetry")]
 pub fn flush_telemetry() -> Result<bool> {
     let mut flushed = false;
-    
+
     // Force flush the logger provider (logs)
     if let Some(logger_provider) = LOGGER_PROVIDER.get() {
         logger_provider
@@ -187,18 +187,18 @@ pub fn flush_telemetry() -> Result<bool> {
             .map_err(|e| eyre::eyre!("Failed to flush log provider: {:?}", e))?;
         flushed = true;
     }
-    
+
     if let Some(tracer_provider) = TRACER_PROVIDER.get() {
         tracer_provider
             .force_flush()
             .map_err(|e| eyre::eyre!("Failed to flush tracer provider: {:?}", e))?;
         flushed = true;
     }
-    
+
     if flushed {
         std::thread::sleep(std::time::Duration::from_millis(1000));
     }
-    
+
     Ok(flushed)
 }
 
