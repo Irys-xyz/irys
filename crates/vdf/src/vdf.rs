@@ -422,7 +422,7 @@ mod tests {
 
         // Send shutdown signal
         shutdown_tx
-            .send(irys_types::ShutdownReason::Vdf)
+            .send(irys_types::ShutdownReason::TestComplete)
             .await
             .unwrap();
 
@@ -535,7 +535,7 @@ mod tests {
 
         // Send shutdown signal
         shutdown_tx
-            .send(irys_types::ShutdownReason::Vdf)
+            .send(irys_types::ShutdownReason::TestComplete)
             .await
             .unwrap();
 

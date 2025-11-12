@@ -210,9 +210,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         attempts
     );
 
-    node.node_ctx
-        .stop(irys_types::ShutdownReason::TestComplete)
-        .await;
+    node.stop().await;
 
     Ok(())
 }

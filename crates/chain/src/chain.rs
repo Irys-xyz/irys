@@ -900,24 +900,32 @@ impl IrysNode {
                             let server_handle = actix_server.handle();
 
                             let server_stop_handle = tokio::spawn(async move {
-                                let _ = main_actor_thread_shutdown_rx.recv().await;
-                                info!("Main actor thread received shutdown signal");
+                                let shutdown_reason = main_actor_thread_shutdown_rx.recv().await;
+                                if let Some(reason) = &shutdown_reason {
+                                    info!("Main actor thread received shutdown signal: {}", reason);
+                                }
 
                                 debug!("Stopping API server");
                                 server_handle.stop(true).await;
                                 info!("API server stopped");
+
+                                shutdown_reason
                             });
 
                             actix_server.await.unwrap();
-                            server_stop_handle.await.unwrap();
+                            let shutdown_reason = server_stop_handle.await.unwrap();
 
                             match gossip_service_handle.stop().await {
                                 Ok(()) => info!("Gossip service stopped"),
                                 Err(e) => warn!("Gossip service is already stopped: {:?}", e),
                             }
 
-                            // Send shutdown signal
-                            vdf_shutdown_sender.send(ShutdownReason::Vdf).await.unwrap();
+                            // Send shutdown signal - propagate the original cause
+                            if let Some(reason) = shutdown_reason {
+                                vdf_shutdown_sender.send(reason).await.unwrap();
+                            } else {
+                                warn!("No shutdown reason received, VDF will be stopped without reason");
+                            }
 
                             debug!("Waiting for VDF thread to finish");
                             // Wait for vdf thread to finish & save steps
@@ -986,7 +994,7 @@ impl IrysNode {
                         Ok(())
                     };
 
-                    let shutdown_reason = match run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver).await {
+                    let shutdown_reason = match run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver, "reth").await {
                         Ok(reason) => reason,
                         Err(e) => {
                             error!("Reth thread error: {:?}", e);

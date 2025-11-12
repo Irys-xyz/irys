@@ -10,6 +10,7 @@ use tracing::{info, trace};
 pub async fn run_until_ctrl_c_or_channel_message<F>(
     fut: F,
     mut channel: tokio::sync::mpsc::Receiver<irys_types::ShutdownReason>,
+    service_name: &str,
 ) -> eyre::Result<irys_types::ShutdownReason>
 where
     F: Future<Output = eyre::Result<()>>,
@@ -27,25 +28,25 @@ where
 
         tokio::select! {
             _ = ctrl_c => {
-                trace!(target: "reth::cli", "Received ctrl-c");
+                trace!("Received ctrl-c");
                 Ok(irys_types::ShutdownReason::Signal("SIGINT".to_string()))
             },
             _ = sigterm => {
-                trace!(target: "reth::cli", "Received SIGTERM");
+                trace!("Received SIGTERM");
                 Ok(irys_types::ShutdownReason::Signal("SIGTERM".to_string()))
             },
             reason = termination_message => {
                 if let Some(reason) = reason {
-                    info!(target: "reth::cli", "Received termination message: {}", reason);
+                    info!("Received termination message: {}", reason);
                     Ok(reason)
                 } else {
-                    trace!(target: "reth::cli", "Received termination message (channel closed)");
+                    trace!("Received termination message (channel closed)");
                     Ok(irys_types::ShutdownReason::Signal("channel closed".to_string()))
                 }
             },
             res = fut => {
                 match res {
-                    Ok(()) => Ok(irys_types::ShutdownReason::ServiceCompleted),
+                    Ok(()) => Ok(irys_types::ShutdownReason::ServiceCompleted(service_name.to_string())),
                     Err(e) => Ok(irys_types::ShutdownReason::FatalError(e.to_string())),
                 }
             },
@@ -59,22 +60,22 @@ where
 
         tokio::select! {
             _ = ctrl_c => {
-                trace!(target: "reth::cli", "Received ctrl-c");
+                trace!("Received ctrl-c");
                 return Ok(irys_types::ShutdownReason::Signal("SIGINT".to_string()))
 
             },
             reason = channel.recv() => {
                 if let Some(reason) = reason {
-                    info!(target: "reth::cli", "Received shutdown message: {}", reason);
+                    info!("Received shutdown message: {}", reason);
                     return Ok(reason)
                 } else {
-                    trace!(target: "reth::cli", "Received shutdown message (channel closed)");
+                    trace!("Received shutdown message (channel closed)");
                     return Ok(irys_types::ShutdownReason::Signal("channel closed".to_string()))
                 }
             },
             res = fut =>  {
                 return match res {
-                    Ok(()) => Ok(irys_types::ShutdownReason::ServiceCompleted),
+                    Ok(()) => Ok(irys_types::ShutdownReason::ServiceCompleted(service_name.to_string())),
                     Err(e) => Ok(irys_types::ShutdownReason::FatalError(e.to_string())),
                 }
             },
