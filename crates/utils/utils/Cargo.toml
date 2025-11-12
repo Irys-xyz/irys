@@ -12,7 +12,7 @@ authors.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 eyre.workspace = true
-irys-types = { path = "../../types" }
+irys-types.workspace = true
 socket2.workspace = true
 opentelemetry = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
