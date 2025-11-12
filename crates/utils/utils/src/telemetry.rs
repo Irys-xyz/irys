@@ -9,7 +9,7 @@ use {
     opentelemetry::{trace::TracerProvider as _, KeyValue},
     opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge,
     opentelemetry_otlp::{Protocol, WithExportConfig as _, WithHttpConfig as _},
-    opentelemetry_sdk::{logs::SdkLoggerProvider, resource::Resource},
+    opentelemetry_sdk::{logs::SdkLoggerProvider, resource::Resource, trace::SdkTracerProvider},
     std::sync::OnceLock,
     tracing::level_filters::LevelFilter,
     tracing_error::ErrorLayer,
@@ -20,6 +20,9 @@ use {
 
 #[cfg(feature = "telemetry")]
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
+
+#[cfg(feature = "telemetry")]
+static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// Initialize OpenTelemetry with Axiom backend
 ///
@@ -106,9 +109,12 @@ pub fn init_telemetry() -> Result<()> {
         .with_log_processor(log_processor)
         .build();
 
-    // Store the logger provider for later flushing (e.g., in panic hook)
+    // Store the providers for later flushing (e.g., in panic hook)
     if LOGGER_PROVIDER.set(logger_provider.clone()).is_err() {
         tracing::warn!("Logger provider already initialized, skipping duplicate initialization");
+    }
+    if TRACER_PROVIDER.set(tracer_provider.clone()).is_err() {
+        tracing::warn!("Tracer provider already initialized, skipping duplicate initialization");
     }
 
     // Set up tracing subscriber FIRST - exactly like init_tracing() does
@@ -139,6 +145,30 @@ pub fn init_telemetry() -> Result<()> {
 
     subscriber.init();
 
+    // Take any other pre-existing panic hook to chain after flushing
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let message = panic_info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or(panic_info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic>".to_string());
+
+        // Log panic information with current span context
+        tracing::error!(
+            panic.location = %panic_info.location().unwrap_or_else(|| std::panic::Location::caller()),
+            panic.message = %message,
+            "Process panicked - flushing telemetry and closing spans before exit"
+        );
+
+        if let Err(e) = flush_telemetry() {
+            eprintln!("Failed to flush telemetry on panic: {}", e);
+        }
+
+        original_hook(panic_info);
+    }));
+
     // NOW we can use tracing! All messages from here forward will go to both terminal and Axiom
     tracing::info!(
         telemetry.service_name = %service_name,
@@ -153,14 +183,38 @@ pub fn init_telemetry() -> Result<()> {
 /// Flush pending telemetry before process termination (e.g., panic hooks)
 #[cfg(feature = "telemetry")]
 pub fn flush_telemetry() -> Result<bool> {
-    if let Some(provider) = LOGGER_PROVIDER.get() {
-        provider
-            .force_flush()
-            .map_err(|e| eyre::eyre!("Failed to flush telemetry: {:?}", e))?;
-        Ok(true)
-    } else {
-        Ok(false)
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    let logger_flush_res = LOGGER_PROVIDER.get().map(SdkLoggerProvider::force_flush);
+
+    let tracer_flush_res = TRACER_PROVIDER.get().map(SdkTracerProvider::force_flush);
+
+    let (flushed, res) = match (logger_flush_res, tracer_flush_res) {
+        (Some(Ok(_)), Some(Ok(_))) => (true, Ok(true)),
+        (None, Some(Ok(_))) => (true, Ok(true)),
+        (Some(Ok(_)), None) => (true, Ok(true)),
+
+        (None | Some(Ok(_)), Some(Err(te))) => {
+            (true, Err(eyre::eyre!("Failed to flush tracer: {:?}", &te)))
+        }
+        (Some(Err(le)), None | Some(Ok(_))) => {
+            (true, Err(eyre::eyre!("Failed to flush logger: {:?}", &le)))
+        }
+        (Some(Err(le)), Some(Err(te))) => (
+            false,
+            Err(eyre::eyre!(
+                "Failed to flush Logger & tracer - logger: {:?}\n tracer: {:?}",
+                &le,
+                te
+            )),
+        ),
+        (None, None) => (false, Ok(false)),
+    };
+
+    if flushed {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
+
+    res
 }
 
 // No-op implementations when the telemetry feature is disabled
