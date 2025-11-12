@@ -31,7 +31,7 @@ use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    validate_path, Address, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
     PoaData, H256, U256,
 };
@@ -1915,12 +1915,12 @@ pub async fn data_txs_are_valid(
                 .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
         // Validate perm_fee is at least the expected amount
-        let actual_perm_fee = tx.perm_fee.unwrap_or(U256::zero());
+        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
         if actual_perm_fee < expected_perm_fee.amount {
             return Err(PreValidationError::InsufficientPermFee {
                 tx_id: tx.id,
                 expected: expected_perm_fee.amount,
-                actual: actual_perm_fee,
+                actual: actual_perm_fee.get(),
             });
         }
 
@@ -1930,7 +1930,7 @@ pub async fn data_txs_are_valid(
             return Err(PreValidationError::InsufficientTermFee {
                 tx_id: tx.id,
                 expected: expected_term_fee,
-                actual: actual_term_fee,
+                actual: actual_term_fee.get(),
             });
         }
 

@@ -84,8 +84,8 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 node.get_anchor().await?,
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
@@ -263,8 +263,8 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 block1.block_hash,
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();

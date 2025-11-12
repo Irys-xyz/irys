@@ -84,8 +84,8 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         data_root: H256::random(),
         data_size: 1024,
         header_size: 0,
-        term_fee: U256::from(1000),
-        perm_fee: Some(U256::from(2000)),
+        term_fee: U256::from(1000).into(),
+        perm_fee: Some(U256::from(2000).into()),
         ledger_id: DataLedger::Submit as u32,
         bundle_format: Some(0),
         chain_id: 1,
@@ -96,7 +96,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     // Create an invalid refund for this promoted transaction
     let invalid_refund = (
         data_tx.id,
-        data_tx.perm_fee.unwrap(), // Try to refund the perm_fee
+        data_tx.perm_fee.unwrap().get(), // Try to refund the perm_fee
         data_tx.signer,
     );
 

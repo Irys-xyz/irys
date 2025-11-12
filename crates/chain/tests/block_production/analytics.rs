@@ -91,7 +91,12 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
         let mut data_bytes = vec![0_u8; data_size];
         rand::thread_rng().fill(&mut data_bytes[..]);
 
-        let tx = a.create_publish_transaction(data_bytes.clone(), anchor, perm_fee, term_fee)?;
+        let tx = a.create_publish_transaction(
+            data_bytes.clone(),
+            anchor,
+            perm_fee.into(),
+            term_fee.into(),
+        )?;
         let tx = a.sign_transaction(tx)?;
         Ok((tx, data_bytes))
     };

@@ -908,7 +908,7 @@ mod tests {
         // action
         let mut buffer = vec![];
         Encodable::encode(&data, &mut buffer);
-        let decoded = Decodable::decode(&mut buffer.as_slice()).unwrap();
+        let decoded: U256 = Decodable::decode(&mut buffer.as_slice()).unwrap();
 
         // Assert
         assert_eq!(data, decoded);

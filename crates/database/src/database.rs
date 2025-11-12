@@ -147,6 +147,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         Some(existing) => existing,
         None => CachedDataRoot {
             data_size: tx_header.data_size,
+            data_size_confirmed: false,
             txid_set: vec![tx_header.id],
             block_set: vec![],
             expiry_height: None,
