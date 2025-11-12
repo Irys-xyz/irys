@@ -27,7 +27,7 @@ pub const PACKING_TYPE: PackingType = PackingType::CUDA;
 pub async fn start_worker(
     config: PackingWorkerConfig,
     listener: TcpListener,
-    stop_rx: Receiver<()>,
+    stop_rx: Receiver<irys_types::ShutdownReason>,
 ) -> eyre::Result<()> {
     // this limits the concurrency across *all* requests
     let packing_semaphore = Semaphore::new(if matches!(PACKING_TYPE, PackingType::CUDA) {
@@ -46,7 +46,8 @@ pub async fn start_worker(
     let server = run_server(state, listener);
 
     use futures_util::TryFutureExt as _;
-    run_until_ctrl_c_or_channel_message(server.map_err(Into::into), stop_rx).await?;
+    run_until_ctrl_c_or_channel_message(server.map_err(Into::into), stop_rx, "packing-worker")
+        .await?;
 
     Ok(())
 }
@@ -152,7 +153,7 @@ mod tests {
 
         assert_eq!(remote_packed, local_packed);
 
-        tx.send(()).await?;
+        tx.send(irys_types::ShutdownReason::TestComplete).await?;
         exit_handle.await??;
         Ok(())
     }

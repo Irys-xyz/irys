@@ -77,6 +77,7 @@ pub async fn fetch_genesis_commitments(
         .collect())
 }
 
+#[tracing::instrument(level = "trace", skip_all, fields(peer.address = %peer, tx.id = %txn_id))]
 pub async fn fetch_txn(
     peer: &SocketAddr,
     client: &reqwest::Client,
@@ -112,6 +113,7 @@ pub async fn fetch_txn(
 }
 
 //TODO spread requests across peers
+#[tracing::instrument(level = "trace", skip_all, fields(peer.address = %peer, block.hash = %block_index_item.block_hash))]
 pub async fn fetch_block(
     peer: &SocketAddr,
     client: &reqwest::Client,

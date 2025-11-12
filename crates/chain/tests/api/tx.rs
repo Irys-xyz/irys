@@ -100,6 +100,6 @@ async fn test_get_tx() -> eyre::Result<()> {
         }
     };
     assert_eq!(commitment_tx, commitment);
-    node.node_ctx.stop().await;
+    node.stop().await;
     Ok(())
 }

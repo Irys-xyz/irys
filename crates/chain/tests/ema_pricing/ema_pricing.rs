@@ -60,7 +60,7 @@ async fn heavy_test_genesis_ema_price_is_respected_for_2_intervals() -> eyre::Re
         );
     }
 
-    ctx.node_ctx.stop().await;
+    ctx.stop().await;
     Ok(())
 }
 
@@ -117,7 +117,7 @@ async fn heavy_test_genesis_ema_price_updates_after_second_interval() -> eyre::R
         "expected to use the EMA price registered in the 3rd block"
     );
 
-    ctx.node_ctx.stop().await;
+    ctx.stop().await;
     Ok(())
 }
 
@@ -165,6 +165,6 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         price_prev = max_allowed_price;
     }
 
-    ctx.node_ctx.stop().await;
+    ctx.stop().await;
     Ok(())
 }

@@ -51,8 +51,9 @@ use irys_types::{
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
-    DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    DataTransactionHeader, DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId,
+    LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
+    UnpackedChunk,
 };
 use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
@@ -612,7 +613,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -659,7 +660,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// Wait for a specific block at the given height using event subscription
     /// This eliminates polling and race conditions by listening to BlockStateUpdated events
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1412,7 +1413,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
-    #[tracing::instrument(skip_all, fields(tx_id), err)]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -1846,7 +1847,9 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn stop(self) -> IrysNodeTest<()> {
-        self.node_ctx.stop().await;
+        self.node_ctx
+            .stop(irys_types::ShutdownReason::TestComplete)
+            .await;
         let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
@@ -2179,12 +2182,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
     }
 
-    pub async fn post_chunk_32b(
+    pub async fn post_chunk_32b_with_status(
         &self,
         tx: &DataTransaction,
         chunk_index: usize,
         chunks: &[[u8; 32]],
-    ) {
+    ) -> (reqwest::StatusCode, String) {
         let chunk = UnpackedChunk {
             data_root: tx.header.data_root,
             data_size: tx.header.data_size,
@@ -2203,8 +2206,75 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
             .expect("client post failed");
 
+        (response.status(), response.text().await.unwrap())
+    }
+
+    pub async fn post_chunk_32b(
+        &self,
+        tx: &DataTransaction,
+        chunk_index: usize,
+        chunks: &[[u8; 32]],
+    ) {
+        let (status, _body) = self
+            .post_chunk_32b_with_status(tx, chunk_index, chunks)
+            .await;
+
         debug!("chunk_index: {:?}", chunk_index);
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(status, reqwest::StatusCode::OK);
+    }
+
+    pub async fn get_chunk(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+    ) -> Option<PackedChunk> {
+        let client = reqwest::Client::new();
+        let api_uri = self.node_ctx.config.node_config.local_api_url();
+        let url = format!(
+            "{}/v1/chunk/ledger/{}/{}",
+            api_uri, ledger as usize, chunk_offset
+        );
+
+        let response = client.get(&url).send().await;
+        // info!("{:#?}", response);
+
+        if let Ok(resp) = response {
+            if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
+                return Some(packed_chunk);
+            }
+        }
+        None
+    }
+
+    pub async fn verify_migrated_chunk_32b(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+        expected_bytes: &[u8; 32],
+        expected_data_size: u64,
+    ) {
+        if let Some(packed_chunk) = self.get_chunk(ledger, chunk_offset).await {
+            let unpacked_chunk = unpack(
+                &packed_chunk,
+                self.node_ctx.config.consensus.entropy_packing_iterations,
+                self.node_ctx.config.consensus.chunk_size as usize,
+                self.node_ctx.config.consensus.chain_id,
+            );
+            if unpacked_chunk.bytes.0 != expected_bytes {
+                println!(
+                    "ledger_chunk_offset: {}\nfound: {:?}\nexpected: {:?}",
+                    chunk_offset, unpacked_chunk.bytes.0, expected_bytes
+                )
+            }
+            assert_eq!(unpacked_chunk.bytes.0, expected_bytes);
+
+            assert_eq!(unpacked_chunk.data_size, expected_data_size);
+        } else {
+            panic!(
+                "Chunk not found! {} ledger chunk_offset: {}",
+                ledger, chunk_offset
+            );
+        }
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {
@@ -2338,6 +2408,19 @@ impl IrysNodeTest<IrysNodeCtx> {
             .map_err(|e| eyre::eyre!("Failed to parse pledge price response: {}", e))?;
 
         Ok(price_info)
+    }
+
+    pub async fn ingest_ingress_proof(&self, ingress_proof: IngressProof) -> eyre::Result<()> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))?;
+
+        Ok(oneshot_rx.await??)
     }
 
     pub async fn post_commitment_tx_raw_without_gossip(
@@ -2665,7 +2748,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Mine blocks until a condition is met
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn mine_until_condition<F>(
         &self,
         mut condition: F,

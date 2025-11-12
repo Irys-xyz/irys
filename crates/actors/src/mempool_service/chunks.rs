@@ -3,7 +3,6 @@ use eyre::eyre;
 use irys_database::{
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::data_size_to_chunk_count,
-    submodule::get_data_size_by_data_root,
     tables::{CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs},
 };
 use irys_types::{
@@ -20,7 +19,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
-    #[instrument(skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "trace", skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -52,16 +51,6 @@ impl Inner {
             .read_tx()
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
-        let binding = self.storage_modules_guard.read().clone();
-        let candidate_sms = binding
-            .iter()
-            .filter_map(|sm| {
-                sm.get_writeable_offsets(&chunk)
-                    .ok()
-                    .map(|write_offsets| (sm, write_offsets))
-            })
-            .collect::<Vec<_>>();
-
         let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?
             .map(|cdr| cdr.data_size)
@@ -71,15 +60,19 @@ impl Inner {
                     chunk.tx_offset = ?chunk.tx_offset,
                     "Checking SMs for data_size"
                 );
-                candidate_sms.iter().find_map(|(sm, write_offsets)| {
-                    write_offsets.iter().find_map(|wo| {
-                        sm.query_submodule_db_by_offset(*wo, |tx| {
-                            get_data_size_by_data_root(tx, chunk.data_root)
-                        })
-                        .ok()
-                        .flatten()
+                // Get a list of all the local storage modules
+                let storage_modules = self.storage_modules_guard.read().clone();
+
+                // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
+                storage_modules
+                    .iter()
+                    .filter_map(|sm| {
+                        sm.collect_data_root_infos(chunk.data_root)
+                            .ok()
+                            .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
                     })
-                })
+                    .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
+                    .max()
             });
 
         let data_size = match data_size {
@@ -151,10 +144,11 @@ impl Inner {
                 return Ok(());
             }
         };
+
         debug!("Got data root and data size");
-        // Validate that the data_size for this chunk matches the data_size
-        // recorded in the transaction header.
-        if data_size != chunk.data_size {
+        // Validate that the data_size for this chunk is less than or equal to
+        // the largest data_size paid for by a data tx with this data_root
+        if chunk.data_size > data_size {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
                 CriticalChunkIngressError::InvalidDataSize,
@@ -271,6 +265,9 @@ impl Inner {
                 .put(chunk_path_hash, ());
         }
 
+        // Write chunk to storage modules that have writeable offsets for this chunk.
+        // Note: get_writeable_offsets() only returns offsets within the data_size
+        // bounds for the data_root stored at that location in the storage module.
         for sm in self.storage_modules_guard.read().iter() {
             if !sm
                 .get_writeable_offsets(&chunk)

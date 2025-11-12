@@ -327,7 +327,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
     assert_eq!(sm_infos_before, sm_infos_after);
 
     // ===== TEST CLEANUP =====
-    restarted_node.node_ctx.stop().await;
+    restarted_node.stop().await;
     Ok(())
 }
 
@@ -483,7 +483,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
     // ===== TEST CLEANUP =====
-    node.node_ctx.stop().await;
+    node.stop().await;
     Ok(())
 }
 

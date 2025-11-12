@@ -169,7 +169,7 @@ impl IrysRethNodeAdapter {
     // we can set safe or finalized to ZERO to skip updating them, but head is mandatory.
     // safe (confirmed) we update in the block confirmed handler
     // finalized we update in the block finalized handler
-    #[tracing::instrument(err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn update_forkchoice_full(
         &self,
         head_block_hash: B256,

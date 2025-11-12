@@ -51,7 +51,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             _timestamp_ms: u128,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, U256)> {
+        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        {
             self.prod
                 .create_evm_block(
                     prev_block_header,

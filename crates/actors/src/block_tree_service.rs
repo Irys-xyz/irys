@@ -102,6 +102,7 @@ pub struct BlockStateUpdated {
 
 impl BlockTreeService {
     /// Spawn a new BlockTree service
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_tree")]
     pub fn spawn_service(
         rx: UnboundedReceiver<BlockTreeServiceMessage>,
         db: DatabaseProvider,
@@ -168,6 +169,7 @@ impl BlockTreeService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting BlockTree service");
 
@@ -207,7 +209,7 @@ impl BlockTreeService {
 
 impl BlockTreeServiceInner {
     /// Dispatches received messages to appropriate handler methods and sends responses
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn handle_message(&mut self, msg: BlockTreeServiceMessage) -> eyre::Result<()> {
         match msg {
             BlockTreeServiceMessage::GetBlockTreeReadGuard { response } => {
@@ -254,6 +256,7 @@ impl BlockTreeServiceInner {
     ///
     /// Errors
     /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_header.block_hash, block.height = block_header.height))]
     async fn send_block_migration_message(
         &self,
         block_header: Arc<IrysBlockHeader>,
@@ -307,6 +310,7 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(fcu.head = %markers.head.block_hash, fcu.migration = %markers.migration_block.block_hash))]
     async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &markers.head;
         debug!(
@@ -346,6 +350,7 @@ impl BlockTreeServiceInner {
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
     /// inconsistent.
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Check if the block is already in the block index
         let binding = self.block_index_guard.clone();
@@ -413,6 +418,7 @@ impl BlockTreeServiceInner {
     }
 
     /// Handles pre-validated blocks received from the validation service.
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     fn on_block_prevalidated(
         &mut self,
         block: Arc<IrysBlockHeader>,
@@ -522,7 +528,7 @@ impl BlockTreeServiceInner {
     ///
     /// The function carefully manages cache locks to avoid deadlocks during async operations,
     /// releasing the write lock before sending events that may trigger callbacks.
-    #[tracing::instrument(skip_all, err, fields(block_hash, validation_result))]
+    #[tracing::instrument(level = "trace", skip_all, err, fields(block_hash, validation_result))]
     async fn on_block_validation_finished(
         &mut self,
         block_hash: H256,
@@ -876,6 +882,7 @@ impl BlockTreeServiceInner {
         block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %epoch_block.block_hash(), block.height = epoch_block.height()))]
     fn send_epoch_events(&self, epoch_block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Get the epoch snapshot
         let block_hash = epoch_block.block_hash();

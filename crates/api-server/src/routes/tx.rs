@@ -32,54 +32,58 @@ pub async fn post_tx(
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::IngestDataTxFromApi(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
-        tracing::error!("API: {:?}", err);
+        tracing::error!("API: {}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver chunk: {err:?}")));
+            .body(format!("Failed to deliver chunk: {err}")));
     }
     let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
-        tracing::error!("API: {:?}", err);
+        tracing::error!("API: {}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {err:?}")));
+            .body(format!("Failed to deliver transaction: {err}")));
     }
 
     // If message delivery succeeded, check for validation errors within the response
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
-        tracing::warn!("API: {:?}", err);
+        tracing::warn!("API: {}", err);
         return match err {
             TxIngressError::InvalidSignature => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Signature: {err:?}"))),
-            TxIngressError::Unfunded => Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
-                .body(format!("Unfunded: {err:?}"))),
+                .body(format!("Invalid Signature: {err}"))),
+            TxIngressError::Unfunded => {
+                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
+                    .body(format!("Unfunded: {err}")))
+            }
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
-                tracing::error!("API: {:?}", err);
+                tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Failed to deliver transaction: {err:?}")))
+                    .body(format!("Failed to deliver transaction: {err}")))
             }
-            TxIngressError::InvalidAnchor => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid Anchor: {err:?}"))),
+            TxIngressError::InvalidAnchor => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("Invalid Anchor: {err}")))
+            }
             TxIngressError::DatabaseError => {
-                tracing::error!("API: {:?}", err);
+                tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal database error: {err:?}")))
+                    .body(format!("Internal database error: {err}")))
             }
             TxIngressError::ServiceUninitialized => {
-                tracing::error!("API: {:?}", err);
+                tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal service error: {err:?}")))
+                    .body(format!("Internal service error: {err}")))
             }
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
-                    "Commitment validation error: {commitment_validation_error:?}"
+                    "Commitment validation error: {commitment_validation_error}"
                 )))
             }
             TxIngressError::InvalidLedger(_) => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid ledger ID: {err:?}"))),
+                .body(format!("Invalid ledger ID: {err}"))),
             TxIngressError::BalanceFetchError { address, reason } => {
                 tracing::error!("API: Balance fetch error for {}: {}", address, reason);
                 Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
