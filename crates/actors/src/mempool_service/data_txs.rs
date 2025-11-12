@@ -16,7 +16,7 @@ use irys_types::{
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 impl Inner {
     // Shared pre-checks for both API and Gossip data tx ingress paths.
@@ -94,7 +94,7 @@ impl Inner {
         for tx in txs {
             // if data tx exists in mempool
             if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
-                debug!("Got tx {} from mempool", &tx);
+                trace!("Got tx {} from mempool", &tx);
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
@@ -103,7 +103,7 @@ impl Inner {
             match self.read_tx() {
                 Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
                     Ok(Some(tx_header)) => {
-                        debug!("Got tx {} from DB", &tx);
+                        trace!("Got tx {} from DB", &tx);
                         found_txs.push(Some(tx_header.clone()));
                         continue;
                     }
