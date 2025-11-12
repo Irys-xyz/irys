@@ -1958,7 +1958,6 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
-                        // Placeholder - move to config or a constant
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             MAX_CONCURRENT_MEMPOOL_TASKS,
                         )),
