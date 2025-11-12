@@ -12,7 +12,7 @@
 //!     results of a child block.
 use crate::{
     block_tree_service::{ReorgEvent, ValidationResult},
-    block_validation::is_seed_data_valid,
+    block_validation::{is_seed_data_valid, ValidationError},
     services::ServiceSenders,
 };
 use eyre::{bail, ensure};
@@ -225,17 +225,17 @@ impl ValidationService {
                             VdfValidationResult::Valid => {
                                 // Valid VDF - task continues to concurrent validation
                             }
-                            VdfValidationResult::Invalid(e) => {
+                            VdfValidationResult::Invalid(vdf_error) => {
                                 error!(
                                     block.hash = %hash,
-                                    custom.error = %e,
+                                    custom.error = %vdf_error,
                                     "VDF validation failed"
                                 );
                                 // Send failure to block tree
                                 if let Err(e) = self.inner.service_senders.block_tree.send(
                                     crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
                                         block_hash: hash,
-                                        validation_result: ValidationResult::Invalid,
+                                        validation_result: ValidationResult::Invalid(ValidationError::VdfValidationFailed(vdf_error.to_string())),
                                     }
                                 ) {
                                     error!(
@@ -336,7 +336,7 @@ impl ValidationServiceInner {
 
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
-    #[tracing::instrument(err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
+    #[tracing::instrument(skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
     pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
         block: &IrysBlockHeader,

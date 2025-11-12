@@ -112,6 +112,10 @@ pub struct NodeConfig {
     /// P2P pull/request parameters
     #[serde(default)]
     pub p2p_pull: P2PPullConfig,
+
+    /// Sync parameters - how many blocks to pull in parallel, timeouts, etc
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 /// # Node Operation Mode
@@ -434,13 +438,17 @@ pub struct P2PGossipConfig {
     pub broadcast_batch_size: usize,
     /// Interval between broadcast steps in milliseconds
     pub broadcast_batch_throttle_interval: u64,
+    /// Enable scoring of peers based on their behavior. Disabling this might help with reducing
+    /// noise during debug, otherwise it's recommended to keep it enabled.
+    pub enable_scoring: bool,
 }
 
 impl Default for P2PGossipConfig {
     fn default() -> Self {
         Self {
-            broadcast_batch_size: 5,
-            broadcast_batch_throttle_interval: 1_000,
+            broadcast_batch_size: 50,
+            broadcast_batch_throttle_interval: 100,
+            enable_scoring: true,
         }
     }
 }
@@ -463,6 +471,31 @@ impl Default for P2PPullConfig {
             top_active_window: 10,
             sample_size: 5,
             max_attempts: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SyncConfig {
+    /// How many blocks to fetch in parallel per batch during the sync
+    pub block_batch_size: usize,
+    /// How often to check if we're behind and need to sync
+    pub periodic_sync_check_interval_secs: u64,
+    /// Timeout for retry block pull/process
+    pub retry_block_request_timeout_secs: u64,
+    /// Whether to enable periodic sync checks
+    pub enable_periodic_sync_check: bool,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            block_batch_size: 10,
+            // Check every 30 seconds if we're behind
+            periodic_sync_check_interval_secs: 30,
+            retry_block_request_timeout_secs: 30,
+            enable_periodic_sync_check: true,
         }
     }
 }
@@ -526,6 +559,18 @@ pub struct MempoolNodeConfig {
     /// Maximum number of valid chunk hashes to keep track of
     /// Prevents re-processing and re-gossipping of recently seen chunks
     pub max_valid_chunks: usize,
+
+    /// Maximum number of data transactions to hold in mempool
+    /// Prevents unbounded growth. Conservative: max_data_txs_per_block * block_migration_depth * 3
+    pub max_valid_submit_txs: usize,
+
+    /// Maximum number of addresses with pending commitment transactions
+    /// Prevents unbounded growth. Conservative: num_staked_miners * 3
+    pub max_valid_commitment_addresses: usize,
+
+    /// Maximum commitment transactions per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_commitments_per_address: usize,
 }
 
 impl NodeConfig {
@@ -680,6 +725,9 @@ impl NodeConfig {
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
             },
 
             vdf: VdfNodeConfig {
@@ -691,6 +739,7 @@ impl NodeConfig {
             p2p_pull: P2PPullConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
+            sync: SyncConfig::default(),
         }
     }
 
@@ -814,6 +863,9 @@ impl NodeConfig {
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
             },
 
             vdf: VdfNodeConfig {
@@ -826,6 +878,8 @@ impl NodeConfig {
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
+
+            sync: SyncConfig::default(),
         }
     }
 

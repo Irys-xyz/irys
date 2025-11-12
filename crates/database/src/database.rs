@@ -82,6 +82,7 @@ pub fn block_header_by_hash<T: DbTx>(
     tx: &T,
     block_hash: &BlockHash,
     include_chunk: bool,
+    // TODO: we should be typing these Results correctly (DatabaseError instead of eyre::Report)
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     let mut block = tx
         .get::<IrysBlockHeaders>(*block_hash)?

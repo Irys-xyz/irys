@@ -15,8 +15,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
 use routes::{
-    block, block_index, block_tree, commitment, full_config, get_chunk, index, ledger, mempool,
-    mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool, mining,
+    peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -91,11 +91,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/info", web::get().to(index::info_route))
         // TODO: we only seem to use this route in `RemoteNodeClient::is_ready`
         .route("/genesis", web::get().to(index::genesis_route))
-        .route(
-            "/network/config",
-            web::get().to(network_config::get_network_config),
-        )
-        .route("/config", web::get().to(full_config::get_full_config))
+        .route("/network/config", web::get().to(config::get_config))
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route(
             "/price/commitment/stake",

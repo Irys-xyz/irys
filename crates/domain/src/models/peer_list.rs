@@ -22,12 +22,12 @@ const UNSTAKED_PEER_PURGATORY_CAPACITY: usize = 500;
 pub(crate) const MILLISECONDS_IN_SECOND: u64 = 1000;
 pub(crate) const HANDSHAKE_COOLDOWN: u64 = MILLISECONDS_IN_SECOND * 5;
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug)]
 pub enum ScoreDecreaseReason {
-    BogusData,
-    Offline,
+    BogusData(String),
+    Offline(String),
+    NetworkError(String),
     SlowResponse,
-    NoResponse,
 }
 
 #[derive(Clone, Debug, Copy)]
@@ -53,6 +53,7 @@ pub struct PeerListDataInner {
     peer_network_service_sender: PeerNetworkSender,
     /// Broadcast channel for peer lifecycle/activity events
     peer_events: broadcast::Sender<PeerEvent>,
+    config: Config,
 }
 
 /// Iterator for all peers (persistent + purgatory) for gossip purposes
@@ -522,9 +523,14 @@ impl PeerListDataInner {
             peer_whitelist: peer_api_ip_whitelist,
             peer_network_service_sender: peer_network_sender,
             peer_events,
+            config: config.clone(),
         };
 
-        for (mining_address, peer_list_item) in peers {
+        for (mining_address, mut peer_list_item) in peers {
+            // If scoring is disabled, set all peer scores to max
+            if !config.node_config.p2p_gossip.enable_scoring {
+                peer_list_item.reputation_score.set_to_max();
+            }
             let address = peer_list_item.address;
             peer_list
                 .gossip_addr_to_mining_addr_map
@@ -554,9 +560,13 @@ impl PeerListDataInner {
     pub fn add_or_update_peer(
         &mut self,
         mining_addr: Address,
-        peer: PeerListItem,
+        mut peer: PeerListItem,
         is_staked: bool,
     ) {
+        // If scoring is disabled, set all peer scores to max, the same as in the constructor
+        if !self.config.node_config.p2p_gossip.enable_scoring {
+            peer.reputation_score.set_to_max();
+        }
         // Determine previous active state (if existed)
         let was_active = self
             .persistent_peers_cache
@@ -571,7 +581,7 @@ impl PeerListDataInner {
 
         let is_updated = self.add_or_update_peer_internal(mining_addr, peer.clone(), is_staked);
 
-        // Determine new active state
+        // Determine a new active state
         let now_peer = self
             .persistent_peers_cache
             .get(&mining_addr)
@@ -625,17 +635,20 @@ impl PeerListDataInner {
     }
 
     pub fn increase_score(&mut self, mining_addr: &Address, reason: ScoreIncreaseReason) {
+        if !self.config.node_config.p2p_gossip.enable_scoring {
+            return;
+        }
         if let Some(peer) = self.persistent_peers_cache.get_mut(mining_addr) {
             let was_active = peer.reputation_score.is_active() && peer.is_online;
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
             }
             let now_active = peer.reputation_score.is_active() && peer.is_online;
@@ -652,13 +665,13 @@ impl PeerListDataInner {
             let was_active = peer.reputation_score.is_active() && peer.is_online;
             match reason {
                 ScoreIncreaseReason::Online => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::DataRequest => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
                 ScoreIncreaseReason::TimelyResponse => {
-                    peer.reputation_score.increase();
+                    peer.reputation_score.increase_online();
                 }
             }
 
@@ -694,25 +707,32 @@ impl PeerListDataInner {
     }
 
     pub fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
+        if !self.config.node_config.p2p_gossip.enable_scoring {
+            warn!(
+                "Would've decreased score for peer {:?}, reason: {:?}",
+                mining_addr, reason
+            );
+            return;
+        }
         warn!(
             "Decreasing score for peer {:?}, reason: {:?}",
             mining_addr, reason
         );
-        // Check persistent cache first
+        // Check the persistent cache first
         if let Some(peer_item) = self.persistent_peers_cache.get_mut(mining_addr) {
             let was_active = peer_item.reputation_score.is_active() && peer_item.is_online;
             match reason {
-                ScoreDecreaseReason::BogusData => {
-                    peer_item.reputation_score.decrease_bogus_data();
+                ScoreDecreaseReason::BogusData(message) => {
+                    peer_item.reputation_score.decrease_bogus_data(&message);
                 }
-                ScoreDecreaseReason::Offline => {
-                    peer_item.reputation_score.decrease_offline();
+                ScoreDecreaseReason::Offline(message) => {
+                    peer_item.reputation_score.decrease_offline(&message);
                 }
                 ScoreDecreaseReason::SlowResponse => {
-                    peer_item.reputation_score.decrease();
+                    peer_item.reputation_score.decrease_slow();
                 }
-                ScoreDecreaseReason::NoResponse => {
-                    peer_item.reputation_score.decrease_offline();
+                ScoreDecreaseReason::NetworkError(message) => {
+                    peer_item.reputation_score.decrease_offline(&message);
                 }
             }
 
@@ -993,7 +1013,7 @@ impl PeerListDataInner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
+    use irys_types::{NodeConfig, PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
@@ -1023,7 +1043,7 @@ mod tests {
         PeerNetworkSender::new(tx)
     }
 
-    fn create_test_peer_list() -> PeerList {
+    fn create_test_peer_list(config: Config) -> PeerList {
         let (peer_events, _rx) = broadcast::channel(100);
         let peer_list_data = PeerListDataInner {
             persistent_peers_cache: HashMap::new(),
@@ -1037,24 +1057,26 @@ mod tests {
             peer_whitelist: HashSet::new(),
             peer_network_service_sender: create_mock_sender(),
             peer_events,
+            config,
         };
         PeerList(Arc::new(RwLock::new(peer_list_data)))
     }
 
     mod peer_list_scoring_tests {
         use super::*;
+        use irys_types::NodeConfig;
         use rstest::rstest;
 
         #[rstest]
-        #[case(ScoreDecreaseReason::BogusData, 45)]
-        #[case(ScoreDecreaseReason::Offline, 47)]
+        #[case(ScoreDecreaseReason::BogusData(String::from("test")), 45)]
+        #[case(ScoreDecreaseReason::Offline(String::from("test")), 47)]
         #[case(ScoreDecreaseReason::SlowResponse, 49)]
-        #[case(ScoreDecreaseReason::NoResponse, 47)]
+        #[case(ScoreDecreaseReason::NetworkError(String::from("test")), 47)]
         fn test_decrease_peer_score_persistent_cache(
             #[case] reason: ScoreDecreaseReason,
             #[case] expected_score: u16,
         ) {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(addr, peer, true);
@@ -1066,18 +1088,19 @@ mod tests {
 
         #[test]
         fn test_multiple_decreases_cumulative() {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(addr, peer, true);
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            peer_list
+                .decrease_peer_score(&addr, ScoreDecreaseReason::BogusData("bogus_data".into()));
             assert_eq!(
                 peer_list.get_peer(&addr).unwrap().reputation_score.get(),
                 45
             );
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline("offline".into()));
             assert_eq!(
                 peer_list.get_peer(&addr).unwrap().reputation_score.get(),
                 42
@@ -1089,7 +1112,10 @@ mod tests {
                 41
             );
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::NoResponse);
+            peer_list.decrease_peer_score(
+                &addr,
+                ScoreDecreaseReason::NetworkError("network_error".into()),
+            );
             assert_eq!(
                 peer_list.get_peer(&addr).unwrap().reputation_score.get(),
                 38
@@ -1098,14 +1124,14 @@ mod tests {
 
         #[test]
         fn test_decrease_score_removes_inactive_from_known_peers() {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, mut peer) = create_test_peer(1);
             peer.reputation_score = PeerScore::new(25);
 
             peer_list.add_or_update_peer(addr, peer.clone(), true);
             assert!(peer_list.all_known_peers().contains(&peer.address));
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData("bogus".into()));
             let updated_peer = peer_list.get_peer(&addr);
 
             if let Some(p) = updated_peer {
@@ -1117,13 +1143,13 @@ mod tests {
 
         #[test]
         fn test_decrease_score_unstaked_peer_removal() {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(addr, peer.clone(), false);
             assert!(peer_list.get_peer(&addr).is_some());
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline("offline".into()));
             assert!(peer_list.get_peer(&addr).is_none());
             assert!(!peer_list.all_known_peers().contains(&peer.address));
         }
@@ -1136,7 +1162,7 @@ mod tests {
             #[case] reason: ScoreIncreaseReason,
             #[case] expected_score: u16,
         ) {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, peer) = create_test_peer(1);
 
             peer_list.add_or_update_peer(addr, peer, true);
@@ -1148,13 +1174,13 @@ mod tests {
 
         #[test]
         fn test_score_transitions_across_thresholds() {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, mut peer) = create_test_peer(1);
 
             peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
             peer_list.add_or_update_peer(addr, peer, true);
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::Offline("offline".into()));
             let updated_peer = peer_list.get_peer(&addr).unwrap();
 
             assert_eq!(updated_peer.reputation_score.get(), 19);
@@ -1168,7 +1194,7 @@ mod tests {
 
         #[test]
         fn test_unstaked_peer_operations() {
-            let peer_list = create_test_peer_list();
+            let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
             let (addr, mut peer) = create_test_peer(1);
 
             peer.reputation_score = PeerScore::new(50);
@@ -1177,7 +1203,7 @@ mod tests {
             let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
             assert_eq!(initial_score, 50);
 
-            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData);
+            peer_list.decrease_peer_score(&addr, ScoreDecreaseReason::BogusData("bogus".into()));
 
             let final_peer = peer_list.get_peer(&addr);
             assert!(
@@ -1189,7 +1215,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_methods_treat_staked_unstaked_peers_equally_except_persistable() {
-        let peer_list = create_test_peer_list();
+        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
 
         // Create test peers
         let (staked_addr, staked_peer) = create_test_peer(1);
@@ -1413,7 +1439,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_wait_for_active_peers_includes_both_staked_and_unstaked() {
-        let peer_list = create_test_peer_list();
+        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
 
         // Create test peers with active reputation scores
         let (staked_addr, mut staked_peer) = create_test_peer(1);

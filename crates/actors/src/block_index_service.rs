@@ -86,11 +86,13 @@ impl BlockIndexServiceInner {
                 all_txs,
                 response,
             } => {
-                // Maintain simple ordering invariant (sequential heights)
+                // Maintain simple ordering invariant (sequential heights and consistent children)
                 if let Some((prev_height, prev_hash)) = &self.last_received_block {
-                    if block_header.height != prev_height + 1 {
+                    if block_header.height != prev_height + 1
+                        || &block_header.previous_block_hash != prev_hash
+                    {
                         let err = eyre!(
-                            "Block migration out of order or with a gap: prev_height={}, prev_hash={:x}, current_height={}, current_hash={:x}",
+                            "Block migration out of order or with a gap: prev_height={}, prev_hash={}, current_height={}, current_hash={}",
                             prev_height,
                             prev_hash,
                             block_header.height,

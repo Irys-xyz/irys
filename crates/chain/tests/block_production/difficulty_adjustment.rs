@@ -1,6 +1,8 @@
+use irys_actors::block_tree_service::ValidationResult;
+use irys_types::NodeConfig;
 use rust_decimal_macros::dec;
 
-use crate::utils::IrysNodeTest;
+use crate::{utils::IrysNodeTest, validation::send_block_to_block_tree};
 
 /// Ensures that the node adjusts its mining difficulty after the configured
 /// number of blocks and that the `last_diff_timestamp` metadata is updated to
@@ -49,5 +51,114 @@ async fn difficulty_adjusts_and_timestamp_updates() -> eyre::Result<()> {
 
     // Shut down the node to clean up the test environment.
     node.stop().await;
+    Ok(())
+}
+
+/// Create 3 nodes:
+/// - genesis that does not mine after peers come online
+/// - 2 peers that create competing forks
+///
+/// Scenario: all blocks get gossiped to the `genesis` node together, but we
+/// control the order of which they get validated by selectively broadacting the execution payloads.
+///
+/// Expectation:
+/// - we only mark the tip for the blocks that are actually the newest validated "highest cumulative diff" block.
+/// (regression protection: `mark_tip` used to be called on every single validated block, even if it had a lesser cumulative diff)
+#[test_log::test(tokio::test)]
+async fn heavy_slow_tip_updated_correctly_in_forks_with_variying_cumulative_difficulties(
+) -> eyre::Result<()> {
+    // max time to wait for block validations
+    let max_seconds = 10;
+    let num_blocks_in_epoch = 2;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = 2;
+    genesis_config.consensus.get_mut().block_tree_depth = 20;
+    let test_signer = genesis_config.new_random_signer();
+    let test_signer_2 = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer, &test_signer_2]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", max_seconds)
+        .await;
+    let fork_creator_1 = genesis_node
+        .testing_peer_with_assignments(&test_signer)
+        .await?;
+    let fork_creator_2 = genesis_node
+        .testing_peer_with_assignments(&test_signer_2)
+        .await?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // temp disable block validation
+    genesis_node.node_ctx.set_validation_enabled(false);
+
+    tracing::error!("...");
+    tracing::error!("...");
+    tracing::error!("...fc1");
+    tracing::error!("...");
+    fork_creator_2.gossip_disable();
+    fork_creator_1.gossip_disable();
+    genesis_node.gossip_disable();
+
+    tracing::error!("...");
+    tracing::error!("...");
+    tracing::error!("...");
+    tracing::error!("...broadcasting");
+    let order = [
+        (&fork_creator_1.mine_block_without_gossip().await?, true),
+        (&fork_creator_1.mine_block_without_gossip().await?, true),
+        (&fork_creator_2.mine_block_without_gossip().await?, false),
+        (&fork_creator_2.mine_block_without_gossip().await?, false),
+        (&fork_creator_2.mine_block_without_gossip().await?, true),
+        (&fork_creator_1.mine_block_without_gossip().await?, false),
+        (&fork_creator_1.mine_block_without_gossip().await?, true),
+    ];
+    for ((block, _eth_block), _new_tip) in order.iter() {
+        tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
+        send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+    }
+
+    tracing::error!("...");
+    tracing::error!("...");
+    tracing::error!("...");
+    tracing::error!("...validating");
+    genesis_node.node_ctx.set_validation_enabled(true);
+    let mut block_state_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+    'outer: for ((block, eth_block), new_tip) in order.iter() {
+        tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
+        genesis_node
+            .node_ctx
+            .block_pool
+            .execution_payload_provider
+            .add_payload_to_cache(eth_block.block().clone())
+            .await;
+        while let Ok(event) = block_state_rx.recv().await {
+            if event.block_hash == block.block_hash
+                && matches!(event.validation_result, ValidationResult::Valid)
+            {
+                continue 'outer;
+            }
+        }
+
+        if *new_tip {
+            assert_eq!(
+                genesis_node.node_ctx.block_tree_guard.read().tip,
+                block.block_hash
+            );
+        } else {
+            assert_ne!(
+                genesis_node.node_ctx.block_tree_guard.read().tip,
+                block.block_hash
+            );
+        }
+    }
+
+    // Shut down the node to clean up the test environment.
+    fork_creator_2.stop().await;
+    fork_creator_1.stop().await;
+    genesis_node.stop().await;
     Ok(())
 }

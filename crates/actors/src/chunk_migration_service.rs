@@ -81,7 +81,7 @@ impl ChunkMigrationServiceInner {
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
-        println!("service started: chunk_migration");
+        tracing::info!("service started: chunk_migration");
         Self {
             block_index,
             config,

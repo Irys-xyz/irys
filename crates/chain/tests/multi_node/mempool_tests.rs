@@ -135,7 +135,18 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
         .await;
     let app = genesis_node.start_public_api().await;
 
-    let tx = signer.create_transaction(data.clone(), genesis_node.get_anchor().await?)?;
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx = signer.create_publish_transaction(
+        data.clone(),
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee,
+        price_info.term_fee,
+    )?;
     let tx = signer.sign_transaction(tx)?;
 
     // Build a pre-header chunk with an oversized data_path (> 64 KiB)
@@ -191,7 +202,19 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
         .await;
     let app = genesis_node.start_public_api().await;
 
-    let tx = signer.create_transaction(vec![1_u8; chunk_size], genesis_node.get_anchor().await?)?;
+    // Get price from the API
+    let tx_data = vec![1_u8; chunk_size];
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, tx_data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx = signer.create_publish_transaction(
+        tx_data,
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee,
+        price_info.term_fee,
+    )?;
     let tx = signer.sign_transaction(tx)?;
 
     // Build a pre-header chunk with oversized bytes
@@ -246,7 +269,18 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
         .await;
     let app = genesis_node.start_public_api().await;
 
-    let tx = signer.create_transaction(data.clone(), genesis_node.get_anchor().await?)?;
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let tx = signer.create_publish_transaction(
+        data.clone(),
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee,
+        price_info.term_fee,
+    )?;
     let tx = signer.sign_transaction(tx)?;
 
     // Pre-header cap is min(max_chunks_per_item, 64) => default 64, so tx_offset >= 64 must be dropped
@@ -442,7 +476,7 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 100; // don't care about anchor expiry
+        .tx_anchor_expiry_depth = 100; // don't care about anchor expiry
     genesis_config.consensus.get_mut().block_migration_depth = block_migration_depth.try_into()?;
 
     // Create a signer (keypair) for the peer and fund it
@@ -1637,7 +1671,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .expect("shared tx should be accepted");
 
     // mine a block
-    let (_block, reth_exec_env) = mine_block(&genesis.node_ctx).await?.unwrap();
+    let (_block, reth_exec_env) = genesis.mine_block_with_payload().await?;
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 

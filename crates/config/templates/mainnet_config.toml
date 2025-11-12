@@ -46,7 +46,7 @@ cache_clean_lag = 2
 
 [cache.eviction_strategy]
 type = "size_based"
-max_cache_size_bytes = 10737418240  # 10 GB
+max_cache_size_bytes = 10737418240 # 10 GB
 
 [[oracles]]
 type = "coingecko"
@@ -75,17 +75,13 @@ max_chunks_per_item = 500
 max_valid_items = 10000
 max_invalid_items = 10000
 max_valid_chunks = 10000
-# Bounded mempool settings - prevent unbounded memory growth
-max_valid_submit_txs = 3000  # Conservative: max_data_txs_per_block * block_migration_depth * 3
-max_valid_commitment_addresses = 300  # Conservative: ~100 miners * 3
-max_commitments_per_address = 20  # Limit per-address resource consumption
 
 [vdf]
 parallel_verification_thread_limit = 4
 
 
 [consensus.Custom]
-chain_id = 1270
+chain_id = 3282
 token_price_safe_range = 1.0
 # Replace with the actual genesis hash of the network you're joining
 expected_genesis_hash = "11111111111111111111111111111111"
@@ -94,17 +90,17 @@ annual_cost_per_gb = 0.01                   # $0.01 USD/GB/year
 decay_rate = 0.01                           # 1% annual decay per year
 chunk_size = 262144
 block_migration_depth = 6
-block_tree_depth = 50
+block_tree_depth = 100
 num_chunks_in_partition = 51872000
-num_chunks_in_recall_range = 800
-num_partitions_per_slot = 1
-entropy_packing_iterations = 1000
-number_of_ingress_proofs_total = 1
-number_of_ingress_proofs_from_assignees = 0
+num_chunks_in_recall_range = 400
+num_partitions_per_slot = 10
+entropy_packing_iterations = 1_000_000
+number_of_ingress_proofs_total = 10
+number_of_ingress_proofs_from_assignees = 5
 # Target storage duration in years
 safe_minimum_number_of_years = 200
-stake_value = 20000.0
-pledge_base_value = 950.0
+stake_value = 400_000.0
+pledge_base_value = 14_000
 pledge_decay = 0.9
 immediate_tx_inclusion_reward_percent = 0.01
 minimum_term_fee_usd = 0.01                  # $0.01 USD minimum for term storage
@@ -115,12 +111,12 @@ miner_address = "0x0000000000000000000000000000000000000000"
 reward_address = "0x0000000000000000000000000000000000000000"
 last_epoch_hash = "11111111111111111111111111111111"
 vdf_seed = "11111111111111111111111111111111"
-genesis_price = 1.0
+genesis_price = 0.05
 # Optional: if omitted, defaults to vdf_seed
 # vdf_next_seed = "22222222222222222222222222222222"
 
 [consensus.Custom.reth]
-chain = 1270
+chain = 3282
 
 [consensus.Custom.reth.genesis]
 nonce = "0x0"
@@ -162,7 +158,7 @@ max_allowed_vdf_fork_steps = 64840
 sha_1s_difficulty = 1800000
 
 [consensus.Custom.block_reward_config]
-inflation_cap = 100000000.0
+inflation_cap = 100_000_000.0
 half_life_secs = 126144000
 
 [consensus.Custom.epoch]

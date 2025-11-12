@@ -1,4 +1,4 @@
-use crate::block_pool::BlockPoolError;
+use crate::block_pool::{AdvisoryBlockPoolError, BlockPoolError, CriticalBlockPoolError};
 use irys_actors::{
     mempool_service::{IngressProofError, TxIngressError},
     AdvisoryChunkIngressError, ChunkIngressError,
@@ -21,7 +21,7 @@ pub enum GossipError {
     #[error("Invalid data: {0}")]
     InvalidData(InvalidDataError),
     #[error("Block pool error: {0:?}")]
-    BlockPool(BlockPoolError),
+    BlockPool(CriticalBlockPoolError),
     #[error("Transaction has already been handled")]
     TransactionIsAlreadyHandled,
     #[error("Commitment validation error: {0}")]
@@ -50,6 +50,9 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
+            }
+            IngressProofError::InvalidAnchor(_anchor) => {
+                Self::InvalidData(InvalidDataError::TransactionAnchor)
             }
         }
     }
@@ -86,6 +89,7 @@ impl From<TxIngressError> for GossipError {
                 Self::Internal(InternalGossipError::ServiceUninitialized)
             }
             TxIngressError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
+            // todo: `CommitmentValidationError` should  probably be made into an external error
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Self::CommitmentValidation(commitment_validation_error)
             }
@@ -94,6 +98,13 @@ impl From<TxIngressError> for GossipError {
                     "Failed to fetch balance for {}: {}",
                     address, reason
                 )))
+            }
+            TxIngressError::MempoolFull(reason) => {
+                // Mempool at capacity - treat as internal/temporary issue
+                Self::Internal(InternalGossipError::MempoolFull(reason))
+            }
+            TxIngressError::FundMisalignment(reason) => {
+                Self::Internal(InternalGossipError::FundMisalignment(reason))
             }
         }
     }
@@ -105,9 +116,24 @@ impl From<PeerNetworkError> for GossipError {
     }
 }
 
+impl From<BlockPoolError> for GossipError {
+    fn from(value: BlockPoolError) -> Self {
+        match value {
+            BlockPoolError::Critical(err) => Self::BlockPool(err),
+            BlockPoolError::Advisory(err) => {
+                Self::Advisory(AdvisoryGossipError::BlockPoolError(err))
+            }
+        }
+    }
+}
+
 impl GossipError {
     pub fn unknown<T: ToString + ?Sized>(error: &T) -> Self {
         Self::Internal(InternalGossipError::Unknown(error.to_string()))
+    }
+
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, Self::Advisory(_))
     }
 }
 
@@ -137,6 +163,8 @@ pub enum InvalidDataError {
     ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
+    #[error("Invalid ingress proof anchor")]
+    IngressProofAnchor,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -145,6 +173,10 @@ pub enum InternalGossipError {
     Unknown(String),
     #[error("Database error")]
     Database,
+    #[error("Mempool is full")]
+    MempoolFull(String),
+    #[error("Fund misalignment")]
+    FundMisalignment(String),
     #[error("Service uninitialized")]
     ServiceUninitialized,
     #[error("Cache cleanup error")]
@@ -165,6 +197,8 @@ pub enum InternalGossipError {
 pub enum AdvisoryGossipError {
     #[error("Failed to ingress chunk: {0:?}")]
     ChunkIngress(AdvisoryChunkIngressError),
+    #[error("Block pool failed to ingest the block: {0:?}")]
+    BlockPoolError(AdvisoryBlockPoolError),
 }
 
 pub type GossipResult<T> = Result<T, GossipError>;
@@ -185,4 +219,7 @@ impl GossipResponse<()> {
 pub enum RejectionReason {
     HandshakeRequired,
     GossipDisabled,
+    InvalidData,
+    RateLimited,
+    UnableToVerifyOrigin,
 }

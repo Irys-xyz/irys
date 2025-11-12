@@ -442,8 +442,13 @@ impl BlockDiscoveryServiceInner {
             );
             // TODO: we can't get these from the database
             // if we can, something has gone wrong!
-            match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
-                .await
+            match get_commitment_tx_in_parallel(
+                &commitment_ledger.tx_ids.0,
+                &mempool_sender,
+                &db,
+                None,
+            )
+            .await
             {
                 Ok(tx) => {
                     commitments = tx;
@@ -469,7 +474,7 @@ impl BlockDiscoveryServiceInner {
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
-        let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
+        let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
         let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
         let mut parent_block = previous_block_header.clone();
 
@@ -513,16 +518,29 @@ impl BlockDiscoveryServiceInner {
             }
         }
 
-        let (parent_ema_snapshot, parent_epoch_snapshot) = {
+        let (parent_ema_snapshot, parent_epoch_snapshot, parent_meta) = {
             let read = block_tree_guard.read();
-            let ema_snapshot = read
-                .get_ema_snapshot(&parent_block_hash)
-                .expect("parent block to be in block tree");
+
+            let parent_block = read.blocks.get(&parent_block_hash).unwrap_or_else(|| {
+                panic!(
+                    "parent block {} should be in the block tree",
+                    &parent_block_hash
+                )
+            });
+
+            let ema_snapshot = parent_block.ema_snapshot.clone();
             // FIXME: Does this need to be for the current block if it's an epoch block?
-            let epoch_snapshot = read
-                .get_epoch_snapshot(&parent_block_hash)
-                .expect("parent block to be in block_tree");
-            (ema_snapshot, epoch_snapshot)
+            let epoch_snapshot = parent_block.epoch_snapshot.clone();
+
+            (
+                ema_snapshot,
+                epoch_snapshot,
+                (
+                    parent_block.chain_state,
+                    parent_block.children.clone(),
+                    parent_block.timestamp,
+                ),
+            )
         };
 
         let validation_result = prevalidate_block(
@@ -550,14 +568,24 @@ impl BlockDiscoveryServiceInner {
 
                 let (epoch_snapshot, mut parent_commitment_snapshot) = {
                     let read = block_tree_guard.read();
-                    let epoch_snapshot = read
-                        .get_epoch_snapshot(&parent_block_hash)
-                        .expect("parent blocks epoch_snapshot should be retrievable");
-                    let parent_commitment_snapshot = read
-                        .get_commitment_snapshot(&parent_block_hash)
-                        .expect("parent block to be in block_tree")
-                        .as_ref()
-                        .clone();
+                    let parent_block = read.blocks.get(&parent_block_hash).unwrap_or_else(|| {
+                        panic!(
+                            "Parent block {} should be in the block tree!\nDEBUG: block tree tip height: {}, child block: {} {}, parent meta:\n {:?}",
+                            &parent_block_hash,
+                            &read
+                                .blocks
+                                .get(&read.tip)
+                                .expect("Tip block not found")
+                                .block
+                                .height,
+                                &new_block_header.block_hash,
+                                &new_block_header.height,
+                                &parent_meta
+                        )
+                    });
+                    let epoch_snapshot = parent_block.epoch_snapshot.clone();
+                    let parent_commitment_snapshot =
+                        parent_block.commitment_snapshot.as_ref().clone();
                     (epoch_snapshot, parent_commitment_snapshot)
                 };
 
@@ -694,11 +722,14 @@ impl BlockDiscoveryServiceInner {
     }
 }
 
+pub const DEFAULT_MEMPOOL_TX_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Get all commitment transactions from the mempool and database
 pub async fn get_commitment_tx_in_parallel(
     commitment_tx_ids: &[IrysTransactionId],
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
+    fetch_timeout: Option<Duration>,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
     let tx_ids_clone = commitment_tx_ids;
 
@@ -713,13 +744,19 @@ pub async fn get_commitment_tx_in_parallel(
                 response: tx,
             }) {
                 Ok(()) => {
+                    let response = if let Some(duration) = fetch_timeout {
+                        // Message was sent successfully, wait for response with timeout
+                        timeout(duration, rx)
+                            .await
+                            .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
+                    } else {
+                        rx.await
+                    };
                     // Message was sent successfully, wait for response with timeout
-                    let result = timeout(Duration::from_secs(5), rx)
-                    .await
-                    .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
-                    .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
+                    let transactions = response
+                        .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
 
-                    Ok(result)
+                    Ok(transactions)
                 }
                 Err(_) => {
                     // Channel is closed - either no receiver was ever created or it was dropped

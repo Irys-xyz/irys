@@ -379,7 +379,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 20;
+        .tx_anchor_expiry_depth = 20;
 
     testing_config_genesis
         .consensus
@@ -455,7 +455,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     // Decreasing peer1 score just to speed up the pruning process
     ctx_genesis_node.node_ctx.peer_list.decrease_peer_score(
         &stopped_peer_1.cfg.miner_address(),
-        ScoreDecreaseReason::Offline,
+        ScoreDecreaseReason::Offline("Test pruning".to_string()),
     );
 
     // Wait for genesis to remove peer1 from its temp peer list
