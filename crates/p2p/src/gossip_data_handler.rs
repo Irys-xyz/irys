@@ -398,15 +398,13 @@ where
         .await
     }
 
-    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), err)]
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), parent = &self.span)]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
-        let span = self.span.clone();
-        let _span = span.enter();
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
