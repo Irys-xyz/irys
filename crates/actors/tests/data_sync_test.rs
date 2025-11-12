@@ -604,10 +604,9 @@ impl TestSetup {
         let tx_path = vec![];
         storage_module
             .index_transaction_data(
+                &data_tx.header,
                 &tx_path,
-                data_tx.header.data_root,
                 LedgerChunkRange(ledger_chunk_offset_ie!(0, num_chunks as u64)),
-                data_tx.header.data_size,
             )
             .map_err(|e| {
                 error!(

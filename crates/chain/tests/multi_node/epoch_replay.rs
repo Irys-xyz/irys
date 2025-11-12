@@ -268,8 +268,8 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
     assert_eq!(peer_assignment_after.slot_index, Some(0));
 
     // Cleanup
-    restarted_node.node_ctx.stop().await;
-    genesis_node.node_ctx.stop().await;
+    restarted_node.stop().await;
+    genesis_node.stop().await;
     Ok(())
 }
 

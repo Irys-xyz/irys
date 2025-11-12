@@ -172,7 +172,7 @@ impl TokioServiceHandle {
                 tracing::debug!("Tokio service '{}' shut down successfully", self.name)
             }
             Err(e) => {
-                tracing::error!("Tokio service '{}' panicked: {:?}", self.name, e)
+                tracing::error!("Tokio service '{}' panicked: {}", self.name, e)
             }
         }
     }
