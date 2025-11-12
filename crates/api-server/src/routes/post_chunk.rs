@@ -49,7 +49,7 @@ pub async fn post_chunk(
     // If we received a response, check for validation errors within the response
     let inner_result: Result<(), ChunkIngressError> = msg_result;
     if let Err(err) = inner_result {
-        warn!(chunk.data_root = %data_root, chunk.tx_offset = ?number, "Error processing chunk: {:?}", &err);
+        warn!(chunk.data_root = ?data_root, chunk.tx_offset = ?number, "Error processing chunk: {:?}", &err);
         return match err {
             ChunkIngressError::Critical(err) => match err {
                 CriticalChunkIngressError::InvalidProof => {
