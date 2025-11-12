@@ -183,10 +183,12 @@ where
                 .await
             {
                 Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-                error!(
-                    "Node {:?}: Failed to process the block {:?}: {:?}",
-                    this_node_id, block_hash_string, error
-                );
+                if !error.is_advisory() {
+                    error!(
+                        "Node {:?}: Failed to process the block {:?}: {:?}",
+                        this_node_id, block_hash_string, error
+                    );
+                }
             } else {
                 info!(
                     "Node {:?}: Server handler handled block {:?}",

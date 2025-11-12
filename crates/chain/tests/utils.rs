@@ -613,7 +613,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -660,7 +660,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// Wait for a specific block at the given height using event subscription
     /// This eliminates polling and race conditions by listening to BlockStateUpdated events
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1413,7 +1413,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
-    #[tracing::instrument(skip_all, fields(tx_id), err)]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -2679,7 +2679,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Mine blocks until a condition is met
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn mine_until_condition<F>(
         &self,
         mut condition: F,

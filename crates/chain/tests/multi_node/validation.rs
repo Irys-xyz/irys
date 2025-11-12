@@ -40,7 +40,8 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, U256)> {
+        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
             self.prod
                 .create_evm_block(
@@ -196,7 +197,8 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, U256)> {
+        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        {
             let mut tampered_mempool = mempool.clone();
             tampered_mempool.submit_txs.push(self.extra_tx.clone());
             self.prod
@@ -286,7 +288,8 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
             timestamp_ms: u128,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, U256)> {
+        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        {
             // NOTE: We reverse the order of txs, this means
             // that during validation the irys block txs will not match the
             // reth block txs

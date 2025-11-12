@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
-    #[instrument(skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "trace", skip_all, err(Debug), fields(data_root = ?chunk.data_root, tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,

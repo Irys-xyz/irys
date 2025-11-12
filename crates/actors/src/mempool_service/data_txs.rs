@@ -16,13 +16,14 @@ use irys_types::{
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 impl Inner {
     // Shared pre-checks for both API and Gossip data tx ingress paths.
     // Performs duplicate detection, signature validation, anchor validation, expiry computation,
     // and ledger parsing. Returns the resolved ledger and the computed expiry height.
     #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root))]
     async fn precheck_data_ingress_common(
         &mut self,
         tx: &DataTransactionHeader,
@@ -71,6 +72,7 @@ impl Inner {
     // Shared post-processing: insert into mempool, cache data_root with expiry,
     // process any pending chunks, and gossip the transaction.
     #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root, expiry_height = expiry_height))]
     async fn postprocess_data_ingress(
         &mut self,
         tx: &DataTransactionHeader,
@@ -84,6 +86,7 @@ impl Inner {
     }
     /// check the mempool and mdbx for data transaction
     /// TODO: align the logic with handle_get_commitment_tx_message (specifically HashMap output)
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.count = txs.len()))]
     pub async fn handle_get_data_tx_message(
         &self,
         txs: Vec<H256>,
@@ -94,7 +97,7 @@ impl Inner {
         for tx in txs {
             // if data tx exists in mempool
             if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
-                debug!("Got tx {} from mempool", &tx);
+                trace!("Got tx {} from mempool", &tx);
                 found_txs.push(Some(tx_header.clone()));
                 continue;
             }
@@ -103,7 +106,7 @@ impl Inner {
             match self.read_tx() {
                 Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
                     Ok(Some(tx_header)) => {
-                        debug!("Got tx {} from DB", &tx);
+                        trace!("Got tx {} from DB", &tx);
                         found_txs.push(Some(tx_header.clone()));
                         continue;
                     }
@@ -126,6 +129,7 @@ impl Inner {
         found_txs
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root))]
     pub async fn handle_data_tx_ingress_message_gossip(
         &mut self,
         tx: DataTransactionHeader,
@@ -173,6 +177,7 @@ impl Inner {
         self.postprocess_data_ingress(&tx, expiry_height).await
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root))]
     pub async fn handle_data_tx_ingress_message_api(
         &mut self,
         mut tx: DataTransactionHeader,
@@ -222,6 +227,7 @@ impl Inner {
 
     /// Validates that a data transaction has sufficient balance to cover its fees.
     /// Checks the balance against the canonical chain tip.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.signer = %tx.signer))]
     fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
@@ -269,6 +275,7 @@ impl Inner {
     /// This is the price that users should use when calculating their transaction fees.
     ///
     /// Ensures that user-provided fees are >= minimum required based on current EMA pricing.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_size = tx.data_size))]
     fn validate_data_tx_ema_pricing(
         &self,
         tx: &DataTransactionHeader,
@@ -389,6 +396,7 @@ impl Inner {
     }
 
     /// Caches data_root with expiry, logging success/failure.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
         match self.irys_db.update_eyre(|db_tx| {
             let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
@@ -413,6 +421,7 @@ impl Inner {
     }
 
     /// Processes any pending chunks that arrived before their parent transaction.
+    #[tracing::instrument(level = "trace", skip_all, fields(data_root = %data_root))]
     async fn process_pending_chunks_for_root(
         &mut self,
         data_root: H256,

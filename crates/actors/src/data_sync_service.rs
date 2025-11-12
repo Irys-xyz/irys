@@ -85,7 +85,7 @@ impl DataSyncServiceInner {
         data_sync
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn handle_message(&mut self, msg: DataSyncServiceMessage) -> eyre::Result<()> {
         match msg {
             DataSyncServiceMessage::SyncPartitions => {
@@ -130,7 +130,7 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn tick(&mut self) -> eyre::Result<()> {
         for orchestrator in self.chunk_orchestrators.values_mut() {
             orchestrator.tick()?;
@@ -139,6 +139,7 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn optimize_peer_concurrency(&mut self) {
         // Get a write lock on the peer bandwidth managers list
         let Ok(mut peers) = self.active_peer_bandwidth_managers.write() else {
@@ -206,6 +207,11 @@ impl DataSyncServiceInner {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(
+        chunk.storage_module_id = storage_module_id,
+        chunk.offset = %chunk_offset,
+        peer.address = %peer_addr
+    ))]
     fn on_chunk_completed(
         &mut self,
         storage_module_id: usize,
@@ -249,6 +255,7 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn on_chunk_failed(
         &mut self,
         storage_module_id: usize,
@@ -270,6 +277,7 @@ impl DataSyncServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn on_chunk_timeout(
         &mut self,
         storage_module_id: usize,
@@ -301,6 +309,7 @@ impl DataSyncServiceInner {
             .remove(&peer_addr);
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn handle_get_active_peers_list(
         &self,
         tx: oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>,
@@ -325,6 +334,7 @@ impl DataSyncServiceInner {
     ///
     /// This maintains an up-to-date mapping between peers and bandwidth managers
     /// for efficient chunk downloading across the network.
+    #[tracing::instrument(level = "trace", skip_all)]
     fn sync_peer_partition_assignments(&mut self) {
         let storage_modules = self.storage_modules.read().unwrap().clone();
 
@@ -357,7 +367,7 @@ impl DataSyncServiceInner {
 
     /// Updates the active_peers list and ensures there are PeerBandwidthManagers for
     /// any peers assigned to store the same slot data.
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn ensure_bandwidth_managers_for_peers(&mut self, ledger_id: u32, slot_index: usize) {
         // Get the slot assignments for all partition hashes in this slot
         let epoch_snapshot = self.block_tree.read().canonical_epoch_snapshot();
@@ -583,6 +593,7 @@ impl DataSyncService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 

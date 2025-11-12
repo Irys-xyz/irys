@@ -442,7 +442,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
 }
 
 impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T, B, M> {
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn spawn_service(
         inner: ChainSyncServiceInner<T, B, M>,
         rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
@@ -474,7 +474,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> ChainSyncResult<()> {
         info!("Starting the sync service");
         let period_secs = self
@@ -534,7 +534,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_message(&self, msg: SyncChainServiceMessage) -> ChainSyncResult<()> {
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {

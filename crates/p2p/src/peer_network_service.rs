@@ -414,7 +414,7 @@ where
         });
     }
 
-    #[instrument(skip(self, handshake), fields(peer.api_address = ?handshake.api_address))]
+    #[instrument(skip_all, fields(peer.api_address = ?handshake.api_address))]
     async fn handle_handshake_request(&self, handshake: HandshakeMessage) {
         let task = {
             let mut state = self.inner.state.lock().await;

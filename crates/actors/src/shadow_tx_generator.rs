@@ -129,6 +129,7 @@ impl Iterator for ShadowTxGenerator<'_> {
 }
 
 impl<'a> ShadowTxGenerator<'a> {
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a Address,
@@ -239,6 +240,7 @@ impl<'a> ShadowTxGenerator<'a> {
     }
 
     // Static helper methods for initialization
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn create_expired_ledger_shadow_txs(
         &self,
         balance_delta: &LedgerExpiryBalanceDelta,

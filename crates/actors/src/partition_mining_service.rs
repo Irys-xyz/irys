@@ -82,6 +82,7 @@ impl PartitionMiningServiceInner {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn set_mining(&mut self, should_mine: bool) {
         debug!(
             "Setting should_mine to {} from {}",
@@ -90,6 +91,7 @@ impl PartitionMiningServiceInner {
         self.should_mine = should_mine;
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn update_difficulty(&mut self, new_diff: U256) {
         debug!(
             "Updating difficulty target in partition miner {}: from {} to {} (diff: {})",
@@ -101,6 +103,7 @@ impl PartitionMiningServiceInner {
         self.difficulty = new_diff;
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn handle_partitions_expiration(&mut self, expired: &H256List) {
         if let Some(partition_hash) = self.storage_module.partition_hash() {
             if expired.0.contains(&partition_hash) {
@@ -144,6 +147,7 @@ impl PartitionMiningServiceInner {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn get_recall_range(
         &mut self,
         step: u64,
@@ -188,6 +192,7 @@ impl PartitionMiningServiceInner {
             .wrap_err("recall range larger than u64")
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn mine_partition_with_seed(
         &mut self,
         mining_seed: irys_types::H256,
@@ -282,6 +287,7 @@ impl PartitionMiningServiceInner {
         Ok(None)
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn handle_seed(&mut self, msg: &BroadcastMiningSeed) {
         let seed = msg.seed.clone();
         if !self.should_mine {

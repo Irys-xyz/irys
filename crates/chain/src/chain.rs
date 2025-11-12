@@ -15,6 +15,7 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
+    mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
@@ -106,6 +107,7 @@ pub struct IrysNodeCtx {
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
+    pub mempool_guard: MempoolReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub partition_controllers: Vec<PartitionMiningController>,
@@ -132,6 +134,7 @@ impl IrysNodeCtx {
     pub fn get_api_state(&self) -> ApiState {
         ApiState {
             mempool_service: self.service_senders.mempool.clone(),
+            mempool_guard: self.mempool_guard.clone(),
             chunk_provider: self.chunk_provider.clone(),
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
@@ -147,6 +150,7 @@ impl IrysNodeCtx {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self) {
         info!("stop function called, shutting down...");
         if let Err(e) = self.stop_mining() {
@@ -481,7 +485,7 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
-    #[tracing::instrument(skip_all, fields(expected_genesis_hash))]
+    #[tracing::instrument(level = "trace", skip_all, fields(expected_genesis_hash))]
     async fn fetch_genesis_from_trusted_peer(
         &self,
         expected_genesis_hash: H256,
@@ -541,6 +545,7 @@ impl IrysNode {
     ///
     /// # Returns
     /// * `eyre::Result<()>` - Success or error result of the database operations
+    #[tracing::instrument(level = "trace", skip_all)]
     fn persist_genesis_block_and_commitments(
         &self,
         genesis_block: &IrysBlockHeader,
@@ -585,6 +590,7 @@ impl IrysNode {
     }
 
     /// Initializes the node (genesis or non-genesis)
+    #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
@@ -814,6 +820,7 @@ impl IrysNode {
         Ok(ctx)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     fn init_services_thread(
         config: Config,
         latest_block: Arc<IrysBlockHeader>,
@@ -915,6 +922,7 @@ impl IrysNode {
         Ok(actor_main_thread_handle)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.height = latest_block_height))]
     fn init_reth_thread(
         config: Config,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
@@ -1007,6 +1015,7 @@ impl IrysNode {
         Ok(reth_thread_handler)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     async fn init_services(
         config: &Config,
         genesis_hash: H256,
@@ -1194,6 +1203,9 @@ impl IrysNode {
             .await
             .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
 
+        // Create the MempoolReadGuard for block discovery service
+        let mempool_guard = MempoolReadGuard::new(mempool_state.clone());
+
         // Create the MempoolPledgeProvider
         let mempool_pledge_provider = Arc::new(MempoolPledgeProvider::new(
             mempool_state,
@@ -1225,6 +1237,7 @@ impl IrysNode {
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
+            mempool_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
             &service_senders,
@@ -1249,6 +1262,7 @@ impl IrysNode {
             &service_senders,
             &block_index_guard,
             &block_tree_guard,
+            &mempool_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
             receivers.block_discovery,
@@ -1401,6 +1415,7 @@ impl IrysNode {
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_state_readonly,
+            mempool_guard: mempool_guard.clone(),
             service_senders: service_senders.clone(),
             partition_controllers,
             packing_waiter: packing_handle.waiter(),
@@ -1495,6 +1510,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
+                mempool_guard: mempool_guard.clone(),
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_guard,
                 db: irys_db,
@@ -1540,6 +1556,7 @@ impl IrysNode {
     }
 
     #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
@@ -1768,6 +1785,7 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
+        mempool_guard: &MempoolReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
         block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
@@ -1776,6 +1794,7 @@ impl IrysNode {
         let block_discovery_inner = BlockDiscoveryServiceInner {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
+            mempool_guard: mempool_guard.clone(),
             db: irys_db.clone(),
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
@@ -1941,6 +1960,7 @@ async fn init_reth_db(
     Ok((reth_node, reth_db))
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
         open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir())?;
