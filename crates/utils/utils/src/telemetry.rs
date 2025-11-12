@@ -145,7 +145,7 @@ pub fn init_telemetry() -> Result<()> {
 
     subscriber.init();
 
-    // Take any other pre-existig panic hook to chain after flushing
+    // Take any other pre-existing panic hook to chain after flushing
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         let message = panic_info
