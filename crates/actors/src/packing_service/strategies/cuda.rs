@@ -34,6 +34,7 @@ impl CudaPackingStrategy {
 
 #[async_trait]
 impl super::PackingStrategy for CudaPackingStrategy {
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = *chunk_range.0.start(), chunk.range_end = *chunk_range.0.end(), partition.hash = %partition_hash))]
     async fn pack(
         &self,
         storage_module: &Arc<StorageModule>,

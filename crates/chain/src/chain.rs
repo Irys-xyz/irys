@@ -150,6 +150,7 @@ impl IrysNodeCtx {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self) {
         info!("stop function called, shutting down...");
         if let Err(e) = self.stop_mining() {
@@ -484,7 +485,7 @@ impl IrysNode {
         (genesis_block, commitments)
     }
 
-    #[tracing::instrument(skip_all, fields(expected_genesis_hash))]
+    #[tracing::instrument(level = "trace", skip_all, fields(expected_genesis_hash))]
     async fn fetch_genesis_from_trusted_peer(
         &self,
         expected_genesis_hash: H256,
@@ -544,6 +545,7 @@ impl IrysNode {
     ///
     /// # Returns
     /// * `eyre::Result<()>` - Success or error result of the database operations
+    #[tracing::instrument(level = "trace", skip_all)]
     fn persist_genesis_block_and_commitments(
         &self,
         genesis_block: &IrysBlockHeader,
@@ -588,6 +590,7 @@ impl IrysNode {
     }
 
     /// Initializes the node (genesis or non-genesis)
+    #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
@@ -817,6 +820,7 @@ impl IrysNode {
         Ok(ctx)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     fn init_services_thread(
         config: Config,
         latest_block: Arc<IrysBlockHeader>,
@@ -918,6 +922,7 @@ impl IrysNode {
         Ok(actor_main_thread_handle)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.height = latest_block_height))]
     fn init_reth_thread(
         config: Config,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
@@ -1010,6 +1015,7 @@ impl IrysNode {
         Ok(reth_thread_handler)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     async fn init_services(
         config: &Config,
         genesis_hash: H256,
@@ -1550,6 +1556,7 @@ impl IrysNode {
     }
 
     #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
         vdf_shutdown_receiver: mpsc::Receiver<()>,
@@ -1953,6 +1960,7 @@ async fn init_reth_db(
     Ok((reth_node, reth_db))
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
         open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir())?;

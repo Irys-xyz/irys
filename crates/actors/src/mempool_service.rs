@@ -69,6 +69,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
 /// covers the total cost (value + fee) of the transaction.
 #[inline]
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
 pub fn validate_funding(
     reth_adapter: &IrysRethNodeAdapter,
     commitment_tx: &irys_types::CommitmentTransaction,
@@ -121,6 +122,7 @@ pub fn validate_funding(
 ///   transactions - this will validate against the current canonical tip)
 /// - value must match the commitment type rules
 #[inline]
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
 pub fn validate_commitment_transaction(
     reth_adapter: &IrysRethNodeAdapter,
     consensus: &irys_types::ConsensusConfig,
@@ -256,7 +258,7 @@ pub enum MempoolServiceMessage {
 }
 
 impl Inner {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
     pub async fn handle_message(&self, msg: MempoolServiceMessage) -> eyre::Result<()> {
         match msg {
@@ -396,6 +398,7 @@ impl Inner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
         let state = self.mempool_state.read().await;
 
@@ -460,6 +463,7 @@ impl Inner {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]
     async fn remove_from_blacklists(&self, tx_ids: Vec<H256>) {
         let mut state = self.mempool_state.write().await;
         for tx_id in tx_ids {
@@ -467,8 +471,8 @@ impl Inner {
         }
     }
 
-    #[instrument(skip_all)]
-    pub async fn validate_tx_anchor_for_inclusion(
+    #[instrument(level = "trace", skip_all)]
+    pub async fn validate_anchor_for_inclusion(
         &self,
         min_anchor_height: u64,
         max_anchor_height: u64,
@@ -657,7 +661,7 @@ impl Inner {
             }
 
             if !self
-                .validate_tx_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
                 .await?
             {
                 continue;
@@ -856,7 +860,7 @@ impl Inner {
             }
 
             if !self
-                .validate_tx_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
+                .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
                 .await?
             {
                 continue;
@@ -954,6 +958,7 @@ impl Inner {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(canonical.len = canonical.len(), submit_tx.count = submit_tx.len()))]
     pub async fn get_publish_txs_and_proofs(
         &self,
         canonical: &[BlockTreeEntry],
@@ -996,7 +1001,7 @@ impl Inner {
                 let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
                 if let Some(cached_data_root) = cached_data_root {
                     let txids = cached_data_root.txid_set;
-                    debug!(tx.ids = ?txids, "Publish candidates");
+                    trace!(tx.ids = ?txids, "Publish candidates");
                     publish_txids.extend(txids)
                 }
             }
@@ -1230,7 +1235,7 @@ impl Inner {
 
     /// return block header from mempool, if found
     /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
-    #[expect(clippy::unused_async)]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_hash, include_chunk = include_chunk))]
     pub async fn handle_get_block_header_message(
         &self,
         block_hash: H256,
@@ -1250,9 +1255,9 @@ impl Inner {
     // Resolves an anchor (block hash) to it's height
     // if it couldn't find the anchor, returns None
     // set canonical to true to enforce that the anchor must be part of the current canonical chain
+    #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
     pub fn get_anchor_height(&self, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
-        // check the mempool, then block tree, then DB
-
+        // check the block tree, then DB
         if let Some(height) = {
             // in a block so rust doesn't complain about it being held across an await point
             // I suspect if let Some desugars to something that lint doesn't like
@@ -1284,7 +1289,7 @@ impl Inner {
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
     // if the anchor is valid, returns anchor block height
-    #[instrument(skip_all, fields(tx.id = %tx.id(), anchor = %tx.anchor()))]
+    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_tx_anchor(
         &self,
         tx: &impl IrysTransactionCommon,
@@ -1322,7 +1327,7 @@ impl Inner {
                 self.mempool_state.write().await,
                 tx_id,
                 format!(
-                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height}"
+                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height})"
                 ),
             );
 
@@ -1330,6 +1335,7 @@ impl Inner {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn persist_mempool_to_disk(&self) -> eyre::Result<()> {
         let base_path = self.config.node_config.mempool_dir();
 
@@ -1379,6 +1385,7 @@ impl Inner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn restore_mempool_from_disk(&self) {
         let recovered =
             RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
@@ -1438,7 +1445,7 @@ impl Inner {
     }
 
     // Helper to verify signature
-    #[instrument(skip_all, fields(tx.id = %tx.id()))]
+    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id()))]
     pub async fn validate_signature<
         T: irys_types::versioning::Signable
             + IrysTransactionCommon
@@ -1507,7 +1514,7 @@ impl Inner {
 
     /// Calculate the expected protocol fee for permanent storage
     /// This includes base network fee + ingress proof rewards
-    #[tracing::instrument(err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn calculate_perm_storage_fee(
         &self,
         bytes_to_store: u64,
@@ -1524,6 +1531,7 @@ impl Inner {
 
     /// Calculate the expected term fee for temporary storage
     /// This matches the calculation in the pricing API and uses dynamic epoch count
+    #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store))]
     pub fn calculate_term_storage_fee(
         &self,
         bytes_to_store: u64,

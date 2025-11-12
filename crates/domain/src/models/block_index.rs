@@ -267,7 +267,7 @@ fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
     let mut file = OpenOptions::new()
         .read(true)

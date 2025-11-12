@@ -64,6 +64,7 @@ impl ServiceHandleWithShutdownSignal {
     /// # Errors
     ///
     /// If the task panics, an error is returned.
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn stop(mut self) -> Result<(), tokio::task::JoinError> {
         info!("Called stop on task \"{}\"", self.name);
         match self.shutdown_tx.send(()).await {
@@ -88,6 +89,7 @@ impl ServiceHandleWithShutdownSignal {
     /// # Errors
     ///
     /// If the task panics, an error is returned.
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn wait_for_exit(&mut self) -> Result<(), tokio::task::JoinError> {
         info!("Waiting for task \"{}\" to exit", self.name);
         let handle = &mut self.handle;

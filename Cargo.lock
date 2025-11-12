@@ -4982,6 +4982,7 @@ dependencies = [
  "reth",
  "reth-db",
  "reth-ethereum-primitives",
+ "reth-payload-primitives",
  "reth-transaction-pool",
  "rstest",
  "rust_decimal",

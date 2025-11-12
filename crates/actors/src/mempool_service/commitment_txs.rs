@@ -17,6 +17,7 @@ impl Inner {
     // Shared pre-checks for both API and Gossip commitment ingress paths.
     // Performs signature validation, whitelist check, mempool/db duplicate detection, and anchor validation.
     #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
     async fn precheck_commitment_ingress_common(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -73,6 +74,7 @@ impl Inner {
     // The log_status_debug flag controls whether the status log is at debug (API) or trace (Gossip) level.
     // The warn_on_unstaked flag controls whether we emit a warning on Unstaked status (true for API only).
     #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
     async fn process_commitment_after_prechecks(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -196,6 +198,7 @@ impl Inner {
     }
 
     /// Check stake/pledge whitelist; reject if address is not whitelisted.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
     async fn check_commitment_whitelist(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -252,6 +255,7 @@ impl Inner {
     }
 
     /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.
+    #[tracing::instrument(level = "trace", skip_all, fields(account.signer = ?signer))]
     async fn process_pending_pledges_for_new_stake(&self, signer: Address) {
         let mut guard = self.mempool_state.write().await;
         let pop = guard.pending_pledges.pop(&signer);
@@ -378,7 +382,7 @@ impl Inner {
     }
 
     /// read specified commitment txs from mempool
-    #[instrument(skip_all, name = "get_commitment_tx")]
+    #[instrument(level = "trace", skip_all, name = "get_commitment_tx", fields(tx.count = commitment_tx_ids.len()))]
     pub async fn handle_get_commitment_tx_message(
         &self,
         commitment_tx_ids: Vec<H256>,
@@ -496,7 +500,7 @@ impl Inner {
         found
     }
 
-    #[tracing::instrument(skip_all, fields(tx.id = ?commitment_tx.id))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
