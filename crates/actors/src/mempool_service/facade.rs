@@ -249,7 +249,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx))
+            .send(MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx))
             .expect("to send GetStakeAndPledgeWhitelist message");
 
         rx.await
