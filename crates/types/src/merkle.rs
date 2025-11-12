@@ -460,13 +460,13 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
     Ok((leaves, and_regular.then_some(regular_leaves)))
 }
 
-pub struct DataRootLeave {
+pub struct DataRootLeaf {
     pub data_root: H256,
     pub tx_size: usize,
 }
 
 /// Generates merkle leaves from data roots
-pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeaf]) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for data_root in data_roots.iter() {
@@ -603,11 +603,11 @@ mod tests {
         // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
         // Create two simple leaves using data roots to avoid chunked input complexity
         let leaves = generate_leaves_from_data_roots(&[
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([1_u8; HASH_SIZE]),
                 tx_size: 5,
             },
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([2_u8; HASH_SIZE]),
                 tx_size: 7,
             },
@@ -705,11 +705,11 @@ mod tests {
         // Build a simple two-leaf tree: left size = 5 bytes, right size = 7 bytes
         // So the branch pivot is 5, and the right leaf's right_bound is 12.
         let leaves = generate_leaves_from_data_roots(&[
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([9_u8; HASH_SIZE]),
                 tx_size: 5,
             },
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([8_u8; HASH_SIZE]),
                 tx_size: 7,
             },
@@ -771,11 +771,11 @@ mod tests {
     fn validate_path_rejects_above_right_bound() {
         // Same two-leaf setup as previous test
         let leaves = generate_leaves_from_data_roots(&[
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([7_u8; HASH_SIZE]),
                 tx_size: 5,
             },
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([6_u8; HASH_SIZE]),
                 tx_size: 7,
             },
