@@ -263,7 +263,7 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     )
     .await;
 
-    node.node_ctx.stop().await;
+    node.stop().await;
 
     Ok(())
 }

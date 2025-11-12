@@ -51,12 +51,10 @@ async fn main() -> eyre::Result<()> {
     handle.start_mining()?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
-    tokio::task::spawn_blocking(|| {
-        reth_thread_handle.unwrap().join().unwrap();
-    })
-    .await?;
+    let shutdown_reason =
+        tokio::task::spawn_blocking(|| reth_thread_handle.unwrap().join().unwrap()).await?;
 
-    handle.stop().await;
+    handle.stop(shutdown_reason).await;
 
     Ok(())
 }
