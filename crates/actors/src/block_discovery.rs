@@ -495,7 +495,7 @@ impl BlockDiscoveryServiceInner {
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
         // TODO: we can remove cloning (here and in the loop)
-        // by extracing out just the metadata we need (height, hash, data ledger tx ids)
+        // by extracting out just the metadata we need (height, hash, data ledger tx ids)
         let mut parent_block = previous_block_header.clone();
 
         // set of valid anchor block hashes for TRANSACTIONS
@@ -527,7 +527,6 @@ impl BlockDiscoveryServiceInner {
                     }
 
                     // Continue the loop - get the next parent block from the block tree
-                    // TODO: fallback to the database - this allows for larger ingress anchor expiry depths
                     let previous_block_header = match block_tree
                         .get_block(&parent_block.previous_block_hash)
                     {
@@ -563,8 +562,6 @@ impl BlockDiscoveryServiceInner {
 
         // get any remaining valid_ingress_anchor_block hashes from the block index
         // we do not need the full block headers, so we use the block index
-        // note: this relies on the block tree not pruning before the block index
-        // which is enforced by Config::validate
         {
             // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
             let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
@@ -597,6 +594,7 @@ impl BlockDiscoveryServiceInner {
 
         // validate anchors for submit, publish, commitments, and ingress proofs
         // (in this context, it means that anchors must be part of the fork/chain that the currently validating block is on)
+        // NOTE: these will probably be collapsed into the validation logic above
 
         // check anchors for submit ledger
         for tx in submit_txs.iter() {

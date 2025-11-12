@@ -2012,11 +2012,6 @@ pub async fn data_txs_are_valid(
                 }
             })?;
 
-            // // Validate the anchor
-            // for proof in tx_proofs {
-            //     // check if the anchor is known
-            // }
-
             // Validate assigned ingress proofs and get counts
             let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
                 &tx_proofs,
