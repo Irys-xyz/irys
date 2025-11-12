@@ -63,8 +63,8 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
     let mut wrong_data_size_tx = genesis_signer.create_publish_transaction(
         data,
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
 
     wrong_data_size_tx.header.data_root = data_root;
@@ -119,8 +119,8 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
     let mut wrong_data_size_tx2 = genesis_signer.create_publish_transaction(
         data2.clone(),
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
     wrong_data_size_tx2.header.data_size = bad_data_size;
     wrong_data_size_tx2 = genesis_signer.sign_transaction(wrong_data_size_tx2)?;

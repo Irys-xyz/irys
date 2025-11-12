@@ -743,6 +743,7 @@ mod tests {
         service.db.update(|wtx| {
             let cached = irys_database::db_cache::CachedDataRoot {
                 data_size: 1024, // 1 KB
+                data_size_confirmed: true,
                 txid_set: vec![],
                 block_set: vec![],
                 expiry_height: None,
@@ -957,6 +958,7 @@ mod tests {
 
                 let cached = irys_database::db_cache::CachedDataRoot {
                     data_size: entry_size,
+                    data_size_confirmed: true,
                     txid_set: vec![],
                     block_set: vec![],
                     expiry_height: None,

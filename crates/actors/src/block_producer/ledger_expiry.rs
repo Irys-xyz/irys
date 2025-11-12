@@ -679,9 +679,11 @@ fn aggregate_balance_deltas(
                     .perm_fee
                     .ok_or_eyre("unpromoted tx should have the prem fee present")?;
                 // Add refund to the vector (already sorted by tx_id due to transaction sorting)
-                balance_delta
-                    .user_perm_fee_refunds
-                    .push((data_tx.id, perm_fee, data_tx.signer));
+                balance_delta.user_perm_fee_refunds.push((
+                    data_tx.id,
+                    perm_fee.get(),
+                    data_tx.signer,
+                ));
             } else {
                 tracing::debug!(
                     tx.id = ?data_tx.id,
@@ -750,14 +752,14 @@ mod tests {
         // Create test transactions
         let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
-            term_fee: U256::from(1000),
+            term_fee: U256::from(1000).into(),
             data_size: 100,
             ..Default::default()
         });
 
         let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
-            term_fee: U256::from(2000),
+            term_fee: U256::from(2000).into(),
             data_size: 200,
             ..Default::default()
         });

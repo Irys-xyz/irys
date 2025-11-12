@@ -170,10 +170,9 @@ impl alloy_rlp::Decodable for IrysSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BoundedFee;
 
-    use crate::{
-        irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256, U256,
-    };
+    use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
     use alloy_primitives::Address;
     use alloy_rlp::{Decodable as _, Encodable as _};
@@ -210,8 +209,8 @@ mod tests {
             data_root: H256::from([3_u8; 32]),
             data_size: 242,
             header_size: 0,
-            term_fee: U256::from(99_u64),
-            perm_fee: Some(U256::from(98_u64)),
+            term_fee: BoundedFee::from(99_u64),
+            perm_fee: Some(BoundedFee::from(98_u64)),
             ledger_id: 0,
             bundle_format: None,
             chain_id: testing_config.chain_id,

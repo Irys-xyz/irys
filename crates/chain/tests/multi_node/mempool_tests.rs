@@ -71,8 +71,8 @@ async fn heavy_pending_chunks_test() -> eyre::Result<()> {
     let tx = signer.create_publish_transaction(
         data,
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
     let tx = signer.sign_transaction(tx)?;
 
@@ -144,8 +144,8 @@ async fn preheader_rejects_oversized_data_path() -> eyre::Result<()> {
     let tx = signer.create_publish_transaction(
         data.clone(),
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
     let tx = signer.sign_transaction(tx)?;
 
@@ -212,8 +212,8 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
     let tx = signer.create_publish_transaction(
         tx_data,
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
     let tx = signer.sign_transaction(tx)?;
 
@@ -278,8 +278,8 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
     let tx = signer.create_publish_transaction(
         data.clone(),
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
     let tx = signer.sign_transaction(tx)?;
 

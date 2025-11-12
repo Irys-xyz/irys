@@ -5,8 +5,8 @@ use irys_reth::shadow_tx::{
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, H256, U256,
+    Address, BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader,
+    IngressProofsList, IrysBlockHeader, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -452,7 +452,7 @@ impl<'a> ShadowTxGenerator<'a> {
         // The block producer reward (5% of term_fee) is paid separately via transaction_fee
         let treasury_amount = term_charges
             .term_fee_treasury
-            .saturating_add(tx.perm_fee.unwrap_or(U256::zero()));
+            .saturating_add(tx.perm_fee.unwrap_or(BoundedFee::zero()).get());
 
         Ok(ShadowMetadata {
             shadow_tx: ShadowTransaction::new_v1(
@@ -770,12 +770,12 @@ mod tests {
         });
 
         let tx = signer
-            .create_publish_transaction(data, anchor, actual_perm_fee, term_fee)
+            .create_publish_transaction(data, anchor, actual_perm_fee.into(), term_fee.into())
             .expect("Failed to create publish transaction");
 
         // Modify the header to reflect the original perm_fee intent
         let mut header = tx.header;
-        header.perm_fee = perm_fee;
+        header.perm_fee = perm_fee.map(Into::into);
         header
     }
 
@@ -1006,7 +1006,7 @@ mod tests {
         };
 
         // Calculate expected values
-        let term_charges = TermFeeCharges::new(term_fee, &config).unwrap();
+        let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Create expected shadow transactions directly
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![
@@ -1152,10 +1152,11 @@ mod tests {
         };
 
         // Calculate expected values
-        let term_charges = TermFeeCharges::new(term_fee, &config).unwrap();
+        let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Since perm_fee was calculated with 4 proofs in mind
-        let publish_charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
+        let publish_charges =
+            PublishFeeCharges::new(perm_fee.into(), term_fee.into(), &config).unwrap();
 
         // Calculate individual ingress rewards (4 proofs total)
         let base_reward_per_proof = publish_charges.ingress_proof_reward / U256::from(4);

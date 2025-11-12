@@ -99,8 +99,8 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        price_info.term_fee,
-        Some(insufficient_perm_fee), // Insufficient perm_fee!
+        price_info.term_fee.into(),
+        Some(insufficient_perm_fee.into()), // Insufficient perm_fee!
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
@@ -219,8 +219,8 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        wrong_term_fee,            // Insufficient term fee
-        Some(price_info.perm_fee), // Correct perm fee for parent EMA
+        wrong_term_fee.into(),            // Insufficient term fee
+        Some(price_info.perm_fee.into()), // Correct perm fee for parent EMA
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
