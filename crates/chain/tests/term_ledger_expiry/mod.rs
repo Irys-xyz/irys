@@ -702,9 +702,6 @@ async fn ledger_expiry_test(params: LedgerExpiryTestParams) -> eyre::Result<()> 
     ctx.verify_final_balance()?;
 
     // Cleanup
-    ctx.node
-        .node_ctx
-        .stop(irys_types::ShutdownReason::TestComplete)
-        .await;
+    ctx.node.stop().await;
     Ok(())
 }
