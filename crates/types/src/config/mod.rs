@@ -125,6 +125,7 @@ impl From<&NodeConfig> for MempoolConfig {
             max_commitment_txs_per_block: consensus.max_commitment_txs_per_block,
             anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
+            max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
         }
     }
 }
@@ -228,6 +229,9 @@ pub struct MempoolConfig {
     /// Maximum commitment transactions per address
     /// Limits the resources that can be consumed by a single address
     pub max_commitments_per_address: usize,
+
+    /// Maximum number of concurrent handlers for mempool messages
+    pub max_concurrent_mempool_tasks: usize,
 }
 
 pub mod serde_utils {

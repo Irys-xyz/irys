@@ -65,8 +65,6 @@ use std::{
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
-const MAX_CONCURRENT_MEMPOOL_TASKS: usize = 50;
-
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
 /// covers the total cost (value + fee) of the transaction.
@@ -1925,6 +1923,7 @@ impl MempoolService {
         let block_tree_read_guard = block_tree_read_guard.clone();
         let config = config.clone();
         let mempool_config = &config.mempool;
+        let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
         let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
@@ -1959,7 +1958,7 @@ impl MempoolService {
                         storage_modules_guard,
                         pledge_provider,
                         message_handler_semaphore: Arc::new(Semaphore::new(
-                            MAX_CONCURRENT_MEMPOOL_TASKS,
+                            max_concurrent_mempool_tasks,
                         )),
                     }),
                 };
@@ -1991,39 +1990,16 @@ impl MempoolService {
                     match msg {
                         Some(msg) => {
                             let inner = Arc::clone(&self.inner);
-                            let permit = inner.message_handler_semaphore.clone().try_acquire_owned();
+                            // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
+                            let semaphore = inner.message_handler_semaphore.clone();
+                            let permit = semaphore.acquire_owned().await;
 
-                            match permit {
-                                Ok(permit) => {
-                                    runtime_handle.spawn(async move {
-                                        let _permit = permit; // Hold until task completes
-                                        if let Err(err) = inner.handle_message(msg).await {
-                                            error!("Error handling mempool message: {:?}", err);
-                                        }
-                                    });
+                            runtime_handle.spawn(async move {
+                                let _permit = permit; // Hold until task completes
+                                if let Err(err) = inner.handle_message(msg).await {
+                                    error!("Error handling mempool message: {:?}", err);
                                 }
-                                Err(_) => {
-                                    // Semaphore at capacity - spawn task that waits for permit
-                                    runtime_handle.spawn(async move {
-                                        let res = inner.message_handler_semaphore.clone()
-                                            .acquire_owned()
-                                            .await;
-
-                                        let permit = match res {
-                                            Ok(permit) => permit,
-                                            Err(err) => {
-                                                error!("Semaphore closed unexpectedly: {:?}", err);
-                                                return;
-                                            }
-                                        };
-
-                                        let _permit = permit;
-                                        if let Err(err) = inner.handle_message(msg).await {
-                                            error!("Error handling mempool message: {:?}", err);
-                                        }
-                                    });
-                                }
-                            }
+                            });
                         }
                         None => {
                             warn!("receiver channel closed");
