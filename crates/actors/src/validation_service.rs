@@ -32,7 +32,7 @@ use tokio::{
     sync::{broadcast, mpsc::UnboundedReceiver, Notify},
     time::Duration,
 };
-use tracing::{debug, error, info, instrument, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 mod active_validations;
 mod block_validation_task;
@@ -96,6 +96,7 @@ pub(crate) struct ValidationServiceInner {
 
 impl ValidationService {
     /// Spawn a new validation service
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_validation")]
     pub fn spawn_service(
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
@@ -164,7 +165,7 @@ impl ValidationService {
     }
 
     /// Main service loop
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("starting validation service");
 
@@ -312,7 +313,7 @@ impl ValidationService {
 }
 
 impl ValidationServiceInner {
-    #[instrument(skip_all, fields(%step=desired_step_number))]
+    #[tracing::instrument(level = "trace", skip_all, fields(%step=desired_step_number))]
     async fn wait_for_step_with_cancel(
         &self,
         desired_step_number: u64,
@@ -341,7 +342,7 @@ impl ValidationServiceInner {
 
     /// Perform vdf fast forwarding and validation.
     /// If for some reason the vdf steps are invalid and / or don't match then the function will return an error
-    #[tracing::instrument(skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
+    #[tracing::instrument(level = "trace", err, skip_all, fields(block.hash = ?block.block_hash, block.height = ?block.height))]
     pub(crate) async fn ensure_vdf_is_valid(
         self: Arc<Self>,
         block: &IrysBlockHeader,
@@ -417,7 +418,7 @@ impl ValidationServiceInner {
 }
 
 /// Handle broadcast channel receive results
-#[instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn handle_broadcast_recv<T>(
     result: Result<T, broadcast::error::RecvError>,
 ) -> eyre::Result<Option<T>> {

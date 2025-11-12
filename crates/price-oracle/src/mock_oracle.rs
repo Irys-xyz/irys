@@ -51,7 +51,7 @@ impl MockOracle {
     /// # Panics
     ///
     /// If the underlying mutex gets poisoned.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     #[expect(
         clippy::unwrap_in_result,
         reason = "lock poisoning is considered irrecoverable in the mock oracle context"

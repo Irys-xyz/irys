@@ -152,7 +152,7 @@ impl SingleOracle {
         }
     }
 
-    #[tracing::instrument(skip(self), err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn update_once(&self) -> eyre::Result<()> {
         match &self.source {
             OracleSource::Mock(m) => {

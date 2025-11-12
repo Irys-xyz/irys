@@ -248,7 +248,7 @@ pub struct MempoolTxsBundle {
 
 impl BlockProducerService {
     /// Spawn a new block producer service
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_producer")]
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
@@ -284,7 +284,7 @@ impl BlockProducerService {
         }
     }
 
-    #[tracing::instrument(skip_all, ret, err)]
+    #[tracing::instrument(level = "trace", skip_all, ret, err)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block producer service");
         debug!(
@@ -319,7 +319,7 @@ impl BlockProducerService {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
@@ -426,7 +426,7 @@ impl BlockProducerService {
     }
 
     /// Internal method to produce a block without the non-Send trait
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(level = "trace", skip_all, fields(
         solution.hash = %solution.solution_hash,
         solution.vdf_step = solution.vdf_step,
         solution.mining_address = %solution.mining_address
@@ -608,7 +608,7 @@ pub trait BlockProdStrategy {
     /// the latest validated block on timeout to ensure production continues.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
-    #[tracing::instrument(skip(self), level = "debug")]
+    #[tracing::instrument(skip_all, level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
@@ -717,6 +717,7 @@ pub trait BlockProdStrategy {
     ///
     /// After producing a block, we check if the parent is still the best canonical block.
     /// If not, we rebuild the block on the new parent, reusing the same solution hash.
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn fully_produce_new_block_candidate(
         &self,
         solution: SolutionContext,
@@ -900,7 +901,7 @@ pub trait BlockProdStrategy {
         Ok((payload, final_treasury_balance))
     }
 
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(level = "trace", skip_all, fields(
         payload.parent_evm_hash = %prev_block_header.evm_block_hash,
         payload.timestamp_sec = timestamp_ms / 1000,
         payload.shadow_tx_count = shadow_txs.len()
@@ -1000,6 +1001,7 @@ pub trait BlockProdStrategy {
         Ok(built_payload)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn produce_block_without_broadcasting(
         &self,
         solution: &SolutionContext,
@@ -1208,6 +1210,7 @@ pub trait BlockProdStrategy {
         Ok(Some((block, stats)))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn broadcast_block(
         &self,
         block: Arc<IrysBlockHeader>,
@@ -1327,6 +1330,7 @@ pub trait BlockProdStrategy {
         Ok(ema_calculation)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1383,7 +1387,7 @@ pub trait BlockProdStrategy {
         height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn fetch_best_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1400,7 +1404,7 @@ pub trait BlockProdStrategy {
         rx.await.expect("to receive txns")
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn fetch_parent_snapshots(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1420,7 +1424,7 @@ pub trait BlockProdStrategy {
         Ok((epoch, commit))
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn build_commitment_ledger_epoch(
         &self,
         commit_snapshot: &CommitmentSnapshot,
@@ -1440,7 +1444,7 @@ pub trait BlockProdStrategy {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn derive_unpledge_refunds(
         &self,
         commit_snapshot: &CommitmentSnapshot,
@@ -1463,6 +1467,7 @@ pub trait BlockProdStrategy {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn get_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1548,6 +1553,7 @@ fn millis_since_epoch(time: SystemTime) -> u128 {
 }
 
 #[inline]
+#[tracing::instrument(level = "trace", skip_all)]
 fn choose_oracle_price(
     parent_ts_ms: u128,
     parent_price: IrysTokenPrice,
@@ -1583,6 +1589,7 @@ impl BlockProdStrategy for ProductionStrategy {
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
 

@@ -71,6 +71,7 @@ impl ChunkCacheService {
     /// # Returns
     ///
     /// A `TokioServiceHandle` for managing the service lifecycle
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_cache")]
     pub fn spawn_service(
         block_index_guard: BlockIndexReadGuard,
         block_tree_guard: BlockTreeReadGuard,
@@ -106,6 +107,7 @@ impl ChunkCacheService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting chunk cache service");
 
@@ -145,6 +147,7 @@ impl ChunkCacheService {
     /// Handles two message types:
     /// - `OnBlockMigrated`: Triggers cache pruning based on block height
     /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
+    #[tracing::instrument(level = "trace", skip_all)]
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         match msg {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
@@ -240,6 +243,7 @@ impl ChunkCacheService {
         self.prune_data_root_cache(prune_height)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(migration_height))]
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
         let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
@@ -296,6 +300,7 @@ impl ChunkCacheService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
         let mut chunks_pruned: u64 = 0;
         let mut eviction_count: usize = 0;
@@ -387,6 +392,7 @@ impl ChunkCacheService {
 
     /// Prunes cache entries older than max_age_seconds
     /// Uses FIFO eviction based on cached_at timestamp
+    #[tracing::instrument(level = "trace", skip_all, fields(max_age_seconds))]
     fn prune_cache_by_time(&self, max_age_seconds: u64) -> eyre::Result<()> {
         let now = irys_types::UnixTimestamp::now()
             .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
@@ -445,6 +451,7 @@ impl ChunkCacheService {
 
     /// Prunes cache entries to bring cache size under configured limit
     /// Uses FIFO eviction based on cached_at timestamp (oldest first)
+    #[tracing::instrument(level = "trace", skip_all, fields(max_cache_size_bytes))]
     fn prune_cache_by_size(
         &self,
         current_chunk_count: u64,

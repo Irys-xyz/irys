@@ -247,6 +247,7 @@ pub async fn calculate_expired_ledger_fees(
 }
 
 /// Fetches a block header from mempool or database
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
 async fn get_block_by_hash(
     block_hash: H256,
     mempool_sender: &UnboundedSender<MempoolServiceMessage>,
@@ -516,6 +517,13 @@ async fn process_boundary_block(
 /// # Returns
 ///
 /// mapping of tx ID to miners who stored it
+#[tracing::instrument(level = "trace", skip_all, fields(
+    chunk.prev_max_offset = %prev_max_offset,
+    chunk.partition_start = %partition_range.start(),
+    chunk.partition_end = %partition_range.end(),
+    tx.count = transactions.len(),
+    boundary.is_earliest = is_earliest
+))]
 fn filter_transactions_by_chunk_range(
     transactions: Vec<DataTransactionHeader>,
     prev_max_offset: LedgerChunkOffset,

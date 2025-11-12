@@ -59,7 +59,7 @@ impl ApiClient {
         Ok(Self { client })
     }
 
-    #[instrument(skip(self, cancel_token), fields(endpoint = %endpoint))]
+    #[instrument(skip_all, fields(endpoint = %endpoint))]
     async fn get_with_cancellation<T>(
         &self,
         url: &str,
