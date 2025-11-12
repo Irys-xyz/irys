@@ -433,8 +433,8 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     let data_tx = genesis_signer.create_publish_transaction(
         data.clone(),
         genesis_node.get_anchor().await?,
-        price_info.perm_fee,
-        price_info.term_fee,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
     )?;
     let data_tx = genesis_signer.sign_transaction(data_tx)?;
 
