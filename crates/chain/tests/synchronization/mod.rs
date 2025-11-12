@@ -81,8 +81,8 @@ async fn heavy_should_resume_from_the_same_block() -> eyre::Result<()> {
         .create_publish_transaction(
             data_bytes.clone(),
             node.get_anchor().await?,
-            price_info.perm_fee,
-            price_info.term_fee,
+            price_info.perm_fee.into(),
+            price_info.term_fee.into(),
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
