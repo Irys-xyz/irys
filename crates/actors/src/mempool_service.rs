@@ -1360,7 +1360,7 @@ impl Inner {
                 self.mempool_state.write().await,
                 tx_id,
                 format!(
-                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height}"
+                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height})"
                 ),
             );
 

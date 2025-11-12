@@ -18,7 +18,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle,
+    IrysTransactionId, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -54,6 +54,18 @@ pub enum BlockDiscoveryError {
     InvalidCommitmentTransaction(String),
     #[error("Invalid data ledgers length: expected {0} ledgers, got {1}")]
     InvalidDataLedgersLength(u32, usize),
+    #[error("Anchor {anchor} for {item_type:?} is unknown/not part of this block's fork")]
+    InvalidAnchor {
+        item_type: AnchorItemType,
+        anchor: BlockHash,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AnchorItemType {
+    DataTransaction { tx_id: H256 },
+    IngressProof { promotion_target_id: H256 },
+    SystemTransaction { tx_id: H256 },
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -475,46 +487,151 @@ impl BlockDiscoveryServiceInner {
         let block_height = new_block_header.height;
 
         let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
-        let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
-        let mut parent_block = previous_block_header.clone();
+        let min_tx_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+        let min_ingress_proof_anchor_height =
+            block_height.saturating_sub(mempool_config.ingress_proof_anchor_expiry_depth.into());
 
         let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
-        if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-            while parent_block.height >= min_anchor_height {
-                // Check to see if any data txids appeared in prior blocks
-                let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+        // TODO: we can remove cloning (here and in the loop)
+        // by extracing out just the metadata we need (height, hash, data ledger tx ids)
+        let mut parent_block = previous_block_header.clone();
 
-                // Compare each ledger type between current and parent blocks
-                if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
-                    // Check for intersection between current and parent txids for this ledger
-                    for txid in incoming_data_tx_ids {
-                        if parent_txids.contains(txid) {
-                            return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
+        // set of valid anchor block hashes for TRANSACTIONS
+        // computed from the block tree & database
+        // short vecs are probably faster than HashSet
+        let mut valid_tx_anchor_blocks = vec![];
+        let bt_finished_height = {
+            // block for block_tree
+            // explicit drop(block_tree) isn't good enough for the compiler
+            let block_tree = block_tree_guard.read();
+            if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
+                while parent_block.height >= min_tx_anchor_height {
+                    // Check to see if any data txids appeared in prior blocks
+                    let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+
+                    // Compare each ledger type between current and parent blocks
+                    if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
+                        // Check for intersection between current and parent txids for this ledger
+                        for txid in incoming_data_tx_ids {
+                            if parent_txids.contains(txid) {
+                                return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
+                            }
                         }
                     }
-                }
+                    valid_tx_anchor_blocks.push(parent_block.block_hash);
 
-                if parent_block.height == 0 {
-                    break;
-                }
-
-                // Continue the loop - get the next parent block
-                // Get the next parent block and own it
-                let previous_block_header = match db.view_eyre(|tx| {
-                    block_header_by_hash(tx, &parent_block.previous_block_hash, false)
-                }) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => break,
-                    Err(e) => {
-                        return Err(BlockDiscoveryError::InternalError(
-                            BlockDiscoveryInternalError::DatabaseError(e),
-                        ))
+                    if parent_block.height == 0 {
+                        break;
                     }
-                };
 
-                parent_block = previous_block_header; // Move instead of borrow
+                    // Continue the loop - get the next parent block from the block tree
+                    // TODO: fallback to the database - this allows for larger ingress anchor expiry depths
+                    let previous_block_header = match block_tree
+                        .get_block(&parent_block.previous_block_hash)
+                    {
+                        Some(header) => header.clone(),
+                        None =>
+                        // fall back to the database
+                        {
+                            match db.view_eyre(|tx| {
+                                block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                            }) {
+                                Ok(Some(header)) => header,
+                                Ok(None) => {
+                                    return Err(BlockDiscoveryError::PreviousBlockNotFound {
+                                        previous_block_hash: parent_block.previous_block_hash,
+                                    });
+                                }
+                                Err(e) => {
+                                    return Err(BlockDiscoveryError::InternalError(
+                                        BlockDiscoveryInternalError::DatabaseError(e),
+                                    ))
+                                }
+                            }
+                        }
+                    };
+
+                    parent_block = previous_block_header; // Move instead of borrow
+                }
+            }
+            parent_block.height
+        };
+
+        let mut valid_ingress_anchor_blocks = valid_tx_anchor_blocks.clone();
+
+        // get any remaining valid_ingress_anchor_block hashes from the block index
+        // we do not need the full block headers, so we use the block index
+        // note: this relies on the block tree not pruning before the block index
+        // which is enforced by Config::validate
+        {
+            // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
+            let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
+            error!("JESSEDEBUG mipah {min_ingress_proof_anchor_height} block_height {} bt_finished_height {bt_finished_height} remaining {remaining}", &new_block_header.height);
+
+            // get from the block index
+            let block_index = self.block_index_guard.read();
+            for height in min_ingress_proof_anchor_height..bt_finished_height {
+                let block_index_item = block_index.get_item(height).unwrap(); // TODO: fix
+                error!("JESSEDEBUG {height} {block_index_item:?}");
+
+                let safe_sub = parent_block.height.checked_sub(1);
+                if safe_sub.is_some_and(|s| s == height)
+                    && block_index_item.block_hash != parent_block.previous_block_hash
+                {
+                    // this indicates some sort of block index corruption
+                    panic!("Internal assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}", &parent_block.height - 1, &parent_block.previous_block_hash, &height, &block_index_item.block_hash)
+                }
+                valid_ingress_anchor_blocks.push(block_index_item.block_hash);
+                error!(
+                    "JESSEDEBUG ADD_ANCHOR {}, {}",
+                    height, block_index_item.block_hash
+                )
+            }
+        }
+        error!(
+            "JESSEDEBUG ANCHORS {} {:?}",
+            &new_block_header.block_hash, &valid_ingress_anchor_blocks
+        );
+
+        // validate anchors for submit, publish, commitments, and ingress proofs
+        // (in this context, it means that anchors must be part of the fork/chain that the currently validating block is on)
+
+        // check anchors for submit ledger
+        for tx in submit_txs.iter() {
+            if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+                return Err(BlockDiscoveryError::InvalidAnchor {
+                    item_type: AnchorItemType::DataTransaction { tx_id: tx.id },
+                    anchor: tx.anchor,
+                });
+            }
+        }
+        // for commitments
+        for tx in commitments.iter() {
+            if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+                return Err(BlockDiscoveryError::InvalidAnchor {
+                    item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
+                    anchor: tx.anchor,
+                });
+            }
+        }
+
+        // and for ingress proofs
+        for tx_header in publish_txs.iter() {
+            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
+                BlockDiscoveryError::BlockValidationError(PreValidationError::IngressProofsMissing)
+            })?;
+            // Validate the anchors
+            for proof in tx_proofs.iter() {
+                if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
+                    return Err(BlockDiscoveryError::InvalidAnchor {
+                        item_type: AnchorItemType::IngressProof {
+                            promotion_target_id: tx_header.id,
+                        },
+                        anchor: proof.anchor,
+                    });
+                }
             }
         }
 

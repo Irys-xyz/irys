@@ -1,14 +1,19 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
 use irys_actors::{
-    async_trait, block_validation::ValidationError, reth_ethereum_primitives, BlockProdStrategy,
-    BlockProducerInner, ProductionStrategy,
+    async_trait,
+    block_discovery::{AnchorItemType, BlockDiscoveryError, BlockDiscoveryFacade as _},
+    block_validation::ValidationError,
+    reth_ethereum_primitives,
+    shadow_tx_generator::PublishLedgerWithTxs,
+    BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
 use irys_types::{
-    storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256,
+    ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
+    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, H256, U256,
 };
 use reth::payload::EthBuiltPayload;
 
@@ -349,6 +354,280 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     );
 
     peer_node.stop().await;
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<()> {
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+    );
+    irys_testing_utils::initialize_tracing();
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub txs: Mutex<MempoolTxs>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn fetch_best_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+        ) -> eyre::Result<MempoolTxs> {
+            Ok(self.txs.lock().unwrap().clone())
+        }
+    }
+    let seconds_to_wait = 30;
+
+    let mut config = NodeConfig::testing()
+        .with_consensus(|consensus| {
+            consensus.chunk_size = 32;
+            consensus.num_partitions_per_slot = 1;
+            consensus.epoch.num_blocks_in_epoch = 3;
+            consensus.block_migration_depth = 1;
+            consensus.mempool.tx_anchor_expiry_depth = 3;
+            consensus.mempool.ingress_proof_anchor_expiry_depth = 5;
+            consensus.number_of_ingress_proofs_total = 1;
+        })
+        .with_genesis_peer_discovery_timeout(1000);
+
+    let genesis_signer = config.signer();
+    let peer_signer = config.new_random_signer();
+
+    // Start the genesis node and wait for packing
+    config.fund_genesis_accounts(vec![&peer_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    let peer_node = genesis_node
+        .testing_peer_with_assignments(&peer_signer)
+        .await?;
+
+    // mine some blocks
+    // genesis_node.mine_blocks(5).await?;
+    // let blk5 = genesis_node.get_block_by_height(5).await?;
+
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let mut data: Vec<u8> = Vec::new();
+    for chunk in &chunks {
+        data.extend_from_slice(chunk);
+    }
+
+    let genesis_hash = genesis_node.get_block_by_height(0).await?.block_hash;
+
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let data_tx = genesis_signer.create_publish_transaction(
+        data.clone(),
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee,
+        price_info.term_fee,
+    )?;
+    let data_tx = genesis_signer.sign_transaction(data_tx)?;
+
+    let data_tx_old = genesis_signer.create_publish_transaction(
+        data.clone(),
+        genesis_hash,
+        price_info.perm_fee,
+        price_info.term_fee,
+    )?;
+    let old_data_tx = genesis_signer.sign_transaction(data_tx_old)?;
+
+    let mut commitment_tx_old = CommitmentTransaction::new_pledge(
+        &config.consensus_config(),
+        genesis_hash,
+        genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
+        genesis_signer.address(),
+    )
+    .await;
+
+    genesis_signer.sign_commitment(&mut commitment_tx_old)?;
+
+    // now we generate an ingress proof anchored to the genesis block
+    // this should be too old, and should be rejected by the API.
+    let too_old_ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        data_tx.header.data_root,
+        chunks.iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        genesis_hash,
+    )?;
+
+    // submit old tx via gossip
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // ingest as gossip
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+            old_data_tx.header.clone(),
+            tx,
+        ))
+        .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+    // Ignore possible ingestion errors in tests
+    rx.await??;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // ingest as gossip
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+            commitment_tx_old.clone(),
+            tx,
+        ))
+        .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+    // Ignore possible ingestion errors in tests
+    rx.await??;
+
+    // submit the correctly anchored data tx
+    genesis_node.ingest_data_tx(data_tx.header.clone()).await?;
+
+    genesis_node
+        .wait_for_mempool(data_tx.header.id, seconds_to_wait)
+        .await?;
+
+    // ensure we are past the 5-block anchor depth for ingress proofs
+    // the txs we injected above never get included in these blocks
+    // as get best mempool txs is too smart for that ;)
+    genesis_node
+        .mine_blocks(
+            6_usize.saturating_sub(genesis_node.get_canonical_chain_height().await as usize),
+        )
+        .await?;
+
+    peer_node.wait_until_height(6, seconds_to_wait).await?;
+
+    // the tx should still be in the mempool
+    genesis_node
+        .wait_for_mempool(old_data_tx.header.id, seconds_to_wait)
+        .await?;
+
+    // 1.) try producing a block with an incorrectly anchored data tx
+    let txs = Mutex::new(MempoolTxs {
+        commitment_tx: vec![],
+        submit_tx: vec![old_data_tx.header],
+        publish_tx: PublishLedgerWithTxs::default(),
+    });
+
+    let block_prod_strategy = EvilBlockProdStrategy {
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+        txs,
+    };
+
+    genesis_node.gossip_disable();
+    let (block, _, _) = block_prod_strategy
+        .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    genesis_node.gossip_enable();
+    let preval_res = block_prod_strategy
+        .inner()
+        .block_discovery
+        .handle_block(Arc::clone(&block), false)
+        .await;
+
+    // dbg!(&preval_res);
+
+    assert!(matches!(
+        preval_res,
+        Err(BlockDiscoveryError::InvalidAnchor {
+            item_type: AnchorItemType::DataTransaction { tx_id: _ },
+            anchor: _
+        })
+    ));
+
+    // 2.) commitment tx with incorrectly anchored commitment tx
+    {
+        let mut lck = block_prod_strategy.txs.lock().unwrap();
+        *lck = MempoolTxs {
+            commitment_tx: vec![commitment_tx_old.clone()],
+            submit_tx: vec![],
+            publish_tx: PublishLedgerWithTxs::default(),
+        };
+    };
+
+    genesis_node.gossip_disable();
+    let (block, _, _) = block_prod_strategy
+        .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    genesis_node.gossip_enable();
+    let preval_res = block_prod_strategy
+        .inner()
+        .block_discovery
+        .handle_block(Arc::clone(&block), false)
+        .await;
+
+    // dbg!(&preval_res);
+
+    assert!(matches!(
+        preval_res,
+        Err(BlockDiscoveryError::InvalidAnchor {
+            item_type: AnchorItemType::SystemTransaction { tx_id: _ },
+            anchor: _
+        })
+    ));
+
+    // 3.) publish tx with incorrectly anchored ingress proof (publish txs don't get their anchor re-validated)
+    {
+        let mut lck = block_prod_strategy.txs.lock().unwrap();
+        *lck = MempoolTxs {
+            commitment_tx: vec![],
+            submit_tx: vec![],
+            publish_tx: PublishLedgerWithTxs {
+                txs: vec![data_tx.header.clone()],
+                proofs: Some(IngressProofsList(vec![too_old_ingress_proof])),
+            },
+        }
+    };
+
+    genesis_node.gossip_disable();
+    let (block, _, _) = block_prod_strategy
+        .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    genesis_node.gossip_enable();
+    let preval_res = block_prod_strategy
+        .inner()
+        .block_discovery
+        .handle_block(Arc::clone(&block), false)
+        .await;
+
+    // dbg!(&preval_res);
+
+    assert!(matches!(
+        preval_res,
+        Err(BlockDiscoveryError::InvalidAnchor {
+            item_type: AnchorItemType::IngressProof {
+                promotion_target_id: _
+            },
+            anchor: _
+        })
+    ));
+
+    // Wind down test
     genesis_node.stop().await;
 
     Ok(())
