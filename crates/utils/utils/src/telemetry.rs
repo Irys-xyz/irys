@@ -151,7 +151,7 @@ pub fn init_telemetry() -> Result<()> {
         let message = panic_info
             .payload()
             .downcast_ref::<&str>()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .or(panic_info.payload().downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "<non-string panic>".to_string());
 
@@ -183,28 +183,38 @@ pub fn init_telemetry() -> Result<()> {
 /// Flush pending telemetry before process termination (e.g., panic hooks)
 #[cfg(feature = "telemetry")]
 pub fn flush_telemetry() -> Result<bool> {
-    let mut flushed = false;
+    use opentelemetry_sdk::logs::SdkLoggerProvider;
+    let logger_flush_res = LOGGER_PROVIDER.get().map(SdkLoggerProvider::force_flush);
 
-    // Force flush the logger provider (logs)
-    if let Some(logger_provider) = LOGGER_PROVIDER.get() {
-        logger_provider
-            .force_flush()
-            .map_err(|e| eyre::eyre!("Failed to flush log provider: {:?}", e))?;
-        flushed = true;
-    }
+    let tracer_flush_res = TRACER_PROVIDER.get().map(SdkTracerProvider::force_flush);
 
-    if let Some(tracer_provider) = TRACER_PROVIDER.get() {
-        tracer_provider
-            .force_flush()
-            .map_err(|e| eyre::eyre!("Failed to flush tracer provider: {:?}", e))?;
-        flushed = true;
-    }
+    let (flushed, res) = match (logger_flush_res, tracer_flush_res) {
+        (Some(Ok(_)), Some(Ok(_))) => (true, Ok(true)),
+        (None, Some(Ok(_))) => (true, Ok(true)),
+        (Some(Ok(_)), None) => (true, Ok(true)),
+
+        (None | Some(Ok(_)), Some(Err(te))) => {
+            (true, Err(eyre::eyre!("Failed to flush tracer: {:?}", &te)))
+        }
+        (Some(Err(le)), None | Some(Ok(_))) => {
+            (true, Err(eyre::eyre!("Failed to flush logger: {:?}", &le)))
+        }
+        (Some(Err(le)), Some(Err(te))) => (
+            false,
+            Err(eyre::eyre!(
+                "Failed to flush Logger & tracer - logger: {:?}\n tracer: {:?}",
+                &le,
+                te
+            )),
+        ),
+        (None, None) => (false, Ok(false)),
+    };
 
     if flushed {
         std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
-    Ok(flushed)
+    res
 }
 
 // No-op implementations when the telemetry feature is disabled

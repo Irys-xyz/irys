@@ -1005,8 +1005,9 @@ impl IrysNode {
                 reth_node.provider.database.db.close();
                 reth_provider::cleanup_provider(&irys_provider);
                 info!("Reth thread finished");
-                
-                irys_utils::telemetry::flush_telemetry();
+                if let Err(e) = irys_utils::telemetry::flush_telemetry() {
+                    error!("Unable to flush telemetry: {:?}", &e)
+                };
             })?;
 
         Ok(reth_thread_handler)
