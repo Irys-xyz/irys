@@ -128,7 +128,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         });
 
     // The balance should decrease by the total cost plus block producer reward
-    let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
+    let expected_spent = U256::from_le_bytes(tx.header.total_cost().get().to_le_bytes());
 
     let actual_spent = TEST_USER_BALANCE_IRYS - signer_balance;
 
@@ -441,7 +441,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // 1. The total storage cost (term_fee + perm_fee if any)
     // 2. The gas costs for the EVM transaction
     // 3. The transfer amount
-    let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
+    let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().get().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
 
     let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT;
@@ -1268,8 +1268,8 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        price_info.term_fee,
-        Some(price_info.perm_fee),
+        price_info.term_fee.into(),
+        Some(price_info.perm_fee.into()),
     )?;
     let malicious_tx = poor_user_signer.sign_transaction(malicious_tx)?;
 

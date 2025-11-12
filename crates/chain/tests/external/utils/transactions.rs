@@ -57,10 +57,12 @@ pub(crate) async fn post_data_transaction(
 
     let data = generate_test_data(data_size);
 
-    let tx =
-        signer
-            .irys_signer
-            .create_publish_transaction(data.clone(), anchor, perm_fee, term_fee)?;
+    let tx = signer.irys_signer.create_publish_transaction(
+        data.clone(),
+        anchor,
+        perm_fee.into(),
+        term_fee.into(),
+    )?;
 
     let signed_tx = signer.irys_signer.sign_transaction(tx)?;
     info!("Created and signed transaction: {:?}", signed_tx.header.id);

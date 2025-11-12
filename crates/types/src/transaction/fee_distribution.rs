@@ -29,8 +29,8 @@ use crate::ingress::IngressProof;
 use crate::storage_pricing::{mul_div, PRECISION_SCALE};
 pub use crate::CommitmentType;
 pub use crate::{
-    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
+    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64,
+    BoundedFee, Compact, ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use eyre::{ensure, eyre, OptionExt as _};
 use serde::{Deserialize, Serialize};
@@ -59,26 +59,29 @@ pub struct TermFeeCharges {
 }
 
 impl TermFeeCharges {
-    pub fn new(term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
+    pub fn new(term_fee: BoundedFee, config: &ConsensusConfig) -> eyre::Result<Self> {
+        // Extract U256 for calculations - BoundedFee ensures input is validated
+        let term_fee_amount = term_fee.get();
+
         // Calculate block producer reward using immediate_tx_inclusion_reward_percent from config
         let block_producer_reward = mul_div(
-            term_fee,
+            term_fee_amount,
             config.immediate_tx_inclusion_reward_percent.amount,
             PRECISION_SCALE,
         )?;
 
         // The rest of the fee goes to the treasury
-        let term_fee_treasury = term_fee
+        let term_fee_treasury = term_fee_amount
             .checked_sub(block_producer_reward)
             .ok_or_eyre("block producer reward larger than term fee")?;
 
         // Validate that the sum of all the fields equals term_fee
         ensure!(
-            block_producer_reward.saturating_add(term_fee_treasury) == term_fee,
+            block_producer_reward.saturating_add(term_fee_treasury) == term_fee_amount,
             "Fee distribution must equal total term_fee: {} + {} != {}",
             block_producer_reward,
             term_fee_treasury,
-            term_fee
+            term_fee_amount
         );
 
         Ok(Self {
@@ -156,10 +159,18 @@ pub struct PublishFeeCharges {
 }
 
 impl PublishFeeCharges {
-    pub fn new(perm_fee: U256, term_fee: U256, config: &ConsensusConfig) -> eyre::Result<Self> {
+    pub fn new(
+        perm_fee: BoundedFee,
+        term_fee: BoundedFee,
+        config: &ConsensusConfig,
+    ) -> eyre::Result<Self> {
+        // Extract U256 for calculations - BoundedFee ensures inputs are validated
+        let perm_fee_amount = perm_fee.get();
+        let term_fee_amount = term_fee.get();
+
         // Calculate the reward for each ingress proof (x% of term_fee)
         let per_ingress_reward = mul_div(
-            term_fee,
+            term_fee_amount,
             config.immediate_tx_inclusion_reward_percent.amount,
             PRECISION_SCALE,
         )
@@ -175,31 +186,31 @@ impl PublishFeeCharges {
         // Validate that perm_fee is sufficient to cover ingress rewards
         // According to business rules, perm_fee = base_permanent_storage_cost + ingress_proof_rewards
         ensure!(
-            perm_fee >= ingress_proof_reward,
+            perm_fee_amount >= ingress_proof_reward,
             "Permanent fee ({}) is insufficient to cover ingress proof rewards ({})",
-            perm_fee,
+            perm_fee_amount,
             ingress_proof_reward
         );
 
         // The perm_fee should include base perm storage cost + ingress rewards
         // Treasury gets the base permanent storage cost portion (perm_fee - ingress_rewards)
-        let perm_fee_treasury = perm_fee.saturating_sub(ingress_proof_reward);
+        let perm_fee_treasury = perm_fee_amount.saturating_sub(ingress_proof_reward);
 
         // Validate that treasury amount is non-zero (there should be base storage cost)
         ensure!(
             perm_fee_treasury > U256::from(0),
             "Permanent fee ({}) must include base storage cost in addition to ingress proof rewards ({})",
-            perm_fee,
+            perm_fee_amount,
             ingress_proof_reward
         );
 
         // Validate that the sum of all fields equals perm_fee
         ensure!(
-            ingress_proof_reward.saturating_add(perm_fee_treasury) == perm_fee,
+            ingress_proof_reward.saturating_add(perm_fee_treasury) == perm_fee_amount,
             "Fee distribution must equal total perm_fee: {} + {} != {}",
             ingress_proof_reward,
             perm_fee_treasury,
-            perm_fee
+            perm_fee_amount
         );
 
         Ok(Self {
@@ -280,7 +291,7 @@ mod tests {
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
-        let term_fee = U256::from(1000);
+        let term_fee = BoundedFee::from(1000_u64);
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Block producer should get 5% = 50
@@ -290,14 +301,14 @@ mod tests {
         // Total should equal term_fee
         assert_eq!(
             charges.block_producer_reward + charges.term_fee_treasury,
-            term_fee
+            term_fee.get()
         );
     }
 
     #[test]
     fn test_term_fee_distribution_on_expiry() {
         let config = ConsensusConfig::testing();
-        let term_fee = U256::from(1000);
+        let term_fee = BoundedFee::from(1000_u64);
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Test with 10 miners
@@ -328,7 +339,7 @@ mod tests {
     #[test]
     fn test_term_fee_distribution_with_remainder() {
         let config = ConsensusConfig::testing();
-        let term_fee = U256::from(1003); // Not evenly divisible by 10
+        let term_fee = BoundedFee::from(1003_u64); // Not evenly divisible by 10
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Test with 10 miners
@@ -359,7 +370,7 @@ mod tests {
     #[test]
     fn test_term_fee_distribution_empty_miners() {
         let config = ConsensusConfig::testing();
-        let term_fee = U256::from(1000);
+        let term_fee = BoundedFee::from(1000_u64);
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         let miners: Vec<Address> = vec![];
@@ -373,7 +384,7 @@ mod tests {
     #[test]
     fn test_term_fee_distribution_rejects_duplicates() {
         let config = ConsensusConfig::testing();
-        let term_fee = U256::from(1000);
+        let term_fee = BoundedFee::from(1000_u64);
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Create miners list with duplicates
@@ -399,8 +410,8 @@ mod tests {
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         config.number_of_ingress_proofs_total = 3;
 
-        let term_fee = U256::from(1000);
-        let perm_fee = U256::from(10000);
+        let term_fee = BoundedFee::from(1000_u64);
+        let perm_fee = BoundedFee::from(10000_u64);
 
         let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
 
@@ -413,7 +424,7 @@ mod tests {
         // Total should equal perm_fee
         assert_eq!(
             charges.ingress_proof_reward + charges.perm_fee_treasury,
-            perm_fee
+            perm_fee.get()
         );
     }
 
@@ -426,8 +437,8 @@ mod tests {
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
-        let term_fee = U256::from(1000);
-        let perm_fee = U256::from(10000);
+        let term_fee = BoundedFee::from(1000_u64);
+        let perm_fee = BoundedFee::from(10000_u64);
         let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
 
         // Create some test ingress proofs
@@ -485,8 +496,8 @@ mod tests {
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         config.number_of_ingress_proofs_total = 3;
 
-        let term_fee = U256::from(1000);
-        let perm_fee = U256::from(100); // Too small to cover ingress rewards (150)
+        let term_fee = BoundedFee::from(1000_u64);
+        let perm_fee = BoundedFee::from(100_u64); // Too small to cover ingress rewards (150)
 
         let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
 
@@ -505,9 +516,9 @@ mod tests {
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
         config.number_of_ingress_proofs_total = 3;
 
-        let term_fee = U256::from(1000);
+        let term_fee = BoundedFee::from(1000_u64);
         // Exactly equal to ingress rewards (150), no base storage cost
-        let perm_fee = U256::from(150);
+        let perm_fee = BoundedFee::from(150_u64);
 
         let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
 
@@ -528,8 +539,8 @@ mod tests {
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
 
-        let term_fee = U256::from(1003); // Not evenly divisible
-        let perm_fee = U256::from(10000);
+        let term_fee = BoundedFee::from(1003_u64); // Not evenly divisible
+        let perm_fee = BoundedFee::from(10000_u64);
         let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
 
         // Create 3 test ingress proofs
