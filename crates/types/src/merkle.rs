@@ -105,6 +105,7 @@ pub struct ValidatePathResult {
     pub leaf_hash: [u8; HASH_SIZE],
     pub left_bound: u128,
     pub right_bound: u128,
+    pub is_rightmost_chunk: bool,
 }
 
 pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
@@ -147,6 +148,7 @@ pub fn validate_path(
 
     let mut left_bound: u128 = 0;
     let mut expected_path_hash = root_hash;
+    let mut is_rightmost_chunk = true;
 
     // Validate branches.
     for branch_proof in branch_proofs.iter() {
@@ -176,6 +178,8 @@ pub fn validate_path(
         // Keep track of left bound as we traverse down the branches
         if is_right_of_offset {
             left_bound = offset;
+        } else {
+            is_rightmost_chunk = false;
         }
 
         debug!(
@@ -221,6 +225,7 @@ pub fn validate_path(
         leaf_hash: leaf_proof.data_hash,
         left_bound,
         right_bound,
+        is_rightmost_chunk,
     })
 }
 
@@ -288,12 +293,19 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
     Ok((leaf_proof.data_hash, left_bound, right_bound))
 }
 
+/// (is_rightmost_chunk, max_byte_offset)
+pub type ChunkInfo = (bool, u64);
+
 /// Validates chunk of data against provided [`Proof`].
+/// Returns a [ChunkInfo] if successful `(is_rightmost_chunk, max_byte_offset)`
 pub fn validate_chunk(
     mut root_id: [u8; HASH_SIZE],
     chunk_node: &Node,
     proof: &Proof,
-) -> Result<(), Error> {
+) -> Result<ChunkInfo, Error> {
+    let mut is_rightmost_chunk = true;
+    let max_byte_offset: u64;
+
     match chunk_node {
         Node {
             data_hash: Some(data_hash),
@@ -342,6 +354,7 @@ pub fn validate_chunk(
                 root_id = if max_byte_range > &branch_proof.offset() {
                     branch_proof.right_id
                 } else {
+                    is_rightmost_chunk = false;
                     branch_proof.left_id
                 }
             }
@@ -356,12 +369,14 @@ pub fn validate_chunk(
             if id != root_id {
                 return Err(eyre!("Invalid Leaf Proof: root mismatch"));
             }
+
+            max_byte_offset = (*max_byte_range).try_into().unwrap();
         }
         _ => {
             unreachable!()
         }
     }
-    Ok(())
+    Ok((is_rightmost_chunk, max_byte_offset))
 }
 
 /// Generates data chunks from which the calculation of root id starts.
@@ -445,13 +460,13 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
     Ok((leaves, and_regular.then_some(regular_leaves)))
 }
 
-pub struct DataRootLeave {
+pub struct DataRootLeaf {
     pub data_root: H256,
     pub tx_size: usize,
 }
 
 /// Generates merkle leaves from data roots
-pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeave]) -> Result<Vec<Node>, Error> {
+pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeaf]) -> Result<Vec<Node>, Error> {
     let mut leaves = Vec::<Node>::new();
     let mut min_byte_range = 0;
     for data_root in data_roots.iter() {
@@ -584,15 +599,100 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validate_is_rightmost_chunk() {
+        // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
+        // Create two simple leaves using data roots to avoid chunked input complexity
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeaf {
+                data_root: H256([1_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeaf {
+                data_root: H256([2_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+        ])
+        .expect("expected valid leaves");
+
+        let leaf_node1 = leaves[0].clone();
+        let leaf_node2 = leaves[1].clone();
+
+        let root = generate_data_root(vec![leaf_node1, leaf_node2]).expect("expected data root");
+        let proofs = resolve_proofs(root.clone(), None).expect("expected proofs");
+
+        let proof1 = Base64::from(proofs[0].proof.clone());
+        let proof2 = Base64::from(proofs[1].proof.clone());
+
+        let left_result =
+            validate_path(root.id, &proof1, 0).expect("left leaf should validate at offset: 0");
+        let right_result =
+            validate_path(root.id, &proof2, 7).expect("left leaf should validate at offset: 7");
+
+        // Rightmost chunk detection
+        assert!(!left_result.is_rightmost_chunk);
+        assert!(right_result.is_rightmost_chunk);
+
+        // Last byte offset validation
+        assert_eq!(left_result.right_bound, 5);
+        assert_eq!(right_result.right_bound, 5 + 7);
+
+        // Build a 3 leaf data_root to validate we can still detect the rightmost chunk in an unbalanced binary tree
+        let leaves = generate_leaves_from_data_roots(&[
+            DataRootLeaf {
+                data_root: H256([1_u8; HASH_SIZE]),
+                tx_size: 5,
+            },
+            DataRootLeaf {
+                data_root: H256([2_u8; HASH_SIZE]),
+                tx_size: 7,
+            },
+            DataRootLeaf {
+                data_root: H256([3_u8; HASH_SIZE]),
+                tx_size: 11,
+            },
+        ])
+        .expect("expected valid leaves");
+
+        let leaf_node1 = leaves[0].clone();
+        let leaf_node2 = leaves[1].clone();
+        let leaf_node3 = leaves[2].clone();
+
+        let root = generate_data_root(vec![leaf_node1, leaf_node2, leaf_node3])
+            .expect("expected data root");
+        let proofs = resolve_proofs(root.clone(), None).expect("expected proofs");
+
+        let proof1 = Base64::from(proofs[0].proof.clone());
+        let proof2 = Base64::from(proofs[1].proof.clone());
+        let proof3 = Base64::from(proofs[2].proof.clone());
+
+        let left_result =
+            validate_path(root.id, &proof1, 0).expect("left leaf should validate at offset: 0");
+        let center_result =
+            validate_path(root.id, &proof2, 7).expect("left leaf should validate at offset: 7");
+        let right_result =
+            validate_path(root.id, &proof3, 23).expect("left leaf should validate at offset: 23");
+
+        // Rightmost chunk detection
+        assert!(!left_result.is_rightmost_chunk);
+        assert!(!center_result.is_rightmost_chunk);
+        assert!(right_result.is_rightmost_chunk);
+
+        // Last byte offset validation
+        assert_eq!(left_result.right_bound, 5);
+        assert_eq!(center_result.right_bound, 5 + 7);
+        assert_eq!(right_result.right_bound, 5 + 7 + 11);
+    }
+
+    #[test]
     fn branch_metadata_invariants_and_proof_offset() {
         // Build a minimal two-leaf tree and verify parent node metadata and proof encoding semantics.
         // Create two simple leaves using data roots to avoid chunked input complexity
         let leaves = generate_leaves_from_data_roots(&[
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([1_u8; HASH_SIZE]),
                 tx_size: 5,
             },
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([2_u8; HASH_SIZE]),
                 tx_size: 7,
             },
@@ -690,11 +790,11 @@ mod tests {
         // Build a simple two-leaf tree: left size = 5 bytes, right size = 7 bytes
         // So the branch pivot is 5, and the right leaf's right_bound is 12.
         let leaves = generate_leaves_from_data_roots(&[
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([9_u8; HASH_SIZE]),
                 tx_size: 5,
             },
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([8_u8; HASH_SIZE]),
                 tx_size: 7,
             },
@@ -756,11 +856,11 @@ mod tests {
     fn validate_path_rejects_above_right_bound() {
         // Same two-leaf setup as previous test
         let leaves = generate_leaves_from_data_roots(&[
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([7_u8; HASH_SIZE]),
                 tx_size: 5,
             },
-            DataRootLeave {
+            DataRootLeaf {
                 data_root: H256([6_u8; HASH_SIZE]),
                 tx_size: 7,
             },
