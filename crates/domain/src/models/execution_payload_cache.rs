@@ -241,7 +241,7 @@ impl ExecutionPayloadCache {
         self.cache.read().await.payloads.contains(evm_block_hash)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all)]
     pub async fn request_payload_from_the_network(
         &self,
         evm_block_hash: B256,

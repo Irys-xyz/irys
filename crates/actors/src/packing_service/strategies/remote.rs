@@ -38,6 +38,7 @@ impl RemotePackingStrategy {
     }
 
     /// Process a stream of packed chunks from a remote service
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = range_start, chunk.range = ?current_chunk_range, partition.hash = %partition_hash))]
     async fn process_chunk_stream(
         &self,
         mut stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
@@ -108,6 +109,7 @@ impl RemotePackingStrategy {
     }
 
     /// Try packing with a specific remote service
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = range_start, chunk.range_end = range_end, partition.hash = %partition_hash, remote.url = %remote.url))]
     async fn try_remote(
         &self,
         remote: &RemotePackingConfig,
@@ -175,6 +177,7 @@ impl RemotePackingStrategy {
 
 #[async_trait]
 impl super::PackingStrategy for RemotePackingStrategy {
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = *chunk_range.0.start(), chunk.range_end = *chunk_range.0.end(), partition.hash = %partition_hash))]
     async fn pack(
         &self,
         storage_module: &Arc<StorageModule>,

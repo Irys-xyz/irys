@@ -32,7 +32,7 @@ impl CoinMarketCapOracle {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn current_price(&self) -> eyre::Result<CoinMarketCapQuote> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));

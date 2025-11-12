@@ -2,6 +2,7 @@ use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
+    mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
@@ -321,6 +322,7 @@ pub enum ValidationError {
 }
 
 /// Full pre-validation steps for a block
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
@@ -860,7 +862,7 @@ pub fn get_recall_range(
 }
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
-#[tracing::instrument(skip_all, fields(
+#[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
     poa.chunk_offset = ?poa.partition_chunk_offset,
     poa.partition_hash = ?poa.partition_hash,
@@ -1005,10 +1007,11 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
-#[tracing::instrument(skip_all, fields(block = ?block.block_hash))]
+#[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     payload_provider: ExecutionPayloadCache,
@@ -1131,6 +1134,7 @@ pub async fn shadow_transactions_are_valid(
     let expected_txs = generate_expected_shadow_transactions_from_db(
         config,
         service_senders,
+        mempool_guard,
         block,
         db,
         parent_epoch_snapshot,
@@ -1190,7 +1194,7 @@ fn extract_leading_shadow_txs(
 
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
-#[tracing::instrument(skip_all, err, fields(
+#[tracing::instrument(level = "trace", skip_all, err, fields(
     block.hash = %block.block_hash,
     block.height = %block.height,
     block.evm_block_hash = %block.evm_block_hash
@@ -1249,10 +1253,11 @@ pub async fn submit_payload_to_reth(
 }
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions_from_db<'a>(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &'a IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
@@ -1278,7 +1283,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     };
 
     // Look up commitment txs
-    let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
+    let commitment_txs = extract_commitment_txs(config, mempool_guard, block, db).await?;
 
     // Lookup data txs
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
@@ -1368,7 +1373,7 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
 
 async fn extract_commitment_txs(
     config: &Config,
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
@@ -1384,8 +1389,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db, None)
-                    .await?
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db).await?
             }
             [] => {
                 // this is valid as we can have a block that contains 0 system ledgers
@@ -1432,7 +1436,7 @@ async fn extract_publish_ledger_with_txs(
 }
 
 /// Validates  the actual shadow transactions match the expected ones
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn validate_shadow_transactions_match(
     actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
     expected: impl Iterator<Item = ShadowTransaction>,
@@ -1508,10 +1512,10 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
+#[tracing::instrument(level = "trace", skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
@@ -1525,10 +1529,9 @@ pub async fn commitment_txs_are_valid(
         .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
-    let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db, None)
-            .await
-            .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
+    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db)
+        .await
+        .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -1729,7 +1732,7 @@ pub fn calculate_term_storage_base_network_fee(
 /// - Publish ledger transactions must have valid ingress proofs
 /// - All transactions must meet minimum fee requirements
 /// - Fee structures must be valid for proper reward distribution
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 pub async fn data_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -2368,7 +2371,7 @@ enum TxInclusionState {
     },
 }
 
-#[tracing::instrument(skip_all, fields(block.hash = ?block_under_validation.block_hash))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,

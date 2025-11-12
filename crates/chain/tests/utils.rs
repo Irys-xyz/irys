@@ -51,8 +51,9 @@ use irys_types::{
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
-    DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
-    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
+    DataTransactionHeader, DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId,
+    LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
+    UnpackedChunk,
 };
 use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
 use irys_vdf::state::VdfStateReadonly;
@@ -612,7 +613,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn wait_until_height(
         &self,
         target_height: u64,
@@ -659,7 +660,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     /// Wait for a specific block at the given height using event subscription
     /// This eliminates polling and race conditions by listening to BlockStateUpdated events
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn wait_for_block_at_height(
         &self,
         target_height: u64,
@@ -1412,7 +1413,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// wait for tx to appear in the mempool or be found in the database
-    #[tracing::instrument(skip_all, fields(tx_id), err)]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx_id), err)]
     pub async fn wait_for_mempool(
         &self,
         tx_id: IrysTransactionId,
@@ -2340,6 +2341,19 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(price_info)
     }
 
+    pub async fn ingest_ingress_proof(&self, ingress_proof: IngressProof) -> eyre::Result<()> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))?;
+
+        Ok(oneshot_rx.await??)
+    }
+
     pub async fn post_commitment_tx_raw_without_gossip(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -2665,7 +2679,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     /// Mine blocks until a condition is met
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn mine_until_condition<F>(
         &self,
         mut condition: F,

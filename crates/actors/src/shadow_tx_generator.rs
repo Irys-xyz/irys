@@ -15,7 +15,7 @@ use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Structure holding publish ledger transactions with their proofs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
     pub proofs: Option<IngressProofsList>,
@@ -129,6 +129,7 @@ impl Iterator for ShadowTxGenerator<'_> {
 }
 
 impl<'a> ShadowTxGenerator<'a> {
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a Address,
@@ -239,6 +240,7 @@ impl<'a> ShadowTxGenerator<'a> {
     }
 
     // Static helper methods for initialization
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn create_expired_ledger_shadow_txs(
         &self,
         balance_delta: &LedgerExpiryBalanceDelta,

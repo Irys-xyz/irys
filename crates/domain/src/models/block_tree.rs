@@ -974,7 +974,7 @@ impl BlockTree {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
-                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+                "get_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}",
                 prev_entry.chain_state, prev_hash, prev_entry.block.height
             );
             match prev_entry.chain_state {

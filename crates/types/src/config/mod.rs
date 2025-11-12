@@ -39,7 +39,7 @@ impl Config {
         // ensures the block tree is able to contain all unmigrated blocks
         ensure!(
             (self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth,
-            "Block tree depth ({}) is smaller than the block migration depth ({})",
+            "Block tree depth ({}) is smaller than the block migration depth ({}) - the block tree must be able to hold blocks until they're migrated",
             &self.consensus.block_tree_depth,
             &self.consensus.block_migration_depth
         );

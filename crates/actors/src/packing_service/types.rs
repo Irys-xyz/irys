@@ -101,6 +101,7 @@ impl PackingIdleWaiter {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(packing.timeout_secs = timeout.map(|d| d.as_secs())))]
     pub async fn wait_for_idle(&self, timeout: Option<Duration>) -> eyre::Result<()> {
         let (tx, rx) = oneshot::channel();
         self.packing_service_sender

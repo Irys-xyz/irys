@@ -438,6 +438,7 @@ impl BlockValidationTask {
             shadow_transactions_are_valid(
                 config,
                 service_senders,
+                &self.service_inner.mempool_guard,
                 block,
                 &self.service_inner.db,
                 self.service_inner.execution_payload_provider.clone(),
@@ -481,7 +482,7 @@ impl BlockValidationTask {
         let commitment_ordering_task = async move {
             commitment_txs_are_valid(
                 config,
-                service_senders,
+                &self.service_inner.mempool_guard,
                 block,
                 &self.service_inner.db,
                 &self.block_tree_guard,

@@ -4,7 +4,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 /// Replay vdf steps on local node, provided by an existing block's VDFLimiterInfo
 /// Assumes the provided steps have been *FULLY VALIDATED*
-#[tracing::instrument(err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 pub fn fast_forward_vdf_steps_from_block(
     vdf_limiter_info: &VDFLimiterInfo,
     vdf_fast_forward_sender: &UnboundedSender<VdfStep>,

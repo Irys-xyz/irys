@@ -9,7 +9,10 @@ use actix_web::{
     web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
-use irys_actors::{mempool_service::MempoolServiceMessage, pledge_provider::MempoolPledgeProvider};
+use irys_actors::{
+    mempool_guard::MempoolReadGuard, mempool_service::MempoolServiceMessage,
+    pledge_provider::MempoolPledgeProvider,
+};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
 use irys_reth_node_bridge::node::RethNodeProvider;
@@ -34,6 +37,7 @@ pub const API_VERSION: &str = "v1";
 #[derive(Clone)]
 pub struct ApiState {
     pub mempool_service: UnboundedSender<MempoolServiceMessage>,
+    pub mempool_guard: MempoolReadGuard,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerList,
     pub db: DatabaseProvider,
