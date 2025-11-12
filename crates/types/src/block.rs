@@ -17,7 +17,7 @@ use crate::{
     serialization::{optional_string_u64, string_u64},
     string_u128,
     transaction::DataTransactionHeader,
-    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave, H256List, IngressProofsList,
+    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
 
@@ -619,11 +619,11 @@ impl DataTransactionLedger {
         }
         let txs_data_roots = data_txs
             .iter()
-            .map(|h| DataRootLeave {
+            .map(|h| DataRootLeaf {
                 data_root: h.data_root,
                 tx_size: h.data_size as usize, // TODO: check this
             })
-            .collect::<Vec<DataRootLeave>>();
+            .collect::<Vec<DataRootLeaf>>();
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
         let root = generate_data_root(data_root_leaves).unwrap();
         let root_id = root.id;

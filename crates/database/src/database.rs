@@ -147,6 +147,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         Some(existing) => existing,
         None => CachedDataRoot {
             data_size: tx_header.data_size,
+            data_size_confirmed: false,
             txid_set: vec![tx_header.id],
             block_set: vec![],
             expiry_height: None,
@@ -158,6 +159,11 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
         cached_data_root.txid_set.push(tx_header.id);
+    }
+
+    // If the entry exists and the tx_headers data_size is larger than the one in the cache, update it
+    if cached_data_root.data_size < tx_header.data_size {
+        cached_data_root.data_size = tx_header.data_size;
     }
 
     // If the entry exists and a block header reference was provided, add the block hash reference if necessary

@@ -1,9 +1,9 @@
 use crate::db_cache::{GlobalChunkOffset, PartitionHashes};
 use crate::metadata::MetadataKey;
-use crate::submodule::tables::RelativeStartOffsets;
+use crate::submodule::tables::DataRootInfos;
 use crate::{
     db_cache::{CachedChunk, CachedChunkIndexEntry, CachedDataRoot},
-    submodule::tables::{ChunkOffsets, ChunkPathHashes},
+    submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
 use irys_types::{Address, Base64, PeerListItem};
@@ -89,10 +89,9 @@ impl_compression_for_compact!(
     CachedDataRoot,
     CachedChunkIndexEntry,
     CachedChunk,
-    ChunkOffsets,
     ChunkPathHashes,
     PartitionHashes,
-    RelativeStartOffsets,
+    DataRootInfos,
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof
@@ -153,8 +152,6 @@ table IngressProofs {
     type Value = CompactCachedIngressProof;
     type SubKey = Address;
 }
-
-
 
 /// Tracks the peer list of known peers as well as their reputation score.
 /// While the node maintains connections to a subset of these peers - the

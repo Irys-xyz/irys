@@ -10,7 +10,6 @@ use crate::{
 };
 use actix_web::{
     dev::Server,
-    middleware,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
@@ -25,6 +24,7 @@ use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+use tracing_actix_web::TracingLogger;
 
 /// Default deduplication window in milliseconds for data requests
 /// Prevents rapid duplicate requests within this time window
@@ -522,10 +522,13 @@ where
         let server = self;
 
         let server_handle = HttpServer::new(move || {
+            let span = tracing::info_span!(target: "irys-api-gossip", "gossip_server");
+            let _guard = span.enter();
+
             App::new()
                 .app_data(Data::new(server.clone()))
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
-                .wrap(middleware::Logger::default().log_target("gossip-server")) // TODO: use tracing_actix_web TracingLogger
+                .wrap(TracingLogger::default())
                 .service(
                     web::scope("/gossip")
                         .route("/transaction", web::post().to(Self::handle_transaction))

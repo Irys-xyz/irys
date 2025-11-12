@@ -67,19 +67,31 @@ impl UnpackedChunk {
         hash_sha256(data_path).into()
     }
 
-    /// a Chunk's tx relative end byte offset
-    /// due to legacy weirdness, the offset is of the end of the chunk, not the start
-    /// i.e for the first chunk, the offset is chunk_size instead of 0
+    /// Returns the transaction-relative byte offset of the last byte in this chunk.
+    ///
+    /// Chunk offsets in the merkle tree are based on end byte offsets:
+    /// - Chunk 0: bytes [0, chunk_size)            → ends at chunk_size - 1
+    /// - Chunk 1: bytes [chunk_size, 2*chunk_size) → ends at 2*chunk_size - 1
+    /// - Last chunk may be partial                 → ends at data_size - 1
+    ///
+    /// Note: Converting from chunk count to chunk offset requires subtracting 1
+    /// (e.g., 3 chunks means the last chunk has offset 2) the same is true
+    /// of the byte offsets in the chunk.
     pub fn end_byte_offset(&self, chunk_size: u64) -> u64 {
         if self.data_size == 0 {
             return 0;
         }
-        // magic: -1 to get a 0-based index
-        let last_index = self.data_size.div_ceil(chunk_size) - 1;
-        if self.tx_offset.0 as u64 == last_index {
-            self.data_size
+
+        // Calculate total number of chunks, then calculate the last chunks offset
+        let num_chunks = self.data_size.div_ceil(chunk_size);
+        let last_chunk_offset = num_chunks - 1;
+
+        if self.tx_offset.0 as u64 == last_chunk_offset {
+            // If it's the last chunk, the end byte offset is just # of bytes - 1
+            self.data_size - 1
         } else {
-            (*self.tx_offset + 1) as u64 * chunk_size - 1
+            // Intermediate chunks always end at a chunk boundary byte count minus 1 to make it an offset
+            (self.tx_offset.0 as u64 + 1) * chunk_size - 1
         }
     }
 }
@@ -321,7 +333,7 @@ pub struct BlockChunkOffset(u64);
     From,
     Into,
 )]
-pub struct RelativeChunkOffset(i32);
+pub struct RelativeChunkOffset(pub i32);
 
 impl Deref for RelativeChunkOffset {
     type Target = i32;
@@ -396,7 +408,7 @@ mod tests {
         };
         assert_eq!(chunk.end_byte_offset(64), 64 - 1);
     }
-    // Last (partial) chunk: end offset should equal total data_size
+    // Last (partial) chunk: end offset be one less than the total data_size (because it's an offset)
     #[test]
     fn end_byte_offset_last_chunk_trimmed() {
         let chunk = UnpackedChunk {
@@ -406,9 +418,9 @@ mod tests {
             bytes: Base64(vec![0; 8]),
             tx_offset: TxChunkOffset(3),
         };
-        assert_eq!(chunk.end_byte_offset(64), 200);
+        assert_eq!(chunk.end_byte_offset(64), 199);
     }
-    // Last chunk exact multiple: end offset should equal total data_size (full chunk)
+    // Last chunk exact multiple: end offset should be one less than the total data_size (because it's an offset)
     #[test]
     fn end_byte_offset_exact_multiple_last_full() {
         let chunk = UnpackedChunk {
@@ -418,6 +430,6 @@ mod tests {
             bytes: Base64(vec![0; 64]),
             tx_offset: TxChunkOffset(1),
         };
-        assert_eq!(chunk.end_byte_offset(64), 128);
+        assert_eq!(chunk.end_byte_offset(64), 127);
     }
 }

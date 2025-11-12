@@ -5,7 +5,6 @@ use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
-    middleware,
     web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
@@ -28,6 +27,7 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
+use tracing_actix_web::TracingLogger;
 
 use crate::routes::anchor;
 
@@ -171,6 +171,9 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     info!(custom.port = ?port, "Starting API server");
     let state = web::Data::new(app_state);
     HttpServer::new(move || {
+        let span = tracing::info_span!(target: "irys-api-http", "api_server");
+        let _guard = span.enter();
+
         let awc_client = awc::Client::new();
         App::new()
             .app_data(state.clone())
@@ -179,7 +182,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
                 JsonConfig::default()
                     .limit(1024 * 1024) // Set JSON payload limit to 1MB
                     .error_handler(|err, req| {
-                        warn!("JSON decode error for req {:?} - {:?}", &req.path(), &err);
+                        warn!("JSON decode error for req {} - {}", &req.path(), &err);
                         let error_message = format!("JSON decode/parse error: {}", err);
                         InternalError::from_response(
                             err,
@@ -192,7 +195,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
             .wrap(Cors::permissive())
-            .wrap(middleware::Logger::default().log_target("api-server"))
+            .wrap(TracingLogger::default()) // TODO: figure out how to change the `target` so we can easily filter HTTP and Gossip server logs
     })
     .listen(listener)
     .unwrap()

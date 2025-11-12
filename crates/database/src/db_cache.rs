@@ -81,6 +81,9 @@ pub struct CachedDataRoot {
     /// Total size (in bytes) of the data represented by the `data_root`
     pub data_size: u64,
 
+    /// Has this data_size been confirmed by the data_path of the rightmost chunk in the data_root
+    pub data_size_confirmed: bool,
+
     /// The set of all tx.ids' that contain this `data_root`
     pub txid_set: Vec<H256>,
 

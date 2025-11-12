@@ -52,7 +52,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
 
     let local_addr = listener.local_addr()?;
 
-    let (tx, rx) = channel(1);
+    let (tx, rx) = channel::<irys_types::ShutdownReason>(1);
     let exit_handle = tokio::spawn(start_worker(packing_config.clone(), listener, rx));
 
     // Wait for remote packing worker to be ready
@@ -188,7 +188,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
     }
 
     // node.stop().await;
-    tx.send(()).await?;
+    tx.send(irys_types::ShutdownReason::TestComplete).await?;
     exit_handle.await??;
     Ok(())
 }
