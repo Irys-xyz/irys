@@ -998,12 +998,14 @@ where
     let db_map = db_results?;
 
     debug!(
-        "mempool_results:\n {:?}",
-        mempool_map.iter().map(|x| x.0).collect::<Vec<_>>()
+        mempool_count = mempool_map.len(),
+        db_count = db_map.len(),
+        "Query results retrieved"
     );
-    debug!(
-        "db_results:\n {:?}",
-        db_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    trace!(
+        mempool_keys = ?mempool_map.keys().collect::<Vec<_>>(),
+        db_keys = ?db_map.keys().collect::<Vec<_>>(),
+        "Detailed query results"
     );
 
     // Combine results, preferring mempool

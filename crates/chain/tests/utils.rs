@@ -1847,7 +1847,9 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     pub async fn stop(self) -> IrysNodeTest<()> {
-        self.node_ctx.stop().await;
+        self.node_ctx
+            .stop(irys_types::ShutdownReason::TestComplete)
+            .await;
         let cfg = self.cfg;
         IrysNodeTest {
             node_ctx: (),
