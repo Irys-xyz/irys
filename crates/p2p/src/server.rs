@@ -23,7 +23,7 @@ use irys_types::{
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn, Instrument};
+use tracing::{debug, error, info, warn, Instrument as _};
 use tracing_actix_web::TracingLogger;
 
 /// Default deduplication window in milliseconds for data requests
@@ -139,10 +139,6 @@ where
         }
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
     #[tracing::instrument(skip_all)]
     async fn handle_block(
         server: Data<Self>,
@@ -435,6 +431,7 @@ where
         };
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
@@ -489,6 +486,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_pull_data(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
@@ -512,6 +510,7 @@ where
         match server
             .data_handler
             .handle_get_data_sync(data_request.0)
+            .in_current_span()
             .await
         {
             Ok(maybe_data) => HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data)),

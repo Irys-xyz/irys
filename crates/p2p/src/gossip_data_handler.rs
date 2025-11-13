@@ -25,7 +25,7 @@ use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{debug, error, instrument, warn, Instrument, Span};
+use tracing::{debug, error, instrument, warn, Instrument as _, Span};
 
 pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
 pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
@@ -840,6 +840,13 @@ where
 
                 match maybe_block {
                     Some(block) => {
+                        if block.poa.chunk.is_none() {
+                            error!(
+                                target = "p2p::gossip_data_handler::handle_get_data",
+                                block.hash = ?block.block_hash,
+                                "Block pool returned a block without a POA chunk"
+                            );
+                        }
                         let data = Arc::new(GossipData::Block(block));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
@@ -900,6 +907,15 @@ where
         match request.data {
             GossipDataRequest::Block(block_hash) => {
                 let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
+                if let Some(block) = &maybe_block {
+                    if block.poa.chunk.is_none() {
+                        error!(
+                            target = "p2p::gossip_data_handler::handle_get_data_sync",
+                            block.hash = ?block.block_hash,
+                            "Block pool returned a block without a POA chunk"
+                        );
+                    }
+                }
                 Ok(maybe_block.map(GossipData::Block))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
