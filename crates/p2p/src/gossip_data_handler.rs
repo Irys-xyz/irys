@@ -25,7 +25,7 @@ use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::{debug, error, instrument, warn, Span};
+use tracing::{debug, error, instrument, warn, Instrument, Span};
 
 pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
 pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
@@ -369,6 +369,7 @@ where
             peer_info.address.api,
             peer_info.address.gossip,
         )
+        .in_current_span()
         .await
     }
 
@@ -400,6 +401,7 @@ where
             peer_info.address.api,
             peer_info.address.gossip,
         )
+        .in_current_span()
         .await
     }
 
@@ -410,6 +412,9 @@ where
         source_api_address: SocketAddr,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
+        if block_header_request.data.poa.chunk.is_none() {
+            error!("received a block without a POA chunk");
+        }
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;

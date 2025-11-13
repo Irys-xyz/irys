@@ -23,7 +23,7 @@ use irys_types::{
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 use tracing_actix_web::TracingLogger;
 
 /// Default deduplication window in milliseconds for data requests
@@ -143,6 +143,7 @@ where
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
     )]
+    #[tracing::instrument(skip_all)]
     async fn handle_block(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
@@ -174,28 +175,39 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
+        if gossip_request.data.poa.chunk.is_none() {
+            error!(
+                target = "p2p::server",
+                block.hash = ?gossip_request.data.block_hash,
+                "received a block without a POA chunk"
+            );
+        }
 
-        tokio::spawn(async move {
-            let block_hash_string = gossip_request.data.block_hash;
-            if let Err(error) = server
-                .data_handler
-                .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
-                .await
-            {
-                Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-                if !error.is_advisory() {
-                    error!(
-                        "Node {:?}: Failed to process the block {:?}: {:?}",
-                        this_node_id, block_hash_string, error
+        tokio::spawn(
+            async move {
+                let block_hash_string = gossip_request.data.block_hash;
+                if let Err(error) = server
+                    .data_handler
+                    .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
+                    .in_current_span()
+                    .await
+                {
+                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    if !error.is_advisory() {
+                        error!(
+                            "Node {:?}: Failed to process the block {:?}: {:?}",
+                            this_node_id, block_hash_string, error
+                        );
+                    }
+                } else {
+                    info!(
+                        "Node {:?}: Server handler handled block {:?}",
+                        this_node_id, block_hash_string
                     );
                 }
-            } else {
-                info!(
-                    "Node {:?}: Server handler handled block {:?}",
-                    this_node_id, block_hash_string
-                );
             }
-        });
+            .in_current_span(),
+        );
 
         debug!(
             "Node {:?}: Started handling block and returned ok response to the peer",
