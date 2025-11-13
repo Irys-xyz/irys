@@ -343,8 +343,12 @@ impl BlockProducerService {
                     debug!("Test blocks remaining: {}", blocks_remaining);
                 }
 
-                let inner = self.inner.clone();
-                let result = Self::produce_block_inner(inner, solution).await?;
+                let production_strategy = ProductionStrategy {
+                    inner: self.inner.clone(),
+                };
+                let result = production_strategy
+                    .fully_produce_new_block(solution)
+                    .await?;
 
                 if let Some((irys_block_header, eth_built_payload)) = result {
                     // Final guard: ensure tests haven't exhausted quota
@@ -354,59 +358,19 @@ impl BlockProducerService {
                         return Ok(());
                     }
 
-                    // Publish the block to discovery (advances canonical chain)
-                    match self
-                        .inner
-                        .block_discovery
-                        .handle_block(Arc::clone(&irys_block_header), false)
-                        .await
-                    {
-                        Ok(()) => {
-                            info!(
-                                block.hash = %irys_block_header.block_hash,
-                                block.height = irys_block_header.height,
-                                "Block publication completed successfully"
-                            );
+                    info!(
+                        block.hash = %irys_block_header.block_hash,
+                        block.height = irys_block_header.height,
+                        "Block publication completed successfully"
+                    );
 
-                            // Gossip the EVM payload
-                            let execution_payload_gossip_data =
-                                GossipBroadcastMessage::from(eth_built_payload.block().clone());
-                            if let Err(payload_broadcast_error) = self
-                                .inner
-                                .service_senders
-                                .gossip_broadcast
-                                .send(execution_payload_gossip_data)
-                            {
-                                error!(
-                                    "Failed to broadcast execution payload: {:?}",
-                                    payload_broadcast_error
-                                );
-                            }
-
-                            // Broadcast difficulty update to miners (unconditionally after publication)
-                            // Note: Opted not to Broadcast only on parent difficulty change as it
-                            //       introduce superfluous timing and resource challenges
-                            self.inner.mining_broadcaster.send_difficulty(
-                                BroadcastDifficultyUpdate(Arc::clone(&irys_block_header)),
-                            );
-
-                            if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
-                                *remaining = remaining.saturating_sub(1);
-                                debug!("Test blocks remaining after publication: {}", *remaining);
-                            }
-
-                            let _ = response.send(Ok(Some((irys_block_header, eth_built_payload))));
-                            return Ok(());
-                        }
-                        Err(e) => {
-                            error!(
-                                "Failed to publish block {:?} ({}): {:?}",
-                                &irys_block_header.block_hash.0, &irys_block_header.height, e
-                            );
-                            let _ = response.send(Ok(None));
-                            return Ok(());
-                        }
+                    if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
+                        *remaining = remaining.saturating_sub(1);
+                        debug!("Test blocks remaining after publication: {}", *remaining);
                     }
+
+                    let _ = response.send(Ok(Some((irys_block_header, eth_built_payload))));
+                    return Ok(());
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
                     let _ = response.send(Ok(None));
@@ -423,37 +387,6 @@ impl BlockProducerService {
             }
         }
         Ok(())
-    }
-
-    /// Internal method to produce a block without the non-Send trait
-    #[tracing::instrument(level = "trace", skip_all, fields(
-        solution.hash = %solution.solution_hash,
-        solution.vdf_step = solution.vdf_step,
-        solution.mining_address = %solution.mining_address
-    ))]
-    async fn produce_block_inner(
-        inner: Arc<BlockProducerInner>,
-        solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        info!(
-            solution.partition_hash = %solution.partition_hash,
-            solution.chunk_offset = solution.chunk_offset,
-            "Starting block production for solution"
-        );
-
-        let production_strategy = ProductionStrategy { inner };
-        let candidate = production_strategy
-            .fully_produce_new_block_candidate(solution)
-            .await
-            .map_err(|e| match e {
-                BlockProductionError::Retryable { source } => {
-                    eyre::eyre!("retryable error during block production").wrap_err(source)
-                }
-                BlockProductionError::Irrecoverable { source } => {
-                    eyre::eyre!("irrecoverable error during block production").wrap_err(source)
-                }
-            })?;
-        Ok(candidate.map(|(b, _stats, p)| (b, p)))
     }
 }
 
@@ -829,7 +762,9 @@ pub trait BlockProdStrategy {
             return Ok(None);
         };
 
-        let block = self.broadcast_block(block, stats).await?;
+        let block = self
+            .broadcast_block(block, stats, &eth_built_payload)
+            .await?;
         let Some(block) = block else { return Ok(None) };
         Ok(Some((block, eth_built_payload)))
     }
@@ -1215,6 +1150,7 @@ pub trait BlockProdStrategy {
         &self,
         block: Arc<IrysBlockHeader>,
         stats: Option<AdjustmentStats>,
+        eth_built_payload: &EthBuiltPayload,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {
@@ -1276,6 +1212,21 @@ pub trait BlockProdStrategy {
                 ))
             }
         }?;
+
+        // Gossip the EVM payload
+        let execution_payload_gossip_data =
+            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+        if let Err(payload_broadcast_error) = self
+            .inner()
+            .service_senders
+            .gossip_broadcast
+            .send(execution_payload_gossip_data)
+        {
+            error!(
+                "Failed to broadcast execution payload: {:?}",
+                payload_broadcast_error
+            );
+        }
 
         if is_difficulty_updated {
             self.inner()
