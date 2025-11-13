@@ -687,7 +687,6 @@ impl Inner {
         );
 
         let migrated_block = (*event.block).clone();
-        // todo: investigate the `poa chunk` - after uncommenting the `eyre::ensure` below, all the tests pass.
         // Yet the code is architected in a way where we could migrate a block without a PoA chunk being present.
         eyre::ensure!(
             migrated_block.poa.chunk.is_some(),

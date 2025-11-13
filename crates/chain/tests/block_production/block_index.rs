@@ -1,0 +1,74 @@
+use tracing::info;
+
+use crate::utils::IrysNodeTest;
+
+/// mine 10 blocks, check that they get migrated to the database.
+/// ensure that the poa chuk is present
+#[test_log::test(tokio::test)]
+async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
+    // Configure a node with block_migration_depth = 2
+    let mut config = irys_types::NodeConfig::testing();
+    config.consensus.get_mut().block_migration_depth = 2;
+
+    let node = IrysNodeTest::new_genesis(config).start().await;
+
+    // Collect mined blocks with their chunks
+    let mut mined_blocks = Vec::new();
+
+    // Mine 10 blocks explicitly
+    for i in 1..=10 {
+        info!("Mining block {}", i);
+        let block = node.mine_block().await?;
+
+        info!(
+            "Mined block at height {} with hash {:?}",
+            block.height, block.block_hash
+        );
+
+        // Assert that the mined block has a chunk in its PoA
+        assert!(
+            block.poa.chunk.is_some(),
+            "Mined block at height {} should have a chunk in poa",
+            block.height
+        );
+
+        mined_blocks.push(block);
+
+        // Verify block index migration at appropriate depth
+        // With migration_depth = 2, block at height H-2 should be in the index when we mine block H
+        if i >= 3 {
+            let migration_height = i - 2;
+
+            info!(
+                "Verifying block at height {} is in block index (current height: {})",
+                migration_height, i
+            );
+
+            // Wait for the block index to catch up to the migration height
+            node.wait_until_block_index_height(migration_height, 10)
+                .await?;
+
+            // Verify the block at migration_height is in the block index WITH chunks
+            let block_from_index = node
+                .get_block_by_height_from_index(migration_height, true)
+                .expect("Block should be in block index after migration depth");
+
+            // Assert that the block read from index has the chunk
+            assert!(
+                block_from_index.poa.chunk.is_some(),
+                "Block at height {} read from index should have a chunk",
+                migration_height
+            );
+
+            let expected_block = &mined_blocks[(migration_height - 1) as usize];
+            assert_eq!(
+                expected_block, &block_from_index,
+                "Block hash in index should match the mined block at height {}",
+                migration_height
+            );
+        }
+    }
+
+    node.stop().await;
+    Ok(())
+}
