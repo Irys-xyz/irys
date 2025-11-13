@@ -71,6 +71,8 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
+    } else {
+        tracing::error!(block.hash = ?block.block_hash, target = "db::block_header", "poa chunk not present when writing the header");
     };
     let mut block_without_chunk = block.clone();
     block_without_chunk.poa.chunk = None;
@@ -91,6 +93,9 @@ pub fn block_header_by_hash<T: DbTx>(
     if include_chunk {
         if let Some(ref mut b) = block {
             b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
+            if b.poa.chunk.is_none() {
+                tracing::error!(block.hash = ?b.block_hash, target = "db::block_header", "poa chunk not present when reading the header");
+            }
         }
     }
 

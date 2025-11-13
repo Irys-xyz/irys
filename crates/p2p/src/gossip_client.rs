@@ -187,6 +187,13 @@ impl GossipClient {
                 .await
             }
             GossipData::Block(irys_block_header) => {
+                if irys_block_header.poa.chunk.is_none() {
+                    error!(
+                        target = "p2p::gossip_client::send_data",
+                        block.hash = ?irys_block_header.block_hash,
+                        "Sending a block header without the POA chunk"
+                    );
+                }
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,

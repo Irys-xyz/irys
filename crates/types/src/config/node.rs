@@ -571,6 +571,14 @@ pub struct MempoolNodeConfig {
     /// Maximum commitment transactions per address
     /// Limits the resources that can be consumed by a single address
     pub max_commitments_per_address: usize,
+
+    /// Maximum number of concurrent handlers for the mempool messages
+    #[serde(default = "default_max_concurrent_mempool_tasks")]
+    pub max_concurrent_mempool_tasks: usize,
+}
+
+pub fn default_max_concurrent_mempool_tasks() -> usize {
+    30
 }
 
 impl NodeConfig {
@@ -728,6 +736,7 @@ impl NodeConfig {
                 max_valid_submit_txs: 3000,
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
+                max_concurrent_mempool_tasks: 30,
             },
 
             vdf: VdfNodeConfig {
@@ -866,6 +875,7 @@ impl NodeConfig {
                 max_valid_submit_txs: 3000,
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
+                max_concurrent_mempool_tasks: 30,
             },
 
             vdf: VdfNodeConfig {

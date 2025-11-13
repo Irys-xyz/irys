@@ -1,7 +1,9 @@
 use alloy_eips::BlockId;
 use alloy_primitives::U256;
+use std::collections::HashMap;
 
 use irys_types::Address;
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
 use reth_node_api::{BlockTy, FullNodeComponents, NodeTypes};
@@ -38,6 +40,12 @@ where
 
     fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
 
+    fn get_balances_irys(
+        &self,
+        addresses: &[Address],
+        block_id: Option<BlockId>,
+    ) -> HashMap<Address, irys_types::U256>;
+
     fn get_balance_irys_canonical_and_pending(
         &self,
         address: Address,
@@ -71,6 +79,17 @@ where
                 )
             })
             .unwrap_or(irys_types::U256::zero())
+    }
+
+    fn get_balances_irys(
+        &self,
+        addresses: &[Address],
+        block_id: Option<BlockId>,
+    ) -> HashMap<Address, irys_types::U256> {
+        addresses
+            .into_par_iter()
+            .map(|address| (*address, self.get_balance_irys(*address, block_id)))
+            .collect()
     }
 
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.

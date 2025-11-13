@@ -18,7 +18,6 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
-use futures::future::BoxFuture;
 use futures::FutureExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
@@ -63,14 +62,14 @@ use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
 /// covers the total cost (value + fee) of the transaction.
 #[inline]
-#[tracing::instrument(level = "trace", skip_all, fields(tx.id = %commitment_tx.id, tx.signer = %commitment_tx.signer))]
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
 pub fn validate_funding(
     reth_adapter: &IrysRethNodeAdapter,
     commitment_tx: &irys_types::CommitmentTransaction,
@@ -123,7 +122,7 @@ pub fn validate_funding(
 ///   transactions - this will validate against the current canonical tip)
 /// - value must match the commitment type rules
 #[inline]
-#[tracing::instrument(level = "trace", skip_all, fields(tx.id = %commitment_tx.id, tx.signer = %commitment_tx.signer))]
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
 pub fn validate_commitment_transaction(
     reth_adapter: &IrysRethNodeAdapter,
     consensus: &irys_types::ConsensusConfig,
@@ -185,7 +184,7 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
-    pub stake_and_pledge_whitelist: HashSet<Address>,
+    message_handler_semaphore: Arc<Semaphore>,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -254,7 +253,7 @@ pub enum MempoolServiceMessage {
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
     UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
-    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
+    CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
 }
@@ -262,147 +261,142 @@ pub enum MempoolServiceMessage {
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
-    pub fn handle_message<'a>(
-        &'a mut self,
-        msg: MempoolServiceMessage,
-    ) -> BoxFuture<'a, eyre::Result<()>> {
-        Box::pin(async move {
-            match msg {
-                MempoolServiceMessage::GetDataTxs(txs, response) => {
-                    let response_message = self.handle_get_data_tx_message(txs).await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::BlockConfirmed(block) => {
-                    if let Err(e) = self.handle_block_confirmed_message(block).await {
-                        tracing::error!("Failed to handle block confirmed message: {:#}", e);
-                    }
-                }
-                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
-                    let response_message = self
-                        .handle_ingress_commitment_tx_message_api(commitment_tx)
-                        .await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
-                    let response_message = self
-                        .handle_ingress_commitment_tx_message_gossip(commitment_tx)
-                        .await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestChunk(chunk, response) => {
-                    let response_value: Result<(), ChunkIngressError> =
-                        self.handle_chunk_ingress_message(chunk).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!(
-                            "handle_chunk_ingress_message response.send() error: {:?}",
-                            e
-                        );
-                    };
-                }
-                MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
-                    let result = self.handle_chunk_ingress_message(chunk).await;
-                    if let Err(e) = result {
-                        tracing::error!("handle_chunk_ingress_message error: {:?}", e);
-                    }
-                }
-                MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
-                    let response_value = self.handle_get_best_mempool_txs(block_id).await;
-                    // Return selected transactions grouped by type
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids,
-                    response,
-                } => {
-                    let response_value = self
-                        .handle_get_commitment_tx_message(commitment_tx_ids)
-                        .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::DataTxExists(txid, response) => {
-                    let response_value = self.handle_data_tx_exists_message(txid).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
-                    let response_value = self
-                        .handle_get_block_header_message(hash, include_chunk)
-                        .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::CommitmentTxExists(txid, response) => {
-                    let response_value = self.handle_commitment_tx_exists_message(txid).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message_api(tx).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-
-                MempoolServiceMessage::GetState(response) => {
-                    if let Err(e) = response
-                        .send(Arc::clone(&self.mempool_state))
-                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
-                    {
-                        tracing::error!("response.send() error: {:?}", e);
-                    }
-                }
-                MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
-                    let response_value = self.remove_from_blacklists(tx_ids).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetMempoolStatus(response) => {
-                    let response_value = self.handle_get_mempool_status().await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
-                    self.stake_and_pledge_whitelist.extend(new_entries);
-                    if let Err(e) = response.send(()) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
-                    let whitelist = self.stake_and_pledge_whitelist.clone();
-                    if let Err(e) = tx.send(whitelist) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
+    pub async fn handle_message(&self, msg: MempoolServiceMessage) -> eyre::Result<()> {
+        match msg {
+            MempoolServiceMessage::GetDataTxs(txs, response) => {
+                let response_message = self.handle_get_data_tx_message(txs).await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::BlockConfirmed(block) => {
+                if let Err(e) = self.handle_block_confirmed_message(block).await {
+                    tracing::error!("Failed to handle block confirmed message: {:#}", e);
                 }
             }
-            Ok(())
-        })
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
+                let response_message = self
+                    .handle_ingress_commitment_tx_message_api(commitment_tx)
+                    .await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+                let response_message = self
+                    .handle_ingress_commitment_tx_message_gossip(commitment_tx)
+                    .await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestChunk(chunk, response) => {
+                let response_value: Result<(), ChunkIngressError> =
+                    self.handle_chunk_ingress_message(chunk).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!(
+                        "handle_chunk_ingress_message response.send() error: {:?}",
+                        e
+                    );
+                };
+            }
+            MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
+                let result = self.handle_chunk_ingress_message(chunk).await;
+                if let Err(e) = result {
+                    tracing::error!("handle_chunk_ingress_message error: {:?}", e);
+                }
+            }
+            MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
+                let response_value = self.handle_get_best_mempool_txs(block_id).await;
+                // Return selected transactions grouped by type
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids,
+                response,
+            } => {
+                let response_value = self
+                    .handle_get_commitment_tx_message(commitment_tx_ids)
+                    .await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::DataTxExists(txid, response) => {
+                let response_value = self.handle_data_tx_exists_message(txid).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
+                let response_value = self
+                    .handle_get_block_header_message(hash, include_chunk)
+                    .await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::CommitmentTxExists(txid, response) => {
+                let response_value = self.handle_commitment_tx_exists_message(txid).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
+                let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
+                let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+
+            MempoolServiceMessage::GetState(response) => {
+                if let Err(e) = response
+                    .send(Arc::clone(&self.mempool_state))
+                    .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
+                {
+                    tracing::error!("response.send() error: {:?}", e);
+                }
+            }
+            MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
+                let response_value = self.handle_ingest_ingress_proof(ingress_proof);
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
+                let response_value = self.remove_from_blacklists(tx_ids).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetMempoolStatus(response) => {
+                let response_value = self.handle_get_mempool_status().await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
+                self.extend_stake_and_pledge_whitelist(new_entries).await;
+                if let Err(e) = response.send(()) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx) => {
+                let whitelist = self.get_stake_and_pledge_whitelist_cloned().await;
+                if let Err(e) = tx.send(whitelist) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+        }
+        Ok(())
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -471,7 +465,7 @@ impl Inner {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]
-    async fn remove_from_blacklists(&mut self, tx_ids: Vec<H256>) {
+    async fn remove_from_blacklists(&self, tx_ids: Vec<H256>) {
         let mut state = self.mempool_state.write().await;
         for tx_id in tx_ids {
             state.recent_invalid_tx.pop(&tx_id);
@@ -548,9 +542,9 @@ impl Inner {
         }
     }
 
-    #[instrument(skip(self), fields(parent_block.id = ?parent_evm_block_id), err)]
+    #[instrument(skip(self), fields(block.parent_evm_id = ?parent_evm_block_id), err)]
     async fn handle_get_best_mempool_txs(
-        &mut self,
+        &self,
         parent_evm_block_id: Option<BlockId>,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
@@ -579,53 +573,7 @@ impl Inner {
 
         debug!("Anchor bounds for inclusion @ {current_height}: >= {min_anchor_height}, <= {max_anchor_height}");
 
-        // Helper function that verifies transaction funding and tracks cumulative fees
-        // Returns true if the transaction can be funded based on current account balance
-        // and previously included transactions in this block
-        let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
-            let signer = tx.signer();
-
-            // Skip transactions from addresses with previously unfunded transactions
-            // This ensures we don't include any transactions (including pledges) from
-            // addresses that couldn't afford their stake commitments
-            if unfunded_address.contains(&signer) {
-                return false;
-            }
-
-            let fee = tx.total_cost();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
-
-            // Calculate total required balance including previously selected transactions
-
-            // get balance state for the block we're building off of
-            let balance: U256 = self
-                .reth_node_adapter
-                .rpc
-                .get_balance_irys(signer, parent_evm_block_id);
-
-            let has_funds = balance >= current_spent + fee;
-
-            // Track fees for this address regardless of whether this specific transaction is included
-            fees_spent_per_address
-                .entry(signer)
-                .and_modify(|val| *val += fee)
-                .or_insert(fee);
-
-            // If transaction cannot be funded, mark the entire address as unfunded
-            // Since stakes are processed before pledges, this prevents inclusion of
-            // pledge commitments when their associated stake commitment is unfunded
-            if !has_funds {
-                debug!(
-                    tx.signer = ?signer,
-                    account.balance = ?balance,
-                    "Transaction funding check failed"
-                );
-                unfunded_address.insert(signer);
-                return false;
-            }
-
-            has_funds
-        };
+        let mut balances: HashMap<Address, U256> = HashMap::new();
 
         // Get all necessary snapshots and canonical chain info in a single read operation
         let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
@@ -673,14 +621,17 @@ impl Inner {
         }
 
         // Process commitments in the mempool in priority order
-        let mempool_state_guard = mempool_state.read().await;
 
         // Collect all stake and pledge commitments from mempool
-        let mut sorted_commitments = mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter().cloned())
-            .collect::<Vec<_>>();
+        let mut sorted_commitments = {
+            let mempool_state_guard = mempool_state.read().await;
+
+            mempool_state_guard
+                .valid_commitment_tx
+                .values()
+                .flat_map(|txs| txs.iter().cloned())
+                .collect::<Vec<_>>()
+        };
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
@@ -764,7 +715,6 @@ impl Inner {
                 break;
             }
         }
-        drop(mempool_state_guard);
 
         // Log commitment selection summary
         if !commitment_tx.is_empty() {
@@ -808,6 +758,12 @@ impl Inner {
             .max_data_txs_per_block
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
+
+        balances.extend(fetch_balances_for_transactions(
+            &self.reth_node_adapter,
+            parent_evm_block_id,
+            &submit_ledger_txs,
+        ));
 
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
@@ -917,7 +873,12 @@ impl Inner {
                 tx.fee = ?tx.total_cost(),
                 "Checking funding for data transaction"
             );
-            if check_funding(&tx) {
+            if check_funding(
+                &tx,
+                &balances,
+                &mut unfunded_address,
+                &mut fees_spent_per_address,
+            ) {
                 trace!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
@@ -1275,7 +1236,7 @@ impl Inner {
 
     /// return block header from mempool, if found
     /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
-    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash, include_chunk = include_chunk))]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_hash, include_chunk = include_chunk))]
     pub async fn handle_get_block_header_message(
         &self,
         block_hash: H256,
@@ -1295,7 +1256,7 @@ impl Inner {
     // Resolves an anchor (block hash) to it's height
     // if it couldn't find the anchor, returns None
     // set canonical to true to enforce that the anchor must be part of the current canonical chain
-    #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor,canonical = canonical))]
+    #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
     pub fn get_anchor_height(&self, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
         // check the block tree, then DB
         if let Some(height) = {
@@ -1329,7 +1290,7 @@ impl Inner {
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
     // if the anchor is valid, returns anchor block height
-    #[instrument(level = "trace", skip_all, fields(tx.id = %tx.id(), anchor = %tx.anchor()))]
+    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), anchor = %tx.anchor()))]
     pub async fn validate_tx_anchor(
         &self,
         tx: &impl IrysTransactionCommon,
@@ -1426,7 +1387,7 @@ impl Inner {
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub async fn restore_mempool_from_disk(&mut self) {
+    pub async fn restore_mempool_from_disk(&self) {
         let recovered =
             RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
                 .await;
@@ -1466,7 +1427,7 @@ impl Inner {
 
     // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
     // right now this only wipes `recent_invalid_tx`
-    pub async fn wipe_blacklists(&mut self) {
+    pub async fn wipe_blacklists(&self) {
         let mut write = self.mempool_state.write().await;
         write.recent_invalid_tx.clear();
         write.recent_invalid_payload_fingerprints.clear();
@@ -1485,14 +1446,14 @@ impl Inner {
     }
 
     // Helper to verify signature
-    #[instrument(level = "trace", skip_all, fields(tx.id = %tx.id()))]
+    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id()))]
     pub async fn validate_signature<
         T: irys_types::versioning::Signable
             + IrysTransactionCommon
             + std::fmt::Debug
             + serde::Serialize,
     >(
-        &mut self,
+        &self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
@@ -1597,6 +1558,16 @@ impl Inner {
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
+
+    async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+        let mut state = self.mempool_state.write().await;
+        state.stake_and_pledge_whitelist.extend(new_entries);
+    }
+
+    async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+        let state = self.mempool_state.read().await;
+        state.stake_and_pledge_whitelist.clone()
+    }
 }
 
 pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
@@ -1621,11 +1592,15 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
-pub fn create_state(config: &MempoolConfig) -> MempoolState {
+pub fn create_state(
+    config: &MempoolConfig,
+    stake_and_pledge_whitelist: &[Address],
+) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
@@ -1642,6 +1617,7 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
+        stake_and_pledge_whitelist: HashSet::from_iter(stake_and_pledge_whitelist.iter().copied()),
     }
 }
 
@@ -1915,7 +1891,7 @@ pub struct MempoolService {
     msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
     block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
-    inner: Inner,
+    inner: Arc<Inner>,
 }
 
 impl Default for MempoolService {
@@ -1940,19 +1916,21 @@ impl MempoolService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let block_tree_read_guard = block_tree_read_guard.clone();
-        let config = config.clone();
-        let mempool_config = &config.mempool;
-        let mempool_state = create_state(mempool_config);
-        let storage_modules_guard = storage_modules_guard;
-        let service_senders = service_senders.clone();
-        let reorg_rx = service_senders.subscribe_reorgs();
-        let block_migrated_rx = service_senders.subscribe_block_migrated();
         let initial_stake_and_pledge_whitelist = config
             .node_config
             .initial_stake_and_pledge_whitelist
             .clone();
+        let block_tree_read_guard = block_tree_read_guard.clone();
+        let config = config.clone();
+        let mempool_config = &config.mempool;
+        let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
+        let storage_modules_guard = storage_modules_guard;
+        let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
+        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
+        let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
                 let mempool_state = Arc::new(RwLock::new(mempool_state));
@@ -1969,7 +1947,7 @@ impl MempoolService {
                     msg_rx: rx,
                     reorg_rx,
                     block_migrated_rx,
-                    inner: Inner {
+                    inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
                         exec: TaskExecutor::current(),
@@ -1979,11 +1957,13 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
-                        stake_and_pledge_whitelist,
-                    },
+                        message_handler_semaphore: Arc::new(Semaphore::new(
+                            max_concurrent_mempool_tasks,
+                        )),
+                    }),
                 };
                 mempool_service
-                    .start()
+                    .start(handle_for_inner)
                     .await
                     .expect("Mempool service encountered an irrecoverable error")
             }
@@ -1997,7 +1977,7 @@ impl MempoolService {
         })
     }
 
-    async fn start(mut self) -> eyre::Result<()> {
+    async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {
         tracing::info!("starting Mempool service");
 
         self.inner.restore_mempool_from_disk().await;
@@ -2009,10 +1989,20 @@ impl MempoolService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            self.inner.handle_message(msg).await?;
+                            let inner = Arc::clone(&self.inner);
+                            // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
+                            let semaphore = inner.message_handler_semaphore.clone();
+                            let permit = semaphore.acquire_owned().await;
+
+                            runtime_handle.spawn(async move {
+                                let _permit = permit; // Hold until task completes
+                                if let Err(err) = inner.handle_message(msg).await {
+                                    error!("Error handling mempool message: {:?}", err);
+                                }
+                            });
                         }
                         None => {
-                            tracing::warn!("receiver channel closed");
+                            warn!("receiver channel closed");
                             break;
                         }
                     }
@@ -2071,6 +2061,71 @@ pub fn handle_broadcast_recv<T>(
             None
         }
     }
+}
+
+fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
+    reth_adapter: &IrysRethNodeAdapter,
+    block_id: Option<BlockId>,
+    txs: &[T],
+) -> HashMap<Address, U256> {
+    let signers: Vec<Address> = txs
+        .iter()
+        .map(irys_types::IrysTransactionCommon::signer)
+        .collect();
+    reth_adapter
+        .reth_node
+        .rpc
+        .get_balances_irys(&signers, block_id)
+}
+
+// Helper function that verifies transaction funding and tracks cumulative fees
+// Returns true if the transaction can be funded based on current account balance
+// and previously included transactions in this block
+fn check_funding<T: IrysTransactionCommon>(
+    tx: &T,
+    balances: &HashMap<Address, U256>,
+    unfunded_address: &mut HashSet<Address>,
+    fees_spent_per_address: &mut HashMap<Address, U256>,
+) -> bool {
+    let signer = tx.signer();
+
+    // Skip transactions from addresses with previously unfunded transactions
+    // This ensures we don't include any transactions (including pledges) from
+    // addresses that couldn't afford their stake commitments
+    if unfunded_address.contains(&signer) {
+        return false;
+    }
+
+    let fee = tx.total_cost();
+    let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
+
+    // Calculate total required balance including previously selected transactions
+
+    // get balance state for the block we're building off of
+    let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
+
+    let has_funds = balance >= current_spent + fee;
+
+    // Track fees for this address regardless of whether this specific transaction is included
+    fees_spent_per_address
+        .entry(signer)
+        .and_modify(|val| *val += fee)
+        .or_insert(fee);
+
+    // If transaction cannot be funded, mark the entire address as unfunded
+    // Since stakes are processed before pledges, this prevents inclusion of
+    // pledge commitments when their associated stake commitment is unfunded
+    if !has_funds {
+        debug!(
+        tx.signer = ?signer,
+        account.balance = ?balance,
+        "Transaction funding check failed"
+        );
+        unfunded_address.insert(signer);
+        return false;
+    }
+
+    has_funds
 }
 
 #[cfg(test)]
@@ -2135,6 +2190,7 @@ mod bounded_mempool_tests {
             recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
             pending_chunks: LruCache::new(NonZeroUsize::new(10).unwrap()),
             pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
         }
     }
 

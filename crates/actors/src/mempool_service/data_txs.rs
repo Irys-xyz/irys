@@ -1,5 +1,5 @@
+use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
-use crate::mempool_service::{MempoolServiceMessage, TxIngressError};
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
@@ -23,9 +23,9 @@ impl Inner {
     // Performs duplicate detection, signature validation, anchor validation, expiry computation,
     // and ledger parsing. Returns the resolved ledger and the computed expiry height.
     #[inline]
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
     async fn precheck_data_ingress_common(
-        &mut self,
+        &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
@@ -72,9 +72,9 @@ impl Inner {
     // Shared post-processing: insert into mempool, cache data_root with expiry,
     // process any pending chunks, and gossip the transaction.
     #[inline]
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root, expiry_height = expiry_height))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
     async fn postprocess_data_ingress(
-        &mut self,
+        &self,
         tx: &DataTransactionHeader,
         expiry_height: u64,
     ) -> Result<(), TxIngressError> {
@@ -129,9 +129,9 @@ impl Inner {
         found_txs
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
     pub async fn handle_data_tx_ingress_message_gossip(
-        &mut self,
+        &self,
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
@@ -177,9 +177,9 @@ impl Inner {
         self.postprocess_data_ingress(&tx, expiry_height).await
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root))]
     pub async fn handle_data_tx_ingress_message_api(
-        &mut self,
+        &self,
         mut tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         debug!(
@@ -227,7 +227,7 @@ impl Inner {
 
     /// Validates that a data transaction has sufficient balance to cover its fees.
     /// Checks the balance against the canonical chain tip.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.signer = %tx.signer))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.signer = ?tx.signer))]
     fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
@@ -275,7 +275,7 @@ impl Inner {
     /// This is the price that users should use when calculating their transaction fees.
     ///
     /// Ensures that user-provided fees are >= minimum required based on current EMA pricing.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_size = tx.data_size))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_size = tx.data_size))]
     fn validate_data_tx_ema_pricing(
         &self,
         tx: &DataTransactionHeader,
@@ -386,7 +386,7 @@ impl Inner {
     /// Inserts tx into the mempool and marks it as recently valid.
     /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
     async fn insert_tx_and_mark_valid(
-        &mut self,
+        &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
@@ -396,7 +396,7 @@ impl Inner {
     }
 
     /// Caches data_root with expiry, logging success/failure.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.data_root = %tx.data_root, expiry_height = expiry_height))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
         match self.irys_db.update_eyre(|db_tx| {
             let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
@@ -421,11 +421,8 @@ impl Inner {
     }
 
     /// Processes any pending chunks that arrived before their parent transaction.
-    #[tracing::instrument(level = "trace", skip_all, fields(data_root = %data_root))]
-    async fn process_pending_chunks_for_root(
-        &mut self,
-        data_root: H256,
-    ) -> Result<(), TxIngressError> {
+    #[tracing::instrument(level = "trace", skip_all, fields(chunk.data_root = ?data_root))]
+    async fn process_pending_chunks_for_root(&self, data_root: H256) -> Result<(), TxIngressError> {
         let mut guard = self.mempool_state.write().await;
         let option_chunks_map = guard.pending_chunks.pop(&data_root);
         drop(guard);
@@ -433,17 +430,7 @@ impl Inner {
         if let Some(chunks_map) = option_chunks_map {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
             for chunk in chunks {
-                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                if let Err(e) = self
-                    .handle_message(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
-                    .await
-                {
-                    warn!("Failed to send chunk to mempool: {:?}", e);
-                }
-
-                let msg_result = oneshot_rx
-                    .await
-                    .expect("pending chunks should be processed by the mempool");
+                let msg_result = self.handle_chunk_ingress_message(chunk).await;
 
                 if let Err(err) = msg_result {
                     tracing::error!("oneshot failure: {:?}", err);
