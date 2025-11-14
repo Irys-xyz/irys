@@ -488,7 +488,7 @@ pub fn generate_ingress_proof(
         let mut set = HashSet::<H256>::new();
 
         let mut chunk_count: u32 = 0;
-        let mut data_size_acc: u64 = 0;
+        let mut total_data_size: u64 = 0;
 
         let iter = dup_walker.into_iter().map(|entry| {
             let (root_hash2, index_entry) = entry?;
@@ -521,7 +521,7 @@ pub fn generate_ingress_proof(
                 .0;
             let chunk_len =
                 u64::try_from(chunk_bin.len()).map_err(|_| eyre!("chunk length exceeds u64"))?;
-            data_size_acc += chunk_len;
+            total_data_size += chunk_len;
             chunk_count += 1;
 
             Ok(chunk_bin)
@@ -532,7 +532,7 @@ pub fn generate_ingress_proof(
             &signer, data_root, iter, chain_id, anchor,
         )?;
 
-        Ok((proof, data_size_acc, chunk_count))
+        Ok((proof, total_data_size, chunk_count))
     })?;
 
     info!(

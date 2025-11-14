@@ -1821,10 +1821,7 @@ impl AtomicMempoolState {
     /// Returns true if any transactions were found and removed, false otherwise
     pub async fn remove_commitment_txs(&self, txids: impl IntoIterator<Item = H256>) -> bool {
         let mut found = false;
-
-        // Collect txids into a HashSet for efficient lookups
         let txids_set: HashSet<H256> = txids.into_iter().collect();
-
         let mut mempool_state_guard = self.write().await;
 
         // Remove all txids from recent_valid_tx cache
