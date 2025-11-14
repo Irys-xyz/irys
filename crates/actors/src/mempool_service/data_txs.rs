@@ -491,7 +491,7 @@ impl Inner {
             return Ok(status);
         }
 
-        let read_tx = self.read_tx();
+        let read_tx = self.irys_db.tx();
 
         if read_tx.is_err() {
             Err(TxReadError::DatabaseError)

@@ -5,6 +5,7 @@ use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
 };
+use reth_db::Database as _;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
@@ -303,7 +304,7 @@ impl Inner {
             return Ok(status);
         }
         //now check the database
-        let read_tx = self.read_tx();
+        let read_tx = self.irys_db.tx();
 
         if read_tx.is_err() {
             Err(TxReadError::DatabaseError)

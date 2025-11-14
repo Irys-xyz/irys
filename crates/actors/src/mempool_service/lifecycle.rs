@@ -34,7 +34,7 @@ impl Inner {
                     });
 
                 // Get and update DB header if needed
-                let mut db_header = match self.read_tx() {
+                let mut db_header = match self.irys_db.tx() {
                     Ok(read_tx) => match tx_header_by_txid(&read_tx, txid) {
                         Ok(Some(h)) => {
                             debug!("Got tx {} from DB", txid);
@@ -662,20 +662,22 @@ impl Inner {
             .handle_get_commitment_tx_message(commitment_tx_ids)
             .await;
 
-        let tx = self
-            .irys_db
-            .tx_mut()
-            .expect("to get a mutable tx reference from the db");
+        // Remove all commitments from mempool in one batch operation
+        self.mempool_state
+            .remove_commitment_txs(commitments.values().map(|x| x.id))
+            .await;
+        {
+            let tx = self
+                .irys_db
+                .tx_mut()
+                .expect("to get a mutable tx reference from the db");
 
-        for commitment_tx in commitments.values() {
-            // Insert the commitment transaction in to the db, perform migration
-            insert_commitment_tx(&tx, commitment_tx)?;
-            // Remove the commitment tx from the mempool cache, completing the migration
-            self.mempool_state
-                .remove_commitment_tx(&commitment_tx.id())
-                .await;
+            for commitment_tx in commitments.values() {
+                // Insert the commitment transaction in to the db, perform migration
+                insert_commitment_tx(&tx, commitment_tx)?;
+            }
+            tx.inner.commit()?;
         }
-        tx.inner.commit()?;
 
         // stage 2: move submit transactions from tree to index
         let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();

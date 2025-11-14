@@ -1816,11 +1816,23 @@ impl AtomicMempoolState {
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
     pub async fn remove_commitment_tx(&self, txid: &H256) -> bool {
+        self.remove_commitment_txs([*txid]).await
+    }
+
+    /// Removes commitment transactions with the specified transaction IDs from the valid_commitment_tx map
+    /// Returns true if any transactions were found and removed, false otherwise
+    pub async fn remove_commitment_txs(&self, txids: impl IntoIterator<Item = H256>) -> bool {
         let mut found = false;
+
+        // Collect txids into a HashSet for efficient lookups
+        let txids_set: HashSet<H256> = txids.into_iter().collect();
 
         let mut mempool_state_guard = self.write().await;
 
-        mempool_state_guard.recent_valid_tx.pop(txid);
+        // Remove all txids from recent_valid_tx cache
+        for txid in &txids_set {
+            mempool_state_guard.recent_valid_tx.pop(txid);
+        }
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = mempool_state_guard
@@ -1831,19 +1843,17 @@ impl AtomicMempoolState {
 
         for address in addresses_to_check {
             if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
-                // Find the index of the transaction to remove
-                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
-                    // Remove the transaction
-                    transactions.remove(index);
+                // Remove all transactions that match any of the txids
+                let original_len = transactions.len();
+                transactions.retain(|tx| !txids_set.contains(&tx.id));
+
+                if transactions.len() < original_len {
                     found = true;
+                }
 
-                    // If the vector is now empty, remove the entry
-                    if transactions.is_empty() {
-                        mempool_state_guard.valid_commitment_tx.remove(&address);
-                    }
-
-                    // Exit early once we've found and removed the transaction
-                    break;
+                // If the vector is now empty, remove the entry
+                if transactions.is_empty() {
+                    mempool_state_guard.valid_commitment_tx.remove(&address);
                 }
             }
         }
