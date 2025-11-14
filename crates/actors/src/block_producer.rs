@@ -1261,14 +1261,18 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let (fresh_price, last_updated) = self.inner().price_oracle.current_snapshot()?;
-        let oracle_updated_ms = millis_since_epoch(last_updated);
+        let (fresh_price, last_updated) = self
+            .inner()
+            .price_oracle
+            .current_snapshot()
+            .map(|(price, update)| (price, millis_since_epoch(update)))
+            .unwrap_or_else(|_err| (parent_block.oracle_irys_price, parent_block.timestamp));
 
         let oracle_irys_price = choose_oracle_price(
             parent_block.timestamp,
             parent_block.oracle_irys_price,
             fresh_price,
-            oracle_updated_ms,
+            last_updated,
         );
 
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
