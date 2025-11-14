@@ -131,39 +131,6 @@ impl BlockStatusProvider {
         }
     }
 
-    // waits for the block tree to be "able" to processed this block, based on height.
-    // this is to prevent overwhelming the block tree with blocks, such that it prunes blocks still undergoing validation.
-    pub async fn wait_for_block_tree_can_process_height(&self, block_height: u64) {
-        const ATTEMPTS_PER_SECOND: u64 = 5;
-        let mut attempts = 0;
-
-        loop {
-            attempts += 1;
-
-            if attempts % ATTEMPTS_PER_SECOND == 0 {
-                debug!(
-                    "Block tree did not catch up to height {} after {} seconds, waiting...",
-                    block_height,
-                    attempts / ATTEMPTS_PER_SECOND
-                );
-            }
-
-            let can_process_height = {
-                let binding = self.block_tree_read_guard.read();
-                binding.can_process_height(block_height)
-            };
-
-            if can_process_height {
-                return;
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(
-                1000 / ATTEMPTS_PER_SECOND,
-            ))
-            .await;
-        }
-    }
-
     pub fn is_height_in_the_index(&self, block_height: u64) -> bool {
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);

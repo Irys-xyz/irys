@@ -126,6 +126,9 @@ impl From<&NodeConfig> for MempoolConfig {
             anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
             max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
+            max_concurrent_block_discovery_tasks: value
+                .mempool
+                .max_concurrent_block_discovery_tasks,
         }
     }
 }
@@ -232,6 +235,10 @@ pub struct MempoolConfig {
 
     /// Maximum number of concurrent handlers for mempool messages
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Maximum number of concurrent block discovery validation tasks
+    /// Controls the number of blocks that can be pre-validated concurrently
+    pub max_concurrent_block_discovery_tasks: usize,
 }
 
 pub mod serde_utils {

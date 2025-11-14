@@ -1819,6 +1819,11 @@ impl IrysNode {
         block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
         runtime_handle: Handle,
     ) -> TokioServiceHandle {
+        let max_concurrent_block_discovery_tasks = config
+            .node_config
+            .mempool
+            .max_concurrent_block_discovery_tasks;
+
         let block_discovery_inner = BlockDiscoveryServiceInner {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
@@ -1828,6 +1833,9 @@ impl IrysNode {
             vdf_steps_guard: vdf_steps_guard.clone(),
             service_senders: service_senders.clone(),
             reward_curve,
+            message_handler_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                max_concurrent_block_discovery_tasks,
+            )),
         };
         BlockDiscoveryService::spawn_service(
             Arc::new(block_discovery_inner),
