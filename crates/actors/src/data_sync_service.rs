@@ -459,7 +459,7 @@ impl DataSyncServiceInner {
                 self.config.node_config.clone(),
             );
 
-            self.chunk_orchestrators.insert(sm_id, orchestrator);
+            // self.chunk_orchestrators.insert(sm_id, orchestrator);
         }
     }
 
