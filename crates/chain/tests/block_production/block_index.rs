@@ -89,10 +89,12 @@ async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
             .block_pool
             .get_block_data(&migrated_block.block_hash)
             .await
-            .expect(&format!(
-                "Block at height {} should be retrievable after restart",
-                migrated_block.height
-            ))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "Block at height {} should be retrievable after restart",
+                    migrated_block.height
+                )
+            })
             .unwrap();
 
         // Assert that the block has the chunk
@@ -104,7 +106,8 @@ async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
 
         // Assert that the block matches the originally mined block
         assert_eq!(
-            &migrated_block, block_from_block_pool.as_ref(),
+            &migrated_block,
+            block_from_block_pool.as_ref(),
             "Block at height {} should match the mined block after restart",
             migrated_block.height
         );
