@@ -1,6 +1,7 @@
 use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
+    confirm_data_size_for_data_root,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::data_size_to_chunk_count,
     tables::{CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs},
@@ -170,6 +171,24 @@ impl Inner {
             }
             Ok(v) => v,
         };
+
+        // Check and see if this is the rightmost chunk
+        if path_result.is_rightmost_chunk {
+            // If this is the rightmost chunk in the data_root we can use it to
+            // validate the data_size and mark it as "confirmed" in the cache.
+            //
+            // In this case the data path stores offsets so we need to add one
+            // to get the size in bytes.
+            let confirmed_data_size: u64 = (path_result.right_bound + 1)
+                .try_into()
+                .expect("to convert U128 path_result.right_bound to data_size to u64");
+
+            self.irys_db
+                .update_eyre(|db_tx| {
+                    confirm_data_size_for_data_root(db_tx, &chunk.data_root, confirmed_data_size)
+                })
+                .expect("confirm_data_size database operation to succeed");
+        }
 
         // Use data_size to identify and validate that only the last chunk
         // can be less than chunk_size
