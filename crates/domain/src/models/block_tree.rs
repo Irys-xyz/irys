@@ -272,7 +272,7 @@ impl BlockTree {
                 })?
                 .block_hash
         };
-        let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
+        let latest_block = block_header_by_hash(&tx, &latest_block_hash, true)
             .map_err(|e| eyre::eyre!("db error loading latest block {}: {}", latest_block_hash, e))?
             .ok_or_else(|| {
                 eyre::eyre!(
