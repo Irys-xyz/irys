@@ -276,10 +276,13 @@ impl BlockDiscoveryServiceInner {
 
         debug!(
             block.height = ?new_block_header.height,
+            block.hash = %new_block_header.block_hash,
             block.global_step_counter = new_block_header.vdf_limiter_info.global_step_number,
             block.output = ?new_block_header.vdf_limiter_info.output,
             block.prev_output = ?new_block_header.vdf_limiter_info.prev_output,
-            "\nPre Validating block"
+            "\nPre Validating block height {} hash {}",
+            new_block_header.height,
+            new_block_header.block_hash
         );
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
@@ -450,8 +453,8 @@ impl BlockDiscoveryServiceInner {
         let mut commitments: Vec<CommitmentTransaction> = Vec::new();
         if let Some(commitment_ledger) = commitment_ledger {
             debug!(
-                "incoming block commitment txids, height {}\n{:#?}",
-                new_block_header.height, commitment_ledger
+                "incoming block commitment txids, height {} hash {}\n{:#?}",
+                new_block_header.height, new_block_header.block_hash, commitment_ledger
             );
             // TODO: we can't get these from the database
             // if we can, something has gone wrong!
@@ -569,7 +572,7 @@ impl BlockDiscoveryServiceInner {
         {
             // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
             let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
-            debug!(target = "preval-anchor", "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height);
+            debug!(target = "preval-anchor", "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash);
 
             // get from the block index
             let block_index = self.block_index_guard.read();
@@ -722,7 +725,8 @@ impl BlockDiscoveryServiceInner {
                         .eq(arc_commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
-                                "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
+                                "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
+                                new_block_header.block_hash,
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
                                 arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
