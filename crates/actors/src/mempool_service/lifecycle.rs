@@ -37,7 +37,7 @@ impl Inner {
                     });
 
                 // Get and update DB header if needed
-                let mut db_header = match self.read_tx() {
+                let mut db_header = match self.irys_db.tx() {
                     Ok(read_tx) => match tx_header_by_txid(&read_tx, txid) {
                         Ok(Some(h)) => {
                             debug!("Got tx {} from DB", txid);
@@ -699,23 +699,27 @@ impl Inner {
         let commitments = self
             .handle_get_commitment_tx_message(commitment_tx_ids)
             .await;
+        self.remove_commitment_txs(commitments.values().map(|x| x.id))
+            .await;
+        {
+            let tx = self
+                .irys_db
+                .tx_mut()
+                .expect("to get a mutable tx reference from the db");
 
-        let tx = self
-            .irys_db
-            .tx_mut()
-            .expect("to get a mutable tx reference from the db");
-
-        for commitment_tx in commitments.values() {
-            // Insert the commitment transaction in to the db, perform migration
-            insert_commitment_tx(&tx, commitment_tx)?;
-            // Remove the commitment tx from the mempool cache, completing the migration
-            self.remove_commitment_tx(&commitment_tx.id()).await;
+            for commitment_tx in commitments.values() {
+                // Insert the commitment transaction in to the db, perform migration
+                insert_commitment_tx(&tx, commitment_tx)?;
+            }
+            tx.inner.commit()?;
         }
-        tx.inner.commit()?;
-
         // stage 2: move submit transactions from tree to index
         let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
         {
+            // FIXME: this next line is less efficient than it needs to be?
+            //        why would we read mdbx txs when we are migrating?
+            let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
+
             let mut_tx = self
                 .irys_db
                 .tx_mut()
@@ -723,10 +727,6 @@ impl Inner {
                     error!("Failed to create mdbx transaction: {}", e);
                 })
                 .expect("expected to read/write to database");
-
-            // FIXME: this next line is less efficient than it needs to be?
-            //        why would we read mdbx txs when we are migrating?
-            let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
             data_tx_headers
                 .into_iter()
                 .enumerate()
@@ -752,6 +752,10 @@ impl Inner {
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
         let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
         {
+            let publish_tx_headers = self
+                .handle_get_data_tx_message(publish_tx_ids.clone())
+                .await;
+
             let mut_tx = self
                 .irys_db
                 .tx_mut()
@@ -759,10 +763,6 @@ impl Inner {
                     error!("Failed to create mdbx transaction: {}", e);
                 })
                 .expect("expected to read/write to database");
-
-            let publish_tx_headers = self
-                .handle_get_data_tx_message(publish_tx_ids.clone())
-                .await;
 
             publish_tx_headers
                 .into_iter()

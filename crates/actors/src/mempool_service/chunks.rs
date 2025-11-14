@@ -47,33 +47,36 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
-        let read_tx = self
-            .read_tx()
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
+        let data_size = {
+            let read_tx = self
+                .irys_db
+                .tx()
+                .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
-        let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
-            .map(|cdr| cdr.data_size)
-            .or_else(|| {
-                debug!(
-                    chunk.data_root = ?chunk.data_root,
-                    chunk.tx_offset = ?chunk.tx_offset,
-                    "Checking SMs for data_size"
-                );
-                // Get a list of all the local storage modules
-                let storage_modules = self.storage_modules_guard.read().clone();
+            irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+                .map_err(|_| CriticalChunkIngressError::DatabaseError)?
+                .map(|cdr| cdr.data_size)
+                .or_else(|| {
+                    debug!(
+                        chunk.data_root = ?chunk.data_root,
+                        chunk.tx_offset = ?chunk.tx_offset,
+                        "Checking SMs for data_size"
+                    );
+                    // Get a list of all the local storage modules
+                    let storage_modules = self.storage_modules_guard.read().clone();
 
-                // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
-                storage_modules
-                    .iter()
-                    .filter_map(|sm| {
-                        sm.collect_data_root_infos(chunk.data_root)
-                            .ok()
-                            .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
-                    })
-                    .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
-                    .max()
-            });
+                    // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
+                    storage_modules
+                        .iter()
+                        .filter_map(|sm| {
+                            sm.collect_data_root_infos(chunk.data_root)
+                                .ok()
+                                .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
+                        })
+                        .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
+                        .max()
+                })
+        };
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -293,43 +296,45 @@ impl Inner {
 
         //  TODO: hook into whatever manages ingress proofs
         let signer_addr = self.config.irys_signer().address();
-        match irys_database::ingress_proof_by_data_root_address(
-            &read_tx,
-            chunk.data_root,
-            signer_addr,
-        ) {
-            Ok(Some(_)) => {
-                info!(
-                    "Our ingress proof already exists for data root {}",
-                    &root_hash
-                );
-                return Ok(());
-            }
-            Ok(None) => {
-                // No proof by our signer exists; continue to check chunk completeness and potentially generate our proof.
-            }
-            Err(e) => {
-                error!("Database error: {:?}", e);
-                return Err(CriticalChunkIngressError::DatabaseError.into());
-            }
-        }
+        let chunk_count = {
+            let read_tx = self
+                .irys_db
+                .tx()
+                .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
-        // check if we have all the chunks for this tx
-        let read_tx = self
-            .read_tx()
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
+            match irys_database::ingress_proof_by_data_root_address(
+                &read_tx,
+                chunk.data_root,
+                signer_addr,
+            ) {
+                Ok(Some(_)) => {
+                    info!(
+                        "Our ingress proof already exists for data root {}",
+                        &root_hash
+                    );
+                    return Ok(());
+                }
+                Ok(None) => {
+                    // No proof by our signer exists; continue to check chunk completeness and potentially generate our proof.
+                }
+                Err(e) => {
+                    error!("Database error: {:?}", e);
+                    return Err(CriticalChunkIngressError::DatabaseError.into());
+                }
+            }
 
-        let mut cursor = read_tx
-            .cursor_dup_read::<CachedChunksIndex>()
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
+            let mut cursor = read_tx
+                .cursor_dup_read::<CachedChunksIndex>()
+                .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
 
-        // get the number of dupsort values (aka the number of chunks)
-        // this ASSUMES that the index isn't corrupt (no double values etc)
-        // the ingress proof generation task does a more thorough check
-        let chunk_count = cursor
-            .dup_count(root_hash)
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
-            .ok_or(CriticalChunkIngressError::DatabaseError)?;
+            // get the number of dupsort values (aka the number of chunks)
+            // this ASSUMES that the index isn't corrupt (no double values etc)
+            // the ingress proof generation task does a more thorough check
+            cursor
+                .dup_count(root_hash)
+                .map_err(|_| CriticalChunkIngressError::DatabaseError)?
+                .ok_or(CriticalChunkIngressError::DatabaseError)?
+        };
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)

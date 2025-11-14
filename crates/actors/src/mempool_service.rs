@@ -51,7 +51,7 @@ use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
-use reth_db::{Database as _, DatabaseError};
+use reth_db::Database as _;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
@@ -978,34 +978,37 @@ impl Inner {
         );
 
         {
-            let read_tx = self
-                .irys_db
-                .tx()
-                .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
+            let publish_txids = {
+                let read_tx = self
+                    .irys_db
+                    .tx()
+                    .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
+                let mut read_cursor = read_tx
+                    .new_cursor::<IngressProofs>()
+                    .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
 
-            let mut read_cursor = read_tx
-                .new_cursor::<IngressProofs>()
-                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
+                let walker = read_cursor
+                    .walk(None)
+                    .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
 
-            let walker = read_cursor
-                .walk(None)
-                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
+                let ingress_proofs = walker
+                    .collect::<Result<HashMap<_, _>, _>>()
+                    .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
 
-            let ingress_proofs = walker
-                .collect::<Result<HashMap<_, _>, _>>()
-                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
+                let mut publish_txids: Vec<H256> = Vec::new();
 
-            let mut publish_txids: Vec<H256> = Vec::new();
-
-            // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
-            for data_root in ingress_proofs.keys() {
-                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
-                if let Some(cached_data_root) = cached_data_root {
-                    let txids = cached_data_root.txid_set;
-                    trace!(tx.ids = ?txids, "Publish candidates");
-                    publish_txids.extend(txids)
+                // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
+                for data_root in ingress_proofs.keys() {
+                    let cached_data_root =
+                        cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
+                    if let Some(cached_data_root) = cached_data_root {
+                        let txids = cached_data_root.txid_set;
+                        trace!(tx.ids = ?txids, "Publish candidates");
+                        publish_txids.extend(txids)
+                    }
                 }
-            }
+                publish_txids
+            };
 
             // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
@@ -1035,7 +1038,6 @@ impl Inner {
                 acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
                 acc
             });
-            let ro_tx = self.irys_db.tx()?;
 
             for tx_header in &tx_headers {
                 debug!(
@@ -1060,6 +1062,7 @@ impl Inner {
                     // check for single-block promotion
                     if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
                         // check database
+                        let ro_tx = self.irys_db.tx()?;
                         if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
                             // no previous inclusion
                             warn!(
@@ -1074,7 +1077,14 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+                let all_proofs = {
+                    let read_tx = self
+                        .irys_db
+                        .tx()
+                        .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
+
+                    ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?
+                };
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1276,7 +1286,7 @@ impl Inner {
         } {
             Ok(Some(height))
         } else if let Some(hdr) = {
-            let read_tx = self.read_tx()?;
+            let read_tx = self.irys_db.tx()?;
             irys_database::block_header_by_hash(&read_tx, &anchor, false)?
         } {
             Ok(Some(hdr.height))
@@ -1431,18 +1441,6 @@ impl Inner {
         let mut write = self.mempool_state.write().await;
         write.recent_invalid_tx.clear();
         write.recent_invalid_payload_fingerprints.clear();
-    }
-
-    /// Helper that opens a read-only database transaction from the Irys mempool state.
-    ///
-    /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
-    /// if the transaction could not be created. Logs an error if the transaction fails.
-    pub fn read_tx(
-        &self,
-    ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
-        self.irys_db
-            .tx()
-            .inspect_err(|e| error!("database error reading tx: {:?}", e))
     }
 
     // Helper to verify signature

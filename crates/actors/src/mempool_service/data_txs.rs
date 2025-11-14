@@ -103,7 +103,7 @@ impl Inner {
             }
 
             // if data tx exists in mdbx
-            match self.read_tx() {
+            match self.irys_db.tx() {
                 Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
                     Ok(Some(tx_header)) => {
                         trace!("Got tx {} from DB", &tx);
@@ -519,7 +519,7 @@ impl Inner {
             Ok(TxKnownStatus::InvalidSeen)
         } else {
             drop(mempool_state_guard);
-            let read_tx = self.read_tx();
+            let read_tx = self.irys_db.tx();
 
             if read_tx.is_err() {
                 Err(TxReadError::DatabaseError)
