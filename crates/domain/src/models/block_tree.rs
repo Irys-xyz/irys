@@ -228,7 +228,8 @@ impl BlockTree {
         let tx = db
             .tx()
             .map_err(|e| eyre::eyre!("failed to open db tx for restore_from_db: {}", e))?;
-        let start_block = block_header_by_hash(&tx, &start_block_hash, false)
+        // note: we need the poa chunk so that it's available in the tree for gossip purposes
+        let start_block = block_header_by_hash(&tx, &start_block_hash, true)
             .map_err(|e| eyre::eyre!("db error loading start block {}: {}", start_block_hash, e))?
             .ok_or_else(|| {
                 eyre::eyre!("start block header not found for hash {}", start_block_hash)
@@ -272,7 +273,8 @@ impl BlockTree {
                 })?
                 .block_hash
         };
-        let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
+        // note: we need the poa chunk so that it's available in the tree for gossip purposes
+        let latest_block = block_header_by_hash(&tx, &latest_block_hash, true)
             .map_err(|e| eyre::eyre!("db error loading latest block {}: {}", latest_block_hash, e))?
             .ok_or_else(|| {
                 eyre::eyre!(
@@ -317,7 +319,8 @@ impl BlockTree {
                 block_index.get_item(block_height).unwrap().block_hash
             };
 
-            let block = block_header_by_hash(&tx, &block_hash, false)
+            // note: we need the poa chunk so that it's available in the tree for gossip purposes
+            let block = block_header_by_hash(&tx, &block_hash, true)
                 .unwrap()
                 .unwrap();
 
