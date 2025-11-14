@@ -129,25 +129,25 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
 
     info!("waiting for tx header...");
 
-    let recv_tx = loop {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let response = node
-            .node_ctx
-            .service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx));
-        if let Err(e) = response {
-            tracing::error!("channel closed, unable to send to mempool: {:?}", e);
-        }
-        match oneshot_rx.await {
-            Ok(Ok(mempool_tx)) if !mempool_tx.submit_tx.is_empty() => {
-                break mempool_tx.submit_tx[0].clone();
+    let recv_tx =
+        loop {
+            let canonical_tip = node.get_canonical_chain().last().unwrap().block_hash;
+            let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+            let response = node.node_ctx.service_senders.mempool.send(
+                MempoolServiceMessage::GetBestMempoolTxs(canonical_tip, oneshot_tx),
+            );
+            if let Err(e) = response {
+                tracing::error!("channel closed, unable to send to mempool: {:?}", e);
             }
-            _ => {
-                sleep(Duration::from_millis(100)).await;
+            match oneshot_rx.await {
+                Ok(Ok(mempool_tx)) if !mempool_tx.submit_tx.is_empty() => {
+                    break mempool_tx.submit_tx[0].clone();
+                }
+                _ => {
+                    sleep(Duration::from_millis(100)).await;
+                }
             }
-        }
-    };
+        };
     info!(
         "got tx {:?}- waiting for chunks & ingress proof generation...",
         &recv_tx.id

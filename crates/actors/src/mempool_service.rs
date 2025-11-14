@@ -234,10 +234,8 @@ pub enum MempoolServiceMessage {
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Return filtered list of candidate txns
-    /// Filtering based on funding status etc based on the provided EVM block ID
-    /// If `None` is provided, the latest canonical block is used
-    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<eyre::Result<MempoolTxs>>),
+    /// Return filtered list of candidate txns for the provided Irys block hash
+    GetBestMempoolTxs(BlockHash, oneshot::Sender<eyre::Result<MempoolTxs>>),
     // todo update the test utils to use the read guard instead. Then this can be deleted
     /// Retrieves a list of CommitmentTransactions based on the provided tx ids
     GetCommitmentTxs {
@@ -486,10 +484,10 @@ impl Inner {
         }
     }
 
-    #[instrument(skip(self), fields(block.parent_evm_id = ?parent_evm_block_id), err)]
+    #[instrument(skip(self), fields(block.parent_block_hash = ?parent_block_hash), err)]
     async fn handle_get_best_mempool_txs(
         &self,
-        parent_evm_block_id: Option<BlockId>,
+        parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
@@ -506,7 +504,61 @@ impl Inner {
             .try_into()
             .expect("max_commitment_txs_per_block to fit into usize");
 
-        let current_height = self.get_latest_block_height()?;
+        let (
+            canonical,
+            parent_block_height,
+            parent_evm_block_id,
+            commitment_snapshot,
+            epoch_snapshot,
+            ema_snapshot,
+        ) = {
+            let tree = self.block_tree_read_guard.read();
+
+            // Get the canonical chain for use in get_publish_txs_and_proofs
+            let (canonical, _) = tree.get_canonical_chain();
+
+            eyre::ensure!(
+                canonical.last().map(|entry| entry.block_hash) == Some(parent_block_hash),
+                "Provided parent_block_hash {:?} is not the canonical chain tip. Canonical tip: {:?}",
+                parent_block_hash,
+                canonical.last().map(|entry| entry.block_hash)
+            );
+
+            let block = tree
+                .get_block(&parent_block_hash)
+                .ok_or_eyre(format!("Block not found: {:?}", parent_block_hash))?;
+
+            // Extract only the data we need before the tree guard is dropped
+            let block_height = block.height;
+            let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
+
+            let ema_snapshot = tree
+                .get_ema_snapshot(&parent_block_hash)
+                .ok_or_else(|| eyre!("EMA snapshot not found for block {:?}", parent_block_hash))?;
+            let epoch_snapshot = tree.get_epoch_snapshot(&parent_block_hash).ok_or_else(|| {
+                eyre!("Epoch snapshot not found for block {:?}", parent_block_hash)
+            })?;
+            let commitment_snapshot =
+                tree.get_commitment_snapshot(&parent_block_hash)
+                    .map_err(|e| {
+                        eyre!(
+                            "Failed to get commitment snapshot for block {:?}: {}",
+                            parent_block_hash,
+                            e
+                        )
+                    })?;
+
+            (
+                canonical,
+                block_height,
+                evm_block_id,
+                commitment_snapshot,
+                epoch_snapshot,
+                ema_snapshot,
+            )
+        };
+
+        let current_height = parent_block_height;
         let min_anchor_height = current_height.saturating_sub(
             (self.config.consensus.mempool.tx_anchor_expiry_depth as u64)
                 .saturating_sub(self.config.consensus.block_migration_depth as u64),
@@ -519,42 +571,13 @@ impl Inner {
 
         let mut balances: HashMap<Address, U256> = HashMap::new();
 
-        // Get all necessary snapshots and canonical chain info in a single read operation
-        let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
-            let tree = self.block_tree_read_guard.read();
-            let (canonical, _) = tree.get_canonical_chain();
-            let last_block = canonical
-                .last()
-                .ok_or_eyre("Empty canonical chain")?
-                .clone();
-
-            // Get all snapshots for the tip block
-            let ema_snapshot = tree
-                .get_ema_snapshot(&last_block.block_hash)
-                .ok_or_else(|| eyre!("EMA snapshot not found for tip block"))?;
-            let epoch_snapshot = tree
-                .get_epoch_snapshot(&last_block.block_hash)
-                .ok_or_else(|| eyre!("Epoch snapshot not found for tip block"))?;
-            let commitment_snapshot = tree
-                .get_commitment_snapshot(&last_block.block_hash)
-                .map_err(|e| eyre!("Failed to get commitment snapshot: {}", e))?;
-
-            (
-                canonical,
-                last_block,
-                commitment_snapshot,
-                epoch_snapshot,
-                ema_snapshot,
-            )
-        };
-
         info!(
-            chain.head_height = last_block.height,
-            chain.head_hash = ?last_block.block_hash,
-            chain.canonical_length = canonical.len(),
+            block.height = parent_block_height,
+            block.hash = ?parent_block_hash,
             "Starting mempool transaction selection"
         );
 
+        // Collect confirmed commitment transactions from canonical chain to avoid duplicates
         for entry in canonical.iter() {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
@@ -564,16 +587,13 @@ impl Inner {
             }
         }
 
-        // Process commitments in the mempool in priority order
-
         // Collect all stake and pledge commitments from mempool
         let mut sorted_commitments = mempool_state.sorted_commitments().await;
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
 
-        // Process sorted commitments
-        // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
+        // Create a throw away commitment snapshot for simulation
         let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
