@@ -1490,6 +1490,11 @@ impl Inner {
     }
 }
 
+/// Mempool state. All methods on this structure are quick utility methods. No function acquires
+/// more than one lock, and no function makes a call to any other function of the
+/// AtomicMempoolState structure, eliminating the possibility of deadlocks. Although this structure
+/// has private read and write methods, these should not be used outside the AtomicMempoolState
+/// under any condition.
 #[derive(Debug, Clone)]
 pub struct AtomicMempoolState(Arc<RwLock<MempoolState>>);
 
@@ -2094,26 +2099,22 @@ impl AtomicMempoolState {
         hash_map
     }
 
+    /// Do not call this funtion from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
-    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
-        match tokio::time::timeout(Duration::from_secs(10), self.0.read()).await {
-            Ok(lock) => lock,
-            Err(elapsed) => {
-                error!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock");
-                panic!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock")
-            }
-        }
+    async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
+        tokio::time::timeout(Duration::from_secs(10), self.0.read()).await.unwrap_or_else(|elapsed| {
+            error!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock");
+            panic!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock")
+        })
     }
 
+    /// Do not call this funtion from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
-    pub async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
-        match tokio::time::timeout(Duration::from_secs(10), self.0.write()).await {
-            Ok(lock) => lock,
-            Err(elapsed) => {
-                error!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock");
-                panic!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock")
-            }
-        }
+    async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
+        tokio::time::timeout(Duration::from_secs(10), self.0.write()).await.unwrap_or_else(|elapsed| {
+            error!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock");
+            panic!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock")
+        })
     }
 }
 
