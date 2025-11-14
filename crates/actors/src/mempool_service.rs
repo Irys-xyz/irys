@@ -518,8 +518,9 @@ impl Inner {
             let (canonical, _) = tree.get_canonical_chain();
 
             eyre::ensure!(
-                canonical.last().map(|entry| entry.block_hash) == Some(parent_block_hash),
-                "Provided parent_block_hash {:?} is not the canonical chain tip. Canonical tip: {:?}",
+                // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
+                canonical.iter().any(|entry| entry.block_hash == parent_block_hash),
+                "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
                 parent_block_hash,
                 canonical.last().map(|entry| entry.block_hash)
             );

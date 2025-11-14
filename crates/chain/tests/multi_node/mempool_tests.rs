@@ -1086,6 +1086,11 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
+    // Wait for mempool to stabilize with expected shape after reorg
+    a_node
+        .wait_for_mempool_best_txs_shape(1, 1, 0, seconds_to_wait.try_into()?)
+        .await?;
+
     let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
     let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
 
@@ -1247,13 +1252,13 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 /// mine a block on B, assert A's tx is included correctly
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
-    initialize_tracing();
+    // std::env::set_var(
+    //     "RUST_LOG",
+    //     "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+    // );
+    // initialize_tracing();
 
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
@@ -1444,6 +1449,11 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
         a_node.get_block_by_height(network_height).await?,
         b_node.get_block_by_height(network_height).await?
     );
+
+    // Wait for mempool to stabilize with expected shape after reorg
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait.try_into()?)
+        .await?;
 
     // assert that a_blk1_tx1 is back in a's mempool
     let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
@@ -1820,21 +1830,14 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         "there should not be a storage tx (lack of funding due to changed parent Irys block)"
     );
 
-    let (tx, rx) = oneshot::channel();
-    // latest
-    let peer2_canonical_tip = peer2.get_canonical_chain().last().unwrap().block_hash;
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(
-            peer2_canonical_tip,
-            tx,
-        ))?;
-    let best_current = rx.await??;
+    // Wait for mempool to stabilize after reconnection
+    let (best_current_submit, _, _) = peer2
+        .wait_for_mempool_best_txs_shape(1, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
+
     // latest block has the fund tx, so it should be present
     assert_eq!(
-        best_current.submit_tx.len(),
+        best_current_submit.len(),
         1,
         "There should be a storage tx"
     );
@@ -1853,20 +1856,13 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // the storage tx shouldn't be in the best mempool txs due to the fork change
 
-    let (tx, rx) = oneshot::channel();
-    let peer2_canonical_tip = peer2.get_canonical_chain().last().unwrap().block_hash;
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(
-            peer2_canonical_tip,
-            tx,
-        ))?;
-    let best_current = rx.await??;
+    // Wait for mempool to stabilize after fork recovery
+    let (best_current_submit, _, _) = peer2
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
 
     assert_eq!(
-        best_current.submit_tx.len(),
+        best_current_submit.len(),
         0,
         "There shouldn't be a storage tx"
     );
