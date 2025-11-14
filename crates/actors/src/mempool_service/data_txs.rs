@@ -501,10 +501,7 @@ impl Inner {
             return Ok(status);
         }
 
-        match self
-            .irys_db
-            .view_eyre(|tx| tx_header_by_txid(tx, &txid))
-        {
+        match self.irys_db.view_eyre(|tx| tx_header_by_txid(tx, &txid)) {
             Ok(Some(_)) => Ok(TxKnownStatus::Migrated),
             Ok(None) => Ok(TxKnownStatus::Unknown),
             Err(_) => Err(TxReadError::DatabaseError),

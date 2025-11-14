@@ -1016,9 +1016,9 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = self
-                    .irys_db
-                    .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?;
+                let all_proofs = self.irys_db.view_eyre(|read_tx| {
+                    ingress_proofs_by_data_root(read_tx, tx_header.data_root)
+                })?;
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
