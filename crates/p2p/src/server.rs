@@ -171,6 +171,8 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
+        let block_hash = gossip_request.data.block_hash;
+        let block_height = gossip_request.data.height;
         if gossip_request.data.poa.chunk.is_none() {
             error!(
                 target = "p2p::server",
@@ -191,14 +193,14 @@ where
                     Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
                     if !error.is_advisory() {
                         error!(
-                            "Node {:?}: Failed to process the block {:?}: {:?}",
-                            this_node_id, block_hash_string, error
+                            "Node {:?}: Failed to process the block {} height {}: {:?}",
+                            this_node_id, block_hash_string, block_height, error
                         );
                     }
                 } else {
                     info!(
-                        "Node {:?}: Server handler handled block {:?}",
-                        this_node_id, block_hash_string
+                        "Node {:?}: Server handler handled block {} height {}",
+                        this_node_id, block_hash_string, block_height
                     );
                 }
             }
@@ -206,8 +208,8 @@ where
         );
 
         debug!(
-            "Node {:?}: Started handling block and returned ok response to the peer",
-            this_node_id
+            "Node {:?}: Started handling block {} height {} and returned ok response to the peer",
+            this_node_id, block_hash, block_height
         );
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }

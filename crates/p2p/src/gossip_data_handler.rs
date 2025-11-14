@@ -429,8 +429,8 @@ where
         let sync_target = self.sync_state.sync_target_height();
         if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
-                "Node {}: Block {} is out of the sync range (target: {}, highest processed: {}), skipping",
-                self.gossip_client.mining_address, block_hash, &sync_target, &self.sync_state.highest_processed_block()
+                "Node {}: Block {} height {} is out of the sync range (target: {}, highest processed: {}), skipping",
+                self.gossip_client.mining_address, block_hash, block_header.height, &sync_target, &self.sync_state.highest_processed_block()
             );
             return Ok(());
         }
@@ -442,8 +442,8 @@ where
         // able to keep track of which peers seen what
         if has_block_already_been_received && !is_block_requested_by_the_pool {
             debug!(
-                "Node {}: Block {} already seen and not requested by the pool, skipping",
-                self.gossip_client.mining_address, block_header.block_hash
+                "Node {}: Block {} height {} already seen and not requested by the pool, skipping",
+                self.gossip_client.mining_address, block_header.block_hash, block_header.height
             );
             return Ok(());
         }
@@ -487,20 +487,20 @@ where
 
         if has_block_already_been_processed {
             debug!(
-                "Node {}: Block {} has already been processed, skipping",
-                self.gossip_client.mining_address, block_header.block_hash
+                "Node {}: Block {} height {} has already been processed, skipping",
+                self.gossip_client.mining_address, block_header.block_hash, block_header.height
             );
             return Ok(());
         }
 
         debug!(
-            "Node {}: Block {} has not been processed yet, starting processing",
-            self.gossip_client.mining_address, block_header.block_hash
+            "Node {}: Block {} height {} has not been processed yet, starting processing",
+            self.gossip_client.mining_address, block_header.block_hash, block_header.height
         );
 
         debug!(
-            "Collecting missing/invalid data transactions for block {:?}",
-            block_hash
+            "Collecting missing/invalid data transactions for block {} height {}",
+            block_hash, block_header.height
         );
         let mut missing_invalid_tx_ids = Vec::new();
 
@@ -514,8 +514,8 @@ where
             }
         }
         debug!(
-            "Collected missing data tx ids: {:?}",
-            missing_invalid_tx_ids
+            "Collected missing data tx ids for block {} height {}: {:?}",
+            block_hash, block_header.height, missing_invalid_tx_ids
         );
 
         for system_tx_id in block_header
@@ -531,14 +531,14 @@ where
             }
         }
         debug!(
-            "Collected missing commitment tx ids: {:?}",
-            missing_invalid_tx_ids
+            "Collected missing commitment tx ids for block {} height {}: {:?}",
+            block_hash, block_header.height, missing_invalid_tx_ids
         );
 
         if !missing_invalid_tx_ids.is_empty() {
             debug!(
-                "Missing/invalid transactions to fetch: {:?}",
-                missing_invalid_tx_ids
+                "Missing/invalid transactions to fetch for block {} height {}: {:?}",
+                block_hash, block_header.height, missing_invalid_tx_ids
             );
         }
 
@@ -552,8 +552,8 @@ where
             })?;
 
         debug!(
-            "Fetching missing transactions from the network for block {:?}",
-            block_hash
+            "Fetching missing transactions from the network for block {} height {}",
+            block_hash, block_header.height
         );
 
         // Fetch missing transactions in parallel with a concurrency limit of 10
@@ -663,8 +663,8 @@ where
         }
 
         debug!(
-            "Got all missing transactions for block {:?}, sending to processing",
-            block_hash
+            "Got all missing transactions for block {} height {}, sending to processing",
+            block_hash, block_header.height
         );
 
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
