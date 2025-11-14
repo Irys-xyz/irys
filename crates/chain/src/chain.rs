@@ -1360,7 +1360,7 @@ impl IrysNode {
         );
 
         // set up the vdf thread (with monitoring task)
-        let vdf_monitor_task = Self::init_vdf_thread(
+        let vdf_task = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
             receivers.vdf_fast_forward,
@@ -1495,8 +1495,8 @@ impl IrysNode {
         let mut services = Vec::new();
         {
             // Services are shut down in FIFO order (first added = first to shut down)
-            // 1. VDF monitoring (shut down first to detect panics)
-            services.push(vdf_monitor_task);
+            // 1. VDF monitoring
+            services.push(vdf_task);
 
             // 2. Mining operations
             services.extend(price_oracle_handles.into_iter());
