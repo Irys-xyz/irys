@@ -27,11 +27,8 @@ impl Inner {
                 // Get mempool header if available
                 let mempool_header = self
                     .mempool_state
-                    .read()
+                    .valid_submit_ledger_tx_cloned(txid)
                     .await
-                    .valid_submit_ledger_tx
-                    .get(txid)
-                    .cloned()
                     .inspect(|_tx| {
                         debug!("Got tx {} from mempool", txid);
                     });
@@ -80,16 +77,9 @@ impl Inner {
 
                 // Update mempool with bounded insert
                 // For confirmed blocks, we log warnings but don't fail if mempool is full
-                let mut mempool_guard = self.mempool_state.write().await;
-                if let Err(e) = mempool_guard.bounded_insert_data_tx(header.clone()) {
-                    warn!(
-                        tx.id = ?header.id,
-                        error = ?e,
-                        "Failed to insert confirmed promoted tx into mempool (likely at capacity)"
-                    );
-                }
-                mempool_guard.recent_valid_tx.put(header.id, ());
-                drop(mempool_guard);
+                self.mempool_state
+                    .bounded_insert_data_tx(header.clone())
+                    .await;
 
                 info!("Promoted tx:\n{:#?}", header);
             }
@@ -168,14 +158,8 @@ impl Inner {
     #[instrument(skip_all)]
     pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
         // re-process all valid txs
-        let (valid_submit_ledger_tx, valid_commitment_tx) = {
-            let mut state = self.mempool_state.write().await;
-            state.recent_valid_tx.clear();
-            (
-                std::mem::take(&mut state.valid_submit_ledger_tx),
-                std::mem::take(&mut state.valid_commitment_tx),
-            )
-        };
+        let (valid_submit_ledger_tx, valid_commitment_tx) =
+            self.mempool_state.take_all_valid_txs().await;
         for (id, tx) in valid_submit_ledger_tx {
             match self.handle_data_tx_ingress_message_gossip(tx).await {
                 Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
@@ -217,14 +201,8 @@ impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?txid))]
     async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
         // Try fast-path: clear in-place if present in the mempool
-        {
-            let mut state = self.mempool_state.write().await;
-            if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-                header.promoted_height = None;
-                state.recent_valid_tx.put(txid, ());
-                tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
-                return Ok(());
-            }
+        if self.mempool_state.clear_promoted_height(txid).await {
+            return Ok(());
         }
 
         tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
@@ -285,57 +263,47 @@ impl Inner {
             }
         };
         // re-process all valid data txs
-        let tx_ids = {
-            let state = self.mempool_state.read().await;
-            state
-                .valid_submit_ledger_tx
-                .keys()
-                .copied()
-                .collect::<Vec<_>>()
-        };
+        let tx_ids = self.mempool_state.all_valid_submit_ledger_ids().await;
         for tx_id in tx_ids {
             let tx = {
-                let state = self.mempool_state.read().await;
                 // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone across lock points
-                state.valid_submit_ledger_tx.get(&tx_id).cloned()
+                self.mempool_state
+                    .valid_submit_ledger_tx_cloned(&tx_id)
+                    .await
             };
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
                 if self.should_prune_tx(current_height, &tx) {
-                    let mut state = self.mempool_state.write().await;
-                    state.valid_submit_ledger_tx.remove(&tx_id);
-                    Self::mark_tx_as_invalid(state, tx_id, TxIngressError::InvalidAnchor);
+                    self.mempool_state
+                        .remove_valid_submit_ledger_tx(&tx_id)
+                        .await;
+                    self.mempool_state
+                        .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor)
+                        .await;
                 }
             }
         }
 
         // re-process all valid commitment txs
-        let addresses = {
-            let state = self.mempool_state.read().await;
-            state
-                .valid_commitment_tx
-                .keys()
-                .copied()
-                .collect::<Vec<_>>()
-        };
+        let addresses = self
+            .mempool_state
+            .all_valid_commitment_ledger_addresses()
+            .await;
         for address in addresses {
-            let txs = {
-                let state = self.mempool_state.read().await;
-                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone
-                state.valid_commitment_tx.get(&address).cloned()
-            };
+            let txs = self
+                .mempool_state
+                .valid_commitment_txs_cloned(&address)
+                .await;
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
                     if self.should_prune_tx(current_height, &tx) {
-                        self.remove_commitment_tx(&tx.id).await;
-                        Self::mark_tx_as_invalid(
-                            self.mempool_state.write().await,
-                            tx.id,
-                            TxIngressError::InvalidAnchor,
-                        );
+                        self.mempool_state.remove_commitment_tx(&tx.id).await;
+                        self.mempool_state
+                            .mark_tx_as_invalid(tx.id, TxIngressError::InvalidAnchor)
+                            .await;
                     }
                 }
             }
@@ -652,13 +620,7 @@ impl Inner {
 
                 tx.promoted_height = Some(promoted_in_block.height);
                 // update entry
-                {
-                    let mut mempool_state_write_guard = self.mempool_state.write().await;
-                    mempool_state_write_guard
-                        .valid_submit_ledger_tx
-                        .entry(tx.id)
-                        .and_modify(|t| *t = tx);
-                }
+                self.mempool_state.update_submit_transaction(tx).await;
                 debug!(
                     "Reorged dual-published tx with {} proofs for {}",
                     &tx_proofs.len(),
@@ -709,7 +671,9 @@ impl Inner {
             // Insert the commitment transaction in to the db, perform migration
             insert_commitment_tx(&tx, commitment_tx)?;
             // Remove the commitment tx from the mempool cache, completing the migration
-            self.remove_commitment_tx(&commitment_tx.id()).await;
+            self.mempool_state
+                .remove_commitment_tx(&commitment_tx.id())
+                .await;
         }
         tx.inner.commit()?;
 
@@ -789,15 +753,9 @@ impl Inner {
         let mempool_state = &self.mempool_state.clone();
 
         // Remove the submit tx from the pending valid_submit_ledger_tx pool
-        {
-            let mut mempool_state_write_guard = mempool_state.write().await;
-            for txid in submit_tx_ids.iter() {
-                mempool_state_write_guard
-                    .valid_submit_ledger_tx
-                    .remove(txid);
-                mempool_state_write_guard.recent_valid_tx.pop(txid);
-            }
-        }
+        mempool_state
+            .remove_transactions_from_pending_valid_pool(&submit_tx_ids)
+            .await;
 
         // add block with optional poa chunk to index
         self.irys_db
