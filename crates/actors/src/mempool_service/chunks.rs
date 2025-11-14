@@ -9,12 +9,11 @@ use irys_types::{
     chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
     validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
 };
-use lru::LruCache;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
-use std::{collections::HashSet, fmt::Display, num::NonZeroUsize};
+use std::{collections::HashSet, fmt::Display};
 use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -32,18 +31,16 @@ impl Inner {
 
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
+
+        if mempool_state
+            .is_a_recent_valid_chunk(&chunk_path_hash)
+            .await
         {
-            let mempool_state_guard = mempool_state.read().await;
-            if mempool_state_guard
-                .recent_valid_chunks
-                .contains(&chunk_path_hash)
-            {
-                debug!(
-                    "Chunk {} already processed recently, skipping re-gossip",
-                    &chunk_path_hash
-                );
-                return Ok(());
-            }
+            debug!(
+                "Chunk {} already processed recently, skipping re-gossip",
+                &chunk_path_hash
+            );
+            return Ok(());
         }
 
         // Check to see if we have a cached data_root for this chunk
@@ -81,7 +78,6 @@ impl Inner {
         let data_size = match data_size {
             Some(ds) => ds,
             None => {
-                let mut mempool_state_write_guard = mempool_state.write().await;
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                 // Pre-header sanity checks to reduce DoS risk.
@@ -126,24 +122,10 @@ impl Inner {
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
-                if let Some(chunks_map) = mempool_state_write_guard
-                    .pending_chunks
-                    .get_mut(&chunk.data_root)
-                {
-                    chunks_map.put(chunk.tx_offset, chunk.clone());
-                } else {
-                    // If there's no entry for this data_root yet, create one
-                    // TODO: rework LRU logic to separate LRU/map https://github.com/Irys-xyz/irys/issues/632
-                    let mut new_lru_cache = LruCache::new(
-                        NonZeroUsize::new(preheader_chunks_per_item)
-                            .expect("expected valid NonZeroUsize::new"),
-                    );
-                    new_lru_cache.put(chunk.tx_offset, chunk.clone());
-                    mempool_state_write_guard
-                        .pending_chunks
-                        .put(chunk.data_root, new_lru_cache);
-                }
-                drop(mempool_state_write_guard);
+
+                self.mempool_state
+                    .put_chunk(chunk.clone(), preheader_chunks_per_item)
+                    .await;
                 return Ok(());
             }
         };
@@ -261,12 +243,9 @@ impl Inner {
         }
 
         // Add to recent valid chunks cache to prevent re-processing
-        {
-            let mut mempool_state_guard = mempool_state.write().await;
-            mempool_state_guard
-                .recent_valid_chunks
-                .put(chunk_path_hash, ());
-        }
+        mempool_state
+            .record_recent_valid_chunk(chunk_path_hash)
+            .await;
 
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
