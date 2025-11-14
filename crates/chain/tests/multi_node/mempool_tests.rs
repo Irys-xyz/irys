@@ -1086,7 +1086,13 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .wait_until_block_index_height(network_height - block_migration_depth, seconds_to_wait)
         .await?;
 
-    let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+    // Wait for mempool to stabilize with expected shape after reorg
+    a_node
+        .wait_for_mempool_best_txs_shape(1, 1, 0, seconds_to_wait.try_into()?)
+        .await?;
+
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
 
     // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
@@ -1207,7 +1213,8 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .await?;
 
     // (a second check) assert that nothing is in the mempool
-    let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
@@ -1245,13 +1252,13 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 /// mine a block on B, assert A's tx is included correctly
 /// gossip B's block back to A, assert that the commitment is no longer in best_mempool_txs
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> {
-    std::env::set_var(
-        "RUST_LOG",
-        "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
-    );
-    initialize_tracing();
+    // std::env::set_var(
+    //     "RUST_LOG",
+    //     "debug,irys_actors::block_validation=off,storage::db::mdbx=off,reth=off,irys_p2p::server=off,irys_actors::mining=error",
+    // );
+    // initialize_tracing();
 
     // config variables
     let num_blocks_in_epoch = 5; // test currently mines 4 blocks, and expects txs to remain in mempool
@@ -1443,8 +1450,14 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
         b_node.get_block_by_height(network_height).await?
     );
 
+    // Wait for mempool to stabilize with expected shape after reorg
+    a_node
+        .wait_for_mempool_best_txs_shape(0, 0, 1, seconds_to_wait.try_into()?)
+        .await?;
+
     // assert that a_blk1_tx1 is back in a's mempool
-    let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a1_b2_reorg_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
 
     assert_eq!(
         a1_b2_reorg_mempool_txs.commitment_tx,
@@ -1482,7 +1495,8 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     // assert that a_blk1_tx1 is no longer present in the mempool
     // (nothing should be in the mempool)
-    let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(None).await?;
+    let a_canonical_tip = a_node.get_canonical_chain().last().unwrap().block_hash;
+    let a_b_blk3_mempool_txs = a_node.get_best_mempool_tx(a_canonical_tip).await?;
     assert!(a_b_blk3_mempool_txs.submit_tx.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.txs.is_empty());
     assert!(a_b_blk3_mempool_txs.publish_tx.proofs.is_none());
@@ -1793,14 +1807,18 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     let (tx, rx) = oneshot::channel();
 
+    // Get the block hash at height - 1
+    let previous_height = peer2.get_canonical_chain_height().await - 1;
+    let previous_block_hash = peer2
+        .get_block_by_height_from_index(previous_height, false)?
+        .block_hash;
+
     peer2
         .node_ctx
         .service_senders
         .mempool
         .send(MempoolServiceMessage::GetBestMempoolTxs(
-            Some(BlockId::number(
-                peer2.get_canonical_chain_height().await - 1,
-            )),
+            previous_block_hash,
             tx,
         ))?;
 
@@ -1809,23 +1827,16 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     assert_eq!(
         best_previous.submit_tx.len(),
         0,
-        "there should not be a storage tx (lack of funding due to changed parent EVM block)"
+        "there should not be a storage tx (lack of funding due to changed parent Irys block)"
     );
 
-    let (tx, rx) = oneshot::channel();
-    // latest
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await??;
+    // Wait for mempool to stabilize after reconnection
+    let (best_current_submit, _, _) = peer2
+        .wait_for_mempool_best_txs_shape(1, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
+
     // latest block has the fund tx, so it should be present
-    assert_eq!(
-        best_current.submit_tx.len(),
-        1,
-        "There should be a storage tx"
-    );
+    assert_eq!(best_current_submit.len(), 1, "There should be a storage tx");
 
     // mine another block on peer1, so it's the longest chain (with gossip)
     let height = peer1.get_canonical_chain_height().await;
@@ -1841,16 +1852,13 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // the storage tx shouldn't be in the best mempool txs due to the fork change
 
-    let (tx, rx) = oneshot::channel();
-    peer2
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(None, tx))?;
-    let best_current = rx.await??;
+    // Wait for mempool to stabilize after fork recovery
+    let (best_current_submit, _, _) = peer2
+        .wait_for_mempool_best_txs_shape(0, 0, 0, seconds_to_wait.try_into()?)
+        .await?;
 
     assert_eq!(
-        best_current.submit_tx.len(),
+        best_current_submit.len(),
         0,
         "There shouldn't be a storage tx"
     );

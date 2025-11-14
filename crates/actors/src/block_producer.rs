@@ -45,7 +45,6 @@ use reth::{
     core::primitives::SealedBlock,
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
     revm::primitives::B256,
-    rpc::types::BlockId,
     tasks::shutdown::Shutdown,
 };
 use reth_payload_primitives::PayloadBuilderError;
@@ -1348,7 +1347,7 @@ pub trait BlockProdStrategy {
             .service_senders
             .mempool
             .send(MempoolServiceMessage::GetBestMempoolTxs(
-                Some(BlockId::Hash(prev_block_header.evm_block_hash.into())),
+                prev_block_header.block_hash,
                 tx,
             ))
             .expect("to send MempoolServiceMessage");
