@@ -1085,7 +1085,7 @@ where
             .await;
     }
 
-    pub(crate) async fn get_block_data(
+    pub async fn get_block_data(
         &self,
         block_hash: &BlockHash,
     ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {

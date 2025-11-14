@@ -14,6 +14,7 @@ async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
 
     // Collect mined blocks with their chunks
     let mut mined_blocks = Vec::new();
+    let mut migrated_blocks = Vec::new();
 
     // Mine 10 blocks explicitly
     for i in 1..=10 {
@@ -66,8 +67,50 @@ async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
                 "Block hash in index should match the mined block at height {}",
                 migration_height
             );
+            migrated_blocks.push(block_from_index);
         }
     }
+
+    info!("All blocks mined and validated. Restarting node to verify persistence...");
+
+    // Restart the node to ensure blocks are persisted correctly
+    let node = node.stop().await.start().await;
+
+    // Verify all mined blocks can be retrieved from block pool after restart
+    for migrated_block in migrated_blocks {
+        info!(
+            "Verifying block at height {} after restart",
+            migrated_block.height
+        );
+
+        // Get the block from the block tree using the hash
+        let block_from_block_pool = node
+            .node_ctx
+            .block_pool
+            .get_block_data(&migrated_block.block_hash)
+            .await
+            .expect(&format!(
+                "Block at height {} should be retrievable after restart",
+                migrated_block.height
+            ))
+            .unwrap();
+
+        // Assert that the block has the chunk
+        assert!(
+            block_from_block_pool.poa.chunk.is_some(),
+            "Block at height {} should have a chunk after restart",
+            migrated_block.height
+        );
+
+        // Assert that the block matches the originally mined block
+        assert_eq!(
+            &migrated_block, block_from_block_pool.as_ref(),
+            "Block at height {} should match the mined block after restart",
+            migrated_block.height
+        );
+    }
+
+    info!("All blocks verified successfully after restart");
 
     node.stop().await;
     Ok(())
