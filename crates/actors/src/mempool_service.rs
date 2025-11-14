@@ -2099,7 +2099,7 @@ impl AtomicMempoolState {
         hash_map
     }
 
-    /// Do not call this funtion from anywhere outside AtomicMempoolState
+    /// Do not call this function from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
     async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
         tokio::time::timeout(Duration::from_secs(10), self.0.read()).await.unwrap_or_else(|elapsed| {
@@ -2108,7 +2108,7 @@ impl AtomicMempoolState {
         })
     }
 
-    /// Do not call this funtion from anywhere outside AtomicMempoolState
+    /// Do not call this function from anywhere outside AtomicMempoolState
     #[instrument(skip_all)]
     async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
         tokio::time::timeout(Duration::from_secs(10), self.0.write()).await.unwrap_or_else(|elapsed| {
