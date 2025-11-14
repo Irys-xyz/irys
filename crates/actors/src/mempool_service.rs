@@ -2743,7 +2743,7 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                println!("Task {task_info} takes too long to complete, possible deadlock detected...");
+                warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
             }
             res = &mut fut => {
                 break res;
