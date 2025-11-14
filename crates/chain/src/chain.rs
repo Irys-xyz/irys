@@ -868,7 +868,6 @@ impl IrysNode {
                             let (
                                 irys_node,
                                 actix_server,
-                                vdf_thread,
                                 gossip_service_handle,
                                 service_set,
                             ) = Self::init_services(
@@ -893,9 +892,7 @@ impl IrysNode {
                             service_set_sender
                                 .send(service_set)
                                 .expect("ServiceSet must be sent");
-                            irys_node_ctx_tx.send(irys_node).expect(
-                    "irys node ctx sender should not be dropped. Is the reth node thread down?",
-                );
+                            irys_node_ctx_tx.send(irys_node).expect("irys node ctx sender should not be dropped. Is the reth node thread down?");
 
                             // await on actix web server
                             let server_handle = actix_server.handle();
@@ -928,11 +925,7 @@ impl IrysNode {
                                 warn!("No shutdown reason received, VDF will be stopped without reason");
                             }
 
-                            debug!("Waiting for VDF thread to finish");
-                            // Wait for vdf thread to finish & save steps
-                            vdf_thread.join().unwrap();
-
-                            debug!("VDF thread finished");
+                            debug!("VDF monitor task will handle thread cleanup");
                         }
                         .instrument(span.clone()),
                     )
@@ -1062,7 +1055,6 @@ impl IrysNode {
     ) -> eyre::Result<(
         IrysNodeCtx,
         Server,
-        JoinHandle<()>,
         ServiceHandleWithShutdownSignal,
         ServiceSet,
     )> {
@@ -1367,8 +1359,8 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
-        // set up the vdf thread
-        let vdf_thread_handler = Self::init_vdf_thread(
+        // set up the vdf thread (with monitoring task)
+        let vdf_monitor_task = Self::init_vdf_thread(
             &config,
             vdf_shutdown_receiver,
             receivers.vdf_fast_forward,
@@ -1380,6 +1372,8 @@ impl IrysNode {
             vdf_state,
             atomic_global_step_number,
             block_status_provider,
+            reth_shutdown_sender.clone(),
+            runtime_handle.clone(),
         );
 
         // set up chunk provider
@@ -1501,36 +1495,39 @@ impl IrysNode {
         let mut services = Vec::new();
         {
             // Services are shut down in FIFO order (first added = first to shut down)
-            // 1. Mining operations
+            // 1. VDF monitoring (shut down first to detect panics)
+            services.push(vdf_monitor_task);
+
+            // 2. Mining operations
             services.extend(price_oracle_handles.into_iter());
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
             services.extend(packing_controller_handles.into_iter());
 
-            // 2. Block production flow
+            // 3. Block production flow
             services.push(block_producer_handle);
             services.push(block_discovery_handle);
 
-            // 3. Validation
+            // 4. Validation
             services.push(validation_handle);
 
-            // 4. Storage operations
+            // 5. Storage operations
             services.push(chunk_cache_handle);
             services.push(storage_module_handle);
             services.push(data_sync_handle);
             services.push(chunk_migration_handle);
 
-            // 5. Sync operations
+            // 6. Sync operations
             services.push(sync_service_handle);
 
-            // 6. Chain management
+            // 7. Chain management
             services.push(block_tree_handle);
 
-            // 7. State management
+            // 8. State management
             services.push(block_index_handle);
             services.push(mempool_handle);
 
-            // 8. Core infrastructure (shutdown last)
+            // 9. Core infrastructure (shutdown last)
             services.push(peer_network_handle);
             services.push(reth_service_task);
         }
@@ -1568,7 +1565,6 @@ impl IrysNode {
         Ok((
             irys_node_ctx,
             server,
-            vdf_thread_handler,
             p2p_service_handle,
             ServiceSet::new(services),
         ))
@@ -1597,7 +1593,9 @@ impl IrysNode {
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
-    ) -> JoinHandle<()> {
+        reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
         // we can't use `cfg!(test)` to detect integration tests, so we check that the path is of form `(...)/.tmp/<random folder>`
@@ -1648,7 +1646,58 @@ impl IrysNode {
                 )
             }
         });
-        vdf_thread_handler
+
+        // Spawn a monitor task that owns the VDF thread lifecycle
+        // This task will detect panics during runtime and trigger shutdown
+        let (shutdown_tx, mut shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(async move {
+            info!("VDF monitor task started");
+
+            // This blocks (in tokio's blocking pool) until VDF thread exits
+            let join_future = tokio::task::spawn_blocking(move || vdf_thread_handler.join());
+
+            tokio::select! {
+                result = join_future => {
+                    match result {
+                        Ok(Ok(())) => {
+                            // VDF exited cleanly (normal shutdown)
+                            info!("VDF thread exited cleanly");
+                        }
+                        Ok(Err(panic_payload)) => {
+                            // VDF panicked - trigger shutdown
+                            error!("VDF thread panicked: {:?}", panic_payload);
+                            let _ = reth_shutdown_sender.send(
+                                ShutdownReason::FatalError(
+                                    format!("VDF thread panicked: {:?}", panic_payload)
+                                )
+                            ).await;
+                        }
+                        Err(join_err) => {
+                            // spawn_blocking failed
+                            error!("Failed to join VDF thread: {:?}", join_err);
+                            let _ = reth_shutdown_sender.send(
+                                ShutdownReason::FatalError(
+                                    format!("VDF thread join failed: {}", join_err)
+                                )
+                            ).await;
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    // Monitor task received shutdown signal
+                    debug!("VDF monitor task received shutdown signal");
+                }
+            }
+
+            info!("VDF monitor task exiting");
+        });
+
+        TokioServiceHandle {
+            name: "vdf_monitor_task".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
     }
 
     fn init_partition_mining_services(
