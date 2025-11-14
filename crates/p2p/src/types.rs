@@ -52,7 +52,7 @@ impl From<IngressProofError> for GossipError {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
             }
             IngressProofError::InvalidAnchor(_anchor) => {
-                Self::InvalidData(InvalidDataError::TransactionAnchor)
+                Self::InvalidData(InvalidDataError::IngressProofAnchor)
             }
         }
     }
