@@ -8,7 +8,7 @@ use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, H256,
 };
-use reth_db::{transaction::DbTx as _, Database as _};
+use reth_db::Database as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
@@ -34,8 +34,15 @@ impl Inner {
                     });
 
                 // Get and update DB header if needed
-                let mut db_header = match self.read_tx() {
-                    Ok(read_tx) => match tx_header_by_txid(&read_tx, txid) {
+                let mut db_header = self
+                    .irys_db
+                    .view(|tx| tx_header_by_txid(tx, txid))
+                    .map_err(|e| {
+                        warn!("Failed to open DB read transaction: {}", e);
+                        e
+                    })
+                    .ok()
+                    .and_then(|result| match result {
                         Ok(Some(h)) => {
                             debug!("Got tx {} from DB", txid);
                             Some(h)
@@ -48,12 +55,7 @@ impl Inner {
                             warn!("DB error loading tx {}: {}", txid, e);
                             None
                         }
-                    },
-                    Err(e) => {
-                        warn!("Failed to open DB read transaction: {}", e);
-                        None
-                    }
-                };
+                    });
 
                 if let Some(ref mut db_tx) = db_header {
                     if db_tx.promoted_height.is_none() {
@@ -662,92 +664,77 @@ impl Inner {
             .handle_get_commitment_tx_message(commitment_tx_ids)
             .await;
 
-        let tx = self
-            .irys_db
-            .tx_mut()
-            .expect("to get a mutable tx reference from the db");
+        // Remove all commitments from mempool in one batch operation
+        self.mempool_state
+            .remove_commitment_txs(commitments.values().map(|x| x.id))
+            .await;
 
-        for commitment_tx in commitments.values() {
-            // Insert the commitment transaction in to the db, perform migration
-            insert_commitment_tx(&tx, commitment_tx)?;
-            // Remove the commitment tx from the mempool cache, completing the migration
-            self.mempool_state
-                .remove_commitment_tx(&commitment_tx.id())
-                .await;
-        }
-        tx.inner.commit()?;
+        // stage 1: insert commitment transactions into database
+        self.irys_db.update_eyre(|tx| {
+            for commitment_tx in commitments.values() {
+                // Insert the commitment transaction in to the db, perform migration
+                insert_commitment_tx(tx, commitment_tx)?;
+            }
+            Ok(())
+        })?;
 
         // stage 2: move submit transactions from tree to index
         let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
         {
-            let mut_tx = self
-                .irys_db
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .expect("expected to read/write to database");
-
             // FIXME: this next line is less efficient than it needs to be?
             //        why would we read mdbx txs when we are migrating?
             let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
-            data_tx_headers
-                .into_iter()
-                .enumerate()
-                .for_each(|(idx, maybe_header)| match maybe_header {
-                    Some(ref header) => {
-                        if let Err(err) = insert_tx_header(&mut_tx, header) {
+
+            self.irys_db.update_eyre(|tx| {
+                for (idx, maybe_header) in data_tx_headers.into_iter().enumerate() {
+                    match maybe_header {
+                        Some(header) => {
+                            if let Err(err) = insert_tx_header(tx, &header) {
+                                error!(
+                                    "Could not insert transaction header - txid: {} err: {}",
+                                    header.id, err
+                                );
+                            }
+                        }
+                        None => {
                             error!(
-                                "Could not insert transaction header - txid: {} err: {}",
-                                header.id, err
+                                "Could not find transaction {} header in mempool",
+                                &submit_tx_ids[idx]
                             );
                         }
                     }
-                    None => {
-                        error!(
-                            "Could not find transaction {} header in mempool",
-                            &submit_tx_ids[idx]
-                        );
-                    }
-                });
-            mut_tx.commit().expect("expect to commit to database");
+                }
+                Ok(())
+            })?;
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
         let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
         {
-            let mut_tx = self
-                .irys_db
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .expect("expected to read/write to database");
-
             let publish_tx_headers = self
                 .handle_get_data_tx_message(publish_tx_ids.clone())
                 .await;
 
-            publish_tx_headers
-                .into_iter()
-                .flatten()
-                .for_each(|mut header| {
+            self.irys_db.update_eyre(|mut_tx| {
+                for mut header in publish_tx_headers.into_iter().flatten() {
                     if header.promoted_height.is_none() {
                         header.promoted_height = Some(event.block.height);
-                        panic!(
+                        eyre::bail!(
                             "Migrating publish tx with no promoted_height {} at height {}",
-                            header.id, event.block.height
+                            header.id,
+                            event.block.height
                         );
                     }
 
-                    if let Err(err) = insert_tx_header(&mut_tx, &header) {
+                    if let Err(err) = insert_tx_header(mut_tx, &header) {
                         error!(
                             "Could not insert transaction header - txid: {} err: {}",
                             header.id, err
                         );
                     }
-                });
-            mut_tx.commit().expect("expect to commit to database");
+                }
+                Ok(())
+            })?;
         }
 
         let mempool_state = &self.mempool_state.clone();

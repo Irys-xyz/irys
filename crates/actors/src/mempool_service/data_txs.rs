@@ -100,24 +100,34 @@ impl Inner {
             }
 
             // if data tx exists in mdbx
-            match self.read_tx() {
-                Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
+            let db_result = self
+                .irys_db
+                .view(|read_tx| tx_header_by_txid(read_tx, &tx))
+                .map_err(|e| {
+                    warn!("Failed to open DB read transaction: {}", e);
+                    e
+                })
+                .ok()
+                .and_then(|result| match result {
                     Ok(Some(tx_header)) => {
                         trace!("Got tx {} from DB", &tx);
-                        found_txs.push(Some(tx_header));
-                        continue;
+                        Some(tx_header)
                     }
                     Ok(None) => {
                         debug!("Tx {} not found in DB", &tx);
+                        None
                     }
                     Err(e) => {
                         warn!("DB error reading tx {}: {}", &tx, e);
+                        None
                     }
-                },
-                Err(e) => {
-                    warn!("Failed to open DB read transaction: {}", e);
-                }
+                });
+
+            if let Some(tx_header) = db_result {
+                found_txs.push(Some(tx_header));
+                continue;
             }
+
             // not found anywhere
             found_txs.push(None);
         }
@@ -491,17 +501,10 @@ impl Inner {
             return Ok(status);
         }
 
-        let read_tx = self.read_tx();
-
-        if read_tx.is_err() {
-            Err(TxReadError::DatabaseError)
-        } else if tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
-            .map_err(|_| TxReadError::DatabaseError)?
-            .is_some()
-        {
-            Ok(TxKnownStatus::Migrated)
-        } else {
-            Ok(TxKnownStatus::Unknown)
+        match self.irys_db.view_eyre(|tx| tx_header_by_txid(tx, &txid)) {
+            Ok(Some(_)) => Ok(TxKnownStatus::Migrated),
+            Ok(None) => Ok(TxKnownStatus::Unknown),
+            Err(_) => Err(TxReadError::DatabaseError),
         }
     }
 

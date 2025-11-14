@@ -79,6 +79,7 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
     Ok(())
 }
+
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn block_header_by_hash<T: DbTx>(
     tx: &T,
@@ -424,54 +425,4 @@ mod tests {
         assert_eq!(result2, block_header);
         Ok(())
     }
-
-    // #[test]
-    // fn insert_and_get_a_block() {
-    //     //let path = tempdir().unwrap();
-    //     let path = get_data_dir();
-    //     println!("TempDir: {:?}", path);
-
-    //     let mut block_header = IrysBlockHeader::new();
-    //     block_header.block_hash.0[0] = 1;
-    //     let db = open_or_create_db(path).unwrap();
-
-    //     // Write a Block
-    //     {
-    //         let result = insert_block(&db, &block_header);
-    //         println!("result: {:?}", result);
-    //         assert_matches!(result, Ok(_));
-    //     }
-
-    //     // Read a Block
-    //     {
-    //         let result = block_by_hash(&db, block_header.block_hash);
-    //         assert_eq!(result, Ok(Some(block_header)));
-    //         println!("result: {:?}", result.unwrap().unwrap());
-    //     }
-    // }
-
-    // #[test]
-    // fn insert_and_get_tx() {
-    //     //let path = tempdir().unwrap();
-    //     let path = get_data_dir();
-    //     println!("TempDir: {:?}", path);
-
-    //     let mut tx = DataTransactionHeader::default();
-    //     tx.id.0[0] = 2;
-    //     let db = open_or_create_db(path).unwrap();
-
-    //     // Write a Tx
-    //     {
-    //         let result = insert_tx(&db, &tx);
-    //         println!("result: {:?}", result);
-    //         assert_matches!(result, Ok(_));
-    //     }
-
-    //     // Read a Tx
-    //     {
-    //         let result = tx_by_txid(&db, &tx.id);
-    //         assert_eq!(result, Ok(Some(tx)));
-    //         println!("result: {:?}", result.unwrap().unwrap());
-    //     }
-    // }
 }

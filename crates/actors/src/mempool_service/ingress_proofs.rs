@@ -67,9 +67,8 @@ impl Inner {
             }
         }
 
-        let db = self.irys_db.clone();
-
-        let res = db
+        let res = self
+            .irys_db
             .update(|rw_tx| -> Result<(), DatabaseError> {
                 rw_tx.put::<IngressProofs>(
                     ingress_proof.data_root,

@@ -19,6 +19,7 @@ use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
 use futures::FutureExt as _;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
@@ -51,7 +52,6 @@ use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
-use reth_db::{Database as _, DatabaseError};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
@@ -914,34 +914,37 @@ impl Inner {
         );
 
         {
-            let read_tx = self
+            let publish_txids = self
                 .irys_db
-                .tx()
+                .view_eyre(|tx| {
+                    let mut read_cursor = tx
+                        .new_cursor::<IngressProofs>()
+                        .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
+
+                    let walker = read_cursor
+                        .walk(None)
+                        .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
+
+                    let ingress_proofs =
+                        walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| {
+                            eyre!("Failed to collect ingress proofs from database: {}", e)
+                        })?;
+
+                    let mut publish_txids: Vec<H256> = Vec::new();
+
+                    // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
+                    for data_root in ingress_proofs.keys() {
+                        let cached_data_root =
+                            cached_data_root_by_data_root(tx, *data_root).unwrap();
+                        if let Some(cached_data_root) = cached_data_root {
+                            let txids = cached_data_root.txid_set;
+                            trace!(tx.ids = ?txids, "Publish candidates");
+                            publish_txids.extend(txids)
+                        }
+                    }
+                    Ok(publish_txids)
+                })
                 .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
-
-            let mut read_cursor = read_tx
-                .new_cursor::<IngressProofs>()
-                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
-
-            let walker = read_cursor
-                .walk(None)
-                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
-
-            let ingress_proofs = walker
-                .collect::<Result<HashMap<_, _>, _>>()
-                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
-
-            let mut publish_txids: Vec<H256> = Vec::new();
-
-            // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
-            for data_root in ingress_proofs.keys() {
-                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
-                if let Some(cached_data_root) = cached_data_root {
-                    let txids = cached_data_root.txid_set;
-                    trace!(tx.ids = ?txids, "Publish candidates");
-                    publish_txids.extend(txids)
-                }
-            }
 
             // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
@@ -971,7 +974,6 @@ impl Inner {
                 acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
                 acc
             });
-            let ro_tx = self.irys_db.tx()?;
 
             for tx_header in &tx_headers {
                 debug!(
@@ -996,7 +998,11 @@ impl Inner {
                     // check for single-block promotion
                     if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
                         // check database
-                        if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
+                        if self
+                            .irys_db
+                            .view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?
+                            .is_none()
+                        {
                             // no previous inclusion
                             warn!(
                                 "Unable to find previous submit inclusion for publish candidate {}",
@@ -1010,7 +1016,9 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+                let all_proofs = self.irys_db.view_eyre(|read_tx| {
+                    ingress_proofs_by_data_root(read_tx, tx_header.data_root)
+                })?;
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1211,10 +1219,10 @@ impl Inner {
             }
         } {
             Ok(Some(height))
-        } else if let Some(hdr) = {
-            let read_tx = self.read_tx()?;
-            irys_database::block_header_by_hash(&read_tx, &anchor, false)?
-        } {
+        } else if let Some(hdr) = self
+            .irys_db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
+        {
             Ok(Some(hdr.height))
         } else {
             // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
@@ -1360,18 +1368,6 @@ impl Inner {
         }
 
         self.mempool_state.wipe_blacklists().await;
-    }
-
-    /// Helper that opens a read-only database transaction from the Irys mempool state.
-    ///
-    /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
-    /// if the transaction could not be created. Logs an error if the transaction fails.
-    pub fn read_tx(
-        &self,
-    ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
-        self.irys_db
-            .tx()
-            .inspect_err(|e| error!("database error reading tx: {:?}", e))
     }
 
     // Helper to verify signature
@@ -1818,11 +1814,20 @@ impl AtomicMempoolState {
     /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
     /// Returns true if the transaction was found and removed, false otherwise
     pub async fn remove_commitment_tx(&self, txid: &H256) -> bool {
-        let mut found = false;
+        self.remove_commitment_txs([*txid]).await
+    }
 
+    /// Removes commitment transactions with the specified transaction IDs from the valid_commitment_tx map
+    /// Returns true if any transactions were found and removed, false otherwise
+    pub async fn remove_commitment_txs(&self, txids: impl IntoIterator<Item = H256>) -> bool {
+        let mut found = false;
+        let txids_set: HashSet<H256> = txids.into_iter().collect();
         let mut mempool_state_guard = self.write().await;
 
-        mempool_state_guard.recent_valid_tx.pop(txid);
+        // Remove all txids from recent_valid_tx cache
+        for txid in &txids_set {
+            mempool_state_guard.recent_valid_tx.pop(txid);
+        }
 
         // Create a vector of addresses to update to avoid borrowing issues
         let addresses_to_check: Vec<Address> = mempool_state_guard
@@ -1833,19 +1838,17 @@ impl AtomicMempoolState {
 
         for address in addresses_to_check {
             if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
-                // Find the index of the transaction to remove
-                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
-                    // Remove the transaction
-                    transactions.remove(index);
+                // Remove all transactions that match any of the txids
+                let original_len = transactions.len();
+                transactions.retain(|tx| !txids_set.contains(&tx.id));
+
+                if transactions.len() < original_len {
                     found = true;
+                }
 
-                    // If the vector is now empty, remove the entry
-                    if transactions.is_empty() {
-                        mempool_state_guard.valid_commitment_tx.remove(&address);
-                    }
-
-                    // Exit early once we've found and removed the transaction
-                    break;
+                // If the vector is now empty, remove the entry
+                if transactions.is_empty() {
+                    mempool_state_guard.valid_commitment_tx.remove(&address);
                 }
             }
         }

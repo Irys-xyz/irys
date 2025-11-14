@@ -44,13 +44,13 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
-        let read_tx = self
-            .read_tx()
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
-
-        let data_size = irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
+        let data_size = self
+            .irys_db
+            .view_eyre(|read_tx| {
+                irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
+                    .map(|opt| opt.map(|cdr| cdr.data_size))
+            })
             .map_err(|_| CriticalChunkIngressError::DatabaseError)?
-            .map(|cdr| cdr.data_size)
             .or_else(|| {
                 debug!(
                     chunk.data_root = ?chunk.data_root,
@@ -272,56 +272,53 @@ impl Inner {
 
         //  TODO: hook into whatever manages ingress proofs
         let signer_addr = self.config.irys_signer().address();
-        match irys_database::ingress_proof_by_data_root_address(
-            &read_tx,
-            chunk.data_root,
-            signer_addr,
-        ) {
-            Ok(Some(_)) => {
-                info!(
-                    "Our ingress proof already exists for data root {}",
-                    &root_hash
-                );
-                return Ok(());
-            }
-            Ok(None) => {
-                // No proof by our signer exists; continue to check chunk completeness and potentially generate our proof.
-            }
-            Err(e) => {
+
+        // Check if ingress proof exists and get chunk count in a single transaction
+        let chunk_count_opt = self
+            .irys_db
+            .view_eyre(|tx| {
+                // First check if proof already exists
+                let proof_exists = irys_database::ingress_proof_by_data_root_address(
+                    tx,
+                    chunk.data_root,
+                    signer_addr,
+                )?;
+
+                if proof_exists.is_some() {
+                    // Return None to signal early return needed
+                    return Ok(None);
+                }
+
+                let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+                let count = cursor
+                    .dup_count(root_hash)?
+                    .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
+
+                Ok(Some(count))
+            })
+            .map_err(|e| {
                 error!("Database error: {:?}", e);
-                return Err(CriticalChunkIngressError::DatabaseError.into());
-            }
-        }
+                CriticalChunkIngressError::DatabaseError
+            })?;
 
-        // check if we have all the chunks for this tx
-        let read_tx = self
-            .read_tx()
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
-
-        let mut cursor = read_tx
-            .cursor_dup_read::<CachedChunksIndex>()
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
-
-        // get the number of dupsort values (aka the number of chunks)
-        // this ASSUMES that the index isn't corrupt (no double values etc)
-        // the ingress proof generation task does a more thorough check
-        let chunk_count = cursor
-            .dup_count(root_hash)
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
-            .ok_or(CriticalChunkIngressError::DatabaseError)?;
+        // Handle early return case
+        let Some(chunk_count) = chunk_count_opt else {
+            info!(
+                "Our ingress proof already exists for data root {}",
+                &root_hash
+            );
+            return Ok(());
+        };
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
-        let expected_chunk_count = match data_size_to_chunk_count(data_size, chunk_size) {
-            Ok(v) => v,
-            Err(_) => {
-                error!(
-                    "Error: {:?}. Invalid data_size for data_root: {:?}",
-                    CriticalChunkIngressError::InvalidDataSize,
-                    chunk.data_root,
-                );
-                return Err(CriticalChunkIngressError::InvalidDataSize.into());
-            }
+        let Ok(expected_chunk_count) = data_size_to_chunk_count(data_size, chunk_size) else {
+            error!(
+                "Error: {:?}. Invalid data_size for data_root: {:?}",
+                CriticalChunkIngressError::InvalidDataSize,
+                chunk.data_root,
+            );
+            return Err(CriticalChunkIngressError::InvalidDataSize.into());
         };
 
         if chunk_count == expected_chunk_count {
@@ -390,9 +387,11 @@ impl Inner {
 }
 
 /// Reasons why Chunk Ingress might fail
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ChunkIngressError {
+    #[error("Critical chunk ingress error: {0:?}")]
     Critical(CriticalChunkIngressError),
+    #[error("Advisory chunk ingress error: {0:?}")]
     Advisory(AdvisoryChunkIngressError),
 }
 
@@ -475,69 +474,73 @@ pub fn generate_ingress_proof(
     // in future, we'll need access to whatever unified storage provider API we have to get chunks
     // regardless of actual location
 
-    let ro_tx = db.tx()?;
-    let mut dup_cursor = ro_tx.cursor_dup_read::<CachedChunksIndex>()?;
-
-    // start from first duplicate entry for this root_hash
-    let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
-
-    // we need to validate that the index is valid
-    // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
-    // if we have, we *must* error
-    let mut set = HashSet::<H256>::new();
     let expected_chunk_count = data_size_to_chunk_count(size, chunk_size)?;
 
-    let mut chunk_count: u32 = 0;
-    let mut data_size: u64 = 0;
+    let (proof, actual_data_size, actual_chunk_count) = db.view_eyre(|tx| {
+        let mut dup_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
 
-    let iter = dup_walker.into_iter().map(|entry| {
-        let (root_hash2, index_entry) = entry?;
-        // make sure we haven't traversed into the wrong key
-        assert_eq!(data_root, root_hash2);
+        // start from first duplicate entry for this root_hash
+        let dup_walker = dup_cursor.walk_dup(Some(data_root), None)?;
 
-        let chunk_path_hash = index_entry.meta.chunk_path_hash;
-        if set.contains(&chunk_path_hash) {
-            return Err(eyre!(
-                "Chunk with hash {} has been found twice for index entry {} of data_root {}",
-                &chunk_path_hash,
-                &index_entry.index,
-                &data_root
-            ));
-        }
-        set.insert(chunk_path_hash);
+        // we need to validate that the index is valid
+        // we do this by constructing a set over the chunk hashes, checking if we've seen this hash before
+        // if we have, we *must* error
+        let mut set = HashSet::<H256>::new();
 
-        // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
-        let chunk = ro_tx
-            .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
-            .ok_or(eyre!(
-                "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
-            ))?;
+        let mut chunk_count: u32 = 0;
+        let mut total_data_size: u64 = 0;
 
-        let chunk_bin = chunk
-            .chunk
-            .ok_or(eyre!(
-                "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
-            ))?
-            .0;
-        let chunk_len =
-            u64::try_from(chunk_bin.len()).map_err(|_| eyre!("chunk length exceeds u64"))?;
-        data_size += chunk_len;
-        chunk_count += 1;
+        let iter = dup_walker.into_iter().map(|entry| {
+            let (root_hash2, index_entry) = entry?;
+            // make sure we haven't traversed into the wrong key
+            assert_eq!(data_root, root_hash2);
 
-        Ok(chunk_bin)
-    });
+            let chunk_path_hash = index_entry.meta.chunk_path_hash;
+            if set.contains(&chunk_path_hash) {
+                return Err(eyre!(
+                    "Chunk with hash {} has been found twice for index entry {} of data_root {}",
+                    &chunk_path_hash,
+                    &index_entry.index,
+                    &data_root
+                ));
+            }
+            set.insert(chunk_path_hash);
 
-    // generate the ingress proof hash
-    let proof =
-        irys_types::ingress::generate_ingress_proof(&signer, data_root, iter, chain_id, anchor)?;
+            // TODO: add code to read from ChunkProvider once it can read through CachedChunks & we have a nice system for unpacking chunks on-demand
+            let chunk = tx
+                .get::<CachedChunks>(index_entry.meta.chunk_path_hash)?
+                .ok_or(eyre!(
+                    "unable to get chunk {chunk_path_hash} for data root {data_root} from DB"
+                ))?;
+
+            let chunk_bin = chunk
+                .chunk
+                .ok_or(eyre!(
+                    "Missing required chunk ({chunk_path_hash}) body for data root {data_root} from DB"
+                ))?
+                .0;
+            let chunk_len =
+                u64::try_from(chunk_bin.len()).map_err(|_| eyre!("chunk length exceeds u64"))?;
+            total_data_size += chunk_len;
+            chunk_count += 1;
+
+            Ok(chunk_bin)
+        });
+
+        // generate the ingress proof hash
+        let proof = irys_types::ingress::generate_ingress_proof(
+            &signer, data_root, iter, chain_id, anchor,
+        )?;
+
+        Ok((proof, total_data_size, chunk_count))
+    })?;
+
     info!(
         "generated ingress proof {} for data root {}",
         &proof.proof, &data_root
     );
-    assert_eq!(data_size, size);
-    assert_eq!({ chunk_count }, expected_chunk_count);
-
-    ro_tx.commit()?;
+    assert_eq!(actual_data_size, size);
+    assert_eq!(actual_chunk_count, expected_chunk_count);
 
     db.update(|rw_tx| {
         rw_tx.put::<IngressProofs>(
