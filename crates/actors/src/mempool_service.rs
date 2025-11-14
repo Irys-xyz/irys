@@ -19,6 +19,7 @@ use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
 use futures::FutureExt as _;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
@@ -51,7 +52,6 @@ use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
-use reth_db::Database as _;
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
@@ -914,37 +914,37 @@ impl Inner {
         );
 
         {
-            let publish_txids = {
-                let read_tx = self
-                    .irys_db
-                    .tx()
-                    .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
-                let mut read_cursor = read_tx
-                    .new_cursor::<IngressProofs>()
-                    .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
+            let publish_txids = self
+                .irys_db
+                .view_eyre(|tx| {
+                    let mut read_cursor = tx
+                        .new_cursor::<IngressProofs>()
+                        .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
 
-                let walker = read_cursor
-                    .walk(None)
-                    .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
+                    let walker = read_cursor
+                        .walk(None)
+                        .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
 
-                let ingress_proofs = walker
-                    .collect::<Result<HashMap<_, _>, _>>()
-                    .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
+                    let ingress_proofs =
+                        walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| {
+                            eyre!("Failed to collect ingress proofs from database: {}", e)
+                        })?;
 
-                let mut publish_txids: Vec<H256> = Vec::new();
+                    let mut publish_txids: Vec<H256> = Vec::new();
 
-                // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
-                for data_root in ingress_proofs.keys() {
-                    let cached_data_root =
-                        cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
-                    if let Some(cached_data_root) = cached_data_root {
-                        let txids = cached_data_root.txid_set;
-                        trace!(tx.ids = ?txids, "Publish candidates");
-                        publish_txids.extend(txids)
+                    // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
+                    for data_root in ingress_proofs.keys() {
+                        let cached_data_root =
+                            cached_data_root_by_data_root(tx, *data_root).unwrap();
+                        if let Some(cached_data_root) = cached_data_root {
+                            let txids = cached_data_root.txid_set;
+                            trace!(tx.ids = ?txids, "Publish candidates");
+                            publish_txids.extend(txids)
+                        }
                     }
-                }
-                publish_txids
-            };
+                    Ok(publish_txids)
+                })
+                .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
 
             // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
@@ -998,8 +998,11 @@ impl Inner {
                     // check for single-block promotion
                     if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
                         // check database
-                        let ro_tx = self.irys_db.tx()?;
-                        if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
+                        if self
+                            .irys_db
+                            .view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?
+                            .is_none()
+                        {
                             // no previous inclusion
                             warn!(
                                 "Unable to find previous submit inclusion for publish candidate {}",
@@ -1013,14 +1016,9 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = {
-                    let read_tx = self
-                        .irys_db
-                        .tx()
-                        .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
-
-                    ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?
-                };
+                let all_proofs = self
+                    .irys_db
+                    .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?;
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1221,10 +1219,10 @@ impl Inner {
             }
         } {
             Ok(Some(height))
-        } else if let Some(hdr) = {
-            let read_tx = self.irys_db.tx()?;
-            irys_database::block_header_by_hash(&read_tx, &anchor, false)?
-        } {
+        } else if let Some(hdr) = self
+            .irys_db
+            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
+        {
             Ok(Some(hdr.height))
         } else {
             // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");

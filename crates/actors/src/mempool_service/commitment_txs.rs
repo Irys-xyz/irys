@@ -5,7 +5,6 @@ use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
 };
-use reth_db::Database as _;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
@@ -304,20 +303,13 @@ impl Inner {
             return Ok(status);
         }
         //now check the database
-        let read_tx = self.irys_db.tx();
-
-        if read_tx.is_err() {
-            Err(TxReadError::DatabaseError)
-        } else if commitment_tx_by_txid(
-            &read_tx.expect("expected valid header from tx id"),
-            &commitment_tx_id,
-        )
-        .map_err(|_| TxReadError::DatabaseError)?
-        .is_some()
+        match self
+            .irys_db
+            .view_eyre(|tx| commitment_tx_by_txid(tx, &commitment_tx_id))
         {
-            Ok(TxKnownStatus::Migrated)
-        } else {
-            Ok(TxKnownStatus::Unknown)
+            Ok(Some(_)) => Ok(TxKnownStatus::Migrated),
+            Ok(None) => Ok(TxKnownStatus::Unknown),
+            Err(_) => Err(TxReadError::DatabaseError),
         }
     }
 

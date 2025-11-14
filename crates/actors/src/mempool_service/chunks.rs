@@ -44,36 +44,33 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
-        let data_size = {
-            let read_tx = self
-                .irys_db
-                .tx()
-                .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
+        let data_size = self
+            .irys_db
+            .view_eyre(|read_tx| {
+                irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
+                    .map(|opt| opt.map(|cdr| cdr.data_size))
+            })
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
+            .or_else(|| {
+                debug!(
+                    chunk.data_root = ?chunk.data_root,
+                    chunk.tx_offset = ?chunk.tx_offset,
+                    "Checking SMs for data_size"
+                );
+                // Get a list of all the local storage modules
+                let storage_modules = self.storage_modules_guard.read().clone();
 
-            irys_database::cached_data_root_by_data_root(&read_tx, chunk.data_root)
-                .map_err(|_| CriticalChunkIngressError::DatabaseError)?
-                .map(|cdr| cdr.data_size)
-                .or_else(|| {
-                    debug!(
-                        chunk.data_root = ?chunk.data_root,
-                        chunk.tx_offset = ?chunk.tx_offset,
-                        "Checking SMs for data_size"
-                    );
-                    // Get a list of all the local storage modules
-                    let storage_modules = self.storage_modules_guard.read().clone();
-
-                    // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
-                    storage_modules
-                        .iter()
-                        .filter_map(|sm| {
-                            sm.collect_data_root_infos(chunk.data_root)
-                                .ok()
-                                .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
-                        })
-                        .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
-                        .max()
-                })
-        };
+                // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
+                storage_modules
+                    .iter()
+                    .filter_map(|sm| {
+                        sm.collect_data_root_infos(chunk.data_root)
+                            .ok()
+                            .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
+                    })
+                    .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
+                    .max()
+            });
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -395,9 +392,11 @@ impl Inner {
 }
 
 /// Reasons why Chunk Ingress might fail
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ChunkIngressError {
+    #[error("Critical chunk ingress error: {0:?}")]
     Critical(CriticalChunkIngressError),
+    #[error("Advisory chunk ingress error: {0:?}")]
     Advisory(AdvisoryChunkIngressError),
 }
 
