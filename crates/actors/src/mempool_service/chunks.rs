@@ -289,11 +289,7 @@ impl Inner {
                     return Ok(None);
                 }
 
-                // Get chunk count if proof doesn't exist
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-                // get the number of dupsort values (aka the number of chunks)
-                // this ASSUMES that the index isn't corrupt (no double values etc)
-                // the ingress proof generation task does a more thorough check
                 let count = cursor
                     .dup_count(root_hash)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
@@ -306,29 +302,23 @@ impl Inner {
             })?;
 
         // Handle early return case
-        let chunk_count = match chunk_count_opt {
-            None => {
-                info!(
-                    "Our ingress proof already exists for data root {}",
-                    &root_hash
-                );
-                return Ok(());
-            }
-            Some(count) => count,
+        let Some(chunk_count) = chunk_count_opt else {
+            info!(
+                "Our ingress proof already exists for data root {}",
+                &root_hash
+            );
+            return Ok(());
         };
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
-        let expected_chunk_count = match data_size_to_chunk_count(data_size, chunk_size) {
-            Ok(v) => v,
-            Err(_) => {
-                error!(
-                    "Error: {:?}. Invalid data_size for data_root: {:?}",
-                    CriticalChunkIngressError::InvalidDataSize,
-                    chunk.data_root,
-                );
-                return Err(CriticalChunkIngressError::InvalidDataSize.into());
-            }
+        let Ok(expected_chunk_count) = data_size_to_chunk_count(data_size, chunk_size) else {
+            error!(
+                "Error: {:?}. Invalid data_size for data_root: {:?}",
+                CriticalChunkIngressError::InvalidDataSize,
+                chunk.data_root,
+            );
+            return Err(CriticalChunkIngressError::InvalidDataSize.into());
         };
 
         if chunk_count == expected_chunk_count {
