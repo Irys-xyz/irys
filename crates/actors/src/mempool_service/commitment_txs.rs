@@ -1,14 +1,12 @@
 use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
-use irys_types::CommitmentType;
 use irys_types::{
     Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
 };
-use lru::LruCache;
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
-use std::{collections::HashMap, num::NonZeroUsize};
+use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 
 impl Inner {
@@ -27,10 +25,8 @@ impl Inner {
             let fingerprint = commitment_tx.fingerprint();
             if self
                 .mempool_state
-                .read()
+                .is_a_recent_invalid_fingerprint(&fingerprint)
                 .await
-                .recent_invalid_payload_fingerprints
-                .contains(&fingerprint)
             {
                 return Err(TxIngressError::InvalidSignature);
             }
@@ -50,6 +46,7 @@ impl Inner {
 
         // Early out if we already know about this transaction (invalid/recent valid/valid_commitment_tx)
         if self
+            .mempool_state
             .is_known_commitment_in_mempool(&commitment_tx.id, commitment_tx.signer)
             .await
         {
@@ -94,7 +91,9 @@ impl Inner {
             | CommitmentSnapshotStatus::UnstakePending
             | CommitmentSnapshotStatus::HasActivePledges => {
                 // Add to valid set and mark recent
-                self.insert_commitment_and_mark_valid(commitment_tx).await?;
+                self.mempool_state
+                    .insert_commitment_and_mark_valid(commitment_tx)
+                    .await?;
 
                 need_to_process_pending_pledges_and_then_gossip = true;
             }
@@ -105,7 +104,12 @@ impl Inner {
                     "commitment tx cached while address is unstaked"
                 );
                 // Cache pledge while address is unstaked
-                self.cache_unstaked_pledge(commitment_tx).await;
+                self.mempool_state
+                    .cache_unstaked_pledge(
+                        commitment_tx,
+                        self.config.node_config.mempool.max_pending_pledge_items,
+                    )
+                    .await;
 
                 // Gossip the pledge even if signer is currently unstaked so other
                 // nodes become aware of the pending pledge and can cache it as well.
@@ -157,16 +161,16 @@ impl Inner {
         // - Do not check account balance here. That is verified on API ingress
         //   and again during selection/block validation.
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
-            let mut guard = self.mempool_state.write().await;
-            guard.recent_invalid_tx.put(commitment_tx.id, ());
-            drop(guard);
+            self.mempool_state
+                .put_recent_invalid(commitment_tx.id)
+                .await;
 
             return Err(e.into());
         }
         if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
-            let mut guard = self.mempool_state.write().await;
-            guard.recent_invalid_tx.put(commitment_tx.id, ());
-            drop(guard);
+            self.mempool_state
+                .put_recent_invalid(commitment_tx.id)
+                .await;
 
             return Err(e.into());
         }
@@ -197,9 +201,9 @@ impl Inner {
             &commitment_tx,
             None,
         ) {
-            let mut guard = self.mempool_state.write().await;
-            guard.recent_invalid_tx.put(commitment_tx.id, ());
-            drop(guard);
+            self.mempool_state
+                .put_recent_invalid(commitment_tx.id)
+                .await;
 
             return Err(e);
         }
@@ -226,9 +230,11 @@ impl Inner {
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        let read_guard = self.mempool_state.read().await;
-        let whitelist = &read_guard.stake_and_pledge_whitelist;
-        if !whitelist.is_empty() && !whitelist.contains(&commitment_tx.signer) {
+        if !self
+            .mempool_state
+            .is_address_in_a_whitelist(&commitment_tx.signer)
+            .await
+        {
             warn!(
                 "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
                 commitment_tx.id, commitment_tx.signer
@@ -236,23 +242,6 @@ impl Inner {
             return Err(CommitmentValidationError::ForbiddenSigner.into());
         }
         Ok(())
-    }
-
-    /// Returns true if the commitment tx is already known in the mempool caches/maps.
-    async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: Address) -> bool {
-        let guard = self.mempool_state.read().await;
-        // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
-        if guard.recent_valid_tx.contains(tx_id) {
-            return true;
-        }
-        if guard
-            .valid_commitment_tx
-            .get(&signer)
-            .is_some_and(|txs| txs.iter().any(|c| c.id == *tx_id))
-        {
-            return true;
-        }
-        false
     }
 
     /// Checks the database index for an existing commitment transaction by id.
@@ -265,24 +254,13 @@ impl Inner {
         Ok(known_in_db)
     }
 
-    /// Inserts a commitment into the mempool valid map and marks it as recently valid.
-    /// Uses bounded insertion which may evict transactions when limits are exceeded.
-    async fn insert_commitment_and_mark_valid(
-        &self,
-        tx: &CommitmentTransaction,
-    ) -> Result<(), TxIngressError> {
-        let mut guard = self.mempool_state.write().await;
-        guard.bounded_insert_commitment_tx(tx)?;
-        guard.recent_valid_tx.put(tx.id, ());
-        Ok(())
-    }
-
     /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.
     #[tracing::instrument(level = "trace", skip_all, fields(account.signer = ?signer))]
     async fn process_pending_pledges_for_new_stake(&self, signer: Address) {
-        let mut guard = self.mempool_state.write().await;
-        let pop = guard.pending_pledges.pop(&signer);
-        drop(guard);
+        let pop = self
+            .mempool_state
+            .pop_pending_pledges_for_signer(&signer)
+            .await;
         if let Some(pledges_lru) = pop {
             // Extract all pending pledges as a vector of owned transactions
             let pledges: Vec<_> = pledges_lru
@@ -304,26 +282,6 @@ impl Inner {
         }
     }
 
-    /// Caches an unstaked pledge in the two-level LRU structure.
-    async fn cache_unstaked_pledge(&self, tx: &CommitmentTransaction) {
-        let mut guard = self.mempool_state.write().await;
-        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer) {
-            // Address already exists in cache - add this pledge transaction to its lru cache
-            pledges_cache.put(tx.id, tx.clone());
-        } else {
-            // First pledge from this address - create a new nested lru cache
-            let max_pending_pledge_items = self.config.mempool.max_pending_pledge_items;
-            let mut new_address_cache =
-                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
-
-            // Add the pledge transaction to the new lru cache for the address
-            new_address_cache.put(tx.id, tx.clone());
-
-            // Add the address cache to the primary lru cache
-            guard.pending_pledges.put(tx.signer, new_address_cache);
-        }
-    }
-
     /// Broadcasts the commitment transaction over gossip.
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
         self.service_senders
@@ -337,56 +295,28 @@ impl Inner {
         &self,
         commitment_tx_id: H256,
     ) -> Result<TxKnownStatus, TxReadError> {
-        let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
-
-        #[expect(clippy::if_same_then_else, reason = "readability")]
-        if mempool_state_guard
-            .recent_valid_tx
-            .contains(&commitment_tx_id)
+        if let Some(status) = self
+            .mempool_state
+            .mempool_commitment_tx_status(&commitment_tx_id)
+            .await
         {
-            Ok(TxKnownStatus::ValidSeen)
-        } else if mempool_state_guard
-            .recent_invalid_tx
-            .contains(&commitment_tx_id)
-        {
-            // Still has it, just invalid
-            Ok(TxKnownStatus::InvalidSeen)
-            // Get any CommitmentTransactions from the valid commitments Map
-        } else if mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter())
-            .any(|tx| tx.id == commitment_tx_id)
-        {
-            Ok(TxKnownStatus::Valid)
+            return Ok(status);
         }
-        // Get any CommitmentTransactions from the pending commitments LRU cache
-        else if mempool_state_guard
-            .pending_pledges
-            .iter()
-            .flat_map(|(_, inner)| inner.iter())
-            .any(|(id, _tx)| *id == commitment_tx_id)
-        {
-            Ok(TxKnownStatus::Valid)
-        } else {
-            //now check the database
-            drop(mempool_state_guard);
-            let read_tx = self.read_tx();
+        //now check the database
+        let read_tx = self.read_tx();
 
-            if read_tx.is_err() {
-                Err(TxReadError::DatabaseError)
-            } else if commitment_tx_by_txid(
-                &read_tx.expect("expected valid header from tx id"),
-                &commitment_tx_id,
-            )
-            .map_err(|_| TxReadError::DatabaseError)?
-            .is_some()
-            {
-                Ok(TxKnownStatus::Migrated)
-            } else {
-                Ok(TxKnownStatus::Unknown)
-            }
+        if read_tx.is_err() {
+            Err(TxReadError::DatabaseError)
+        } else if commitment_tx_by_txid(
+            &read_tx.expect("expected valid header from tx id"),
+            &commitment_tx_id,
+        )
+        .map_err(|_| TxReadError::DatabaseError)?
+        .is_some()
+        {
+            Ok(TxKnownStatus::Migrated)
+        } else {
+            Ok(TxKnownStatus::Unknown)
         }
     }
 
@@ -396,117 +326,26 @@ impl Inner {
         &self,
         commitment_tx_ids: Vec<H256>,
     ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
-        let mut hash_map = HashMap::new();
-
-        // first flat_map all the commitment transactions
-        let mempool_state_guard = self.mempool_state.read().await;
-
-        // TODO: what the heck is this, this needs to be optimised at least a little bit
-
-        // Get any CommitmentTransactions from the valid commitments Map
-        mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter())
-            .for_each(|tx| {
-                hash_map.insert(tx.id, tx.clone());
-            });
-
-        // Get any CommitmentTransactions from the pending commitments LRU cache
-        mempool_state_guard
-            .pending_pledges
-            .iter()
-            .flat_map(|(_, inner)| inner.iter())
-            .for_each(|(tx_id, tx)| {
-                hash_map.insert(*tx_id, tx.clone());
-            });
+        let all_commitment_transactions = self.mempool_state.all_commitment_transactions().await;
 
         debug!(
             "handle_get_commitment_transactions_message: {:?}",
-            hash_map.iter().map(|x| x.0).collect::<Vec<_>>()
+            all_commitment_transactions
+                .iter()
+                .map(|x| x.0)
+                .collect::<Vec<_>>()
         );
 
         // Attempt to locate and retain only the requested tx_ids
         let mut filtered_map = HashMap::with_capacity(commitment_tx_ids.len());
         for txid in commitment_tx_ids {
-            if let Some(tx) = hash_map.get(&txid) {
+            if let Some(tx) = all_commitment_transactions.get(&txid) {
                 filtered_map.insert(txid, tx.clone());
             }
         }
 
         // Return only the transactions matching the requested IDs
         filtered_map
-    }
-
-    /// should really only be called by persist_mempool_to_disk, all other scenarios need a more
-    /// subtle filtering of commitment state, recently confirmed? pending? valid? etc.
-    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, CommitmentTransaction> {
-        let mut hash_map = HashMap::new();
-
-        // first flat_map all the commitment transactions
-        let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
-
-        // Get any CommitmentTransactions from the valid commitments
-        mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter())
-            .for_each(|tx| {
-                hash_map.insert(tx.id, tx.clone());
-            });
-
-        // Get any CommitmentTransactions from the pending commitments
-        mempool_state_guard
-            .pending_pledges
-            .iter()
-            .flat_map(|(_, inner)| inner.iter())
-            .for_each(|(tx_id, tx)| {
-                hash_map.insert(*tx_id, tx.clone());
-            });
-
-        hash_map
-    }
-
-    /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
-    /// Returns true if the transaction was found and removed, false otherwise
-    pub async fn remove_commitment_tx(&self, txid: &H256) -> bool {
-        let mut found = false;
-
-        let mempool_state = &self.mempool_state;
-        let mut mempool_state_guard = mempool_state.write().await;
-
-        mempool_state_guard.recent_valid_tx.pop(txid);
-
-        // Create a vector of addresses to update to avoid borrowing issues
-        let addresses_to_check: Vec<Address> = mempool_state_guard
-            .valid_commitment_tx
-            .keys()
-            .copied()
-            .collect();
-
-        for address in addresses_to_check {
-            if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
-                // Find the index of the transaction to remove
-                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
-                    // Remove the transaction
-                    transactions.remove(index);
-                    found = true;
-
-                    // If the vector is now empty, remove the entry
-                    if transactions.is_empty() {
-                        mempool_state_guard.valid_commitment_tx.remove(&address);
-                    }
-
-                    // Exit early once we've found and removed the transaction
-                    break;
-                }
-            }
-        }
-
-        drop(mempool_state_guard);
-
-        found
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id))]
@@ -544,25 +383,18 @@ impl Inner {
             }
             CommitmentSnapshotStatus::Unstaked => {
                 // For unstaked addresses, check for pending stake transactions
-                let mempool_state_guard = self.mempool_state.read().await;
-                // Get pending transactions for this address
-                if let Some(pending) = mempool_state_guard
-                    .valid_commitment_tx
-                    .get(&commitment_tx.signer)
+                if self
+                    .mempool_state
+                    .is_there_a_pledge_for_unstaked_address(&commitment_tx.signer)
+                    .await
                 {
-                    // Check if there's at least one pending stake transaction
-                    if pending
-                        .iter()
-                        .any(|c| c.commitment_type == CommitmentType::Stake)
-                    {
-                        // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
-                        return CommitmentSnapshotStatus::Unknown;
-                    }
+                    // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
+                    CommitmentSnapshotStatus::Unknown
+                } else {
+                    // No pending stakes found
+                    warn!("Commitment is unstaked: {}", commitment_tx.id);
+                    CommitmentSnapshotStatus::Unstaked
                 }
-
-                // No pending stakes found
-                warn!("Commitment is unstaked: {}", commitment_tx.id);
-                return CommitmentSnapshotStatus::Unstaked;
             }
         }
     }

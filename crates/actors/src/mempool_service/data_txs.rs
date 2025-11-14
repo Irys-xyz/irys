@@ -35,10 +35,8 @@ impl Inner {
             let fingerprint = tx.fingerprint();
             if self
                 .mempool_state
-                .read()
+                .is_a_recent_invalid_fingerprint(&fingerprint)
                 .await
-                .recent_invalid_payload_fingerprints
-                .contains(&fingerprint)
             {
                 return Err(TxIngressError::InvalidSignature);
             }
@@ -78,7 +76,7 @@ impl Inner {
         tx: &DataTransactionHeader,
         expiry_height: u64,
     ) -> Result<(), TxIngressError> {
-        self.insert_tx_and_mark_valid(tx).await?;
+        self.mempool_state.insert_tx_and_mark_valid(tx).await?;
         self.cache_data_root_with_expiry(tx, expiry_height);
         self.process_pending_chunks_for_root(tx.data_root).await?;
         self.broadcast_tx_gossip(tx);
@@ -92,13 +90,12 @@ impl Inner {
         txs: Vec<H256>,
     ) -> Vec<Option<DataTransactionHeader>> {
         let mut found_txs = Vec::with_capacity(txs.len());
-        let mempool_state_guard = self.mempool_state.read().await;
 
         for tx in txs {
             // if data tx exists in mempool
-            if let Some(tx_header) = mempool_state_guard.valid_submit_ledger_tx.get(&tx) {
+            if let Some(tx_header) = self.mempool_state.valid_submit_ledger_tx_cloned(&tx).await {
                 trace!("Got tx {} from mempool", &tx);
-                found_txs.push(Some(tx_header.clone()));
+                found_txs.push(Some(tx_header));
                 continue;
             }
 
@@ -107,7 +104,7 @@ impl Inner {
                 Ok(read_tx) => match tx_header_by_txid(&read_tx, &tx) {
                     Ok(Some(tx_header)) => {
                         trace!("Got tx {} from DB", &tx);
-                        found_txs.push(Some(tx_header.clone()));
+                        found_txs.push(Some(tx_header));
                         continue;
                     }
                     Ok(None) => {
@@ -125,7 +122,6 @@ impl Inner {
             found_txs.push(None);
         }
 
-        drop(mempool_state_guard);
         found_txs
     }
 
@@ -383,18 +379,6 @@ impl Inner {
             .map_err(|_err| TxIngressError::InvalidLedger(tx.ledger_id))
     }
 
-    /// Inserts tx into the mempool and marks it as recently valid.
-    /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
-    async fn insert_tx_and_mark_valid(
-        &self,
-        tx: &DataTransactionHeader,
-    ) -> Result<(), TxIngressError> {
-        let mut guard = self.mempool_state.write().await;
-        guard.bounded_insert_data_tx(tx.clone())?;
-        guard.recent_valid_tx.put(tx.id, ());
-        Ok(())
-    }
-
     /// Caches data_root with expiry, logging success/failure.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
@@ -423,9 +407,10 @@ impl Inner {
     /// Processes any pending chunks that arrived before their parent transaction.
     #[tracing::instrument(level = "trace", skip_all, fields(chunk.data_root = ?data_root))]
     async fn process_pending_chunks_for_root(&self, data_root: H256) -> Result<(), TxIngressError> {
-        let mut guard = self.mempool_state.write().await;
-        let option_chunks_map = guard.pending_chunks.pop(&data_root);
-        drop(guard);
+        let option_chunks_map = self
+            .mempool_state
+            .pop_pending_chunks_cache(&data_root)
+            .await;
 
         if let Some(chunks_map) = option_chunks_map {
             let chunks: Vec<_> = chunks_map.into_iter().map(|(_, chunk)| chunk).collect();
@@ -484,15 +469,13 @@ impl Inner {
         let mut hash_map = HashMap::new();
 
         // first flat_map all the storage transactions
-        let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
-
         // Get any DataTransaction from the valid storage txs
-        mempool_state_guard
-            .valid_submit_ledger_tx
-            .values()
+        self.mempool_state
+            .all_valid_submit_ledgers_cloned()
+            .await
+            .into_values()
             .for_each(|tx| {
-                hash_map.insert(tx.id, tx.clone());
+                hash_map.insert(tx.id, tx);
             });
 
         hash_map
@@ -503,34 +486,22 @@ impl Inner {
         &self,
         txid: H256,
     ) -> Result<TxKnownStatus, TxReadError> {
-        let mempool_state = &self.mempool_state;
-        let mempool_state_guard = mempool_state.read().await;
+        let status = self.mempool_state.mempool_data_tx_status(&txid).await;
+        if let Some(status) = status {
+            return Ok(status);
+        }
 
-        // #[expect(clippy::if_same_then_else, reason = "readability")]
-        if mempool_state_guard
-            .valid_submit_ledger_tx
-            .contains_key(&txid)
+        let read_tx = self.read_tx();
+
+        if read_tx.is_err() {
+            Err(TxReadError::DatabaseError)
+        } else if tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
+            .map_err(|_| TxReadError::DatabaseError)?
+            .is_some()
         {
-            Ok(TxKnownStatus::Valid)
-        } else if mempool_state_guard.recent_valid_tx.contains(&txid) {
-            Ok(TxKnownStatus::ValidSeen)
-        } else if mempool_state_guard.recent_invalid_tx.contains(&txid) {
-            // Still has it, just invalid
-            Ok(TxKnownStatus::InvalidSeen)
+            Ok(TxKnownStatus::Migrated)
         } else {
-            drop(mempool_state_guard);
-            let read_tx = self.read_tx();
-
-            if read_tx.is_err() {
-                Err(TxReadError::DatabaseError)
-            } else if tx_header_by_txid(&read_tx.expect("expected valid header from tx id"), &txid)
-                .map_err(|_| TxReadError::DatabaseError)?
-                .is_some()
-            {
-                Ok(TxKnownStatus::Migrated)
-            } else {
-                Ok(TxKnownStatus::Unknown)
-            }
+            Ok(TxKnownStatus::Unknown)
         }
     }
 
@@ -604,12 +575,8 @@ impl Inner {
         let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
 
         // Start with all valid Submit ledger transactions - we'll filter out already-included ones
-        let mut valid_submit_ledger_tx = self
-            .mempool_state
-            .read()
-            .await
-            .valid_submit_ledger_tx
-            .clone();
+        let mut pending_valid_submit_ledger_tx =
+            self.mempool_state.all_valid_submit_ledgers_cloned().await;
 
         // Walk backwards through the canonical chain, removing Submit transactions
         // that have already been included in recent blocks within the anchor expiry window
@@ -621,7 +588,7 @@ impl Inner {
                 // Remove Submit transactions that already exist in this historical block
                 // This prevents double-inclusion and ensures we only return truly pending transactions
                 for txid in submit_txids.iter() {
-                    valid_submit_ledger_tx.remove(txid);
+                    pending_valid_submit_ledger_tx.remove(txid);
                 }
             }
 
@@ -651,6 +618,6 @@ impl Inner {
 
         // Return all remaining Submit transactions by consuming the map
         // These represent Submit transactions that are pending and haven't been included in any recent block
-        valid_submit_ledger_tx.into_values().collect()
+        pending_valid_submit_ledger_tx.into_values().collect()
     }
 }

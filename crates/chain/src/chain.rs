@@ -793,6 +793,7 @@ impl IrysNode {
                 .mempool
                 .send(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
+            let config = ctx.config.clone();
             // use executor so we get automatic termination when the node starts to shut down
             task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
@@ -817,11 +818,11 @@ impl IrysNode {
                         .map(|(_, i)| i)
                         .collect::<Vec<_>>();
 
-                    let mempool = &mempool.read().await;
+                    let mempool_status = mempool.get_status(&config.node_config).await;
 
                     info!(
                     target = "node-state",
-                    "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, &mempool.pending_chunks.len(), &mempool.valid_submit_ledger_tx.len(), &mempool.pending_pledges.len()
+                    "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, mempool_status.pending_chunks_count, mempool_status.data_tx_count, mempool_status.pending_pledges_count
                 )
                 }
             });

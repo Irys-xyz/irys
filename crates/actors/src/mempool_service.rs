@@ -33,7 +33,7 @@ use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, H256, U256,
+    IrysTransactionId, NodeConfig, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -58,11 +58,13 @@ use std::fs;
 use std::io::Write as _;
 use std::num::NonZeroUsize;
 use std::pin::pin;
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
@@ -359,7 +361,7 @@ impl Inner {
 
             MempoolServiceMessage::GetState(response) => {
                 if let Err(e) = response
-                    .send(Arc::clone(&self.mempool_state))
+                    .send(self.mempool_state.clone())
                     .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
                 {
                     tracing::error!("response.send() error: {:?}", e);
@@ -401,75 +403,15 @@ impl Inner {
 
     #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
-        let state = self.mempool_state.read().await;
-
-        // Calculate total data size
-        let data_tx_total_size: u64 = state
-            .valid_submit_ledger_tx
-            .values()
-            .map(|tx| tx.data_size)
-            .sum();
-
-        let mempool_config = &self.config.node_config.consensus_config().mempool;
-
-        // Calculate capacity utilization
-        let data_tx_capacity_pct = if state.max_submit_txs > 0 {
-            (state.valid_submit_ledger_tx.len() as f64 / state.max_submit_txs as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        let commitment_address_capacity_pct = if state.max_commitment_addresses > 0 {
-            (state.valid_commitment_tx.len() as f64 / state.max_commitment_addresses as f64) * 100.0
-        } else {
-            0.0
-        };
-
-        // Log capacity warnings
-        if data_tx_capacity_pct > 90.0 {
-            warn!(
-                mempool.data_tx_capacity = data_tx_capacity_pct,
-                mempool.data_tx_count = state.valid_submit_ledger_tx.len(),
-                mempool.data_tx_max = state.max_submit_txs,
-                "Data tx mempool approaching capacity"
-            );
-        }
-
-        if commitment_address_capacity_pct > 90.0 {
-            warn!(
-                mempool.commitment_address_capacity = commitment_address_capacity_pct,
-                mempool.commitment_address_count = state.valid_commitment_tx.len(),
-                mempool.commitment_address_max = state.max_commitment_addresses,
-                "Commitment address mempool approaching capacity"
-            );
-        }
-
-        debug!(
-            mempool.data_tx_capacity = data_tx_capacity_pct,
-            mempool.commitment_address_capacity = commitment_address_capacity_pct,
-            "Mempool capacity utilization"
-        );
-
-        Ok(MempoolStatus {
-            data_tx_count: state.valid_submit_ledger_tx.len(),
-            commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
-            pending_chunks_count: state.pending_chunks.len(),
-            pending_pledges_count: state.pending_pledges.len(),
-            recent_valid_tx_count: state.recent_valid_tx.len(),
-            recent_invalid_tx_count: state.recent_invalid_tx.len(),
-            data_tx_total_size,
-            config: mempool_config.clone(),
-            data_tx_capacity_pct,
-            commitment_address_capacity_pct,
-        })
+        Ok(self
+            .mempool_state
+            .get_status(&self.config.node_config)
+            .await)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]
     async fn remove_from_blacklists(&self, tx_ids: Vec<H256>) {
-        let mut state = self.mempool_state.write().await;
-        for tx_id in tx_ids {
-            state.recent_invalid_tx.pop(&tx_id);
-        }
+        self.mempool_state.remove_blacklisted_txids(&tx_ids).await;
     }
 
     #[instrument(level = "trace", skip_all)]
@@ -488,7 +430,9 @@ impl Inner {
         {
             Some(height) => height,
             None => {
-                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                self.mempool_state
+                    .mark_tx_as_invalid(tx_id, "Unknown anchor")
+                    .await;
                 return Err(TxIngressError::InvalidAnchor.into());
             }
         };
@@ -623,15 +567,7 @@ impl Inner {
         // Process commitments in the mempool in priority order
 
         // Collect all stake and pledge commitments from mempool
-        let mut sorted_commitments = {
-            let mempool_state_guard = mempool_state.read().await;
-
-            mempool_state_guard
-                .valid_commitment_tx
-                .values()
-                .flat_map(|txs| txs.iter().cloned())
-                .collect::<Vec<_>>()
-        };
+        let mut sorted_commitments = mempool_state.sorted_commitments().await;
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
@@ -1308,7 +1244,9 @@ impl Inner {
         {
             Some(height) => height,
             None => {
-                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                self.mempool_state
+                    .mark_tx_as_invalid(tx_id, "Unknown anchor")
+                    .await;
                 return Err(TxIngressError::InvalidAnchor);
             }
         };
@@ -1324,13 +1262,12 @@ impl Inner {
             debug!("valid block hash anchor for tx ");
             return Ok(anchor_height);
         } else {
-            Self::mark_tx_as_invalid(
-                self.mempool_state.write().await,
+            self.mempool_state.mark_tx_as_invalid(
                 tx_id,
                 format!(
                     "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height})"
-                ),
-            );
+                )
+            ).await;
 
             return Err(TxIngressError::InvalidAnchor);
         }
@@ -1343,7 +1280,7 @@ impl Inner {
         let commitment_tx_path = base_path.join("commitment_tx");
         fs::create_dir_all(commitment_tx_path.clone())
             .expect("to create the mempool/commitment_tx dir");
-        let commitment_hash_map = self.get_all_commitment_tx().await;
+        let commitment_hash_map = self.mempool_state.get_all_commitment_tx().await;
         for tx in commitment_hash_map.values() {
             // Create a filepath for this transaction
             let tx_path = commitment_tx_path.join(format!("{}.json", tx.id));
@@ -1422,15 +1359,7 @@ impl Inner {
             }
         }
 
-        self.wipe_blacklists().await;
-    }
-
-    // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
-    // right now this only wipes `recent_invalid_tx`
-    pub async fn wipe_blacklists(&self) {
-        let mut write = self.mempool_state.write().await;
-        write.recent_invalid_tx.clear();
-        write.recent_invalid_payload_fingerprints.clear();
+        self.mempool_state.wipe_blacklists().await;
     }
 
     /// Helper that opens a read-only database transaction from the Irys mempool state.
@@ -1468,11 +1397,11 @@ impl Inner {
             // signing preimage (prehash). This avoids poisoning legitimate transactions that
             // share the same signature bytes but differ in signed content.
             let fingerprint = tx.fingerprint();
+
             self.mempool_state
-                .write()
-                .await
-                .recent_invalid_payload_fingerprints
-                .put(fingerprint, ());
+                .mark_fingerprint_as_invalid(fingerprint)
+                .await;
+
             warn!(
                 "Tx {} signature is invalid (fingerprint {:?})",
                 &tx.id(),
@@ -1489,17 +1418,6 @@ impl Inner {
             );
             Err(TxIngressError::InvalidSignature)
         }
-    }
-
-    /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
-    pub fn mark_tx_as_invalid(
-        mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState>,
-        tx_id: IrysTransactionId,
-        err_reason: impl ToString,
-    ) {
-        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
-        state.recent_invalid_tx.put(tx_id, ());
-        state.recent_valid_tx.pop(&tx_id);
     }
 
     // Helper to get the canonical chain and latest height
@@ -1560,17 +1478,646 @@ impl Inner {
     }
 
     async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
-        let mut state = self.mempool_state.write().await;
-        state.stake_and_pledge_whitelist.extend(new_entries);
+        self.mempool_state
+            .extend_stake_and_pledge_whitelist(new_entries)
+            .await;
     }
 
     async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
-        let state = self.mempool_state.read().await;
-        state.stake_and_pledge_whitelist.clone()
+        self.mempool_state
+            .get_stake_and_pledge_whitelist_cloned()
+            .await
     }
 }
 
-pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
+/// Mempool state. All methods on this structure are quick utility methods. No function acquires
+/// more than one lock, and no function makes a call to any other function of the
+/// AtomicMempoolState structure, eliminating the possibility of deadlocks. Although this structure
+/// has private read and write methods, these should not be used outside the AtomicMempoolState
+/// under any condition.
+#[derive(Debug, Clone)]
+pub struct AtomicMempoolState(Arc<RwLock<MempoolState>>);
+
+impl AtomicMempoolState {
+    pub fn new(inner: MempoolState) -> Self {
+        Self(Arc::new(RwLock::new(inner)))
+    }
+
+    pub async fn remove_blacklisted_txids(&self, tx_ids: &[H256]) {
+        let mut state = self.write().await;
+        for tx_id in tx_ids {
+            state.recent_invalid_tx.pop(tx_id);
+        }
+    }
+
+    /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
+    pub async fn mark_tx_as_invalid(&self, tx_id: IrysTransactionId, err_reason: impl ToString) {
+        let state = &mut self.write().await;
+        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
+        state.recent_invalid_tx.put(tx_id, ());
+        state.recent_valid_tx.pop(&tx_id);
+    }
+
+    pub async fn sorted_commitments(&self) -> Vec<CommitmentTransaction> {
+        let mempool_state_guard = self.read().await;
+
+        mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter().cloned())
+            .collect::<Vec<_>>()
+    }
+
+    /// Get specific commitment transactions by their IDs from the mempool
+    ///
+    /// This searches both:
+    /// - `valid_commitment_tx`: Validated commitment transactions organized by address
+    /// - `pending_pledges`: Out-of-order pledge transactions waiting for dependencies
+    ///
+    /// Returns a HashMap containing only the requested transactions that were found.
+    ///
+    /// Complexity: O(n + m) where n is the number of requested IDs and m is the total
+    /// number of transactions in the mempool.
+    #[must_use]
+    pub async fn get_commitment_txs(
+        &self,
+        commitment_tx_ids: &[IrysTransactionId],
+    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+        const PRESUMED_PLEDGES_PER_ACCOUNT: usize = 4;
+        let mempool_state_guard = self.read().await;
+
+        // Build lookup map of ALL transactions in mempool - O(m)
+        let mut all_txs = HashMap::with_capacity(
+            mempool_state_guard.valid_commitment_tx.len()
+                + mempool_state_guard.pending_pledges.len() * PRESUMED_PLEDGES_PER_ACCOUNT,
+        );
+
+        // Collect from valid_commitment_tx
+        for txs in mempool_state_guard.valid_commitment_tx.values() {
+            for tx in txs {
+                all_txs.insert(tx.id, tx);
+            }
+        }
+
+        // Collect from pending_pledges
+        for (_, inner_cache) in mempool_state_guard.pending_pledges.iter() {
+            for (id, tx) in inner_cache.iter() {
+                all_txs.insert(*id, tx);
+            }
+        }
+
+        // Lookup requested transactions - O(n)
+        commitment_tx_ids
+            .iter()
+            .filter_map(|tx_id| all_txs.get(tx_id).map(|tx| (*tx_id, (*tx).clone())))
+            .collect()
+    }
+
+    // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
+    // right now this only wipes `recent_invalid_tx`
+    pub async fn wipe_blacklists(&self) {
+        let mut write = self.write().await;
+        write.recent_invalid_tx.clear();
+        write.recent_invalid_payload_fingerprints.clear();
+    }
+
+    pub async fn get_status(&self, config: &NodeConfig) -> MempoolStatus {
+        let state = self.read().await;
+
+        // Calculate total data size
+        let data_tx_total_size: u64 = state
+            .valid_submit_ledger_tx
+            .values()
+            .map(|tx| tx.data_size)
+            .sum();
+
+        let mempool_config = &config.consensus_config().mempool;
+
+        // Calculate capacity utilization
+        let data_tx_capacity_pct = if state.max_submit_txs > 0 {
+            (state.valid_submit_ledger_tx.len() as f64 / state.max_submit_txs as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let commitment_address_capacity_pct = if state.max_commitment_addresses > 0 {
+            (state.valid_commitment_tx.len() as f64 / state.max_commitment_addresses as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Log capacity warnings
+        if data_tx_capacity_pct > 90.0 {
+            warn!(
+                mempool.data_tx_capacity = data_tx_capacity_pct,
+                mempool.data_tx_count = state.valid_submit_ledger_tx.len(),
+                mempool.data_tx_max = state.max_submit_txs,
+                "Data tx mempool approaching capacity"
+            );
+        }
+
+        if commitment_address_capacity_pct > 90.0 {
+            warn!(
+                mempool.commitment_address_capacity = commitment_address_capacity_pct,
+                mempool.commitment_address_count = state.valid_commitment_tx.len(),
+                mempool.commitment_address_max = state.max_commitment_addresses,
+                "Commitment address mempool approaching capacity"
+            );
+        }
+
+        debug!(
+            mempool.data_tx_capacity = data_tx_capacity_pct,
+            mempool.commitment_address_capacity = commitment_address_capacity_pct,
+            "Mempool capacity utilization"
+        );
+
+        MempoolStatus {
+            data_tx_count: state.valid_submit_ledger_tx.len(),
+            commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
+            pending_chunks_count: state.pending_chunks.len(),
+            pending_pledges_count: state.pending_pledges.len(),
+            recent_valid_tx_count: state.recent_valid_tx.len(),
+            recent_invalid_tx_count: state.recent_invalid_tx.len(),
+            data_tx_total_size,
+            config: mempool_config.clone(),
+            data_tx_capacity_pct,
+            commitment_address_capacity_pct,
+        }
+    }
+
+    pub async fn mark_fingerprint_as_invalid(&self, fingerprint: H256) {
+        self.0
+            .write()
+            .await
+            .recent_invalid_payload_fingerprints
+            .put(fingerprint, ());
+    }
+
+    pub async fn is_a_recent_invalid_fingerprint(&self, fingerprint: &H256) -> bool {
+        self.0
+            .read()
+            .await
+            .recent_invalid_payload_fingerprints
+            .contains(fingerprint)
+    }
+
+    pub async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+        let mut state = self.write().await;
+        state.stake_and_pledge_whitelist.extend(new_entries);
+    }
+
+    pub async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+        let state = self.read().await;
+        state.stake_and_pledge_whitelist.clone()
+    }
+
+    pub async fn valid_submit_ledger_tx_cloned(
+        &self,
+        tx_id: &H256,
+    ) -> Option<DataTransactionHeader> {
+        self.0
+            .read()
+            .await
+            .valid_submit_ledger_tx
+            .get(tx_id)
+            .cloned()
+    }
+
+    pub async fn all_valid_submit_ledgers_cloned(&self) -> BTreeMap<H256, DataTransactionHeader> {
+        self.read().await.valid_submit_ledger_tx.clone()
+    }
+
+    /// For confirmed blocks, we log warnings but don't fail if mempool is full
+    pub async fn bounded_insert_data_tx(&self, header: DataTransactionHeader) {
+        let mut mempool_guard = self.write().await;
+        if let Err(e) = mempool_guard.bounded_insert_data_tx(header.clone()) {
+            warn!(
+                tx.id = ?header.id,
+                error = ?e,
+                "Failed to insert confirmed promoted tx into mempool (likely at capacity)"
+            );
+        }
+        mempool_guard.recent_valid_tx.put(header.id, ());
+    }
+
+    pub async fn is_a_recent_valid_chunk(&self, chunk_path_hash: &ChunkPathHash) -> bool {
+        let mempool_state_guard = self.read().await;
+        mempool_state_guard
+            .recent_valid_chunks
+            .contains(chunk_path_hash)
+    }
+
+    pub async fn count_mempool_commitments(
+        &self,
+        user_address: &Address,
+        commitment_type_filter: impl Fn(&CommitmentType) -> bool,
+        seen_ids: &mut HashSet<H256>,
+    ) -> u64 {
+        let mempool = self.read().await;
+
+        mempool
+            .valid_commitment_tx
+            .get(user_address)
+            .map(|txs| {
+                txs.iter()
+                    .filter(|tx| commitment_type_filter(&tx.commitment_type))
+                    .filter(|tx| seen_ids.insert(tx.id))
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    }
+
+    pub async fn put_chunk(&self, chunk: UnpackedChunk, preheader_chunks_per_item: usize) {
+        let mempool_state_write_guard = &mut self.write().await;
+        if let Some(chunks_map) = mempool_state_write_guard
+            .pending_chunks
+            .get_mut(&chunk.data_root)
+        {
+            chunks_map.put(chunk.tx_offset, chunk.clone());
+        } else {
+            // If there's no entry for this data_root yet, create one
+            // TODO: rework LRU logic to separate LRU/map https://github.com/Irys-xyz/irys/issues/632
+            let mut new_lru_cache = LruCache::new(
+                NonZeroUsize::new(preheader_chunks_per_item)
+                    .expect("expected valid NonZeroUsize::new"),
+            );
+            new_lru_cache.put(chunk.tx_offset, chunk.clone());
+            mempool_state_write_guard
+                .pending_chunks
+                .put(chunk.data_root, new_lru_cache);
+        }
+    }
+
+    pub async fn record_recent_valid_chunk(&self, chunk_path_hash: ChunkPathHash) {
+        let mut mempool_state_guard = self.write().await;
+        mempool_state_guard
+            .recent_valid_chunks
+            .put(chunk_path_hash, ());
+    }
+
+    /// Inserts tx into the mempool and marks it as recently valid.
+    /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
+    pub async fn insert_tx_and_mark_valid(
+        &self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        let mut guard = self.write().await;
+        guard.bounded_insert_data_tx(tx.clone())?;
+        guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
+    }
+
+    pub async fn all_valid_commitment_txs_cloned(
+        &self,
+    ) -> BTreeMap<Address, Vec<CommitmentTransaction>> {
+        self.read().await.valid_commitment_tx.clone()
+    }
+
+    pub async fn all_valid_submit_ledger_ids(&self) -> Vec<H256> {
+        let state = self.read().await;
+        state
+            .valid_submit_ledger_tx
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
+    pub async fn all_valid_commitment_ledger_addresses(&self) -> Vec<Address> {
+        let state = self.read().await;
+        state
+            .valid_commitment_tx
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
+    pub async fn valid_commitment_txs_cloned(
+        &self,
+        address: &Address,
+    ) -> Option<Vec<CommitmentTransaction>> {
+        self.0
+            .read()
+            .await
+            .valid_commitment_tx
+            .get(address)
+            .cloned()
+    }
+
+    pub async fn remove_valid_submit_ledger_tx(&self, tx_id: &H256) {
+        let mut state = self.write().await;
+        state.valid_submit_ledger_tx.remove(tx_id);
+    }
+
+    pub async fn pop_pending_chunks_cache(
+        &self,
+        data_root: &DataRoot,
+    ) -> Option<LruCache<TxChunkOffset, UnpackedChunk>> {
+        self.write().await.pending_chunks.pop(data_root)
+    }
+
+    /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
+    /// Returns true if the transaction was found and removed, false otherwise
+    pub async fn remove_commitment_tx(&self, txid: &H256) -> bool {
+        let mut found = false;
+
+        let mut mempool_state_guard = self.write().await;
+
+        mempool_state_guard.recent_valid_tx.pop(txid);
+
+        // Create a vector of addresses to update to avoid borrowing issues
+        let addresses_to_check: Vec<Address> = mempool_state_guard
+            .valid_commitment_tx
+            .keys()
+            .copied()
+            .collect();
+
+        for address in addresses_to_check {
+            if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
+                // Find the index of the transaction to remove
+                if let Some(index) = transactions.iter().position(|tx| tx.id == *txid) {
+                    // Remove the transaction
+                    transactions.remove(index);
+                    found = true;
+
+                    // If the vector is now empty, remove the entry
+                    if transactions.is_empty() {
+                        mempool_state_guard.valid_commitment_tx.remove(&address);
+                    }
+
+                    // Exit early once we've found and removed the transaction
+                    break;
+                }
+            }
+        }
+
+        found
+    }
+
+    pub async fn take_all_valid_txs(
+        &self,
+    ) -> (
+        BTreeMap<H256, DataTransactionHeader>,
+        BTreeMap<Address, Vec<CommitmentTransaction>>,
+    ) {
+        let mut state = self.write().await;
+        state.recent_valid_tx.clear();
+        (
+            std::mem::take(&mut state.valid_submit_ledger_tx),
+            std::mem::take(&mut state.valid_commitment_tx),
+        )
+    }
+
+    pub async fn remove_transactions_from_pending_valid_pool(&self, submit_tx_ids: &[H256]) {
+        let mut guard = self.write().await;
+        for txid in submit_tx_ids {
+            guard.valid_submit_ledger_tx.remove(txid);
+            guard.recent_valid_tx.pop(txid);
+        }
+    }
+
+    pub async fn update_submit_transaction(&self, tx: DataTransactionHeader) {
+        self.0
+            .write()
+            .await
+            .valid_submit_ledger_tx
+            .entry(tx.id)
+            .and_modify(|t| *t = tx);
+    }
+
+    pub async fn clear_promoted_height(&self, txid: H256) -> bool {
+        let mut cleared = false;
+        let mut state = self.write().await;
+        if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
+            header.promoted_height = None;
+            state.recent_valid_tx.put(txid, ());
+            tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
+            cleared = true;
+        }
+        cleared
+    }
+
+    pub async fn put_recent_invalid(&self, tx_id: H256) {
+        self.write().await.recent_invalid_tx.put(tx_id, ());
+    }
+
+    pub async fn mempool_data_tx_status(&self, txid: &H256) -> Option<TxKnownStatus> {
+        let mempool_state_guard = self.read().await;
+
+        // #[expect(clippy::if_same_then_else, reason = "readability")]
+        if mempool_state_guard
+            .valid_submit_ledger_tx
+            .contains_key(txid)
+        {
+            Some(TxKnownStatus::Valid)
+        } else if mempool_state_guard.recent_valid_tx.contains(txid) {
+            Some(TxKnownStatus::ValidSeen)
+        } else if mempool_state_guard.recent_invalid_tx.contains(txid) {
+            // Still has it, just invalid
+            Some(TxKnownStatus::InvalidSeen)
+        } else {
+            None
+        }
+    }
+
+    pub async fn mempool_commitment_tx_status(
+        &self,
+        commitment_tx_id: &H256,
+    ) -> Option<TxKnownStatus> {
+        let mempool_state_guard = self.read().await;
+
+        #[expect(clippy::if_same_then_else, reason = "readability")]
+        if mempool_state_guard
+            .recent_valid_tx
+            .contains(commitment_tx_id)
+        {
+            Some(TxKnownStatus::ValidSeen)
+        } else if mempool_state_guard
+            .recent_invalid_tx
+            .contains(commitment_tx_id)
+        {
+            // Still has it, just invalid
+            Some(TxKnownStatus::InvalidSeen)
+            // Get any CommitmentTransactions from the valid commitments Map
+        } else if mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter())
+            .any(|tx| &tx.id == commitment_tx_id)
+        {
+            Some(TxKnownStatus::Valid)
+        }
+        // Get any CommitmentTransactions from the pending commitments LRU cache
+        else if mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .any(|(id, _tx)| id == commitment_tx_id)
+        {
+            Some(TxKnownStatus::Valid)
+        } else {
+            None
+        }
+    }
+
+    pub async fn is_address_in_a_whitelist(&self, address: &Address) -> bool {
+        let read_guard = self.read().await;
+        let whitelist = &read_guard.stake_and_pledge_whitelist;
+        whitelist.is_empty() || whitelist.contains(address)
+    }
+
+    /// Returns true if the commitment tx is already known in the mempool caches/maps.
+    pub async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: Address) -> bool {
+        let guard = self.read().await;
+        // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
+        if guard.recent_valid_tx.contains(tx_id) {
+            return true;
+        }
+        if guard
+            .valid_commitment_tx
+            .get(&signer)
+            .is_some_and(|txs| txs.iter().any(|c| c.id == *tx_id))
+        {
+            return true;
+        }
+        false
+    }
+
+    /// should really only be called by persist_mempool_to_disk, all other scenarios need a more
+    /// subtle filtering of commitment state, recently confirmed? pending? valid? etc.
+    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the commitment transactions
+        let mempool_state_guard = self.read().await;
+
+        // Get any CommitmentTransactions from the valid commitments
+        mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter())
+            .for_each(|tx| {
+                hash_map.insert(tx.id, tx.clone());
+            });
+
+        // Get any CommitmentTransactions from the pending commitments
+        mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .for_each(|(tx_id, tx)| {
+                hash_map.insert(*tx_id, tx.clone());
+            });
+
+        hash_map
+    }
+
+    pub async fn pop_pending_pledges_for_signer(
+        &self,
+        signer: &Address,
+    ) -> Option<LruCache<IrysTransactionId, CommitmentTransaction>> {
+        self.write().await.pending_pledges.pop(signer)
+    }
+
+    /// Caches an unstaked pledge in the two-level LRU structure.
+    pub async fn cache_unstaked_pledge(
+        &self,
+        tx: &CommitmentTransaction,
+        max_pending_pledge_items: usize,
+    ) {
+        let mut guard = self.write().await;
+        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer) {
+            // Address already exists in cache - add this pledge transaction to its lru cache
+            pledges_cache.put(tx.id, tx.clone());
+        } else {
+            // First pledge from this address - create a new nested lru cache
+            let mut new_address_cache =
+                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+            // Add the pledge transaction to the new lru cache for the address
+            new_address_cache.put(tx.id, tx.clone());
+
+            // Add the address cache to the primary lru cache
+            guard.pending_pledges.put(tx.signer, new_address_cache);
+        }
+    }
+
+    /// Inserts a commitment into the mempool valid map and marks it as recently valid.
+    /// Uses bounded insertion which may evict transactions when limits are exceeded.
+    async fn insert_commitment_and_mark_valid(
+        &self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let mut guard = self.write().await;
+        guard.bounded_insert_commitment_tx(tx)?;
+        guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
+    }
+
+    async fn is_there_a_pledge_for_unstaked_address(&self, signer: &Address) -> bool {
+        // For unstaked addresses, check for pending stake transactions
+        let mempool_state_guard = self.read().await;
+        // Get pending transactions for this address
+        if let Some(pending) = mempool_state_guard.valid_commitment_tx.get(signer) {
+            // Check if there's at least one pending stake transaction
+            if pending
+                .iter()
+                .any(|c| c.commitment_type == CommitmentType::Stake)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    async fn all_commitment_transactions(&self) -> HashMap<H256, CommitmentTransaction> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the commitment transactions
+        let mempool_state_guard = self.read().await;
+
+        // TODO: what the heck is this, this needs to be optimised at least a little bit
+
+        // Get any CommitmentTransactions from the valid commitments Map
+        mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter())
+            .for_each(|tx| {
+                hash_map.insert(tx.id, tx.clone());
+            });
+
+        // Get any CommitmentTransactions from the pending commitments LRU cache
+        mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .for_each(|(tx_id, tx)| {
+                hash_map.insert(*tx_id, tx.clone());
+            });
+
+        hash_map
+    }
+
+    /// Do not call this function from anywhere outside AtomicMempoolState
+    #[instrument(skip_all)]
+    async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
+        tokio::time::timeout(Duration::from_secs(10), self.0.read()).await.unwrap_or_else(|elapsed| {
+            error!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock");
+            panic!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock")
+        })
+    }
+
+    /// Do not call this function from anywhere outside AtomicMempoolState
+    #[instrument(skip_all)]
+    async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
+        tokio::time::timeout(Duration::from_secs(10), self.0.write()).await.unwrap_or_else(|elapsed| {
+            error!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock");
+            panic!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock")
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct MempoolState {
     /// bounded map with manual capacity enforcement
@@ -1933,7 +2480,7 @@ impl MempoolService {
         let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
-                let mempool_state = Arc::new(RwLock::new(mempool_state));
+                let mempool_state = AtomicMempoolState::new(mempool_state);
                 let pledge_provider = MempoolPledgeProvider::new(
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
@@ -1989,17 +2536,65 @@ impl MempoolService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            let inner = Arc::clone(&self.inner);
                             // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
-                            let semaphore = inner.message_handler_semaphore.clone();
-                            let permit = semaphore.acquire_owned().await;
-
-                            runtime_handle.spawn(async move {
-                                let _permit = permit; // Hold until task completes
-                                if let Err(err) = inner.handle_message(msg).await {
-                                    error!("Error handling mempool message: {:?}", err);
+                            let semaphore = self.inner.message_handler_semaphore.clone();
+                            match semaphore.try_acquire_owned() {
+                                Ok(permit) => {
+                                    let inner = Arc::clone(&self.inner);
+                                    // Permit acquired immediately
+                                    runtime_handle.spawn(async move {
+                                        let _permit = permit; // Hold until task completes
+                                        let task_info = format!("Mempool message handler for {:?}", msg);
+                                        if let Err(err) = wait_with_progress(
+                                            inner.handle_message(msg),
+                                            20,
+                                            &task_info,
+                                        ).await {
+                                            error!("Error handling mempool message: {:?}", err);
+                                        }
+                                    });
                                 }
-                            });
+                                Err(e) => {
+                                    match e {
+                                        tokio::sync::TryAcquireError::Closed => {
+                                            error!("Mempool message handler semaphore closed");
+                                            break;
+                                        }
+                                        tokio::sync::TryAcquireError::NoPermits => {
+                                            warn!("Mempool message handler semaphore at capacity, waiting for permit");
+                                        }
+                                    }
+                                    // No permits available, will wait
+                                    let inner = Arc::clone(&self.inner);
+                                    let semaphore = inner.message_handler_semaphore.clone();
+                                    // Wait a minute before crashing out
+                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+                                        Ok(permit_result) => {
+                                            match permit_result {
+                                                Ok(permit) => {
+                                                    runtime_handle.spawn(async move {
+                                                        let _permit = permit; // Hold until task completes
+                                                        let task_info = format!("Mempool message handler for {:?}", msg);
+                                                        if let Err(err) = wait_with_progress(
+                                                            inner.handle_message(msg),
+                                                            20,
+                                                            &task_info,
+                                                        ).await {
+                                                            error!("Error handling mempool message: {:?}", err);
+                                                        }
+                                                    });
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to acquire mempool message handler permit: {:?}", err);
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {
+                                            error!("Timed out waiting for mempool message handler permit");
+                                        }
+                                    }
+                                }
+                            }
                         }
                         None => {
                             warn!("receiver channel closed");
@@ -2126,6 +2721,32 @@ fn check_funding<T: IrysTransactionCommon>(
     }
 
     has_funds
+}
+
+/// Waits for `fut` to finish while printing every `n_secs`.
+async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let fut = fut;
+    tokio::pin!(fut);
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(n_secs));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    // Don't do an immediate tick
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                println!("Task {task_info} takes too long to complete, possible deadlock detected...");
+            }
+            res = &mut fut => {
+                break res;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
