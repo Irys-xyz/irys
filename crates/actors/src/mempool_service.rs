@@ -568,8 +568,6 @@ impl Inner {
         let max_anchor_height =
             current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
 
-        debug!("Anchor bounds for inclusion @ {current_height}: >= {min_anchor_height}, <= {max_anchor_height}");
-
         let mut balances: HashMap<Address, U256> = HashMap::new();
 
         info!(
@@ -594,7 +592,8 @@ impl Inner {
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
 
-        // Create a throw away commitment snapshot for simulation
+        // Process sorted commitments
+        // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
         let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
             if confirmed_commitments.contains(&tx.id) {
