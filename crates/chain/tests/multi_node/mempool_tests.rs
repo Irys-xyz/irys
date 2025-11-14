@@ -1836,11 +1836,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .await?;
 
     // latest block has the fund tx, so it should be present
-    assert_eq!(
-        best_current_submit.len(),
-        1,
-        "There should be a storage tx"
-    );
+    assert_eq!(best_current_submit.len(), 1, "There should be a storage tx");
 
     // mine another block on peer1, so it's the longest chain (with gossip)
     let height = peer1.get_canonical_chain_height().await;
