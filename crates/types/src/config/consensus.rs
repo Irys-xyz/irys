@@ -540,9 +540,9 @@ impl ConsensusConfig {
                 // Address that receives the genesis block reward
                 reward_address: Address::ZERO, // todo()
                 // The initial last_epoch_hash used by the genesis block
-                last_epoch_hash: H256::zero(), // todo()
+                last_epoch_hash: H256::from_base58("4eiVupeZoaBgxyDMacRHnvbbzodLRTEcGUG3yjXpAE4i"),
                 // The initial VDF seed used by the genesis block Must be explicitly set for deterministic VDF output at genesis.
-                vdf_seed: H256::zero(), // todo()
+                vdf_seed: H256::from_base58("3peqVpX6VF8GjEsSeFk6XPN19bSn7fQbjgT6PJMkpzDo"),
                 // The initial next VDF seed used after the first reset boundary. If not set in config, defaults to the same value as vdf_seed
                 vdf_next_seed: None,
                 // The initial price of the Irys token at genesis in USD Sets the baseline for all future pricing calculations
@@ -792,17 +792,4 @@ impl ConsensusConfig {
             max_future_timestamp_drift_millis: 15_000,
         }
     }
-}
-
-#[test]
-fn test() {
-    let config = GenesisConfig {
-        timestamp_millis: 0,
-        miner_address: todo!(),
-        reward_address: todo!(),
-        last_epoch_hash: todo!(),
-        vdf_seed: todo!(),
-        vdf_next_seed: todo!(),
-        genesis_price: todo!(),
-    };
 }
