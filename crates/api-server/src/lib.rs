@@ -9,8 +9,8 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::{
-    mempool_guard::MempoolReadGuard,
-    pledge_provider::MempoolPledgeProvider, MempoolServiceMessageWithSpan,
+    mempool_guard::MempoolReadGuard, pledge_provider::MempoolPledgeProvider,
+    MempoolServiceMessageWithSpan,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
