@@ -491,7 +491,7 @@ pub struct SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            block_batch_size: 10,
+            block_batch_size: 50,
             // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
