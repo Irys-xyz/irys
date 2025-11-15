@@ -781,12 +781,6 @@ where
             current_block_hash
         );
 
-        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
-
-        self.block_status_provider
-            .wait_for_block_tree_can_process_height(block_header.height)
-            .await;
-
         // Send cached transactions (if any) to the mempool before handling the block
         let cached_txs = self
             .blocks_cache

@@ -575,10 +575,19 @@ pub struct MempoolNodeConfig {
     /// Maximum number of concurrent handlers for the mempool messages
     #[serde(default = "default_max_concurrent_mempool_tasks")]
     pub max_concurrent_mempool_tasks: usize,
+
+    /// Maximum number of concurrent block discovery validation tasks
+    /// Controls the number of blocks that can be pre-validated concurrently
+    #[serde(default = "default_max_concurrent_block_discovery_tasks")]
+    pub max_concurrent_block_discovery_tasks: usize,
 }
 
 pub fn default_max_concurrent_mempool_tasks() -> usize {
     30
+}
+
+pub fn default_max_concurrent_block_discovery_tasks() -> usize {
+    8
 }
 
 impl NodeConfig {
@@ -737,6 +746,7 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                max_concurrent_block_discovery_tasks: 8,
             },
 
             vdf: VdfNodeConfig {
@@ -876,6 +886,7 @@ impl NodeConfig {
                 max_valid_commitment_addresses: 300,
                 max_commitments_per_address: 20,
                 max_concurrent_mempool_tasks: 30,
+                max_concurrent_block_discovery_tasks: 8,
             },
 
             vdf: VdfNodeConfig {
