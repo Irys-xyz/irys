@@ -8,11 +8,10 @@ use crate::{
     },
     cache_service::CacheServiceAction,
     chunk_migration_service::ChunkMigrationServiceMessage,
-    mempool_service::MempoolServiceMessage,
     packing_service::{PackingRequest, PackingSender, PackingService},
     reth_service::RethServiceMessage,
     validation_service::ValidationServiceMessage,
-    DataSyncServiceMessage, StorageModuleServiceMessage,
+    DataSyncServiceMessage, MempoolServiceMessageWithSpan, StorageModuleServiceMessage,
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
@@ -95,7 +94,7 @@ impl ServiceSenders {
 pub struct ServiceReceivers {
     pub chunk_cache: UnboundedReceiver<CacheServiceAction>,
     pub chunk_migration: UnboundedReceiver<ChunkMigrationServiceMessage>,
-    pub mempool: UnboundedReceiver<MempoolServiceMessage>,
+    pub mempool: UnboundedReceiver<MempoolServiceMessageWithSpan>,
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
@@ -118,7 +117,7 @@ pub struct ServiceReceivers {
 pub struct ServiceSendersInner {
     pub chunk_cache: UnboundedSender<CacheServiceAction>,
     pub chunk_migration: UnboundedSender<ChunkMigrationServiceMessage>,
-    pub mempool: UnboundedSender<MempoolServiceMessage>,
+    pub mempool: UnboundedSender<MempoolServiceMessageWithSpan>,
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
@@ -143,7 +142,8 @@ impl ServiceSendersInner {
         let (chunk_cache_sender, chunk_cache_receiver) = unbounded_channel::<CacheServiceAction>();
         let (chunk_migration_sender, chunk_migration_receiver) =
             unbounded_channel::<ChunkMigrationServiceMessage>();
-        let (mempool_sender, mempool_receiver) = unbounded_channel::<MempoolServiceMessage>();
+        let (mempool_sender, mempool_receiver) =
+            unbounded_channel::<MempoolServiceMessageWithSpan>();
         // vdf channel for fast forwarding steps during node sync
         let (vdf_fast_forward_sender, vdf_fast_forward_receiver) = unbounded_channel::<VdfStep>();
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
