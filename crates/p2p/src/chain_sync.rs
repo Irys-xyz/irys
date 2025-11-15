@@ -1276,8 +1276,8 @@ async fn get_block_index(
     // Ideally, if we fetch an index batch, we should wait until the whole batch is processed
     //  before fetching the next batch to avoid errors in case if a batch had a faulty block.
     //  However, in the first version it doesn't matter as much as the first release, since
-    //  at first the network is going to run in a controlled environment with trusted nodes,
-    //  but we should make a more sofisticated algorithm for a follow-up release.
+    //  at first the network is going to run in a controlled environment with trusted nodes.
+    //  However, we should make a more sophisticated algorithm for a follow-up release.
     let peers = synced_peers_sorted_by_cumulative_diff(
         peer_list,
         api_client,
