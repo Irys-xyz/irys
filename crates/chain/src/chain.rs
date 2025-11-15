@@ -780,6 +780,8 @@ impl IrysNode {
         // spawn a task to periodically log system info, but not in tests
         #[cfg(not(test))]
         {
+            use irys_actors::MempoolServiceMessage;
+
             let block_index = ctx.block_index_guard.clone();
             let block_tree = ctx.block_tree_guard.clone();
             let peer_list = ctx.peer_list.clone();
