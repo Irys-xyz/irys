@@ -2,7 +2,7 @@ use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
 use eyre::eyre;
 use irys_database::{
-    block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
+    block_header_by_hash, db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -13,7 +13,6 @@ use irys_types::{
     DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
     IrysTransactionId, H256, U256,
 };
-use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::collections::HashMap;
 use tracing::{debug, error, info, trace, warn};
@@ -393,10 +392,8 @@ impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.data_root = ?tx.data_root, expiry_height = expiry_height))]
     fn cache_data_root_with_expiry(&self, tx: &DataTransactionHeader, expiry_height: u64) {
         match self.irys_db.update_eyre(|db_tx| {
-            let mut cdr = irys_database::cache_data_root(db_tx, tx, None)?
+            irys_database::cache_data_root(db_tx, tx, None, Some(expiry_height))?
                 .ok_or_else(|| eyre!("failed to cache data_root"))?;
-            cdr.expiry_height = Some(expiry_height);
-            db_tx.put::<CachedDataRoots>(tx.data_root, cdr)?;
             Ok(())
         }) {
             Ok(()) => {

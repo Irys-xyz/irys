@@ -149,8 +149,19 @@ pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
     let result = tx.get::<CachedDataRoots>(*data_root)?;
 
     if let Some(mut cached_data_root) = result {
-        cached_data_root.data_size = data_size;
+        let original_expiry_height = cached_data_root.expiry_height;
+
+        cached_data_root.data_size = data_size;  // validated_data_size;
         cached_data_root.data_size_confirmed = true;
+
+        if original_expiry_height.is_some() && cached_data_root.expiry_height.is_none() {
+            warn!(
+                "Expiry_height was set to Some({:?}) but is now None for data_root {}. Keeping original value.",
+                original_expiry_height, data_root
+            );
+            cached_data_root.expiry_height = original_expiry_height;
+        }
+
         tx.put::<CachedDataRoots>(*data_root, cached_data_root.clone())?;
         Ok(Some(cached_data_root))
     } else {
@@ -164,6 +175,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     tx: &T,
     tx_header: &DataTransactionHeader,
     block_header: Option<&IrysBlockHeader>,
+    expiry_height: Option<u64>,
 ) -> eyre::Result<Option<CachedDataRoot>> {
     let key = tx_header.data_root;
 
@@ -204,6 +216,10 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         }
         // Clear any pre-confirmation expiry once the data_root is included in a block
         cached_data_root.expiry_height = None;
+    }
+
+    if let Some(expiry) = expiry_height {
+        cached_data_root.expiry_height = Some(expiry);
     }
 
     // Update the database with the modified or new entry

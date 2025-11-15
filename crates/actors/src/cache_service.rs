@@ -557,7 +557,7 @@ mod tests {
             ..Default::default()
         });
         db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
+            database::cache_data_root(wtx, &tx_header, None, None)?;
             eyre::Ok(())
         })??;
 
@@ -632,7 +632,7 @@ mod tests {
             ..Default::default()
         });
         db.update(|wtx| {
-            database::cache_data_root(wtx, &tx_header, None)?;
+            database::cache_data_root(wtx, &tx_header, None, None)?;
             eyre::Ok(())
         })??;
 
