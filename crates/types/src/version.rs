@@ -1,4 +1,4 @@
-use crate::address_base58_stringify;
+use crate::{address_base58_stringify, U256};
 use crate::{
     decode_address, encode_address, serialization::string_u64, serialization::string_usize,
     Arbitrary, IrysSignature, RethPeerInfo, H256,
@@ -351,12 +351,13 @@ pub struct NodeInfo {
     pub uptime_secs: u64,
     #[serde(with = "address_base58_stringify")]
     pub mining_address: Address,
+    pub cumulative_difficulty: U256,
 }
 
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
-    use crate::Address;
+    use crate::{Address, U256};
     use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
     use serde_json;
 
@@ -396,6 +397,7 @@ mod tests {
             current_sync_height: 0,
             uptime_secs: 0,
             mining_address: Address::ZERO,
+            cumulative_difficulty: U256::zero(),
         };
 
         let json = serde_json::to_string(&node_info).unwrap();
@@ -444,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_info_serde_roundtrip() -> eyre::Result<()> {
-        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111"}"#;
+        let old_json = r#"{"version":"1.0.0","peerCount":10,"chainId":"12345","height":"67890","blockHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","blockIndexHeight":"0","blockIndexHash":"5TLJx8LqeDGxJ6b6R4JWfZFmPunoM9VgpGDVo9fHexKD","pendingBlocks":"0","isSyncing":false,"currentSyncHeight":"0","uptimeSecs":"0","miningAddress":"11111111111111111111","cumulativeDifficulty":"123"}"#;
         // Test that we can still deserialize old numeric format for small values
         // TODO: remove this at some point?
         let node_info: NodeInfo = serde_json::from_str(old_json)?;

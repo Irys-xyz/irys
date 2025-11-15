@@ -13,7 +13,7 @@ use irys_types::{
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1255,175 +1255,86 @@ async fn check_and_update_full_validation_switch_height(
     }
 }
 
+#[instrument(skip_all, fields(
+    index_request.start = start,
+    index_request.limit = limit,
+    index_request.retries = retries,
+    index_request.fetch_from_trusted_peers_only = fetch_from_trusted_peers_only
+), err)]
 async fn get_block_index(
     peer_list: &PeerList,
     api_client: &impl ApiClient,
     start: usize,
     limit: usize,
     retries: usize,
-    fetch_from_the_trusted_peer: bool,
+    fetch_from_trusted_peers_only: bool,
 ) -> ChainSyncResult<Vec<BlockIndexItem>> {
     debug!(
         "Fetching block index starting from height {} with limit {}",
         start, limit
     );
-    let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
-        debug!("Fetching block index from trusted peers");
-        peer_list.online_trusted_peers()
-    } else {
-        debug!("Fetching block index from top active peers");
-        peer_list.top_active_peers(None, None)
-    };
+    // Ideally, if we fetch an index batch, we should wait until the whole batch is processed
+    //  before fetching the next batch to avoid errors in case if a batch had a faulty block.
+    //  However, in the first version it doesn't matter as much as the first release, since
+    //  at first the network is going to run in a controlled environment with trusted nodes.
+    //  However, we should make a more sophisticated algorithm for a follow-up release.
+    let peers = synced_peers_sorted_by_cumulative_diff(
+        peer_list,
+        api_client,
+        fetch_from_trusted_peers_only,
+    )
+    .await?;
 
-    if peers_to_fetch_index_from.is_empty() {
+    if peers.is_empty() {
         return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
-    // the peer to remove from the candidate list of peers
-    // this is so we don't have conflicting mutable and immutable borrows
-    let mut to_remove = None;
-
     for _ in 0..retries {
-        if let Some(to_remove) = to_remove {
-            peers_to_fetch_index_from.retain(|peer| peer.0 != to_remove);
-        };
+        let mut peers = peers.clone();
 
-        let (miner_address, top_peer) =
-            peers_to_fetch_index_from
-                .choose(&mut rand::thread_rng())
-                .ok_or(GossipError::Network("No peers available".to_string()))?;
+        while let Some((diff, mut peers_to_fetch_index_from)) = peers.pop_last() {
+            debug!("Peers with cumulative diff {:?}: {:?}", diff, peers.len());
+            peers_to_fetch_index_from.shuffle(&mut rand::thread_rng());
 
-        let should_remove = match api_client
-            .node_info(top_peer.address.api)
-            .await
-            .map_err(|network_error| GossipError::Network(network_error.to_string()))
-        {
-            Ok(info) => {
-                if info.is_syncing {
-                    info!(
-                        "Peer {} is syncing, skipping for block index fetch",
-                        &miner_address
-                    );
-
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(error) => {
-                error!(
-                    "Failed to fetch node info from peer {:?}: {:?}",
-                    miner_address, error
-                );
-                true
-            }
-        };
-
-        if should_remove {
-            // this is so we don't have conflicting mutable and immutable borrows
-            to_remove = Some(*miner_address);
-            continue;
-        }
-
-        match api_client
-            .get_block_index(
-                top_peer.address.api,
-                BlockIndexQuery {
-                    height: start,
-                    limit,
-                },
-            )
-            .await
-            .map_err(|network_error| ChainSyncError::Network(network_error.to_string()))
-        {
-            Ok(index) => {
+            for (mining_addr, peer) in &peers_to_fetch_index_from {
                 debug!(
-                    "Fetched block index from peer {:?}: {:?}",
-                    miner_address, index
+                    peer.address = ?peer.address.api,
+                    index.start = start,
+                    index.limit = limit,
+                    "Fetching block index from peer {:?}",
+                    mining_addr
                 );
 
-                // If the index is empty, try all other peers before returning empty
-                if index.is_empty() {
-                    debug!(
-                        "Peer {:?} returned an empty index, trying all other peers",
-                        miner_address
-                    );
-
-                    // Try all remaining peers
-                    for (other_miner_address, other_peer) in peers_to_fetch_index_from.iter() {
-                        if other_miner_address == miner_address {
-                            continue; // Skip the peer we just tried
-                        }
-
-                        debug!("Trying to fetch index from peer {:?}", other_miner_address);
-
-                        // Check if peer is syncing
-                        match api_client.node_info(other_peer.address.api).await {
-                            Ok(info) => {
-                                if info.is_syncing {
-                                    info!(
-                                        "Peer {} is syncing, skipping for block index fetch",
-                                        other_miner_address
-                                    );
-                                    continue;
-                                }
-                            }
-                            Err(error) => {
-                                error!(
-                                    "Failed to fetch node info from peer {:?}: {:?}",
-                                    other_miner_address, error
-                                );
-                                continue;
-                            }
-                        }
-
-                        match api_client
-                            .get_block_index(
-                                other_peer.address.api,
-                                BlockIndexQuery {
-                                    height: start,
-                                    limit,
-                                },
-                            )
-                            .await
-                        {
-                            Ok(other_index) => {
-                                if !other_index.is_empty() {
-                                    debug!(
-                                        "Peer {:?} returned a non-empty index: {:?}",
-                                        other_miner_address, other_index
-                                    );
-                                    return Ok(other_index);
-                                } else {
-                                    debug!(
-                                        "Peer {:?} also returned an empty index",
-                                        other_miner_address
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                error!(
-                                    "Failed to fetch a block index from peer {:?}: {:?}",
-                                    other_miner_address, error
-                                );
-                                continue;
-                            }
-                        }
+                match api_client
+                    .get_block_index(
+                        peer.address.api,
+                        BlockIndexQuery {
+                            height: start,
+                            limit,
+                        },
+                    )
+                    .await
+                {
+                    Ok(index) => {
+                        debug!(
+                            peer.address = ?peer.address.api,
+                            index.start = start,
+                            index.limit = limit,
+                            "Fetched block index from peer {:?}: {:?}",
+                            mining_addr, index
+                        );
+                        return Ok(index);
                     }
-
-                    // All peers returned empty indices, return empty
-                    debug!("All peers returned empty indices, returning empty list");
-                    return Ok(vec![]);
+                    Err(error) => {
+                        warn!(
+                            peer.address = ?peer.address.api,
+                            index.start = start,
+                            index.limit = limit,
+                            "Failed to fetch a block index from peer {:?}: {:?}",
+                            mining_addr, error
+                        );
+                    }
                 }
-
-                return Ok(index);
-            }
-            Err(error) => {
-                error!(
-                    "Failed to fetch block index from peer {:?}: {:?}",
-                    miner_address, error
-                );
-                continue;
             }
         }
     }
@@ -1554,6 +1465,65 @@ async fn estimate_canonical_height(
     }
 
     highest_trusted_peer_height
+}
+
+async fn synced_peers_sorted_by_cumulative_diff(
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    trusted_peers_only: bool,
+) -> ChainSyncResult<BTreeMap<U256, Vec<(Address, PeerListItem)>>> {
+    let peers = if trusted_peers_only {
+        peer_list.online_trusted_peers()
+    } else {
+        peer_list.top_active_peers(None, None)
+    };
+    if peers.is_empty() {
+        return Err(ChainSyncError::Network(
+            "No online peers available".to_string(),
+        ));
+    }
+
+    let peers_and_diffs_futures = peers.into_iter().map(|(addr, peer)| {
+        let api_client = api_client.clone();
+        async move {
+            match api_client.node_info(peer.address.api).await {
+                Ok(info) => {
+                    if !info.is_syncing {
+                        Ok((addr, peer, info.cumulative_difficulty))
+                    } else {
+                        Err(ChainSyncError::Network(format!(
+                            "Peer {addr:?} is syncing, skipping"
+                        )))
+                    }
+                }
+                Err(err) => Err(ChainSyncError::Network(format!(
+                    "Failed to fetch node info from peer {:?}: {}",
+                    addr, err
+                ))),
+            }
+        }
+    });
+
+    let mut peers_and_diffs = BTreeMap::new();
+    for res in futures::future::join_all(peers_and_diffs_futures).await {
+        match res {
+            Ok((addr, peer, diff)) => {
+                peers_and_diffs
+                    .entry(diff)
+                    .or_insert_with(Vec::new)
+                    .push((addr, peer));
+            }
+            Err(err) => warn!("{}", err),
+        }
+    }
+
+    if peers_and_diffs.is_empty() {
+        return Err(ChainSyncError::Network(
+            "No peers available after fetching cumulative difficulties".to_string(),
+        ));
+    }
+
+    Ok(peers_and_diffs)
 }
 
 #[cfg(test)]
@@ -1723,10 +1693,10 @@ mod tests {
                 debug!("Data requests: {:?}", data_requests);
                 assert_eq!(data_requests[0].height, 11);
                 assert_eq!(data_requests[1].height, 11);
-                assert_eq!(data_requests[0].limit, 10);
-                assert_eq!(data_requests[1].limit, 10);
+                assert_eq!(data_requests[0].limit, 50);
+                assert_eq!(data_requests[1].limit, 50);
                 assert_eq!(data_requests[2].height, 12);
-                assert_eq!(data_requests[2].limit, 10);
+                assert_eq!(data_requests[2].limit, 50);
             }
 
             // Check that the sync status has changed to synced
