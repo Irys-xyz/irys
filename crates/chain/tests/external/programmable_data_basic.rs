@@ -130,12 +130,13 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
     info!("waiting for tx header...");
 
     let recv_tx = loop {
+        let canonical_tip = node.get_canonical_chain().last().unwrap().block_hash;
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let response = node
             .node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx).into());
+            .send(MempoolServiceMessage::GetBestMempoolTxs(canonical_tip, oneshot_tx).into());
         if let Err(e) = response {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }

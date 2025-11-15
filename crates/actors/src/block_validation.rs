@@ -2537,9 +2537,11 @@ where
         //  b) Get the submit ledger offset intervals for each of the blocks
         let mut block_ranges = Vec::new();
         for block_hash in block_hashes.iter() {
-            let block_range =
-                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await;
-            block_ranges.push(block_range);
+            if let Some(block_range) =
+                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await
+            {
+                block_ranges.push(block_range);
+            }
         }
 
         //  c) Get the slots the proof address is assigned to store
@@ -2587,25 +2589,25 @@ async fn get_ledger_range<F, Fut>(
     hash: &H256,
     mempool_block_retriever: F,
     db: &DatabaseProvider,
-) -> LedgerChunkRange
+) -> Option<LedgerChunkRange>
 where
     F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
     Fut: Future<Output = Option<IrysBlockHeader>>,
 {
-    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await;
+    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await?;
     let prev_block_hash = block.previous_block_hash;
 
     if block.height == 0 {
-        LedgerChunkRange(ii(
+        Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(0),
             LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        ))
+        )))
     } else {
-        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await;
-        LedgerChunkRange(ii(
+        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await?;
+        Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
             LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        ))
+        )))
     }
 }
 
@@ -2613,7 +2615,7 @@ async fn get_block_by_hash<F, Fut>(
     hash: &H256,
     mempool_block_retriever: F,
     db: &DatabaseProvider,
-) -> IrysBlockHeader
+) -> Option<IrysBlockHeader>
 where
     F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
     Fut: Future<Output = Option<IrysBlockHeader>>,
@@ -2622,12 +2624,11 @@ where
 
     // Return the block if we found it in the mempool, otherwise get it from the db
     if let Some(block) = block {
-        block
+        Some(block)
     } else {
         db.view(|tx| block_header_by_hash(tx, hash, false))
             .expect("creating a read tx should succeed")
             .expect("creating a read tx should succeed")
-            .expect("db query should succeed")
     }
 }
 

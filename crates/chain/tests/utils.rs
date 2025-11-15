@@ -46,8 +46,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, DataLedger, EvmBlockHash, GossipBroadcastMessage,
-    H256List, SyncMode, H256, U256,
+    partition::PartitionAssignment, Address, BlockHash, DataLedger, EvmBlockHash,
+    GossipBroadcastMessage, H256List, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -1515,9 +1515,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut prev = (0, 0, 0);
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
+            let canonical_tip = self.get_canonical_chain().last().unwrap().block_hash;
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             mempool_service
-                .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx).into())?;
+                .send(MempoolServiceMessage::GetBestMempoolTxs(canonical_tip, oneshot_tx).into())?;
 
             let txs: MempoolTxs = oneshot_rx.await??;
             let MempoolTxs {
@@ -1544,17 +1545,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             ))
     }
 
-    // Get the best txs from the mempool, based off the account state at the optional parent EVM block
-    // if None is provided, it will use the latest state.
+    // Get the best txs from the mempool, based off the account state at the parent Irys block
     pub async fn get_best_mempool_tx(
         &self,
-        parent_evm_block_hash: Option<BlockId>,
+        parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(parent_evm_block_hash, tx).into())
+            .send(MempoolServiceMessage::GetBestMempoolTxs(parent_block_hash, tx).into())
             .expect("to send MempoolServiceMessage");
         rx.await.expect("to receive best transactions from mempool")
     }

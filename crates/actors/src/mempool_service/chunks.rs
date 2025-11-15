@@ -14,7 +14,6 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display};
-use tokio::sync::oneshot;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
@@ -329,30 +328,12 @@ impl Inner {
             let signer = self.config.irys_signer();
             let chain_id = self.config.consensus.chain_id;
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
-            let (tx, rx) = oneshot::channel();
 
-            self.service_senders
-                .block_index
-                .send(
-                    crate::block_index_service::BlockIndexServiceMessage::GetLatestBlockIndex {
-                        response: tx,
-                    },
-                )
-                .map_err(|_e| {
-                    CriticalChunkIngressError::Other(
-                        "Block index communication failure".to_string(),
-                    )
-                })?;
-            let latest_migrated = rx
-                .await
-                .map_err(|_e| {
-                    CriticalChunkIngressError::Other(
-                        "Block index communication failure".to_string(),
-                    )
-                })?
-                .ok_or_else(|| {
-                    CriticalChunkIngressError::Other("Invalid block index (no entries)".to_string())
-                })?;
+            let latest_migrated = self
+                .block_tree_read_guard
+                .read()
+                .get_latest_canonical_entry()
+                .clone();
 
             self.exec.clone().spawn_blocking(async move {
                 let proof = generate_ingress_proof(
