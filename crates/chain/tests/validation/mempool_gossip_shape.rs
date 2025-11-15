@@ -24,9 +24,11 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
 
     // Gossip it and expect an error
     let (resp_tx, resp_rx) = oneshot::channel();
-    genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx),
-    )?;
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx).into())?;
 
     // Should error due to InvalidStakeValue
     let res = resp_rx.await.expect("mempool responded");
@@ -38,7 +40,7 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::CommitmentTxExists(tx.id, exists_tx))?;
+        .send(MempoolServiceMessage::CommitmentTxExists(tx.id, exists_tx).into())?;
     let exists = exists_rx
         .await
         .expect("mempool responded")
@@ -48,9 +50,11 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
 
     // Re-gossip same tx; precheck should now skip due to recent_invalid_tx marking
     let (resp_tx2, resp_rx2) = oneshot::channel();
-    genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx2),
-    )?;
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx2).into())?;
     let res2 = resp_rx2.await.expect("mempool responded");
     assert!(res2.is_err(), "expected gossip to skip already invalid tx");
 
@@ -80,9 +84,11 @@ async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result
 
     // Gossip it and expect an error
     let (resp_tx, resp_rx) = oneshot::channel();
-    genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx),
-    )?;
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx).into())?;
     let res = resp_rx.await.expect("mempool responded");
     assert!(res.is_err(), "expected gossip to reject low-fee commitment");
 
@@ -92,7 +98,7 @@ async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::CommitmentTxExists(tx.id, exists_tx))?;
+        .send(MempoolServiceMessage::CommitmentTxExists(tx.id, exists_tx).into())?;
     let exists = exists_rx
         .await
         .expect("mempool responded")
@@ -102,9 +108,11 @@ async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result
 
     // Re-gossip same tx; should be skipped now
     let (resp_tx2, resp_rx2) = oneshot::channel();
-    genesis_node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx2),
-    )?;
+    genesis_node
+        .node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(tx.clone(), resp_tx2).into())?;
     let res2 = resp_rx2.await.expect("mempool responded");
     assert!(res2.is_err(), "expected gossip to skip already invalid tx");
 

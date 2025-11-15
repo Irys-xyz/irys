@@ -421,7 +421,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx).into())?;
 
         match rx.await? {
             Some(header) => Ok(header),
@@ -1346,10 +1346,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(
-                prev_block_header.block_hash,
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetBestMempoolTxs(prev_block_header.block_hash, tx).into())
             .expect("to send MempoolServiceMessage");
         rx.await.expect("to receive txns")
     }

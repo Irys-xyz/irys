@@ -433,7 +433,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
         .node_ctx
         .service_senders
         .mempool
-        .send(get_tx_msg)
+        .send(get_tx_msg.into())
     {
         tracing::error!("error sending message to mempool: {:?}", err);
     }
@@ -1141,10 +1141,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
             .node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                vec![a_blk1_tx1.header.id],
-                tx,
-            ))?;
+            .send(MempoolServiceMessage::GetDataTxs(vec![a_blk1_tx1.header.id], tx).into())?;
         let mempool_txs = rx.await?;
         let a_blk1_tx1_mempool = mempool_txs.first().unwrap().clone().unwrap();
         a_blk1_tx1_mempool
@@ -1817,10 +1814,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBestMempoolTxs(
-            previous_block_hash,
-            tx,
-        ))?;
+        .send(MempoolServiceMessage::GetBestMempoolTxs(previous_block_hash, tx).into())?;
 
     let best_previous = rx.await??;
     // previous block does not have the fund tx, the tx should not be present

@@ -31,7 +31,7 @@ pub async fn post_tx(
     // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::IngestDataTxFromApi(tx, oneshot_tx);
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg.into()) {
         tracing::error!("API: {}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body(format!("Failed to deliver chunk: {err}")));
@@ -247,7 +247,7 @@ pub async fn get_tx_promotion_status(
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     state
         .mempool_service
-        .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
+        .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx).into())
         .unwrap();
 
     let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {

@@ -65,7 +65,7 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
 use tokio::time::MissedTickBehavior;
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
@@ -187,6 +187,20 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+}
+
+pub struct MempoolServiceMessageWithSpan {
+    pub message: MempoolServiceMessage,
+    pub span: Span,
+}
+
+impl From<MempoolServiceMessage> for MempoolServiceMessageWithSpan {
+    fn from(value: MempoolServiceMessage) -> Self {
+        Self {
+            message: value,
+            span: Span::current(),
+        }
+    }
 }
 
 /// Messages that the Mempool Service handler supports
@@ -2458,8 +2472,8 @@ pub enum IngressProofError {
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
+    msg_rx: UnboundedReceiver<MempoolServiceMessageWithSpan>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,                // reorg broadcast receiver
     block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
     inner: Arc<Inner>,
 }
@@ -2477,7 +2491,7 @@ impl MempoolService {
         reth_node_adapter: IrysRethNodeAdapter,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<MempoolServiceMessage>,
+        rx: UnboundedReceiver<MempoolServiceMessageWithSpan>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
@@ -2559,6 +2573,9 @@ impl MempoolService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
+                            let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+                            let _enter = span.enter();
+
                             // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
@@ -2572,10 +2589,10 @@ impl MempoolService {
                                             inner.handle_message(msg),
                                             20,
                                             &task_info,
-                                        ).await {
+                                        ).in_current_span().await {
                                             error!("Error handling mempool message: {:?}", err);
                                         }
-                                    });
+                                    }.in_current_span());
                                 }
                                 Err(e) => {
                                     match e {
@@ -2602,10 +2619,10 @@ impl MempoolService {
                                                             inner.handle_message(msg),
                                                             20,
                                                             &task_info,
-                                                        ).await {
+                                                        ).in_current_span().await {
                                                             error!("Error handling mempool message: {:?}", err);
                                                         }
-                                                    });
+                                                    }.in_current_span());
                                                 }
                                                 Err(err) => {
                                                     error!("Failed to acquire mempool message handler permit: {:?}", err);
@@ -2651,7 +2668,8 @@ impl MempoolService {
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
         while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+            let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+            self.inner.handle_message(msg).instrument(span).await?;
         }
 
         self.inner.persist_mempool_to_disk().await?;
@@ -2751,7 +2769,8 @@ async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let fut = fut;
+    let span = Span::current();
+    let fut = fut.instrument(Span::current());
     tokio::pin!(fut);
 
     let mut ticker = tokio::time::interval(Duration::from_secs(n_secs));
@@ -2763,7 +2782,8 @@ where
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                println!("Task {task_info} takes too long to complete, possible deadlock detected...");
+                let _ = span.enter();
+                warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
             }
             res = &mut fut => {
                 break res;
