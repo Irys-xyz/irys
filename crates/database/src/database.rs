@@ -13,7 +13,7 @@ use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
     IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
-    MEGABYTE,
+    H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -136,6 +136,28 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
+/// Confirms the data size of a cached data root entry after validating its rightmost chunk.
+///
+/// Updates the entry with the proven data size extracted from the last leaf's merkle proof.
+/// Returns `Ok(Some(entry))` if updated, `Ok(None)` if entry not found.
+pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: &H256,
+    data_size: u64,
+) -> eyre::Result<Option<CachedDataRoot>> {
+    // Access the current cached entry from the database
+    let result = tx.get::<CachedDataRoots>(*data_root)?;
+
+    if let Some(mut cached_data_root) = result {
+        cached_data_root.data_size = data_size;
+        cached_data_root.data_size_confirmed = true;
+        tx.put::<CachedDataRoots>(*data_root, cached_data_root.clone())?;
+        Ok(Some(cached_data_root))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
@@ -167,8 +189,8 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         cached_data_root.txid_set.push(tx_header.id);
     }
 
-    // If the entry exists and the tx_headers data_size is larger than the one in the cache, update it
-    if cached_data_root.data_size < tx_header.data_size {
+    // If the data_size is not yet confirmed and the tx_headers data_size is larger than the one in the cache, update it
+    if cached_data_root.data_size < tx_header.data_size && !cached_data_root.data_size_confirmed {
         cached_data_root.data_size = tx_header.data_size;
     }
 
