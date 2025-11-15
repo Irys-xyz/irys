@@ -574,6 +574,7 @@ impl Inner {
         };
 
         let current_height = parent_block_height;
+        let next_block_height = parent_block_height + 1;
         let min_anchor_height = current_height.saturating_sub(
             (self.config.consensus.mempool.tx_anchor_expiry_depth as u64)
                 .saturating_sub(self.config.consensus.block_migration_depth as u64),
@@ -750,10 +751,12 @@ impl Inner {
             match ledger {
                 irys_types::DataLedger::Publish => {
                     // For Publish ledger, validate both term and perm fees
-                    // Calculate expected fees based on current EMA
-                    let Ok(expected_term_fee) =
-                        self.calculate_term_storage_fee(tx.data_size, &ema_snapshot)
-                    else {
+                    // Calculate expected fees based on current EMA for the next block height
+                    let Ok(expected_term_fee) = self.calculate_term_storage_fee(
+                        tx.data_size,
+                        &ema_snapshot,
+                        next_block_height,
+                    ) else {
                         continue;
                     };
 
@@ -1480,19 +1483,16 @@ impl Inner {
 
     /// Calculate the expected term fee for temporary storage
     /// This matches the calculation in the pricing API and uses dynamic epoch count
-    #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store))]
+    #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
     pub fn calculate_term_storage_fee(
         &self,
         bytes_to_store: u64,
         ema: &Arc<irys_domain::EmaSnapshot>,
+        block_height: u64,
     ) -> Result<U256, TxIngressError> {
-        // Get the latest block height to calculate next block's expires
-        let latest_height = self.get_latest_block_height()?;
-        let next_block_height = latest_height + 1;
-
-        // Calculate expires for the next block using the shared utility
+        // Calculate expires for the specified block height using the shared utility
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            next_block_height,
+            block_height,
             self.config.consensus.epoch.num_blocks_in_epoch,
             self.config.consensus.epoch.submit_ledger_epoch_length,
         );
