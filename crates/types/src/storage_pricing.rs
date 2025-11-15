@@ -34,7 +34,7 @@ const TAYLOR_TERMS: u32 = 30;
 ///
 /// The actual scale is defined by the usage: pr
 #[derive(
-    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default,
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Arbitrary, Default, Hash,
 )]
 pub struct Amount<T> {
     pub amount: U256,
@@ -181,7 +181,7 @@ pub mod phantoms {
     pub struct CostPerGb;
 
     /// Currency denominator util type.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct Usd;
 
     /// Currency denominator util type.
@@ -200,7 +200,7 @@ pub mod phantoms {
     pub struct NetworkFee;
 
     /// Price of the $IRYS token.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct IrysPrice;
 
     /// Cost per storing 1 chunk of data. Includes adjustment for storage duration.
