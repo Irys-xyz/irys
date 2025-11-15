@@ -894,37 +894,6 @@ impl NodeConfig {
         }
     }
 
-    pub fn mainnet() -> Self {
-        Self {
-            node_mode: NodeMode::Peer,
-            sync_mode: SyncMode::Full,
-            base_directory: todo!(),
-            mining_key: todo!(),
-            trusted_peers: todo!(),
-            initial_stake_and_pledge_whitelist: todo!(),
-            initial_whitelist: todo!(),
-            peer_filter_mode: todo!(),
-            reward_address: todo!(),
-            stake_pledge_drives: todo!(),
-            genesis_peer_discovery_timeout_millis: todo!(),
-            gossip: todo!(),
-            http: todo!(),
-            reth: todo!(),
-            storage: todo!(),
-            data_sync: todo!(),
-            packing: todo!(),
-            cache: todo!(),
-            oracles: todo!(),
-            vdf: todo!(),
-            mempool: todo!(),
-            consensus: ConsensusOptions::Mainnet,
-            p2p_handshake: todo!(),
-            p2p_gossip: todo!(),
-            p2p_pull: todo!(),
-            sync: todo!(),
-        }
-    }
-
     /// get the storage module directory path
     pub fn storage_module_dir(&self) -> PathBuf {
         self.base_directory.join("storage_modules")
