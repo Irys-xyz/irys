@@ -1273,8 +1273,12 @@ async fn get_block_index(
         "Fetching block index starting from height {} with limit {}",
         start, limit
     );
-    let peers =
-        synced_peers_sorted_by_cumulative_diff(peer_list, api_client, fetch_from_trusted_peers_only).await?;
+    let peers = synced_peers_sorted_by_cumulative_diff(
+        peer_list,
+        api_client,
+        fetch_from_trusted_peers_only,
+    )
+    .await?;
 
     if peers.is_empty() {
         return Err(ChainSyncError::Network("No peers available".to_string()));
@@ -1296,28 +1300,34 @@ async fn get_block_index(
                     mining_addr
                 );
 
-                match api_client.get_block_index(peer.address.api, BlockIndexQuery {
-                    height: start,
-                    limit,
-                }).await {
+                match api_client
+                    .get_block_index(
+                        peer.address.api,
+                        BlockIndexQuery {
+                            height: start,
+                            limit,
+                        },
+                    )
+                    .await
+                {
                     Ok(index) => {
                         debug!(
-                        peer.address = ?peer.address.api,
-                        index.start = start,
-                        index.limit = limit,
-                        "Fetched block index from peer {:?}: {:?}",
-                        mining_addr, index
-                    );
+                            peer.address = ?peer.address.api,
+                            index.start = start,
+                            index.limit = limit,
+                            "Fetched block index from peer {:?}: {:?}",
+                            mining_addr, index
+                        );
                         return Ok(index);
                     }
                     Err(error) => {
                         warn!(
-                        peer.address = ?peer.address.api,
-                        index.start = start,
-                        index.limit = limit,
-                        "Failed to fetch a block index from peer {:?}: {:?}",
-                        mining_addr, error
-                    );
+                            peer.address = ?peer.address.api,
+                            index.start = start,
+                            index.limit = limit,
+                            "Failed to fetch a block index from peer {:?}: {:?}",
+                            mining_addr, error
+                        );
                     }
                 }
             }
@@ -1472,10 +1482,14 @@ async fn synced_peers_sorted_by_cumulative_diff(
         let api_client = api_client.clone();
         async move {
             match api_client.node_info(peer.address.api).await {
-                Ok(info) => if !info.is_syncing {
-                    Ok((addr, peer, info.cumulative_difficulty))
-                } else {
-                    Err(ChainSyncError::Network(format!("Peer {addr:?} is syncing, skipping")))
+                Ok(info) => {
+                    if !info.is_syncing {
+                        Ok((addr, peer, info.cumulative_difficulty))
+                    } else {
+                        Err(ChainSyncError::Network(format!(
+                            "Peer {addr:?} is syncing, skipping"
+                        )))
+                    }
                 }
                 Err(err) => Err(ChainSyncError::Network(format!(
                     "Failed to fetch node info from peer {:?}: {}",
@@ -1493,7 +1507,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
                     .entry(diff)
                     .or_insert_with(Vec::new)
                     .push((addr, peer));
-            },
+            }
             Err(err) => warn!("{}", err),
         }
     }
