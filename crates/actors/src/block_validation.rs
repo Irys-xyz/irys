@@ -1267,13 +1267,9 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     // Look up previous block to get EVM hash
     let prev_block = {
         let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();
-        service_senders
-            .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(
-                block.previous_block_hash,
-                false,
-                tx_prev,
-            ))?;
+        service_senders.mempool.send(
+            MempoolServiceMessage::GetBlockHeader(block.previous_block_hash, false, tx_prev).into(),
+        )?;
         match rx_prev.await? {
             Some(h) => h,
             None => db
@@ -2150,7 +2146,10 @@ pub async fn data_txs_are_valid(
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
                                 .mempool
-                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .send(
+                                    crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx)
+                                        .into(),
+                                )
                                 .is_err()
                             {
                                 return Err(PreValidationError::ValidationServiceUnreachable);
@@ -2494,7 +2493,7 @@ async fn mempool_block_retriever(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx).into())
         .expect("MempoolServiceMessage should be delivered");
     rx.await.expect("mempool service message should succeed")
 }

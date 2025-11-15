@@ -10,7 +10,7 @@ pub async fn get_mempool_status(state: web::Data<ApiState>) -> Result<HttpRespon
 
     state
         .mempool_service
-        .send(MempoolServiceMessage::GetMempoolStatus(tx))
+        .send(MempoolServiceMessage::GetMempoolStatus(tx).into())
         .map_err(|_| ApiError::Internal {
             err: "Mempool service unavailable".into(),
         })?;

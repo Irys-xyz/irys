@@ -993,14 +993,14 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             // Retrieve the transaction headers for all pending txids in a single batch
             let to_check: Vec<H256> = unconfirmed_promotions.clone();
-            let headers =
-                {
-                    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                    self.node_ctx.service_senders.mempool.send(
-                        MempoolServiceMessage::GetDataTxs(to_check.clone(), oneshot_tx),
-                    )?;
-                    oneshot_rx.await.unwrap()
-                };
+            let headers = {
+                let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+                self.node_ctx
+                    .service_senders
+                    .mempool
+                    .send(MempoolServiceMessage::GetDataTxs(to_check.clone(), oneshot_tx).into())?;
+                oneshot_rx.await.unwrap()
+            };
 
             // Track which txids have met the required number of proofs
             let mut to_remove: HashSet<H256> = HashSet::new();
@@ -1425,7 +1425,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))?;
+            mempool_service.send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx).into())?;
 
             //if transaction exists
             if oneshot_rx
@@ -1466,10 +1466,13 @@ impl IrysNodeTest<IrysNodeCtx> {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
             let to_fetch = tx_ids.iter().copied().collect_vec();
             debug!("Fetching {:?}", &to_fetch);
-            mempool_service.send(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: to_fetch,
-                response: oneshot_tx,
-            })?;
+            mempool_service.send(
+                MempoolServiceMessage::GetCommitmentTxs {
+                    commitment_tx_ids: to_fetch,
+                    response: oneshot_tx,
+                }
+                .into(),
+            )?;
             let fetched = oneshot_rx.await?;
 
             for found in fetched.keys() {
@@ -1513,7 +1516,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let expected = (submit_txs, publish_txs, commitment_txs);
         for _ in 0..max_retries {
             let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-            mempool_service.send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx))?;
+            mempool_service
+                .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx).into())?;
 
             let txs: MempoolTxs = oneshot_rx.await??;
             let MempoolTxs {
@@ -1550,10 +1554,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(
-                parent_evm_block_hash,
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetBestMempoolTxs(parent_evm_block_hash, tx).into())
             .expect("to send MempoolServiceMessage");
         rx.await.expect("to receive best transactions from mempool")
     }
@@ -1610,13 +1611,9 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let response =
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromApi(
-                    tx.header.clone(),
-                    oneshot_tx,
-                ));
+            self.node_ctx.service_senders.mempool.send(
+                MempoolServiceMessage::IngestDataTxFromApi(tx.header.clone(), oneshot_tx).into(),
+            );
         if let Err(e) = response {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -1672,7 +1669,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mempool_sender = &self.node_ctx.service_senders.mempool;
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         if let Err(e) =
-            mempool_sender.send(MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx))
+            mempool_sender.send(MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx).into())
         {
             tracing::info!("Unable to send mempool message: {}", e);
         } else {
@@ -1707,7 +1704,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<DataTransactionHeader> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_ingress_msg = MempoolServiceMessage::GetDataTxs(vec![*tx_id], oneshot_tx);
-        if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
+        if let Err(err) = self
+            .node_ctx
+            .service_senders
+            .mempool
+            .send(tx_ingress_msg.into())
+        {
             tracing::error!(
                 "API Failed to deliver MempoolServiceMessage::GetDataTxs: {:?}",
                 err
@@ -1734,7 +1736,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             commitment_tx_ids: vec![*tx_id],
             response: oneshot_tx,
         };
-        if let Err(err) = self.node_ctx.service_senders.mempool.send(tx_ingress_msg) {
+        if let Err(err) = self
+            .node_ctx
+            .service_senders
+            .mempool
+            .send(tx_ingress_msg.into())
+        {
             tracing::error!(
                 "API Failed to deliver MempoolServiceMessage::GetCommitmentTxs: {:?}",
                 err
@@ -1938,10 +1945,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromGossip(
-                    tx_header.clone(),
-                    tx,
-                ))
+                .send(MempoolServiceMessage::IngestDataTxFromGossip(tx_header.clone(), tx).into())
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             // Ignore possible ingestion errors in tests
             let _ = rx.await?;
@@ -1988,7 +1992,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 .node_ctx
                                 .service_senders
                                 .mempool
-                                .send(MempoolServiceMessage::IngestChunk(unpacked, ctx));
+                                .send(MempoolServiceMessage::IngestChunk(unpacked, ctx).into());
                             let _ = crx.await;
 
                             // Verify the chunk is present on the peer DB (small retry loop)
@@ -2042,10 +2046,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
-                    commitment_tx,
-                    tx,
-                ))
+                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, tx).into())
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
                 tracing::error!(
@@ -2420,10 +2421,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::IngestIngressProof(
-                ingress_proof,
-                oneshot_tx,
-            ))?;
+            .send(MempoolServiceMessage::IngestIngressProof(ingress_proof, oneshot_tx).into())?;
 
         Ok(oneshot_rx.await??)
     }
@@ -2439,13 +2437,11 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn ingest_data_tx(&self, data_tx: DataTransactionHeader) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let result =
-            self.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromApi(
-                    data_tx, oneshot_tx,
-                ));
+        let result = self
+            .node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::IngestDataTxFromApi(data_tx, oneshot_tx).into());
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
@@ -2463,7 +2459,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> Result<(), AddTxError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let result = self.node_ctx.service_senders.mempool.send(
-            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx),
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx).into(),
         );
         if let Err(e) = result {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);

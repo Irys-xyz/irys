@@ -342,7 +342,7 @@ impl BlockTreeServiceInner {
         let tip_block = Arc::clone(&markers.head);
         self.service_senders
             .mempool
-            .send(MempoolServiceMessage::BlockConfirmed(tip_block))
+            .send(MempoolServiceMessage::BlockConfirmed(tip_block).into())
             .expect("mempool service has unexpectedly become unreachable");
     }
 
@@ -954,7 +954,7 @@ impl BlockTreeServiceInner {
 
         let (tx, rx) = oneshot::channel();
         mempool
-            .send(MempoolServiceMessage::GetDataTxs(data_tx_ids.clone(), tx))
+            .send(MempoolServiceMessage::GetDataTxs(data_tx_ids.clone(), tx).into())
             .map_err(|_| eyre::eyre!("Failed to send request to mempool"))?;
 
         let received = rx

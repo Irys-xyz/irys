@@ -135,7 +135,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
             .node_ctx
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx));
+            .send(MempoolServiceMessage::GetBestMempoolTxs(None, oneshot_tx).into());
         if let Err(e) = response {
             tracing::error!("channel closed, unable to send to mempool: {:?}", e);
         }
