@@ -642,7 +642,7 @@ pub struct MempoolNodeConfig {
 }
 
 pub fn default_max_concurrent_mempool_tasks() -> usize {
-    30
+    50
 }
 
 impl NodeConfig {
