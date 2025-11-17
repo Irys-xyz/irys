@@ -1873,13 +1873,13 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // Step 5: Validate all SUBMIT tx (including same-block promotions)
-    let all_txs = publish_txs.iter().map(|tx| (tx, DataLedger::Submit));
+    // Step 5: Validate all transactions (including same-block promotions)
+    let all_txs = publish_txs
+        .iter()
+        .map(|tx| (tx, DataLedger::Publish))
+        .chain(submit_txs.iter().map(|tx| (tx, DataLedger::Submit)));
 
-    // DO NOT INCLUDE ANY LOGIC OTHER THAN PRICING VALIDATION HERE
-    // IT ONLY RUNS FOR NON-PROMOTED TXS
     for (tx, current_ledger) in all_txs {
-        debug_assert_eq!(current_ledger, DataLedger::Submit);
         // All data transactions must have ledger_id set to Publish
         // TODO: support other term ledgers here
         if tx.ledger_id != DataLedger::Publish as u32 {
@@ -1946,17 +1946,24 @@ pub async fn data_txs_are_valid(
             },
         )?;
 
-        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
-        // (they're waiting for proofs to arrive)
-        if tx.promoted_height.is_some() {
-            // TODO: This should be a hard error, but the test infrastructure currently
-            // creates transactions with ingress proofs that get placed in Submit ledger.
-            // This needs to be fixed in the block production logic to properly place
-            // transactions with proofs in the Publish ledger.
-            tracing::warn!(
-                "Transaction {} in Submit ledger should not have a promoted_height",
-                tx.id
-            );
+        match current_ledger {
+            DataLedger::Publish => {
+                // no special publish-ledger-only asserts here
+            }
+            DataLedger::Submit => {
+                // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+                // (they're waiting for proofs to arrive)
+                if tx.promoted_height.is_some() {
+                    // TODO: This should be a hard error, but the test infrastructure currently
+                    // creates transactions with ingress proofs that get placed in Submit ledger.
+                    // This needs to be fixed in the block production logic to properly place
+                    // transactions with proofs in the Publish ledger.
+                    tracing::warn!(
+                        "Transaction {} in Submit ledger should not have a promoted_height",
+                        tx.id
+                    );
+                }
+            }
         }
     }
 
