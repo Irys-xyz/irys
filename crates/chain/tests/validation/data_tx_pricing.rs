@@ -14,8 +14,9 @@ use irys_domain::ChainState;
 use irys_types::storage_pricing::Amount;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    U256,
+    OracleConfig, U256,
 };
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
@@ -330,6 +331,121 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
     ));
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+// Test that a data transaction submitted before an EMA price increase can still be promoted
+// and included in a block after the price increases, validating backward compatibility
+#[test_log::test(tokio::test)]
+async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+    // Configure network with short EMA interval and ever-increasing mock oracle
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Set EMA interval to 2 blocks for quick price changes
+    let price_adjustment_interval = 2_u64;
+    genesis_config
+        .consensus
+        .get_mut()
+        .ema
+        .price_adjustment_interval = price_adjustment_interval;
+
+    // Configure mock oracle with ever-increasing prices
+    genesis_config.oracles = vec![OracleConfig::Mock {
+        initial_price: Amount::token(dec!(1.0)).expect("valid token amount"),
+        incremental_change: Amount::token(dec!(0.01)).expect("valid token amount"),
+        smoothing_interval: 1000, // Ensures continuous increase for 1000 blocks
+        poll_interval_ms: 100,
+    }];
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Mine 6 blocks to exit ema price being constant during first 2 intervals
+    for _ in 0..6 {
+        genesis_node.mine_block().await?;
+    }
+
+    // Create a data transaction with pricing at current height (height 6)
+    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    let data_size = data.len() as u64;
+
+    let price_info = genesis_node
+        .get_data_price(DataLedger::Publish, data_size)
+        .await?;
+
+    let tx = test_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::Publish,
+        price_info.term_fee.into(),
+        Some(price_info.perm_fee.into()),
+    )?;
+    let tx = test_signer.sign_transaction(tx)?;
+
+    // Post ONLY the transaction header (no chunks yet)
+    genesis_node.post_data_tx_raw(&tx.header).await;
+
+    // Mine 1 more block so we're at height 7, meaning n+1 (block 8) will be at new EMA interval
+    let submit_block = genesis_node.mine_block().await?;
+    let submit_ledger = &submit_block.data_ledgers[DataLedger::Submit];
+    assert!(
+        submit_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in submit ledger"
+    );
+
+    // Verify we're at the right height before uploading chunks
+    let current_height = genesis_node.get_canonical_chain_height().await;
+    assert_eq!(
+        current_height, 7,
+        "Should be at height 7 before uploading chunks"
+    );
+
+    // Capture EMA snapshot at the time of submit (height 7)
+    let submit_ema_snapshot = genesis_node
+        .get_ema_snapshot(&submit_block.block_hash)
+        .expect("EMA snapshot for submit block must exist");
+    let submit_ema_price = submit_ema_snapshot.ema_for_public_pricing();
+
+    // Mine blocks to forward EMA
+    for _ in 0..3 {
+        genesis_node.mine_block().await?;
+    }
+
+    // NOW upload the chunks after the block was mined
+    genesis_node.upload_chunks(&tx).await?;
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
+    let promote_block = genesis_node.mine_block().await?;
+
+    let publish_ledger = &promote_block.data_ledgers[DataLedger::Publish];
+    assert!(
+        publish_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in publish ledger after promotion"
+    );
+
+    // Capture EMA snapshot at the time of promotion
+    let promote_ema_snapshot = genesis_node
+        .get_ema_snapshot(&promote_block.block_hash)
+        .expect("EMA snapshot for promote block must exist");
+    let promote_ema_price = promote_ema_snapshot.ema_for_public_pricing();
+
+    // Verify that EMA has increased between submit and promotion
+    assert!(
+        promote_ema_price > submit_ema_price,
+        "EMA price should have increased from submit (height {}, price {:?}) to promotion (height {}, price {:?})",
+        submit_block.height,
+        submit_ema_price,
+        promote_block.height,
+        promote_ema_price
+    );
 
     genesis_node.stop().await;
     Ok(())
