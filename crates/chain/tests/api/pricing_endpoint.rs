@@ -281,11 +281,12 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
 
     // mine 2 full intervals so public pricing diverges from genesis
-    ctx.mine_two_intervals(price_adjustment_interval).await?;
+    ctx.mine_two_ema_intervals(price_adjustment_interval)
+        .await?;
 
     // Stage 1: NOT in last quarter (interval=4)
     let mut last_block = ctx
-        .mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage1 = ctx
@@ -311,7 +312,7 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
 
     // Stage 2: First block of last quarter (interval=4)
     last_block = ctx
-        .mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage2 = ctx
@@ -382,11 +383,12 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary_decreasing() -
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
 
     // mine 2 full intervals so public pricing diverges from genesis
-    ctx.mine_two_intervals(price_adjustment_interval).await?;
+    ctx.mine_two_ema_intervals(price_adjustment_interval)
+        .await?;
 
     // Stage 1: NOT in last quarter (interval=4)
     let mut last_block = ctx
-        .mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
         .await?;
 
     let ema_stage1 = ctx
@@ -407,7 +409,7 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary_decreasing() -
 
     // Stage 2: First block of last quarter (interval=4)
     last_block = ctx
-        .mine_until_next_in_last_quarter(price_adjustment_interval)
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
         .await?;
     let ema_stage2 = ctx
         .node_ctx
