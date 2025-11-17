@@ -324,7 +324,7 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         "With consistent price increases, newer EMA should be higher"
     );
 
-    // Last quarter now uses the LOWER of the two EMAs for public pricing
+    // Last quarter uses the LOWER of the two EMAs for public pricing
     verify_pricing_uses_ema(
         &ctx,
         &address,
@@ -334,12 +334,10 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
     )
     .await?;
 
-    // Additionally, create and submit a tx priced via the API at the last-quarter boundary
     let data = vec![1_u8; 1024];
-    match ctx.post_publish_data_tx(&signer, data).await {
-        Ok(_) => {}
-        Err(e) => panic!("Tx using API price at last-quarter boundary was not accepted: {e:?}"),
-    }
+    ctx.post_publish_data_tx(&signer, data)
+        .await
+        .expect("Tx using API price at last-quarter boundary was not accepted");
 
     // STAGE 3: Mine 2 more blocks to block 34 - last block of last quarter
     // At block 34: position=11, blocks_until=1
