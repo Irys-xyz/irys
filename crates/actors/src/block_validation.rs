@@ -1785,9 +1785,9 @@ pub async fn data_txs_are_valid(
         .map(|(tx, ledger_current)| {
             let state = if same_block_promotions.contains(&tx.id) {
                 TxInclusionState::Found {
-                    ledger_current: DataLedger::Publish,
-                    ledger_historical: DataLedger::Submit,
-                    block_hash: block.block_hash,
+                    // Same block promotion: both ledgers are in the current block
+                    ledger_current: (DataLedger::Publish, block.block_hash),
+                    ledger_historical: (DataLedger::Submit, block.block_hash),
                 }
             } else {
                 TxInclusionState::Searching { ledger_current }
@@ -1811,9 +1811,69 @@ pub async fn data_txs_are_valid(
         error: e.to_string(),
     })?;
 
+    let validate_price = |tx: &&DataTransactionHeader| {
+        // Calculate expected fees based on data size using block's EMA
+        // Calculate term fee first as it's needed for perm fee calculation
+        // Calculate epochs for storage using the same method as mempool
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            block.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            config.consensus.epoch.submit_ledger_epoch_length,
+        );
+
+        let expected_term_fee = calculate_term_storage_base_network_fee(
+            tx.data_size,
+            epochs_for_storage,
+            &block_ema,
+            config,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+        let expected_perm_fee =
+            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)
+                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+
+        // Validate perm_fee is at least the expected amount
+        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
+        if actual_perm_fee < expected_perm_fee.amount {
+            return Err(PreValidationError::InsufficientPermFee {
+                tx_id: tx.id,
+                expected: expected_perm_fee.amount,
+                actual: actual_perm_fee.get(),
+            });
+        }
+
+        // Validate term_fee is at least the expected amount
+        let actual_term_fee = tx.term_fee;
+        if actual_term_fee < expected_term_fee {
+            return Err(PreValidationError::InsufficientTermFee {
+                tx_id: tx.id,
+                expected: expected_term_fee,
+                actual: actual_term_fee.get(),
+            });
+        }
+
+        // Validate fee distribution structures can be created successfully
+        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
+        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+            PreValidationError::InvalidTermFeeStructure {
+                tx_id: tx.id,
+                reason: e.to_string(),
+            }
+        })?;
+
+        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
+            |e| PreValidationError::InvalidPermFeeStructure {
+                tx_id: tx.id,
+                reason: e.to_string(),
+            },
+        )?;
+        Ok(())
+    };
+
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
+            // no past inclusions
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
@@ -1828,65 +1888,8 @@ pub async fn data_txs_are_valid(
                         }
                     }
                     DataLedger::Submit => {
-                        // Calculate expected fees based on data size using block's EMA
-                        // Calculate term fee first as it's needed for perm fee calculation
-                        // Calculate epochs for storage using the same method as mempool
-                        let epochs_for_storage =
-                            irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-                                block.height,
-                                config.consensus.epoch.num_blocks_in_epoch,
-                                config.consensus.epoch.submit_ledger_epoch_length,
-                            );
-
-                        let expected_term_fee = calculate_term_storage_base_network_fee(
-                            tx.data_size,
-                            epochs_for_storage,
-                            &block_ema,
-                            config,
-                        )
-                        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-                        let expected_perm_fee = calculate_perm_storage_total_fee(
-                            tx.data_size,
-                            expected_term_fee,
-                            &block_ema,
-                            config,
-                        )
-                        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-
-                        // Validate perm_fee is at least the expected amount
-                        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
-                        if actual_perm_fee < expected_perm_fee.amount {
-                            return Err(PreValidationError::InsufficientPermFee {
-                                tx_id: tx.id,
-                                expected: expected_perm_fee.amount,
-                                actual: actual_perm_fee.get(),
-                            });
-                        }
-
-                        // Validate term_fee is at least the expected amount
-                        let actual_term_fee = tx.term_fee;
-                        if actual_term_fee < expected_term_fee {
-                            return Err(PreValidationError::InsufficientTermFee {
-                                tx_id: tx.id,
-                                expected: expected_term_fee,
-                                actual: actual_term_fee.get(),
-                            });
-                        }
-
-                        // Validate fee distribution structures can be created successfully
-                        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
-                        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
-                            PreValidationError::InvalidTermFeeStructure {
-                                tx_id: tx.id,
-                                reason: e.to_string(),
-                            }
-                        })?;
-
-                        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus)
-                            .map_err(|e| PreValidationError::InvalidPermFeeStructure {
-                                tx_id: tx.id,
-                                reason: e.to_string(),
-                            })?;
+                        // Submit tx with no past inclusion - VALID (new transaction)
+                        validate_price(tx)?;
 
                         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                         // (they're waiting for proofs to arrive)
@@ -1901,18 +1904,21 @@ pub async fn data_txs_are_valid(
                             );
                         }
 
-                        // Submit tx with no past inclusion - VALID (new transaction)
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
                 }
             }
             TxInclusionState::Found {
-                ledger_current,
-                ledger_historical,
-                block_hash,
+                ledger_current: (ledger_current, current_block_hash),
+                ledger_historical: (ledger_historical, historical_block_hash),
             } => {
                 match (ledger_current, ledger_historical) {
                     (DataLedger::Publish, DataLedger::Submit) => {
+                        if current_block_hash == historical_block_hash && current_block_hash == &block.block_hash {
+                            // tx was included & promoted within the same block
+                            validate_price(tx)?;
+                        }
+
                         // OK: Transaction promoted from past Submit to current Publish
                         debug!(
                             "Transaction {} promoted from past Submit to current Publish ledger",
@@ -1922,7 +1928,7 @@ pub async fn data_txs_are_valid(
                     (DataLedger::Publish, DataLedger::Publish) => {
                         return Err(PreValidationError::PublishTxAlreadyIncluded {
                             tx_id: tx.id,
-                            block_hash: *block_hash,
+                            block_hash: *historical_block_hash,
                         });
                     }
                     (DataLedger::Submit, _) => {
@@ -1930,7 +1936,7 @@ pub async fn data_txs_are_valid(
                         return Err(PreValidationError::SubmitTxAlreadyIncluded {
                             tx_id: tx.id,
                             ledger: *ledger_historical,
-                            block_hash: *block_hash,
+                            block_hash: *historical_block_hash,
                         });
                     }
                 }
@@ -2370,10 +2376,13 @@ enum TxInclusionState {
     Searching {
         ledger_current: DataLedger,
     },
+    // Track block hashes for both current and historical ledgers
+    // so we can emit precise errors and diagnostics.
+    // ledger_current.1 is the hash of the block under validation.
+    // ledger_historical.1 is the hash of the block where the prior inclusion was found.
     Found {
-        ledger_current: DataLedger,
-        ledger_historical: DataLedger,
-        block_hash: BlockHash,
+        ledger_current: (DataLedger, BlockHash),
+        ledger_historical: (DataLedger, BlockHash),
     },
     Duplicate {
         ledger_historical: (DataLedger, BlockHash),
@@ -2420,7 +2429,12 @@ async fn get_previous_tx_inclusions(
                 // don't process the states for a block we're putting under full validation
                 return Ok(());
             }
-            process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
+            process_block_ledgers_with_states(
+                &header.data_ledgers,
+                header.block_hash,
+                block_under_validation.block_hash,
+                tx_ids,
+            )
         };
         // Move to the parent block and continue the traversal backwards
         block = match block_tree_guard.get_block(&block.0) {
@@ -2462,7 +2476,8 @@ async fn get_previous_tx_inclusions(
 /// Returns true if all transactions have been found
 fn process_block_ledgers_with_states(
     ledgers: &[DataTransactionLedger],
-    block_hash: BlockHash,
+    historical_block_hash: BlockHash,
+    current_block_hash: BlockHash,
     tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
 ) -> eyre::Result<()> {
     for ledger in ledgers {
@@ -2475,15 +2490,14 @@ fn process_block_ledgers_with_states(
                     TxInclusionState::Searching { ledger_current } => {
                         // First time finding this transaction
                         *state = TxInclusionState::Found {
-                            ledger_current: *ledger_current,
-                            ledger_historical: ledger_type,
-                            block_hash,
+                            ledger_current: (*ledger_current, current_block_hash),
+                            ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
                     TxInclusionState::Found { .. } => {
                         // Transaction already found once, this is a duplicate
                         *state = TxInclusionState::Duplicate {
-                            ledger_historical: (ledger_type, block_hash),
+                            ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
                     TxInclusionState::Duplicate { .. } => {
