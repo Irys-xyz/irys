@@ -263,6 +263,10 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         poll_interval_ms: 500,
     }];
 
+    // Fund a test signer so we can submit a tx using the quoted price
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
     let ctx = crate::utils::IrysNodeTest::new_genesis(config)
         .start()
         .await;
@@ -320,14 +324,22 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         "With consistent price increases, newer EMA should be higher"
     );
 
+    // Last quarter now uses the LOWER of the two EMAs for public pricing
     verify_pricing_uses_ema(
         &ctx,
         &address,
         data_size_bytes,
-        ema_stage2.ema_price_1_interval_ago, // Max pricing (higher EMA)
-        "Block 32 (first of last quarter): should use higher ema_price_1_interval_ago",
+        ema_stage2.ema_price_2_intervals_ago,
+        "Block 32 (first of last quarter): should use lower-of-two (ema_price_2_intervals_ago)",
     )
     .await?;
+
+    // Additionally, create and submit a tx priced via the API at the last-quarter boundary
+    let data = vec![1_u8; 1024];
+    match ctx.post_publish_data_tx(&signer, data).await {
+        Ok(_) => {},
+        Err(e) => panic!("Tx using API price at last-quarter boundary was not accepted: {e:?}"),
+    }
 
     // STAGE 3: Mine 2 more blocks to block 34 - last block of last quarter
     // At block 34: position=11, blocks_until=1
@@ -348,12 +360,13 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         "With consistent price increases, newer EMA should still be higher"
     );
 
+    // Still in last quarter: continue using the LOWER of the two EMAs
     verify_pricing_uses_ema(
         &ctx,
         &address,
         data_size_bytes,
-        ema_stage3.ema_price_1_interval_ago, // Still using max pricing (higher EMA)
-        "Block 34 (deep in last quarter): should still use higher ema_price_1_interval_ago",
+        ema_stage3.ema_price_2_intervals_ago,
+        "Block 34 (deep in last quarter): should use lower-of-two (ema_price_2_intervals_ago)",
     )
     .await?;
 
