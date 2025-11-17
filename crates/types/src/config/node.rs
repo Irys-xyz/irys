@@ -300,6 +300,21 @@ pub trait NetworkConfigWithDefaults {
     }
 }
 
+/// Macro to implement NetworkConfigWithDefaults for types with public_ip and bind_ip fields
+macro_rules! impl_network_config_with_defaults {
+    ($type:ty) => {
+        impl NetworkConfigWithDefaults for $type {
+            fn public_ip_option(&self) -> &Option<String> {
+                &self.public_ip
+            }
+
+            fn bind_ip_option(&self) -> &Option<String> {
+                &self.bind_ip
+            }
+        }
+    };
+}
+
 /// # Gossip Network Configuration
 ///
 /// Settings for peer-to-peer communication between nodes.
@@ -318,15 +333,7 @@ pub struct GossipConfig {
     pub bind_port: u16,
 }
 
-impl NetworkConfigWithDefaults for GossipConfig {
-    fn public_ip_option(&self) -> &Option<String> {
-        &self.public_ip
-    }
-
-    fn bind_ip_option(&self) -> &Option<String> {
-        &self.bind_ip
-    }
-}
+impl_network_config_with_defaults!(GossipConfig);
 
 /// # Reth Node Configuration
 ///
@@ -359,15 +366,7 @@ pub struct RethNetworkConfig {
     pub peer_id: reth_transaction_pool::PeerId,
 }
 
-impl NetworkConfigWithDefaults for RethNetworkConfig {
-    fn public_ip_option(&self) -> &Option<String> {
-        &self.public_ip
-    }
-
-    fn bind_ip_option(&self) -> &Option<String> {
-        &self.bind_ip
-    }
-}
+impl_network_config_with_defaults!(RethNetworkConfig);
 
 /// # Data Packing Configuration
 ///
@@ -470,15 +469,7 @@ pub struct HttpConfig {
     pub bind_port: u16,
 }
 
-impl NetworkConfigWithDefaults for HttpConfig {
-    fn public_ip_option(&self) -> &Option<String> {
-        &self.public_ip
-    }
-
-    fn bind_ip_option(&self) -> &Option<String> {
-        &self.bind_ip
-    }
-}
+impl_network_config_with_defaults!(HttpConfig);
 
 /// P2P handshake configuration with sensible defaults
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
