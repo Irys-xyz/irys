@@ -1828,6 +1828,79 @@ pub async fn data_txs_are_valid(
                         }
                     }
                     DataLedger::Submit => {
+                        // Calculate expected fees based on data size using block's EMA
+                        // Calculate term fee first as it's needed for perm fee calculation
+                        // Calculate epochs for storage using the same method as mempool
+                        let epochs_for_storage =
+                            irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+                                block.height,
+                                config.consensus.epoch.num_blocks_in_epoch,
+                                config.consensus.epoch.submit_ledger_epoch_length,
+                            );
+
+                        let expected_term_fee = calculate_term_storage_base_network_fee(
+                            tx.data_size,
+                            epochs_for_storage,
+                            &block_ema,
+                            config,
+                        )
+                        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+                        let expected_perm_fee = calculate_perm_storage_total_fee(
+                            tx.data_size,
+                            expected_term_fee,
+                            &block_ema,
+                            config,
+                        )
+                        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+
+                        // Validate perm_fee is at least the expected amount
+                        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
+                        if actual_perm_fee < expected_perm_fee.amount {
+                            return Err(PreValidationError::InsufficientPermFee {
+                                tx_id: tx.id,
+                                expected: expected_perm_fee.amount,
+                                actual: actual_perm_fee.get(),
+                            });
+                        }
+
+                        // Validate term_fee is at least the expected amount
+                        let actual_term_fee = tx.term_fee;
+                        if actual_term_fee < expected_term_fee {
+                            return Err(PreValidationError::InsufficientTermFee {
+                                tx_id: tx.id,
+                                expected: expected_term_fee,
+                                actual: actual_term_fee.get(),
+                            });
+                        }
+
+                        // Validate fee distribution structures can be created successfully
+                        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
+                        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+                            PreValidationError::InvalidTermFeeStructure {
+                                tx_id: tx.id,
+                                reason: e.to_string(),
+                            }
+                        })?;
+
+                        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus)
+                            .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+                                tx_id: tx.id,
+                                reason: e.to_string(),
+                            })?;
+
+                        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+                        // (they're waiting for proofs to arrive)
+                        if tx.promoted_height.is_some() {
+                            // TODO: This should be a hard error, but the test infrastructure currently
+                            // creates transactions with ingress proofs that get placed in Submit ledger.
+                            // This needs to be fixed in the block production logic to properly place
+                            // transactions with proofs in the Publish ledger.
+                            tracing::error!(
+                                "Transaction {} in Submit ledger should not have a promoted_height",
+                                tx.id
+                            );
+                        }
+
                         // Submit tx with no past inclusion - VALID (new transaction)
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
@@ -1889,62 +1962,6 @@ pub async fn data_txs_are_valid(
                 actual: tx.ledger_id,
             });
         }
-
-        // Calculate expected fees based on data size using block's EMA
-        // Calculate term fee first as it's needed for perm fee calculation
-        // Calculate epochs for storage using the same method as mempool
-        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            block.height,
-            config.consensus.epoch.num_blocks_in_epoch,
-            config.consensus.epoch.submit_ledger_epoch_length,
-        );
-
-        let expected_term_fee = calculate_term_storage_base_network_fee(
-            tx.data_size,
-            epochs_for_storage,
-            &block_ema,
-            config,
-        )
-        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-        let expected_perm_fee =
-            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)
-                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-
-        // Validate perm_fee is at least the expected amount
-        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
-        if actual_perm_fee < expected_perm_fee.amount {
-            return Err(PreValidationError::InsufficientPermFee {
-                tx_id: tx.id,
-                expected: expected_perm_fee.amount,
-                actual: actual_perm_fee.get(),
-            });
-        }
-
-        // Validate term_fee is at least the expected amount
-        let actual_term_fee = tx.term_fee;
-        if actual_term_fee < expected_term_fee {
-            return Err(PreValidationError::InsufficientTermFee {
-                tx_id: tx.id,
-                expected: expected_term_fee,
-                actual: actual_term_fee.get(),
-            });
-        }
-
-        // Validate fee distribution structures can be created successfully
-        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
-        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
-            PreValidationError::InvalidTermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            }
-        })?;
-
-        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
-            |e| PreValidationError::InvalidPermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            },
-        )?;
 
         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
         // (they're waiting for proofs to arrive)

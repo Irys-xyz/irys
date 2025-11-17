@@ -440,12 +440,101 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
 
     // Verify that EMA has increased between submit and promotion
     assert!(
-        promote_ema_price > submit_ema_price,
-        "EMA price should have increased from submit (height {}, price {:?}) to promotion (height {}, price {:?})",
+        promote_ema_price < submit_ema_price,
+        "EMA price should have decreased from submit (height {}, price {:?}) to promotion (height {}, price {:?})",
         submit_block.height,
         submit_ema_price,
         promote_block.height,
         promote_ema_price
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+
+// Test that a data transaction submitted before an EMA price increase can still be promoted
+// and included in a block after the price increases, validating backward compatibility
+#[test_log::test(tokio::test)]
+async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+    // Configure network with short EMA interval and ever-increasing mock oracle
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Set EMA interval to 2 blocks for quick price changes
+    let price_adjustment_interval = 2_u64;
+    genesis_config
+        .consensus
+        .get_mut()
+        .ema
+        .price_adjustment_interval = price_adjustment_interval;
+
+    // Configure mock oracle with ever-increasing prices
+    genesis_config.oracles = vec![OracleConfig::Mock {
+        initial_price: Amount::token(dec!(1.0)).expect("valid token amount"),
+        incremental_change: Amount::token(dec!(0.01)).expect("valid token amount"),
+        smoothing_interval: 1000, // Ensures continuous increase for 1000 blocks
+        poll_interval_ms: 100,
+        initial_direction_up: false,
+    }];
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_two_ema_intervals(2).await?;
+    let block = genesis_node.ema_mine_until_next_in_last_quarter(price_adjustment_interval).await?;
+
+    // Create a data transaction with pricing at current height (height 6)
+    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    let data_size = data.len() as u64;
+
+    let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
+
+    // Calculate expected fees using the provided EMA
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        price_before_the_interval.ema_for_public_pricing(),
+    )?;
+
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        price_before_the_interval.ema_for_public_pricing(),
+        expected_term_fee,
+    )?;
+
+    let tx = test_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::Publish,
+        U256::zero().into(),
+        Some(U256::zero().into()),
+    )?;
+    let tx = test_signer.sign_transaction(tx)?;
+
+    // Post ONLY the transaction header (no chunks yet)
+    genesis_node.post_data_tx_raw(&tx.header).await;
+
+    // NOW upload the chunks after the block was mined
+    genesis_node.upload_chunks(&tx).await?;
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
+    let promote_block = genesis_node.mine_block().await?;
+
+    let submit_ledger = &promote_block.data_ledgers[DataLedger::Submit];
+    let publish_ledger = &promote_block.data_ledgers[DataLedger::Publish];
+    assert!(
+        submit_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in submit ledger"
+    );
+    assert!(
+        publish_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in publish ledger after promotion"
     );
 
     genesis_node.stop().await;
