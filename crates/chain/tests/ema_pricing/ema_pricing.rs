@@ -135,6 +135,7 @@ async fn heavy_test_oracle_price_too_high_gets_capped() -> eyre::Result<()> {
         incremental_change: Amount::token(dec!(1.0)).unwrap(),
         // only change direction after 10 blocks
         smoothing_interval: 10,
+        initial_direction_up: true,
         poll_interval_ms: 500,
     }];
 

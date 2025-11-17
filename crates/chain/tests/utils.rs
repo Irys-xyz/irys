@@ -369,6 +369,54 @@ impl IrysNodeTest<()> {
 }
 
 impl IrysNodeTest<IrysNodeCtx> {
+    /// Returns true if the next block height is in the last quarter of the pricing interval.
+    pub fn ema_next_block_in_last_quarter(
+        next_block_height: u64,
+        price_adjustment_interval: u64,
+    ) -> bool {
+        // last_quarter_start = interval - ceil(interval/4)
+        let last_quarter_start =
+            price_adjustment_interval.saturating_sub(price_adjustment_interval.div_ceil(4));
+        (next_block_height % price_adjustment_interval) >= last_quarter_start
+    }
+
+    /// Mine 2x price adjustment interval blocks to move public pricing off genesis EMA.
+    pub async fn mine_two_ema_intervals(&self, price_adjustment_interval: u64) -> eyre::Result<()> {
+        self.mine_blocks((price_adjustment_interval * 2) as usize)
+            .await
+    }
+
+    /// Mine until the next block would fall into the last quarter of the pricing interval
+    /// and return the current tip header when the condition is met.
+    pub async fn ema_mine_until_next_in_last_quarter(
+        &self,
+        price_adjustment_interval: u64,
+    ) -> eyre::Result<IrysBlockHeader> {
+        loop {
+            let current_tip_height = self.get_canonical_chain_height().await;
+            let next_height = current_tip_height + 1;
+            if Self::ema_next_block_in_last_quarter(next_height, price_adjustment_interval) {
+                return self.get_block_by_height(current_tip_height).await;
+            }
+            self.mine_block().await?;
+        }
+    }
+
+    /// Mine until the next block would NOT fall into the last quarter of the pricing interval
+    /// and return the current tip header when the condition is met.
+    pub async fn ema_mine_until_next_not_in_last_quarter(
+        &self,
+        price_adjustment_interval: u64,
+    ) -> eyre::Result<IrysBlockHeader> {
+        loop {
+            let current_tip_height = self.get_canonical_chain_height().await;
+            let next_height = current_tip_height + 1;
+            if !Self::ema_next_block_in_last_quarter(next_height, price_adjustment_interval) {
+                return self.get_block_by_height(current_tip_height).await;
+            }
+            self.mine_block().await?;
+        }
+    }
     /// Waits for the provided future to resolve, and if it doesn't after `timeout_duration`,
     /// mines a single block on this node and waits again.
     /// Designed for use with calls that expect to be able to send and confirm a tx in a single future.

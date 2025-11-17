@@ -56,6 +56,12 @@ use irys_types::{
 use std::sync::Arc;
 
 /// Snapshot of EMA-related pricing data for a specific block.
+///
+/// Ema snapshot contains core expression of "how much USD is a single irys token worth".
+/// Most of our data pricing is expressed in USD. So as the irys token goes up
+/// in value compared to the dollar, we need less irys to cover the same usd fee.
+/// The opposite is also true: if irys goes down in value then we need more of
+/// it to cover the base fees.
 #[derive(Debug, Clone, Default, PartialEq, Hash)]
 pub struct EmaSnapshot {
     /// EMA price to use for public pricing operations (from block 2 intervals ago).

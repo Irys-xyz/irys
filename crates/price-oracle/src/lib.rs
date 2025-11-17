@@ -46,12 +46,14 @@ impl SingleOracle {
         initial_price: Amount<(IrysPrice, Usd)>,
         incremental_change: Amount<(IrysPrice, Usd)>,
         smoothing_interval: u64,
+        initial_direction_up: bool,
         poll_interval_ms: u64,
     ) -> Arc<Self> {
         let source = OracleSource::Mock(mock_oracle::MockOracle::new(
             initial_price,
             incremental_change,
             smoothing_interval,
+            initial_direction_up,
         ));
         let poll_interval = Duration::from_millis(poll_interval_ms.max(1));
         Arc::new(Self {
