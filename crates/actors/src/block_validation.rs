@@ -1785,9 +1785,9 @@ pub async fn data_txs_are_valid(
         .map(|(tx, ledger_current)| {
             let state = if same_block_promotions.contains(&tx.id) {
                 TxInclusionState::Found {
-                    ledger_current: DataLedger::Publish,
-                    ledger_historical: DataLedger::Submit,
-                    block_hash: block.block_hash,
+                    // Same block promotion: both ledgers are in the current block
+                    ledger_current: (DataLedger::Publish, block.block_hash),
+                    ledger_historical: (DataLedger::Submit, block.block_hash),
                 }
             } else {
                 TxInclusionState::Searching { ledger_current }
@@ -1811,85 +1811,7 @@ pub async fn data_txs_are_valid(
         error: e.to_string(),
     })?;
 
-    // Step 4: Validate based on ledger rules
-    for (tx, past_inclusion) in txs_to_check.values() {
-        match past_inclusion {
-            TxInclusionState::Searching { ledger_current } => {
-                match ledger_current {
-                    DataLedger::Publish => {
-                        // check the db - if we can fetch it, we have a previous inclusion
-                        if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
-                            warn!("had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth", &_header, &tx.id, &tx);
-                        } else {
-                            // Publish tx with no past inclusion - INVALID
-                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
-                                tx_id: tx.id,
-                            });
-                        }
-                    }
-                    DataLedger::Submit => {
-                        // Submit tx with no past inclusion - VALID (new transaction)
-                        debug!("Transaction {} is new in Submit ledger", tx.id);
-                    }
-                }
-            }
-            TxInclusionState::Found {
-                ledger_current,
-                ledger_historical,
-                block_hash,
-            } => {
-                match (ledger_current, ledger_historical) {
-                    (DataLedger::Publish, DataLedger::Submit) => {
-                        // OK: Transaction promoted from past Submit to current Publish
-                        debug!(
-                            "Transaction {} promoted from past Submit to current Publish ledger",
-                            tx.id
-                        );
-                    }
-                    (DataLedger::Publish, DataLedger::Publish) => {
-                        return Err(PreValidationError::PublishTxAlreadyIncluded {
-                            tx_id: tx.id,
-                            block_hash: *block_hash,
-                        });
-                    }
-                    (DataLedger::Submit, _) => {
-                        // Submit tx should not have any past inclusion
-                        return Err(PreValidationError::SubmitTxAlreadyIncluded {
-                            tx_id: tx.id,
-                            ledger: *ledger_historical,
-                            block_hash: *block_hash,
-                        });
-                    }
-                }
-            }
-            TxInclusionState::Duplicate { ledger_historical } => {
-                // Transaction found in multiple past blocks - this is always invalid
-                return Err(PreValidationError::TxFoundInMultipleBlocks {
-                    tx_id: tx.id,
-                    ledger: ledger_historical.0,
-                    block_hash: ledger_historical.1,
-                });
-            }
-        }
-    }
-
-    // Step 5: Validate all SUBMIT tx (including same-block promotions)
-    let all_txs = publish_txs.iter().map(|tx| (tx, DataLedger::Submit));
-
-    // DO NOT INCLUDE ANY LOGIC OTHER THAN PRICING VALIDATION HERE
-    // IT ONLY RUNS FOR NON-PROMOTED TXS
-    for (tx, current_ledger) in all_txs {
-        debug_assert_eq!(current_ledger, DataLedger::Submit);
-        // All data transactions must have ledger_id set to Publish
-        // TODO: support other term ledgers here
-        if tx.ledger_id != DataLedger::Publish as u32 {
-            return Err(PreValidationError::InvalidLedgerId {
-                tx_id: tx.id,
-                expected: DataLedger::Publish as u32,
-                actual: tx.ledger_id,
-            });
-        }
-
+    let validate_price = |tx: &&DataTransactionHeader| {
         // Calculate expected fees based on data size using block's EMA
         // Calculate term fee first as it's needed for perm fee calculation
         // Calculate epochs for storage using the same method as mempool
@@ -1945,6 +1867,109 @@ pub async fn data_txs_are_valid(
                 reason: e.to_string(),
             },
         )?;
+        Ok(())
+    };
+
+    // Step 4: Validate based on ledger rules
+    for (tx, past_inclusion) in txs_to_check.values() {
+        match past_inclusion {
+            // no past inclusions
+            TxInclusionState::Searching { ledger_current } => {
+                match ledger_current {
+                    DataLedger::Publish => {
+                        // check the db - if we can fetch it, we have a previous inclusion
+                        if let Ok(Some(_header)) = tx_header_by_txid(&ro_tx, &tx.id) {
+                            warn!("had to fetch header {:#?} from DB for {}, (exp: {:#?}) as submit inclusion wasn't within anchor depth", &_header, &tx.id, &tx);
+                        } else {
+                            // Publish tx with no past inclusion - INVALID
+                            return Err(PreValidationError::PublishTxMissingPriorSubmit {
+                                tx_id: tx.id,
+                            });
+                        }
+                    }
+                    DataLedger::Submit => {
+                        // Submit tx with no past inclusion - VALID (new transaction)
+                        validate_price(tx)?;
+
+                        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+                        // (they're waiting for proofs to arrive)
+                        if tx.promoted_height.is_some() {
+                            // TODO: This should be a hard error, but the test infrastructure currently
+                            // creates transactions with ingress proofs that get placed in Submit ledger.
+                            // This needs to be fixed in the block production logic to properly place
+                            // transactions with proofs in the Publish ledger.
+                            tracing::error!(
+                                "Transaction {} in Submit ledger should not have a promoted_height",
+                                tx.id
+                            );
+                        }
+
+                        debug!("Transaction {} is new in Submit ledger", tx.id);
+                    }
+                }
+            }
+            TxInclusionState::Found {
+                ledger_current: (ledger_current, current_block_hash),
+                ledger_historical: (ledger_historical, historical_block_hash),
+            } => {
+                match (ledger_current, ledger_historical) {
+                    (DataLedger::Publish, DataLedger::Submit) => {
+                        if current_block_hash == historical_block_hash
+                            && current_block_hash == &block.block_hash
+                        {
+                            // tx was included & promoted within the same block
+                            validate_price(tx)?;
+                        }
+
+                        // OK: Transaction promoted from past Submit to current Publish
+                        debug!(
+                            "Transaction {} promoted from past Submit to current Publish ledger",
+                            tx.id
+                        );
+                    }
+                    (DataLedger::Publish, DataLedger::Publish) => {
+                        return Err(PreValidationError::PublishTxAlreadyIncluded {
+                            tx_id: tx.id,
+                            block_hash: *historical_block_hash,
+                        });
+                    }
+                    (DataLedger::Submit, _) => {
+                        // Submit tx should not have any past inclusion
+                        return Err(PreValidationError::SubmitTxAlreadyIncluded {
+                            tx_id: tx.id,
+                            ledger: *ledger_historical,
+                            block_hash: *historical_block_hash,
+                        });
+                    }
+                }
+            }
+            TxInclusionState::Duplicate { ledger_historical } => {
+                // Transaction found in multiple past blocks - this is always invalid
+                return Err(PreValidationError::TxFoundInMultipleBlocks {
+                    tx_id: tx.id,
+                    ledger: ledger_historical.0,
+                    block_hash: ledger_historical.1,
+                });
+            }
+        }
+    }
+
+    // Step 5: Validate all SUBMIT tx (including same-block promotions)
+    let all_txs = publish_txs.iter().map(|tx| (tx, DataLedger::Submit));
+
+    // DO NOT INCLUDE ANY LOGIC OTHER THAN PRICING VALIDATION HERE
+    // IT ONLY RUNS FOR NON-PROMOTED TXS
+    for (tx, current_ledger) in all_txs {
+        debug_assert_eq!(current_ledger, DataLedger::Submit);
+        // All data transactions must have ledger_id set to Publish
+        // TODO: support other term ledgers here
+        if tx.ledger_id != DataLedger::Publish as u32 {
+            return Err(PreValidationError::InvalidLedgerId {
+                tx_id: tx.id,
+                expected: DataLedger::Publish as u32,
+                actual: tx.ledger_id,
+            });
+        }
 
         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
         // (they're waiting for proofs to arrive)
@@ -2353,10 +2378,13 @@ enum TxInclusionState {
     Searching {
         ledger_current: DataLedger,
     },
+    // Track block hashes for both current and historical ledgers
+    // so we can emit precise errors and diagnostics.
+    // ledger_current.1 is the hash of the block under validation.
+    // ledger_historical.1 is the hash of the block where the prior inclusion was found.
     Found {
-        ledger_current: DataLedger,
-        ledger_historical: DataLedger,
-        block_hash: BlockHash,
+        ledger_current: (DataLedger, BlockHash),
+        ledger_historical: (DataLedger, BlockHash),
     },
     Duplicate {
         ledger_historical: (DataLedger, BlockHash),
@@ -2403,7 +2431,12 @@ async fn get_previous_tx_inclusions(
                 // don't process the states for a block we're putting under full validation
                 return Ok(());
             }
-            process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
+            process_block_ledgers_with_states(
+                &header.data_ledgers,
+                header.block_hash,
+                block_under_validation.block_hash,
+                tx_ids,
+            )
         };
         // Move to the parent block and continue the traversal backwards
         block = match block_tree_guard.get_block(&block.0) {
@@ -2445,7 +2478,8 @@ async fn get_previous_tx_inclusions(
 /// Returns true if all transactions have been found
 fn process_block_ledgers_with_states(
     ledgers: &[DataTransactionLedger],
-    block_hash: BlockHash,
+    historical_block_hash: BlockHash,
+    current_block_hash: BlockHash,
     tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
 ) -> eyre::Result<()> {
     for ledger in ledgers {
@@ -2458,15 +2492,14 @@ fn process_block_ledgers_with_states(
                     TxInclusionState::Searching { ledger_current } => {
                         // First time finding this transaction
                         *state = TxInclusionState::Found {
-                            ledger_current: *ledger_current,
-                            ledger_historical: ledger_type,
-                            block_hash,
+                            ledger_current: (*ledger_current, current_block_hash),
+                            ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
                     TxInclusionState::Found { .. } => {
                         // Transaction already found once, this is a duplicate
                         *state = TxInclusionState::Duplicate {
-                            ledger_historical: (ledger_type, block_hash),
+                            ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
                     TxInclusionState::Duplicate { .. } => {
