@@ -11,10 +11,9 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_domain::ChainState;
-use irys_types::storage_pricing::Amount;
+use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount};
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    OracleConfig, U256,
+    BoundedFee, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256
 };
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -359,6 +358,7 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
         incremental_change: Amount::token(dec!(0.01)).expect("valid token amount"),
         smoothing_interval: 1000, // Ensures continuous increase for 1000 blocks
         poll_interval_ms: 100,
+        initial_direction_up: false,
     }];
 
     let test_signer = genesis_config.new_random_signer();
@@ -366,45 +366,46 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
-
-    // Mine 6 blocks to exit ema price being constant during first 2 intervals
-    for _ in 0..6 {
-        genesis_node.mine_block().await?;
-    }
+    genesis_node.mine_two_ema_intervals(2).await?;
+    let block = genesis_node.ema_mine_until_next_in_last_quarter(price_adjustment_interval).await?;
 
     // Create a data transaction with pricing at current height (height 6)
     let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
     let data_size = data.len() as u64;
 
-    let price_info = genesis_node
-        .get_data_price(DataLedger::Publish, data_size)
-        .await?;
+    let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
+
+    // Calculate expected fees using the provided EMA
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        price_before_the_interval.ema_for_public_pricing(),
+    )?;
+
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        price_before_the_interval.ema_for_public_pricing(),
+        expected_term_fee,
+    )?;
 
     let tx = test_signer.create_transaction_with_fees(
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        price_info.term_fee.into(),
-        Some(price_info.perm_fee.into()),
+        expected_term_fee.into(),
+        Some(expected_perm_fee.amount.into()),
     )?;
     let tx = test_signer.sign_transaction(tx)?;
 
     // Post ONLY the transaction header (no chunks yet)
     genesis_node.post_data_tx_raw(&tx.header).await;
 
-    // Mine 1 more block so we're at height 7, meaning n+1 (block 8) will be at new EMA interval
     let submit_block = genesis_node.mine_block().await?;
     let submit_ledger = &submit_block.data_ledgers[DataLedger::Submit];
     assert!(
         submit_ledger.tx_ids.0.contains(&tx.header.id),
         "Transaction should be in submit ledger"
-    );
-
-    // Verify we're at the right height before uploading chunks
-    let current_height = genesis_node.get_canonical_chain_height().await;
-    assert_eq!(
-        current_height, 7,
-        "Should be at height 7 before uploading chunks"
     );
 
     // Capture EMA snapshot at the time of submit (height 7)
