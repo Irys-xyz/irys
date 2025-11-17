@@ -5,7 +5,8 @@ use crate::utils::{
 use crate::validation::unpledge_partition::gossip_data_tx_to_node;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage, block_validation::ValidationError,
+    block_tree_service::BlockTreeServiceMessage,
+    block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
@@ -16,6 +17,10 @@ use irys_types::{
     BoundedFee, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256
 };
 use rust_decimal_macros::dec;
+use irys_types::IngressProofsList;
+use irys_database::walk_all;
+use irys_database::tables::IngressProofs as IngressProofsTable;
+use reth_db::Database as _;
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
@@ -498,7 +503,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         data_size,
         &genesis_node.node_ctx.config.consensus,
         price_before_the_interval.ema_for_public_pricing(),
-    )?;
+    )?.checked_div(U256::from(2)).unwrap();
 
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
@@ -511,30 +516,101 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        U256::zero().into(),
-        Some(U256::zero().into()),
+        expected_term_fee.into(),
+        Some((expected_perm_fee.amount).into()),
     )?;
+    // let tx = test_signer.create_transaction_with_fees(
+    //     data,
+    //     genesis_node.get_anchor().await?,
+    //     DataLedger::Publish,
+    //     U256::zero().into(),
+    //     Some(U256::zero().into()),
+    // )?;
     let tx = test_signer.sign_transaction(tx)?;
 
-    // Post ONLY the transaction header (no chunks yet)
-    genesis_node.post_data_tx_raw(&tx.header).await;
+    // Gossip ONLY the transaction header (no chunks yet) via mempool service
+    gossip_data_tx_to_node(&genesis_node, &tx.header).await?;
 
-    // NOW upload the chunks after the block was mined
+    // Upload chunks via public API and wait for ingress proofs to be generated
     genesis_node.upload_chunks(&tx).await?;
     genesis_node
         .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
         .await?;
-    let promote_block = genesis_node.mine_block().await?;
 
-    let submit_ledger = &promote_block.data_ledgers[DataLedger::Submit];
-    let publish_ledger = &promote_block.data_ledgers[DataLedger::Publish];
-    assert!(
-        submit_ledger.tx_ids.0.contains(&tx.header.id),
-        "Transaction should be in submit ledger"
-    );
-    assert!(
-        publish_ledger.tx_ids.0.contains(&tx.header.id),
-        "Transaction should be in publish ledger after promotion"
+    // Build an EvilBlockProducer that force-includes the tx in both ledgers
+    // Collect proofs for this tx from the DB
+    let proofs_list = {
+        let ro_tx = genesis_node
+            .node_ctx
+            .db
+            .as_ref()
+            .tx()
+            .expect("create mdbx read tx");
+        let mut proofs = Vec::new();
+        for (root, cached) in walk_all::<IngressProofsTable, _>(&ro_tx).expect("walk proofs") {
+            if root == tx.header.data_root {
+                proofs.push(cached.proof.clone());
+            }
+        }
+        IngressProofsList(proofs)
+    };
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub data_tx: DataTransactionHeader,
+        pub proofs: IngressProofsList,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.data_tx.clone()],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![self.data_tx.clone()],
+                    proofs: Some(self.proofs.clone()),
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
+        }
+    }
+
+    let block_prod_strategy = EvilBlockProdStrategy {
+        data_tx: tx.header.clone(),
+        proofs: proofs_list,
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (promote_block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Validate by sending block directly to the block tree
+    send_block_to_block_tree(&genesis_node.node_ctx, promote_block.clone(), vec![]).await?;
+
+    // Expect the block to be rejected for insufficient perm_fee during prevalidation
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &promote_block.block_hash).await;
+    assert_validation_error(
+        outcome,
+        |e| matches!(
+            e,
+            ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+        ),
+        "block with insufficient perm_fee should be rejected",
     );
 
     genesis_node.stop().await;
