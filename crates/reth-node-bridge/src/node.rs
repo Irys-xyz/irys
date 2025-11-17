@@ -2,7 +2,7 @@ use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{payload::ShadowTxStore, IrysEthereumNode};
-use irys_types::Address;
+use irys_types::{Address, NetworkConfigWithDefaults as _};
 use reth::{
     args::DatabaseArgs,
     payload::EthPayloadBuilderAttributes,
@@ -108,9 +108,17 @@ pub async fn run_node(
         RethRpcModule::Debug,
     ])));
 
-    reth_config.rpc.http_addr = node_config.reth.network.bind_ip.parse()?;
+    reth_config.rpc.http_addr = node_config
+        .reth
+        .network
+        .bind_ip(&node_config.network_defaults)
+        .parse()?;
     reth_config.network.port = node_config.reth.network.bind_port;
-    reth_config.network.addr = node_config.reth.network.bind_ip.parse()?;
+    reth_config.network.addr = node_config
+        .reth
+        .network
+        .bind_ip(&node_config.network_defaults)
+        .parse()?;
 
     reth_config.datadir.datadir = node_config.reth_data_dir().into();
     reth_config.rpc.http_corsdomain = Some("*".to_string());

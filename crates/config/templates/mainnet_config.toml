@@ -8,23 +8,23 @@ reward_address = "0x0000000000000000000000000000000000000000"
 stake_pledge_drives = false
 genesis_peer_discovery_timeout_millis = 10000
 
-[gossip]
+# Default network configuration used by all services (http, gossip, reth)
+# Individual services can override these values if needed
+[network_defaults]
 public_ip = "127.0.0.1"
-public_port = 8081
 bind_ip = "0.0.0.0"
+
+[gossip]
+public_port = 8081
 bind_port = 8081
 
 [http]
-public_ip = "127.0.0.1"
 public_port = 8080
-bind_ip = "0.0.0.0"
 bind_port = 8080
 
 [reth.network]
 use_random_ports = false
-public_ip = "127.0.0.1"
 public_port = 30303
-bind_ip = "0.0.0.0"
 bind_port = 30303
 
 
