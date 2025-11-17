@@ -429,9 +429,7 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
     let submit_ema_price = submit_ema_snapshot.ema_for_public_pricing();
 
     // Mine blocks to forward EMA
-    for _ in 0..3 {
-        genesis_node.mine_block().await?;
-    }
+    genesis_node.mine_blocks(3).await?;
 
     // NOW upload the chunks after the block was mined
     genesis_node.upload_chunks(&tx).await?;
