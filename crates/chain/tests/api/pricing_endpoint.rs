@@ -337,7 +337,7 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
     // Additionally, create and submit a tx priced via the API at the last-quarter boundary
     let data = vec![1_u8; 1024];
     match ctx.post_publish_data_tx(&signer, data).await {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => panic!("Tx using API price at last-quarter boundary was not accepted: {e:?}"),
     }
 
