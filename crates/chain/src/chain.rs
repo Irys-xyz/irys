@@ -1778,11 +1778,13 @@ impl IrysNode {
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    initial_direction_up,
                     poll_interval_ms,
                 } => SingleOracle::new_mock(
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    initial_direction_up,
                     poll_interval_ms,
                 ),
                 OracleConfig::CoinMarketCap {
