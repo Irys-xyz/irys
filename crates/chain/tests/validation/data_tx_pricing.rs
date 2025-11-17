@@ -4,23 +4,27 @@ use crate::utils::{
 };
 use crate::validation::unpledge_partition::gossip_data_tx_to_node;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{PreValidationError, ValidationError},
-    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
-    ProductionStrategy,
+    shadow_tx_generator::PublishLedgerWithTxs,
+    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_domain::ChainState;
-use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount};
-use irys_types::{
-    BoundedFee, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig, U256
-};
-use rust_decimal_macros::dec;
-use irys_types::IngressProofsList;
-use irys_database::walk_all;
 use irys_database::tables::IngressProofs as IngressProofsTable;
+use irys_database::walk_all;
+use irys_domain::ChainState;
+use irys_types::storage_pricing::{
+    calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
+};
+use irys_types::IngressProofsList;
+use irys_types::{
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
+    OracleConfig, U256,
+};
 use reth_db::Database as _;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
@@ -340,8 +344,11 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
     Ok(())
 }
 
-// Test that a data transaction submitted before an EMA price increase can still be promoted
-// and included in a block after the price increases, validating backward compatibility
+// Ensure that we don't validate the perm fee on a tx that gets promoted on a
+// different block than it was initially included.
+//
+// The test deliberately proomotes the tx in a future EMA interval, meaning that
+// future price validations will always be invalid
 #[test_log::test(tokio::test)]
 async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
@@ -372,7 +379,9 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     genesis_node.mine_two_ema_intervals(2).await?;
-    let block = genesis_node.ema_mine_until_next_in_last_quarter(price_adjustment_interval).await?;
+    let block = genesis_node
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .await?;
 
     // Create a data transaction with pricing at current height (height 6)
     let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
@@ -457,11 +466,13 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
     Ok(())
 }
 
-
-// Test that a data transaction submitted before an EMA price increase can still be promoted
-// and included in a block after the price increases, validating backward compatibility
+// Test that ensures we validate the price data fields of a data tx that gets
+// promoted in the same block that it was submitted in.
+// This is done by crafting a tx with invalid price fields -
+// if we skip validation then the block won't be rejected.
 #[test_log::test(tokio::test)]
-async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()>
+{
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -490,7 +501,9 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         .start_and_wait_for_packing("GENESIS", seconds_to_wait)
         .await;
     genesis_node.mine_two_ema_intervals(2).await?;
-    let block = genesis_node.ema_mine_until_next_in_last_quarter(price_adjustment_interval).await?;
+    let block = genesis_node
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .await?;
 
     // Create a data transaction with pricing at current height (height 6)
     let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
@@ -503,7 +516,9 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         data_size,
         &genesis_node.node_ctx.config.consensus,
         price_before_the_interval.ema_for_public_pricing(),
-    )?.checked_div(U256::from(2)).unwrap();
+    )?
+    .checked_div(U256::from(2))
+    .unwrap();
 
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
@@ -519,13 +534,6 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         expected_term_fee.into(),
         Some((expected_perm_fee.amount).into()),
     )?;
-    // let tx = test_signer.create_transaction_with_fees(
-    //     data,
-    //     genesis_node.get_anchor().await?,
-    //     DataLedger::Publish,
-    //     U256::zero().into(),
-    //     Some(U256::zero().into()),
-    // )?;
     let tx = test_signer.sign_transaction(tx)?;
 
     // Gossip ONLY the transaction header (no chunks yet) via mempool service
@@ -606,10 +614,12 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
     let outcome = read_block_from_state(&genesis_node.node_ctx, &promote_block.block_hash).await;
     assert_validation_error(
         outcome,
-        |e| matches!(
-            e,
-            ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
-        ),
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+            )
+        },
         "block with insufficient perm_fee should be rejected",
     );
 

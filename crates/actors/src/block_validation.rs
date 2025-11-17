@@ -1914,7 +1914,9 @@ pub async fn data_txs_are_valid(
             } => {
                 match (ledger_current, ledger_historical) {
                     (DataLedger::Publish, DataLedger::Submit) => {
-                        if current_block_hash == historical_block_hash && current_block_hash == &block.block_hash {
+                        if current_block_hash == historical_block_hash
+                            && current_block_hash == &block.block_hash
+                        {
                             // tx was included & promoted within the same block
                             validate_price(tx)?;
                         }
