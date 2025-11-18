@@ -14,7 +14,7 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display};
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn, Instrument};
 
 impl Inner {
     #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
@@ -335,6 +335,8 @@ impl Inner {
                 .get_latest_canonical_entry()
                 .clone();
 
+            let block_tree_read_guard = self.block_tree_read_guard.clone();
+            let config = self.config.clone();
             self.exec.clone().spawn_blocking(async move {
                 let proof = generate_ingress_proof(
                     db.clone(),
@@ -348,12 +350,28 @@ impl Inner {
                 // TODO: handle results instead of unwrapping
                 .unwrap();
 
-                // Gossip the ingress proof
-                let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
-                if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-                    tracing::error!("Failed to send gossip data: {:?}", error);
+                match Self::validate_ingress_proof_anchor_static(&block_tree_read_guard, &db, &config, &proof) {
+                    Ok(()) => {
+                        // Gossip the ingress proof
+                        let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
+                        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+                            tracing::error!("Failed to send gossip data: {:?}", error);
+                        }
+                    }
+                    Err(e) => {
+                        // If the anchor is unknown or too old, prune the ingress proof if it exists
+                        debug!(
+                            proof.data_root = ?proof.data_root,
+                            "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e);
+                        if let Err(err) = Self::remove_ingress_proofs_static(&db, proof.data_root) {
+                            error!(
+                                proof.data_root = ?proof.data_root,
+                                "Failed to prune ingress proof for data root {:?}: {:?}", &proof.data_root, err
+                            );
+                        }
+                    }
                 }
-            });
+            }.in_current_span());
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
