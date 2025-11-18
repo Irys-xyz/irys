@@ -29,24 +29,22 @@ api = "172.21.0.4:8080"
 [trusted_peers.execution]
 peering_tcp_addr = "172.21.0.4:9010"
 
+# Default network configuration - all services use this public_ip unless overridden
+[network_defaults]
+public_ip = "172.21.0.3"
+bind_ip = "0.0.0.0"
 
 [gossip]
-public_ip = "172.21.0.3"
 public_port = 9009
-bind_ip = "0.0.0.0"
 bind_port = 9009
 
 [http]
-public_ip = "172.21.0.3"
 public_port = 8080
-bind_ip = "0.0.0.0"
 bind_port = 8080
 
 [reth.network]
 use_random_ports = false
-public_ip = "172.21.0.3"
 public_port = 9010
-bind_ip = "0.0.0.0"
 bind_port = 9010
 
 [storage]

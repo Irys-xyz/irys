@@ -1,6 +1,6 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-use irys_types::ShutdownReason;
+use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
@@ -302,7 +302,8 @@ impl IrysNode {
         let http_listener = create_listener(
             format!(
                 "{}:{}",
-                &node_config.http.bind_ip, &node_config.http.bind_port
+                node_config.http.bind_ip(&node_config.network_defaults),
+                node_config.http.bind_port
             )
             .parse()
             .expect("A valid HTTP IP & port"),
@@ -310,7 +311,8 @@ impl IrysNode {
         let gossip_listener = create_listener(
             format!(
                 "{}:{}",
-                &node_config.gossip.bind_ip, &node_config.gossip.bind_port
+                node_config.gossip.bind_ip(&node_config.network_defaults),
+                node_config.gossip.bind_port
             )
             .parse()
             .expect("A valid HTTP IP & port"),
@@ -714,11 +716,11 @@ impl IrysNode {
             &node_mode,
             &ctx.config.node_config.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
-            &node_config.http.bind_ip,
+            node_config.http.bind_ip(&node_config.network_defaults),
             &node_config.http.bind_port,
-            &node_config.gossip.bind_ip,
+            node_config.gossip.bind_ip(&node_config.network_defaults),
             &node_config.gossip.bind_port,
-            &node_config.reth.network.bind_ip,
+            node_config.reth.network.bind_ip(&node_config.network_defaults),
             &node_config.reth.network.bind_port,
 
         );
@@ -1119,7 +1121,7 @@ impl IrysNode {
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
         let mut node_config = config.node_config.clone();
         node_config.reth.network.peer_id = reth_peering.peer_id;
-        node_config.reth.network.bind_ip = reth_peering.peering_tcp_addr.ip().to_string();
+        node_config.reth.network.bind_ip = Some(reth_peering.peering_tcp_addr.ip().to_string());
         node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
 
         if node_config.reth.network.public_port == 0 {
