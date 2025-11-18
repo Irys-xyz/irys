@@ -17,7 +17,7 @@ use irys_actors::{
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_guard::MempoolReadGuard,
-    mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
+    mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
     partition_mining_service::{
@@ -27,7 +27,7 @@ use irys_actors::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
-    BlockValidationTracker, DataSyncService, StorageModuleService,
+    BlockValidationTracker, DataSyncService, MempoolServiceMessageWithSpan, StorageModuleService,
 };
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
@@ -780,6 +780,8 @@ impl IrysNode {
         // spawn a task to periodically log system info, but not in tests
         #[cfg(not(test))]
         {
+            use irys_actors::MempoolServiceMessage;
+
             let block_index = ctx.block_index_guard.clone();
             let block_tree = ctx.block_tree_guard.clone();
             let peer_list = ctx.peer_list.clone();
@@ -791,7 +793,7 @@ impl IrysNode {
             let (tx, rx) = oneshot::channel();
             ctx.service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetState(tx))?;
+                .send(MempoolServiceMessage::GetState(tx).into())?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
             // use executor so we get automatic termination when the node starts to shut down
@@ -1224,7 +1226,7 @@ impl IrysNode {
         let (tx, rx) = oneshot::channel();
         service_senders
             .mempool
-            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx).into())
             .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
 
         let mempool_state = rx
@@ -1776,11 +1778,13 @@ impl IrysNode {
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    initial_direction_up,
                     poll_interval_ms,
                 } => SingleOracle::new_mock(
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    initial_direction_up,
                     poll_interval_ms,
                 ),
                 OracleConfig::CoinMarketCap {
@@ -1964,7 +1968,7 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
     reth_rx: UnboundedReceiver<RethServiceMessage>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {

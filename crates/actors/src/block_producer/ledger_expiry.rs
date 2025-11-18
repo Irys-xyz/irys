@@ -60,6 +60,7 @@
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_service::MempoolServiceMessage;
 use crate::shadow_tx_generator::RollingHash;
+use crate::MempoolServiceMessageWithSpan;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
@@ -91,7 +92,7 @@ pub async fn calculate_expired_ledger_fees(
     ledger_type: DataLedger,
     config: &Config,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
     db: DatabaseProvider,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
@@ -250,11 +251,11 @@ pub async fn calculate_expired_ledger_fees(
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
 async fn get_block_by_hash(
     block_hash: H256,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<IrysBlockHeader> {
     let (tx, rx) = oneshot::channel();
-    mempool_sender.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+    mempool_sender.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx).into())?;
 
     match rx.await? {
         Some(header) => Ok(header),
@@ -465,7 +466,7 @@ async fn process_boundary_block(
     ledger_type: DataLedger,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     // Get the block and its transactions
@@ -592,7 +593,7 @@ fn filter_transactions_by_chunk_range(
 async fn process_middle_blocks(
     middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
     ledger_type: DataLedger,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     let mut tx_to_miners = BTreeMap::new();

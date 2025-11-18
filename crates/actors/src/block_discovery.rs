@@ -2,7 +2,7 @@ use crate::{
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{prevalidate_block, PreValidationError},
     services::ServiceSenders,
-    MempoolServiceMessage,
+    MempoolServiceMessage, MempoolServiceMessageWithSpan,
 };
 
 use crate::mempool_guard::MempoolReadGuard;
@@ -293,11 +293,9 @@ impl BlockDiscoveryServiceInner {
         let previous_block_header = {
             let (tx_prev, rx_prev) = oneshot::channel();
             mempool_sender
-                .send(MempoolServiceMessage::GetBlockHeader(
-                    parent_block_hash,
-                    false,
-                    tx_prev,
-                ))
+                .send(
+                    MempoolServiceMessage::GetBlockHeader(parent_block_hash, false, tx_prev).into(),
+                )
                 .map_err(|channel_error| {
                     BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
                 })?;
@@ -339,10 +337,7 @@ impl BlockDiscoveryServiceInner {
 
         let (tx, rx) = oneshot::channel();
         mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                submit_tx_ids_to_check.clone(),
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetDataTxs(submit_tx_ids_to_check.clone(), tx).into())
             .map_err(|channel_error| {
                 BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
             })?;
@@ -391,10 +386,7 @@ impl BlockDiscoveryServiceInner {
 
         let (tx, rx) = oneshot::channel();
         mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                publish_tx_ids_to_check.clone(),
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetDataTxs(publish_tx_ids_to_check.clone(), tx).into())
             .map_err(|channel_error| {
                 BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
             })?;
@@ -923,7 +915,7 @@ pub async fn get_commitment_tx_in_parallel(
 /// Get all data transactions from the mempool and database
 pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<DataTransactionHeader>> {
     get_data_tx_in_parallel_inner(
@@ -932,7 +924,7 @@ pub async fn get_data_tx_in_parallel(
             let sender = mempool_sender.clone();
             async move {
                 let (tx, rx) = oneshot::channel();
-                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx))?;
+                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx).into())?;
                 Ok(rx.await?)
             }
             .boxed()

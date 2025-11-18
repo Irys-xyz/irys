@@ -190,6 +190,10 @@ pub enum OracleConfig {
 
         /// Number of blocks between price updates
         smoothing_interval: u64,
+        /// Initial direction of price movement. When true the mock increases first;
+        /// when false it decreases first.
+        #[serde(default = "super::default_oracle_initial_direction_up")]
+        initial_direction_up: bool,
         /// Poll interval in milliseconds for refreshing the mock oracle price snapshots.
         #[serde(default = "default_mock_oracle_poll_interval_ms")]
         poll_interval_ms: u64,
@@ -232,6 +236,10 @@ const fn default_price_oracle_poll_interval_ms() -> u64 {
 
 const fn default_mock_oracle_poll_interval_ms() -> u64 {
     10_000
+}
+
+pub(crate) const fn default_oracle_initial_direction_up() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -491,7 +499,7 @@ pub struct SyncConfig {
 impl Default for SyncConfig {
     fn default() -> Self {
         Self {
-            block_batch_size: 10,
+            block_batch_size: 50,
             // Check every 30 seconds if we're behind
             periodic_sync_check_interval_secs: 30,
             retry_block_request_timeout_secs: 30,
@@ -670,6 +678,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
+                initial_direction_up: true,
                 poll_interval_ms: default_mock_oracle_poll_interval_ms(),
             }],
             mining_key,
@@ -807,6 +816,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
+                initial_direction_up: true,
                 poll_interval_ms: default_mock_oracle_poll_interval_ms(),
             }],
             mining_key,
