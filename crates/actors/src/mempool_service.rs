@@ -1239,11 +1239,21 @@ impl Inner {
     // set canonical to true to enforce that the anchor must be part of the current canonical chain
     #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
     pub fn get_anchor_height(&self, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
-        Self::get_anchor_height_static(&self.block_tree_read_guard, &self.irys_db, anchor, canonical)
+        Self::get_anchor_height_static(
+            &self.block_tree_read_guard,
+            &self.irys_db,
+            anchor,
+            canonical,
+        )
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
-    pub fn get_anchor_height_static(block_tree_read_guard: &BlockTreeReadGuard, irys_db: &DatabaseProvider, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
+    pub fn get_anchor_height_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+        irys_db: &DatabaseProvider,
+        anchor: H256,
+        canonical: bool,
+    ) -> eyre::Result<Option<u64>> {
         // check the block tree, then DB
         if let Some(height) = {
             // in a block so rust doesn't complain about it being held across an await point
@@ -1261,8 +1271,8 @@ impl Inner {
             }
         } {
             Ok(Some(height))
-        } else if let Some(hdr) = irys_db
-            .view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
+        } else if let Some(hdr) =
+            irys_db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
         {
             Ok(Some(hdr.height))
         } else {
@@ -1462,7 +1472,9 @@ impl Inner {
         Self::get_latest_block_height_static(&self.block_tree_read_guard)
     }
 
-    pub fn get_latest_block_height_static(block_tree_read_guard: &BlockTreeReadGuard) -> Result<u64, TxIngressError> {
+    pub fn get_latest_block_height_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+    ) -> Result<u64, TxIngressError> {
         // TODO: `get_canonical_chain` clones the entire canonical chain, we can make do with a ref here
         let canon_chain = block_tree_read_guard.read().get_canonical_chain();
         let latest = canon_chain.0.last().ok_or(TxIngressError::Other(

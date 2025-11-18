@@ -1,9 +1,12 @@
+use crate::mempool_service::{IngressProofError, Inner};
 use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
-use irys_types::{ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof};
+use irys_domain::BlockTreeReadGuard;
+use irys_types::{
+    ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
+    IngressProof,
+};
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
 use tracing::warn;
-use irys_domain::BlockTreeReadGuard;
-use crate::mempool_service::{IngressProofError, Inner};
 
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
@@ -65,7 +68,10 @@ impl Inner {
         Ok(())
     }
 
-    pub fn validate_ingress_proof_anchor(&self, ingress_proof: &IngressProof) -> Result<(), IngressProofError> {
+    pub fn validate_ingress_proof_anchor(
+        &self,
+        ingress_proof: &IngressProof,
+    ) -> Result<(), IngressProofError> {
         Self::validate_ingress_proof_anchor_static(
             &self.block_tree_read_guard,
             &self.irys_db,
@@ -78,22 +84,23 @@ impl Inner {
         block_tree_read_guard: &BlockTreeReadGuard,
         irys_db: &DatabaseProvider,
         config: &Config,
-        ingress_proof: &IngressProof
+        ingress_proof: &IngressProof,
     ) -> Result<(), IngressProofError> {
-        let latest_height = Self::get_latest_block_height_static(block_tree_read_guard).map_err(|_e| {
-            IngressProofError::Other(
-                "unable to get canonical chain from block tree ".to_owned(),
-            )
-        })?;
+        let latest_height =
+            Self::get_latest_block_height_static(block_tree_read_guard).map_err(|_e| {
+                IngressProofError::Other(
+                    "unable to get canonical chain from block tree ".to_owned(),
+                )
+            })?;
 
         // TODO: add an ingress proof invalid LRU, like we have for txs
         let anchor_height = match Self::get_anchor_height_static(
-                block_tree_read_guard,
-                irys_db,
-                ingress_proof.anchor,
-                false, /* does not need to be canonical */
-            )
-            .map_err(|_e| IngressProofError::DatabaseError)?
+            block_tree_read_guard,
+            irys_db,
+            ingress_proof.anchor,
+            false, /* does not need to be canonical */
+        )
+        .map_err(|_e| IngressProofError::DatabaseError)?
         {
             Some(height) => height,
             None => {
@@ -104,12 +111,8 @@ impl Inner {
 
         // check consensus config
 
-        let min_anchor_height = latest_height.saturating_sub(
-            config
-                .consensus
-                .mempool
-                .ingress_proof_anchor_expiry_depth as u64,
-        );
+        let min_anchor_height = latest_height
+            .saturating_sub(config.consensus.mempool.ingress_proof_anchor_expiry_depth as u64);
 
         let too_old = anchor_height < min_anchor_height;
 
