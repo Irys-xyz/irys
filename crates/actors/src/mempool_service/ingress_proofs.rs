@@ -118,7 +118,7 @@ impl Inner {
 
         if too_old {
             warn!("Ingress proof anchor is too old");
-            return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+            Err(IngressProofError::InvalidAnchor(ingress_proof.anchor))
         } else {
             Ok(())
         }
