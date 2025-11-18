@@ -1055,7 +1055,19 @@ impl Inner {
                 // Get all the proofs for this tx
                 let all_proofs = self.irys_db.view_eyre(|read_tx| {
                     ingress_proofs_by_data_root(read_tx, tx_header.data_root)
-                })?;
+                })?.into_iter().filter(|(root, cached_proof)| {
+                    match self.validate_ingress_proof_anchor_and_remove_if_invalid(&cached_proof.proof) {
+                        Ok(removed) => !removed,
+                        Err(e) => {
+                            warn!(
+                                "Failed to validate ingress proof anchor for data root {:?} of tx {}: {}",
+                                root, &tx_header.id, e
+                            );
+                            // Errored when removing the proof, filtering out
+                            false
+                        }
+                    }
+                }).collect::<Vec<_>>();
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self

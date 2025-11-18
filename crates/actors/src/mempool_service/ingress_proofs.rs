@@ -1,4 +1,5 @@
 use crate::mempool_service::{IngressProofError, Inner};
+use irys_database::delete_ingress_proof;
 use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::{
@@ -6,7 +7,7 @@ use irys_types::{
     IngressProof,
 };
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
-use tracing::warn;
+use tracing::{instrument, warn};
 
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
@@ -134,12 +135,35 @@ impl Inner {
     ) -> Result<(), IngressProofError> {
         irys_db
             .update(|rw_tx| -> Result<(), DatabaseError> {
-                rw_tx.delete::<IngressProofs>(data_root, None)?;
+                delete_ingress_proof(rw_tx, data_root)
+                    .map_err(|report| DatabaseError::Other(report.to_string()))?;
                 Ok(())
             })
             .map_err(|_| IngressProofError::DatabaseError)?
             .map_err(|_| IngressProofError::DatabaseError)?;
 
         Ok(())
+    }
+
+    /// Validate the ingress proof anchor, and if invalid, remove the ingress proof from the database.
+    /// Returns `Ok(true)` if the proof was removed, `Ok(false)` if it was valid and not removed.
+    #[instrument(skip_all, fields(proof.data_root = ?ingress_proof.data_root))]
+    pub fn validate_ingress_proof_anchor_and_remove_if_invalid(
+        &self,
+        ingress_proof: &IngressProof,
+    ) -> Result<bool, IngressProofError> {
+        match self.validate_ingress_proof_anchor(ingress_proof) {
+            // Not removed
+            Ok(()) => Ok(false),
+            Err(e) => {
+                warn!(
+                    "Ingress proof anchor validation failed: {:?}. Pruning the proof",
+                    e
+                );
+                // If the anchor is unknown or too old, prune the ingress proof if it exists
+                self.remove_ingress_proof(ingress_proof.data_root)?;
+                Ok(true)
+            }
+        }
     }
 }

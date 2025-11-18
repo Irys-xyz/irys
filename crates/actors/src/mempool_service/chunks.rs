@@ -14,7 +14,7 @@ use reth_db::{
     cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display};
-use tracing::{debug, error, info, instrument, warn, Instrument};
+use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 impl Inner {
     #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
@@ -277,13 +277,37 @@ impl Inner {
             .irys_db
             .view_eyre(|tx| {
                 // First check if proof already exists
-                let proof_exists = irys_database::ingress_proof_by_data_root_address(
+                let ingress_proof = irys_database::ingress_proof_by_data_root_address(
                     tx,
                     chunk.data_root,
                     signer_addr,
                 )?;
 
-                if proof_exists.is_some() {
+                if let Some(compact_proof) = ingress_proof {
+                    match self.validate_ingress_proof_anchor_and_remove_if_invalid(&compact_proof.proof) {
+                        Ok(removed) => {
+                            if !removed {
+                                // Proof is valid, no need to proceed further
+                                return Ok(None);
+                            } else {
+                                info!(
+                                    proof.data_root = ?compact_proof.proof.data_root,
+                                    "Removed invalid ingress proof for data root {:?}", &compact_proof.proof.data_root
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let message = format!(
+                                "Error validating ingress proof anchor for data root {:?}: {:?}",
+                                &compact_proof.proof.data_root, e
+                            );
+                            error!(
+                                proof.data_root = ?compact_proof.proof.data_root,
+                                message
+                            );
+                            return Err(eyre::eyre!(message));
+                        }
+                    }
                     // Return None to signal early return needed
                     return Ok(None);
                 }

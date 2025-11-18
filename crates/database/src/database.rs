@@ -340,6 +340,10 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     }
 }
 
+pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
+    Ok(tx.delete::<IngressProofs>(data_root, None)?)
+}
+
 pub fn walk_all<T: Table, TX: DbTx>(
     read_tx: &TX,
 ) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {
