@@ -39,7 +39,8 @@ Once you’ve installed the dependencies you can compile the build with
 ## Compile feature flags
 `telemetry` - enables exporting of opentelemetry log & span collection.
 *  Use the canonical `OTEL_EXPORTER_OTLP_ENDPOINT` env var to configure the opentelemetry endpoint to send both spans and logs to.
-* Optionally, specify the `AXIOM_API_TOKEN` and `AXIOM_DATASET` env vars to configure support for Axiom.
+* Optionally, specify the `AXIOM_API_TOKEN` and `AXIOM_DATASET` env vars to configure support for Axiom. \
+
 `nvidia` - enables CUDA accelerated packing. 
 
 **Note:** GPU packing currently takes priority over CPU packing for bulk packing operations - future work will enable the node to use both simultaneously.
