@@ -588,8 +588,8 @@ impl Compact for Base64 {
     }
 
     fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
-        let mut vec = Vec::with_capacity(len);
-        buf.copy_to_slice(&mut vec[..]);
+        let vec = Vec::from(&buf[..len]);
+        buf.advance(len);
         (Self(vec), buf)
     }
 }
@@ -1000,6 +1000,20 @@ mod tests {
 
         // Call from_compact to convert the bytes back to U256
         let (decoded_value, _) = U256::from_compact(&buf[..], buf.len());
+
+        // Check that the decoded value matches the original value
+        assert_eq!(decoded_value, original_value);
+    }
+
+    #[test]
+    fn test_base64_compact_round_trip() {
+        // Create a Base64 value and convert it to compact bytes
+        let original_value = Base64::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let mut buf = BytesMut::with_capacity(original_value.0.len());
+        original_value.to_compact(&mut buf);
+
+        // Call from_compact to convert the bytes back to Base64
+        let (decoded_value, _) = Base64::from_compact(&buf[..], buf.len());
 
         // Check that the decoded value matches the original value
         assert_eq!(decoded_value, original_value);
