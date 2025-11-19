@@ -2653,9 +2653,11 @@ impl MempoolService {
                                         Ok(permit_result) => {
                                             match permit_result {
                                                 Ok(permit) => {
-                                                    runtime_handle.spawn(async move {
+                                                    let task_info = format!("Mempool message handler for {:?}", msg);
+                                                    let mempool_task_info = task_info.clone();
+
+                                                    let handle = runtime_handle.spawn(async move {
                                                         let _permit = permit; // Hold until task completes
-                                                        let task_info = format!("Mempool message handler for {:?}", msg);
                                                         if let Err(err) = wait_with_progress(
                                                             inner.handle_message(msg),
                                                             20,
@@ -2664,6 +2666,16 @@ impl MempoolService {
                                                             error!("Error handling mempool message: {:?}", err);
                                                         }
                                                     }.in_current_span());
+
+                                                    // Monitor for panic - triggers shutdown via panic hook
+                                                    runtime_handle.spawn(async move {
+                                                        if let Err(e) = handle.await {
+                                                            error!("Mempool handler task failed for {}: {:?}", mempool_task_info, e);
+                                                            if e.is_panic() {
+                                                                panic!("Mempool handler task panicked: {:?}", e);
+                                                            }
+                                                        }
+                                                    });
                                                 }
                                                 Err(err) => {
                                                     error!("Failed to acquire mempool message handler permit: {:?}", err);
