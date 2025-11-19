@@ -134,9 +134,9 @@ To tell the Irys Node Software what drives to use for partitions you must first 
 
 ```toml
 submodule_paths = [
- "/Users/dmac/irys/storage_modules/submodule_0",
- "/Users/dmac/irys/storage_modules/submodule_1",
- "/Users/dmac/irys/storage_modules/submodule_2",
+ "/mnt/storage_modules/submodule_0",
+ "/mnt/storage_modules/submodule_1",
+ "/mnt/storage_modules/submodule_2",
 ]
 ```
 
