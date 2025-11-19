@@ -1,5 +1,5 @@
+# Irys Mainnet Beta 
 _Node Deployment Guide_
-#irys-chain/specs 
 # Requirements
 High level overview of the Irys Node Software requirements
 ## Operating System
