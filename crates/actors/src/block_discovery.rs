@@ -24,10 +24,11 @@ use irys_types::{
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{
     mpsc::{self, error::SendError, UnboundedSender},
     oneshot::{self, error::RecvError},
+    Semaphore,
 };
 use tracing::{debug, error, info, trace, warn, Instrument as _};
 
@@ -147,14 +148,16 @@ pub struct BlockDiscoveryServiceInner {
     pub vdf_steps_guard: VdfStateReadonly,
     /// Service Senders
     pub service_senders: ServiceSenders,
+    /// Semaphore to limit concurrent block discovery tasks
+    pub message_handler_semaphore: Arc<Semaphore>,
 }
 
 #[derive(Debug)]
-
 pub struct BlockDiscoveryService {
     shutdown: Shutdown,
     msg_rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
     inner: Arc<BlockDiscoveryServiceInner>,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl BlockDiscoveryService {
@@ -168,12 +171,14 @@ impl BlockDiscoveryService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
+        let runtime_handle_clone = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
                 let service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner,
+                    runtime_handle: runtime_handle_clone,
                 };
                 service
                     .start()
@@ -206,8 +211,21 @@ impl BlockDiscoveryService {
                 // Handle commands
                 cmd = self.msg_rx.recv() => {
                     match cmd {
-                        Some(cmd) => {
-                            self.handle_message(cmd).await?;
+                        Some(msg) => {
+                            let semaphore = self.inner.message_handler_semaphore.clone();
+                            match semaphore.clone().try_acquire_owned() {
+                                Ok(permit) => {
+                                    self.spawn_validation_task(permit, msg);
+                                }
+                                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                                    warn!("Block discovery semaphore at capacity, waiting for permit");
+                                    self.spawn_with_timeout(semaphore, msg).await;
+                                }
+                                Err(tokio::sync::TryAcquireError::Closed) => {
+                                    error!("Block discovery semaphore closed");
+                                    break;
+                                }
+                            }
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
@@ -220,6 +238,50 @@ impl BlockDiscoveryService {
 
         info!("Shutting down block discovery service gracefully");
         Ok(())
+    }
+
+    /// Spawn a validation task with the acquired permit
+    fn spawn_validation_task(
+        &self,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        msg: BlockDiscoveryMessage,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        let runtime_handle = self.runtime_handle.clone();
+
+        runtime_handle.spawn(
+            async move {
+                let _permit = permit; // Hold until completion
+
+                match msg {
+                    BlockDiscoveryMessage::BlockDiscovered(block, skip_vdf, response_tx) => {
+                        let result = inner
+                            .validate_and_forward_with_parent_wait(block, skip_vdf)
+                            .await;
+
+                        if let Some(tx) = response_tx {
+                            let _ = tx.send(result);
+                        }
+                    }
+                }
+            }
+            .in_current_span(),
+        );
+    }
+
+    /// Wait with timeout when semaphore is at capacity
+    async fn spawn_with_timeout(&self, semaphore: Arc<Semaphore>, msg: BlockDiscoveryMessage) {
+        match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+            Ok(Ok(permit)) => {
+                self.spawn_validation_task(permit, msg);
+            }
+            Ok(Err(e)) => {
+                error!("Failed to acquire block discovery permit: {:?}", e);
+            }
+            Err(_) => {
+                error!("Timed out waiting for block discovery permit");
+            }
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -254,6 +316,96 @@ pub enum BlockDiscoveryMessage {
 }
 
 impl BlockDiscoveryServiceInner {
+    /// Validate block and wait for parent to be in tree before forwarding
+    pub async fn validate_and_forward_with_parent_wait(
+        self: Arc<Self>,
+        block: Arc<IrysBlockHeader>,
+        skip_vdf: bool,
+    ) -> Result<(), BlockDiscoveryError> {
+        let parent_hash = block.previous_block_hash;
+
+        debug!(
+            block.hash = %block.block_hash,
+            block.height = block.height,
+            block.parent_hash = %parent_hash,
+            "Waiting for parent block to be in tree before validation"
+        );
+
+        // Step 1: Wait for parent to be in block tree (with 5 second timeout)
+        let parent_ready = self
+            .clone()
+            .wait_for_parent_in_tree(parent_hash, Duration::from_secs(5))
+            .await;
+
+        if !parent_ready {
+            warn!(
+                block.hash = %block.block_hash,
+                block.parent_hash = %parent_hash,
+                "Parent not in tree after 5s timeout, dropping block"
+            );
+            return Err(BlockDiscoveryError::InternalError(
+                BlockDiscoveryInternalError::BlockTreeRequestFailed(
+                    "Parent block not in tree within timeout".to_string(),
+                ),
+            ));
+        }
+
+        debug!(
+            block.hash = %block.block_hash,
+            block.parent_hash = %parent_hash,
+            "Parent found in tree, proceeding with validation"
+        );
+
+        // Step 2: Run pre-validation and send to block tree
+        self.block_discovered(block.clone(), skip_vdf).await
+    }
+
+    /// Wait for parent block to appear in block tree
+    pub async fn wait_for_parent_in_tree(
+        self: Arc<Self>,
+        parent_hash: BlockHash,
+        timeout: Duration,
+    ) -> bool {
+        // Subscribe to block state updates
+        let mut block_state_rx = self.service_senders.subscribe_block_state_updates();
+
+        // Create timeout future
+        let timeout_future = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_future);
+
+        loop {
+            // Check if parent is in tree
+            {
+                let tree = self.block_tree_guard.read();
+                if tree.blocks.contains_key(&parent_hash) {
+                    debug!(parent.hash = %parent_hash, "Parent found in block tree");
+                    return true;
+                }
+            }
+
+            // Wait for either timeout or block state update
+            tokio::select! {
+                _ = &mut timeout_future => {
+                    warn!(parent.hash = %parent_hash, "Timeout waiting for parent");
+                    return false;
+                }
+                result = block_state_rx.recv() => {
+                    match result {
+                        Ok(event) if event.block_hash == parent_hash => {
+                            // Parent state changed, check again
+                            continue;
+                        }
+                        Ok(_) => continue, // Other block, keep waiting
+                        Err(_) => {
+                            error!("Block state channel closed");
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(block.height = %block.height, block.hash = %block.block_hash))]
     pub async fn block_discovered(
         &self,
