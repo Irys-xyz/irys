@@ -6,6 +6,7 @@ use alloy_primitives::{bytes, FixedBytes};
 use alloy_rlp::{Decodable, Encodable, RlpDecodable, RlpEncodable};
 use arbitrary::Unstructured;
 use base58::{FromBase58, ToBase58 as _};
+use bytes::Buf as _;
 use derive_more::Deref;
 use eyre::eyre;
 use eyre::Error;
@@ -556,7 +557,7 @@ impl Decompress for H256 {
 /// A struct of [`Vec<u8>`] used for all `base64_url` encoded fields. This is
 /// used for large fields like proof chunk data.
 
-#[derive(Default, Debug, Clone, Eq, PartialEq, Compact, Arbitrary, RlpDecodable, RlpEncodable)]
+#[derive(Default, Debug, Clone, Eq, PartialEq, Arbitrary, RlpDecodable, RlpEncodable)]
 pub struct Base64(pub Vec<u8>);
 
 impl std::fmt::Display for Base64 {
@@ -573,6 +574,23 @@ impl std::fmt::Display for Base64 {
                 base64_url::encode(&self.0[self.0.len() - trunc_len..])
             )
         }
+    }
+}
+
+impl Compact for Base64 {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let len = self.0.len();
+        buf.put_slice(&self.0);
+        len
+    }
+
+    fn from_compact(mut buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let mut vec = Vec::with_capacity(len);
+        buf.copy_to_slice(&mut vec[..]);
+        (Self(vec), buf)
     }
 }
 
