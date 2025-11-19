@@ -807,7 +807,7 @@ impl Inner {
                     // Validate perm fee must be present for Publish ledger
                     let Some(perm_fee) = tx.perm_fee else {
                         // Missing perm_fee for Publish ledger transaction is invalid
-                        debug!(
+                        warn!(
                             tx.id = ?tx.id,
                             tx.signer = ?tx.signer,
                             "Invalid Publish tx: missing perm_fee"
@@ -1060,7 +1060,7 @@ impl Inner {
 
                 if is_promoted {
                     // If it's promoted skip it
-                    debug!(
+                    warn!(
                         tx.id = ?tx_header.id,
                         tx.promoted_height = ?tx_header.promoted_height,
                         "Publish candidate is already promoted"
@@ -1081,7 +1081,7 @@ impl Inner {
                             .is_none()
                         {
                             // no previous inclusion
-                            debug!(
+                            warn!(
                                 tx.id = ?tx_header.id,
                                 tx.data_root = ?tx_header.data_root,
                                 "Unable to find previous submit inclusion for publish candidate"
