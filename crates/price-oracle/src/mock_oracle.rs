@@ -33,11 +33,12 @@ impl MockOracle {
         initial_price: Amount<(IrysPrice, Usd)>,
         incremental_change: Amount<(IrysPrice, Usd)>,
         smoothing_interval: u64,
+        initial_direction_up: bool,
     ) -> Self {
         let price_context = PriceContext {
             price: initial_price,
             calls: 0,
-            going_up: true,
+            going_up: initial_direction_up,
         };
         Self {
             context: Mutex::new(price_context),
@@ -112,6 +113,7 @@ mod tests {
             Amount::token(dec!(1.0)).unwrap(),
             Amount::token(dec!(0.05)).unwrap(),
             smoothing_interval,
+            true,
         );
 
         // Because this is an async method, we must block on the returned Future in a synchronous test.
@@ -131,6 +133,7 @@ mod tests {
             Amount::token(dec!(1.0)).unwrap(),
             Amount::token(dec!(0.10)).unwrap(),
             smoothing_interval,
+            true,
         );
 
         // First call -> should go up by 0.10 to 1.10
@@ -149,6 +152,7 @@ mod tests {
             Amount::token(dec!(1.0)).unwrap(),
             Amount::token(dec!(0.10)).unwrap(),
             smoothing_interval,
+            true,
         );
 
         // Call #1 -> going_up = true => 1.0 + 0.10 = 1.10

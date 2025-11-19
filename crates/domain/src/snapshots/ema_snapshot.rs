@@ -56,7 +56,13 @@ use irys_types::{
 use std::sync::Arc;
 
 /// Snapshot of EMA-related pricing data for a specific block.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// Ema snapshot contains core expression of "how much USD is a single irys token worth".
+/// Most of our data pricing is expressed in USD. So as the irys token goes up
+/// in value compared to the dollar, we need less irys to cover the same usd fee.
+/// The opposite is also true: if irys goes down in value then we need more of
+/// it to cover the base fees.
+#[derive(Debug, Clone, Default, PartialEq, Hash)]
 pub struct EmaSnapshot {
     /// EMA price to use for public pricing operations (from block 2 intervals ago).
     /// This is the "stable" price that external systems and users see.
@@ -256,6 +262,17 @@ impl EmaSnapshot {
     /// Get the EMA price that should be used for public pricing.
     pub fn ema_for_public_pricing(&self) -> IrysTokenPrice {
         self.ema_price_2_intervals_ago
+    }
+
+    // NON CANONICAL HASH
+    // SHOULD BE USED FOR DEBUGGING ONLY
+    pub fn get_hash(&self) -> String {
+        use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        let res = hasher.finish();
+        use base58::ToBase58 as _;
+        res.to_le_bytes().to_base58()
     }
 }
 

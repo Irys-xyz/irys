@@ -242,16 +242,19 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     Ok(())
 }
 
+// Ensure correct behavior when EMA trend is increasing.
+// We expect the pricing endpoint to choose the LOWER of the two EMAs
+// during the last quarter. This yields lower IRYS amounts (higher USD price -> lower IRYS).
 #[test_log::test(tokio::test)]
 async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Result<()> {
-    // Setup: Configure with interval of 12 blocks
-    // Last 25% = 3 blocks (blocks_until_boundary <= 3)
-    let price_adjustment_interval = 12;
+    // Setup: Configure with interval of 4 blocks
+    // Last 25% = 1 block (position_in_interval == 3)
+    let price_adjustment_interval = 4;
     let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
     config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
 
-    // Configure mock oracle with consistent price increases (smoothing_interval = 999999)
-    // This ensures ema_price_1_interval_ago > ema_price_2_intervals_ago throughout the test
+    // Configure mock oracle with consistent price increases (smoothing_interval = 999999).
+    // This ensures ema_price_1_interval_ago > ema_price_2_intervals_ago throughout the test.
     config.oracles = vec![irys_types::OracleConfig::Mock {
         initial_price: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0))
             .unwrap(),
@@ -260,8 +263,13 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         ))
         .unwrap(),
         smoothing_interval: 999999,
+        initial_direction_up: true,
         poll_interval_ms: 500,
     }];
+
+    // Fund a test signer so we can submit a tx using the quoted price
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
 
     let ctx = crate::utils::IrysNodeTest::new_genesis(config)
         .start()
@@ -272,13 +280,14 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
 
-    // Mine to block 27 - NOT in last quarter
-    // At block 27: next_block=28, position=4, blocks_until=8
-    // 8 > 3 -> NOT in last quarter -> should use ema_price_2_intervals_ago
-    let mut last_block = ctx.mine_block().await?;
-    for _ in 2..=27 {
-        last_block = ctx.mine_block().await?;
-    }
+    // mine 2 full intervals so public pricing diverges from genesis
+    ctx.mine_two_ema_intervals(price_adjustment_interval)
+        .await?;
+
+    // Stage 1: NOT in last quarter (interval=4)
+    let mut last_block = ctx
+        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .await?;
 
     let ema_stage1 = ctx
         .node_ctx
@@ -297,16 +306,14 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         &address,
         data_size_bytes,
         ema_stage1.ema_price_2_intervals_ago, // Standard pricing (lower EMA)
-        "Block 27 (NOT in last quarter): should use lower ema_price_2_intervals_ago",
+        "(NOT in last quarter): should use lower ema_price_2_intervals_ago",
     )
     .await?;
 
-    // Mine to block 32 - first block OF last quarter (boundary!)
-    // At block 32: position=9, blocks_until=3
-    // 3 <= 3 -> IN last quarter -> should use max(ema_1_interval, ema_2_intervals)
-    for _ in 28..=32 {
-        last_block = ctx.mine_block().await?;
-    }
+    // Stage 2: First block of last quarter (interval=4)
+    last_block = ctx
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .await?;
 
     let ema_stage2 = ctx
         .node_ctx
@@ -320,43 +327,117 @@ async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary() -> eyre::Res
         "With consistent price increases, newer EMA should be higher"
     );
 
+    // Last quarter uses the LOWER of the two EMAs for public pricing
     verify_pricing_uses_ema(
         &ctx,
         &address,
         data_size_bytes,
-        ema_stage2.ema_price_1_interval_ago, // Max pricing (higher EMA)
-        "Block 32 (first of last quarter): should use higher ema_price_1_interval_ago",
+        ema_stage2.ema_price_2_intervals_ago,
+        "Last quarter: should use lower-of-two (ema_price_2_intervals_ago)",
     )
     .await?;
 
-    // STAGE 3: Mine 2 more blocks to block 34 - last block of last quarter
-    // At block 34: position=11, blocks_until=1
-    // 1 <= 3 -> Still IN last quarter -> should still use max EMA
-    for _ in 33..=34 {
-        last_block = ctx.mine_block().await?;
-    }
+    let data = vec![1_u8; 1024];
+    ctx.post_publish_data_tx(&signer, data)
+        .await
+        .expect("Tx using API price at last-quarter boundary was not accepted");
 
-    let ema_stage3 = ctx
+    ctx.stop().await;
+    Ok(())
+}
+
+// Same boundary test, but ensure behavior when EMA trend is decreasing.
+// We still expect the pricing endpoint to choose the LOWER of the two EMAs
+// during the last quarter. This yields higher IRYS amounts (lower USD price -> higher IRYS).
+#[test_log::test(tokio::test)]
+async fn heavy_slow_pricing_ema_switches_at_last_quarter_boundary_decreasing() -> eyre::Result<()> {
+    // Configure with interval of 4 blocks
+    let price_adjustment_interval = 4;
+    let mut config = crate::utils::IrysNodeTest::<()>::default_async().cfg;
+    config.consensus.get_mut().ema.price_adjustment_interval = price_adjustment_interval;
+
+    // Configure mock oracle with an initially decreasing trend
+    config.oracles = vec![irys_types::OracleConfig::Mock {
+        initial_price: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(1.0))
+            .unwrap(),
+        incremental_change: irys_types::storage_pricing::Amount::token(rust_decimal_macros::dec!(
+            0.05
+        ))
+        .unwrap(),
+        smoothing_interval: 999999,
+        initial_direction_up: false,
+        poll_interval_ms: 500,
+    }];
+
+    // Fund a test signer so we can submit a tx using the quoted price
+    let signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let ctx = crate::utils::IrysNodeTest::new_genesis(config)
+        .start()
+        .await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        ctx.node_ctx.config.node_config.http.bind_port
+    );
+    let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size;
+
+    // mine 2 full intervals so public pricing diverges from genesis
+    ctx.mine_two_ema_intervals(price_adjustment_interval)
+        .await?;
+
+    // Stage 1: NOT in last quarter (interval=4)
+    let mut last_block = ctx
+        .ema_mine_until_next_not_in_last_quarter(price_adjustment_interval)
+        .await?;
+
+    let ema_stage1 = ctx
         .node_ctx
         .block_tree_guard
         .read()
         .get_ema_snapshot(&last_block.block_hash)
         .expect("EMA snapshot should exist");
 
+    verify_pricing_uses_ema(
+        &ctx,
+        &address,
+        data_size_bytes,
+        ema_stage1.ema_price_2_intervals_ago,
+        "(NOT in last quarter): should use lower ema_price_2_intervals_ago",
+    )
+    .await?;
+
+    // Stage 2: First block of last quarter (interval=4)
+    last_block = ctx
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .await?;
+    let ema_stage2 = ctx
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .get_ema_snapshot(&last_block.block_hash)
+        .expect("EMA snapshot should exist");
+
+    // Ensure we're in the decreasing scenario
     assert!(
-        ema_stage3.ema_price_1_interval_ago.amount > ema_stage3.ema_price_2_intervals_ago.amount,
-        "With consistent price increases, newer EMA should still be higher"
+        ema_stage2.ema_price_1_interval_ago.amount < ema_stage2.ema_price_2_intervals_ago.amount,
+        "Expected newer EMA to be lower (decreasing trend)"
     );
 
     verify_pricing_uses_ema(
         &ctx,
         &address,
         data_size_bytes,
-        ema_stage3.ema_price_1_interval_ago, // Still using max pricing (higher EMA)
-        "Block 34 (deep in last quarter): should still use higher ema_price_1_interval_ago",
+        ema_stage2.ema_price_1_interval_ago,
+        "Last quarter: should use lower-of-two (ema_price_1_interval_ago)",
     )
     .await?;
 
+    // Also submit a tx priced via the API at the last-quarter boundary and ensure acceptance
+    let data = vec![2_u8; 1024];
+    ctx.post_publish_data_tx(&signer, data)
+        .await
+        .expect("Tx using API price in decreasing last-quarter scenario was not accepted");
     ctx.stop().await;
     Ok(())
 }

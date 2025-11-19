@@ -74,27 +74,24 @@ pub async fn get_price(
                 state.config.consensus.epoch.submit_ledger_epoch_length,
             );
 
-            // Determine pricing EMA based on proximity to interval boundary
-            // When near the end of an interval, use max pricing to ensure transaction
-            // fees remain sufficient even if the transaction is included after the interval rolls over
+            // Determine pricing EMA for public quotes with special handling in
+            // the last quarter of the adjustment interval.
+            // - Not in last quarter: use stable public pricing (2 intervals ago)
+            // - In last quarter: use the LOWER of the last two EMAs (more conservative in IRYS)
+            //   Note: lower USD price -> higher IRYS required
             let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
             let position_in_interval = next_block_height % price_adjustment_interval;
-
-            // Last 25% of interval: use max(current_pricing, next_interval_pricing)
             let last_quarter_start =
                 price_adjustment_interval - price_adjustment_interval.div_ceil(4);
             let in_last_quarter = position_in_interval >= last_quarter_start;
 
             let pricing_ema = if in_last_quarter {
-                // Protect against price increases when interval boundary is crossed
-                // Use the higher of current or next interval's pricing
-                if ema.ema_price_1_interval_ago.amount > ema.ema_price_2_intervals_ago.amount {
+                if ema.ema_price_1_interval_ago.amount < ema.ema_price_2_intervals_ago.amount {
                     ema.ema_price_1_interval_ago
                 } else {
                     ema.ema_price_2_intervals_ago
                 }
             } else {
-                // Normal case: use standard public pricing (2 intervals ago)
                 ema.ema_for_public_pricing()
             };
 

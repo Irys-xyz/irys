@@ -642,6 +642,15 @@ mod tests {
                 .parse()
                 .unwrap(),
         ];
+        // Set network_defaults to match what deserialization will produce (using default_network_defaults)
+        expected_config.network_defaults.bind_ip = "0.0.0.0".to_string();
+        // Set explicit IPs to match the old-style TOML config
+        expected_config.gossip.public_ip = Some("127.0.0.1".to_string());
+        expected_config.gossip.bind_ip = Some("127.0.0.1".to_string());
+        expected_config.http.public_ip = Some("127.0.0.1".to_string());
+        expected_config.http.bind_ip = Some("127.0.0.1".to_string());
+        expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
+        expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();
