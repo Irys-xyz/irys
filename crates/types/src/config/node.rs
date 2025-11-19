@@ -430,6 +430,10 @@ pub enum CacheEvictionStrategy {
         #[serde(default = "default_max_cache_size_bytes")]
         max_cache_size_bytes: u64,
     },
+
+    /// No eviction: cache data is never automatically evicted
+    /// Only data_root pruning based on expiry/inclusion will occur
+    NoEviction,
 }
 
 const fn default_max_cache_size_bytes() -> u64 {
@@ -438,9 +442,7 @@ const fn default_max_cache_size_bytes() -> u64 {
 
 impl Default for CacheEvictionStrategy {
     fn default() -> Self {
-        Self::SizeBased {
-            max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-        }
+        Self::NoEviction
     }
 }
 

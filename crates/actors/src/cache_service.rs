@@ -295,6 +295,9 @@ impl ChunkCacheService {
                     debug!("Cache within size limits, no eviction needed");
                 }
             }
+            CacheEvictionStrategy::NoEviction => {
+                debug!("No eviction strategy configured, skipping cache eviction");
+            }
         }
 
         Ok(())
