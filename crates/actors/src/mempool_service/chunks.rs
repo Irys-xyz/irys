@@ -361,36 +361,44 @@ impl Inner {
 
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();
-            self.exec.clone().spawn_blocking(async move {
-                let proof = generate_ingress_proof(
-                    db.clone(),
-                    root_hash,
-                    data_size,
-                    chunk_size,
-                    signer,
-                    chain_id,
-                    latest_migrated.block_hash,
-                )
-                // TODO: handle results instead of unwrapping
-                .unwrap();
+            self.exec.clone().spawn_blocking(
+                async move {
+                    let proof = generate_ingress_proof(
+                        db.clone(),
+                        root_hash,
+                        data_size,
+                        chunk_size,
+                        signer,
+                        chain_id,
+                        latest_migrated.block_hash,
+                    )
+                    // TODO: handle results instead of unwrapping
+                    .unwrap();
 
-                match Self::validate_ingress_proof_anchor_static(&block_tree_read_guard, &db, &config, &proof) {
-                    Ok(()) => {
-                        // Gossip the ingress proof
-                        let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
-                        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-                            tracing::error!("Failed to send gossip data: {:?}", error);
+                    match Self::validate_ingress_proof_anchor_static(
+                        &block_tree_read_guard,
+                        &db,
+                        &config,
+                        &proof,
+                    ) {
+                        Ok(()) => {
+                            // Gossip the ingress proof
+                            let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
+                            if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+                                tracing::error!("Failed to send gossip data: {:?}", error);
+                            }
+                        }
+                        Err(e) => {
+                            // Don't broadcast expired proofs
+                            debug!(
+                                proof.data_root = ?proof.data_root,
+                                "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e
+                            );
                         }
                     }
-                    Err(e) => {
-                        // Don't broadcast expired proofs
-                        debug!(
-                            proof.data_root = ?proof.data_root,
-                            "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e
-                        );
-                    }
                 }
-            }.in_current_span());
+                .in_current_span(),
+            );
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
