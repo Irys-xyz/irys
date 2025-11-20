@@ -123,7 +123,6 @@ impl Inner {
         }
     }
 
-    #[expect(dead_code)]
     pub fn remove_ingress_proof(
         irys_db: &DatabaseProvider,
         data_root: DataRoot,
