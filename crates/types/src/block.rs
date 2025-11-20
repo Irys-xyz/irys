@@ -1292,7 +1292,7 @@ mod tests {
 
         for proof in proofs {
             let encoded_proof = Base64(proof.proof.clone());
-            validate_path(tx_root.0, &encoded_proof, proof.offset as u128).unwrap();
+            validate_path(tx_root.0, &encoded_proof, proof.last_byte_index as u128).unwrap();
         }
     }
 
