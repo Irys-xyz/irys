@@ -588,7 +588,7 @@ impl ConsensusConfig {
                 // Number of checkpoints to include in each VDF step
                 num_checkpoints_in_vdf_step: 25,
                 // Minimum number of steps to store in FIFO VecDeque to allow for network forks
-                max_allowed_vdf_fork_steps: 60_000,
+                max_allowed_vdf_fork_steps: 188_836,
                 // Target number of SHA-256 operations per second for the VDF
                 sha_1s_difficulty: 13_000_000,
             },
