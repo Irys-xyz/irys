@@ -593,7 +593,7 @@ impl ConsensusConfig {
                 sha_1s_difficulty: 13_000_000,
             },
             // Number of chunks that make up a single partition
-            num_chunks_in_partition: 75_534_336, //  ~20 TB,
+            num_chunks_in_partition: 75_534_400, //  ~20 TB,
             // Number of chunks that can be recalled in each partition by a mining step
             num_chunks_in_recall_range: 400,
             // Number of replica partitions in each storage slot
