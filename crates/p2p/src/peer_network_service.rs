@@ -8,9 +8,9 @@ use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     build_user_agent, Address, AnnouncementFinishedMessage, Config, DatabaseProvider,
-    GossipDataRequest, HandshakeMessage, PeerAddress, PeerFilterMode, PeerListItem,
-    PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse, RejectedResponse,
-    RethPeerInfo, TokioServiceHandle, VersionRequest,
+    GossipDataRequest, HandshakeMessage, NetworkConfigWithDefaults as _, PeerAddress,
+    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
+    PeerResponse, RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -116,21 +116,33 @@ fn build_peer_address(config: &Config) -> PeerAddress {
     PeerAddress {
         gossip: format!(
             "{}:{}",
-            config.node_config.gossip.public_ip, config.node_config.gossip.public_port
+            config
+                .node_config
+                .gossip
+                .public_ip(&config.node_config.network_defaults),
+            config.node_config.gossip.public_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
         api: format!(
             "{}:{}",
-            config.node_config.http.public_ip, config.node_config.http.public_port
+            config
+                .node_config
+                .http
+                .public_ip(&config.node_config.network_defaults),
+            config.node_config.http.public_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
         execution: RethPeerInfo {
             peering_tcp_addr: format!(
                 "{}:{}",
-                &config.node_config.reth.network.public_ip,
-                &config.node_config.reth.network.public_port
+                config
+                    .node_config
+                    .reth
+                    .network
+                    .public_ip(&config.node_config.network_defaults),
+                config.node_config.reth.network.public_port
             )
             .parse()
             .expect("valid SocketAddr expected"),

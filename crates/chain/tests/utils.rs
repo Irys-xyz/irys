@@ -47,7 +47,7 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, Address, BlockHash, DataLedger, EvmBlockHash,
-    GossipBroadcastMessage, H256List, SyncMode, H256, U256,
+    GossipBroadcastMessage, H256List, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -481,13 +481,15 @@ impl IrysNodeTest<IrysNodeCtx> {
             (PeerAddress {
                 api: format!(
                     "{}:{}",
-                    node_config.http.public_ip, node_config.http.public_port
+                    node_config.http.public_ip(&node_config.network_defaults),
+                    node_config.http.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
                 gossip: format!(
                     "{}:{}",
-                    node_config.http.bind_ip, node_config.http.bind_port
+                    node_config.gossip.public_ip(&node_config.network_defaults),
+                    node_config.gossip.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),

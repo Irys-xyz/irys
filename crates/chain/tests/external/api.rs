@@ -28,7 +28,7 @@ async fn external_api() -> eyre::Result<()> {
     initialize_tracing();
     let mut testing_config = NodeConfig::testing();
     testing_config.http.bind_port = 8080; // external test, should never be run concurrently
-    testing_config.http.bind_ip = "0.0.0.0".to_string();
+    testing_config.http.bind_ip = Some("0.0.0.0".to_string());
 
     let account1 = IrysSigner::random_signer(&testing_config.consensus_config());
     let mut node = IrysNodeTest::new_genesis(testing_config.clone());

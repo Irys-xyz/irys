@@ -69,6 +69,10 @@ pub struct NodeConfig {
 
     pub genesis_peer_discovery_timeout_millis: u64,
 
+    /// Default network configuration used by all services unless overridden
+    #[serde(default = "default_network_defaults")]
+    pub network_defaults: NetworkDefaults,
+
     /// Peer-to-peer network communication settings
     pub gossip: GossipConfig,
 
@@ -267,6 +271,58 @@ pub struct DataSyncServiceConfig {
     pub chunk_request_timeout: Duration,
 }
 
+/// # Network Defaults
+///
+/// Default IP addresses used across all services unless overridden.
+/// This allows you to specify public_ip and bind_ip once instead of
+/// repeating them for each service (http, gossip, reth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkDefaults {
+    /// Default public IP address advertised to other peers
+    pub public_ip: String,
+    /// Default bind IP address for all services
+    pub bind_ip: String,
+}
+
+/// Network configuration with optional overrides
+pub trait NetworkConfigWithDefaults {
+    /// Get the optional public IP
+    fn public_ip_option(&self) -> &Option<String>;
+
+    /// Get the optional bind IP
+    fn bind_ip_option(&self) -> &Option<String>;
+
+    /// Get the public IP, falling back to network defaults if not set
+    fn public_ip<'a>(&'a self, defaults: &'a NetworkDefaults) -> &'a str {
+        self.public_ip_option()
+            .as_deref()
+            .unwrap_or(&defaults.public_ip)
+    }
+
+    /// Get the bind IP, falling back to network defaults if not set
+    fn bind_ip<'a>(&'a self, defaults: &'a NetworkDefaults) -> &'a str {
+        self.bind_ip_option()
+            .as_deref()
+            .unwrap_or(&defaults.bind_ip)
+    }
+}
+
+/// Macro to implement NetworkConfigWithDefaults for types with public_ip and bind_ip fields
+macro_rules! impl_network_config_with_defaults {
+    ($type:ty) => {
+        impl NetworkConfigWithDefaults for $type {
+            fn public_ip_option(&self) -> &Option<String> {
+                &self.public_ip
+            }
+
+            fn bind_ip_option(&self) -> &Option<String> {
+                &self.bind_ip
+            }
+        }
+    };
+}
+
 /// # Gossip Network Configuration
 ///
 /// Settings for peer-to-peer communication between nodes.
@@ -274,14 +330,18 @@ pub struct DataSyncServiceConfig {
 #[serde(deny_unknown_fields)]
 pub struct GossipConfig {
     /// The IP address that's going to be announced to other peers
-    pub public_ip: String,
+    #[serde(default)]
+    pub public_ip: Option<String>,
     /// The port to accept connections from other peers
     pub public_port: u16,
     /// The IP address the gossip service binds to
-    pub bind_ip: String,
+    #[serde(default)]
+    pub bind_ip: Option<String>,
     /// The port number the gossip service listens on
     pub bind_port: u16,
 }
+
+impl_network_config_with_defaults!(GossipConfig);
 
 /// # Reth Node Configuration
 ///
@@ -299,11 +359,13 @@ pub struct RethNetworkConfig {
     #[serde(default)]
     pub use_random_ports: bool,
     /// The IP address that's going to be announced to other peers
-    pub public_ip: String,
+    #[serde(default)]
+    pub public_ip: Option<String>,
     /// The port to accept connections from other peers
     pub public_port: u16,
     /// The IP address that Reth binds to
-    pub bind_ip: String,
+    #[serde(default)]
+    pub bind_ip: Option<String>,
     /// The port number the Reth listens on
     pub bind_port: u16,
     // peer ID
@@ -311,6 +373,8 @@ pub struct RethNetworkConfig {
     #[serde(default)]
     pub peer_id: reth_transaction_pool::PeerId,
 }
+
+impl_network_config_with_defaults!(RethNetworkConfig);
 
 /// # Data Packing Configuration
 ///
@@ -402,14 +466,18 @@ pub struct CacheConfig {
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// The IP address visible to the outside world
-    pub public_ip: String,
+    #[serde(default)]
+    pub public_ip: Option<String>,
     /// The port that is visible to the outside world
     pub public_port: u16,
     /// The IP address the HTTP service binds to
-    pub bind_ip: String,
+    #[serde(default)]
+    pub bind_ip: Option<String>,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
 }
+
+impl_network_config_with_defaults!(HttpConfig);
 
 /// P2P handshake configuration with sensible defaults
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,6 +580,15 @@ impl Default for SyncConfig {
 /// This keeps legacy configurations working by defaulting to unrestricted mode.
 fn default_peer_filter_mode() -> PeerFilterMode {
     PeerFilterMode::Unrestricted
+}
+
+/// Default network configuration when not specified in the config file.
+/// Uses localhost for public_ip and binds to all interfaces.
+fn default_network_defaults() -> NetworkDefaults {
+    NetworkDefaults {
+        public_ip: "127.0.0.1".to_string(),
+        bind_ip: "0.0.0.0".to_string(),
+    }
 }
 
 /// # VDF (Verifiable Delay Function) Configuration
@@ -638,7 +715,11 @@ impl NodeConfig {
     }
 
     pub fn local_api_url(&self) -> String {
-        format!("http://{}:{}", self.http.bind_ip, self.http.bind_port)
+        format!(
+            "http://{}:{}",
+            self.http.bind_ip(&self.network_defaults),
+            self.http.bind_port
+        )
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -700,18 +781,22 @@ impl NodeConfig {
             initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
+            network_defaults: NetworkDefaults {
+                public_ip: "127.0.0.1".to_string(),
+                bind_ip: "127.0.0.1".to_string(),
+            },
             gossip: GossipConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 0,
-                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 0,
             },
             reth: RethConfig {
                 network: RethNetworkConfig {
                     use_random_ports: true,
-                    public_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    public_ip: Some("0.0.0.0".to_string()),
                     public_port: 0,
-                    bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    bind_ip: Some("0.0.0.0".to_string()),
                     bind_port: 0,
                     peer_id: Default::default(),
                 },
@@ -728,9 +813,9 @@ impl NodeConfig {
                 eviction_strategy: CacheEvictionStrategy::default(),
             },
             http: HttpConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 0,
-                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 0,
             },
             mempool: MempoolNodeConfig {
@@ -839,18 +924,22 @@ impl NodeConfig {
             initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
+            network_defaults: NetworkDefaults {
+                public_ip: "127.0.0.1".to_string(),
+                bind_ip: "0.0.0.0".to_string(),
+            },
             gossip: GossipConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 8081,
-                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 8081,
             },
             reth: RethConfig {
                 network: RethNetworkConfig {
                     use_random_ports: false,
-                    public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    public_ip: None,
                     public_port: 9009,
-                    bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    bind_ip: Some("127.0.0.1".to_string()),
                     bind_port: 9009,
                     peer_id: Default::default(),
                 },
@@ -867,9 +956,9 @@ impl NodeConfig {
                 eviction_strategy: CacheEvictionStrategy::default(),
             },
             http: HttpConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 8080,
-                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 8080,
             },
 
@@ -938,16 +1027,25 @@ impl NodeConfig {
     /// Get the PeerAddress for this node configuration
     pub fn peer_address(&self) -> PeerAddress {
         PeerAddress {
-            api: format!("{}:{}", self.http.public_ip, self.http.public_port)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
-                .parse()
-                .expect("valid SocketAddr expected"),
+            api: format!(
+                "{}:{}",
+                self.http.public_ip(&self.network_defaults),
+                self.http.public_port
+            )
+            .parse()
+            .expect("valid SocketAddr expected"),
+            gossip: format!(
+                "{}:{}",
+                self.gossip.public_ip(&self.network_defaults),
+                self.gossip.public_port
+            )
+            .parse()
+            .expect("valid SocketAddr expected"),
             execution: RethPeerInfo {
                 peering_tcp_addr: format!(
                     "{}:{}",
-                    &self.reth.network.public_ip, &self.reth.network.public_port
+                    self.reth.network.public_ip(&self.network_defaults),
+                    self.reth.network.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),
