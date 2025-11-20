@@ -586,8 +586,8 @@ impl ConsensusConfig {
                 num_checkpoints_in_vdf_step: 25,
                 // Minimum number of steps to store in FIFO VecDeque to allow for network forks
                 max_allowed_vdf_fork_steps: 60_000,
-                // Target number of SHA-1 operations per second for VDF calibration
-                sha_1s_difficulty: 1_800_000,
+                // Target number of SHA-256 operations per second for the VDF
+                sha_1s_difficulty: 13_000_000,
             },
             // Number of chunks that make up a single partition
             num_chunks_in_partition: 75_534_336, //  ~20 TB,
