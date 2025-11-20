@@ -481,8 +481,9 @@ impl IrysNode {
 
         // Calculate initial difficulty based on number of storage modules
         let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
-        let difficulty = calculate_initial_difficulty(&self.config.consensus, storage_module_count)
-            .expect("valid calculated initial difficulty");
+        let difficulty =
+            calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
+                .expect("valid calculated initial difficulty");
 
         genesis_block.diff = difficulty;
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
