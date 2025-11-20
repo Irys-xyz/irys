@@ -559,7 +559,7 @@ impl ConsensusConfig {
                 // The number of blocks a given anchor (tx or block hash) is valid for. The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
                 ingress_proof_anchor_expiry_depth: 200,
                 // Fee required for commitment transactions (stake, unstake, pledge, unpledge)
-                commitment_fee: 100,
+                commitment_fee: 62500000000000000,
             },
             epoch: EpochConfig {
                 // Scaling factor for the capacity projection curve Affects how network capacity is calculated and projected
