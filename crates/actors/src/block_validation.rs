@@ -929,20 +929,21 @@ pub fn poa_is_valid(
         )
         .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
-        if !(tx_path_result.left_bound..=tx_path_result.right_bound)
+        if !(tx_path_result.min_byte_range..=tx_path_result.max_byte_range)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
             return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
         }
 
         let tx_chunk_offset =
-            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
+            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.min_byte_range;
 
         // data_path validation
         let data_path_result = validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
-        if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
+        if !(data_path_result.min_byte_range..=data_path_result.max_byte_range)
+            .contains(&tx_chunk_offset)
         {
             return Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds);
         }
@@ -965,7 +966,7 @@ pub fn poa_is_valid(
         let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
             (config
                 .chunk_size
-                .min((data_path_result.right_bound - data_path_result.left_bound) as u64))
+                .min((data_path_result.max_byte_range - data_path_result.min_byte_range) as u64))
                 as usize,
         );
 

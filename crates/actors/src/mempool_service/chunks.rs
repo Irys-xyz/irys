@@ -179,9 +179,9 @@ impl Inner {
             // In this case the data path stores offsets so we need to add one
             // to get the size in bytes.
             let confirmed_data_size: u64 = path_result
-                .right_bound
+                .max_byte_range
                 .try_into()
-                .expect("to convert U128 path_result.right_bound to data_size to u64");
+                .expect("to convert U128 path_result.max_byte_range to data_size to u64");
 
             self.irys_db
                 .update_eyre(|db_tx| {
