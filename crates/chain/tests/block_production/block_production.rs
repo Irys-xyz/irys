@@ -528,8 +528,11 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify that the transaction was rejected due to insufficient funds
     match tx_result {
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            info!("Transaction correctly rejected due to insufficient funds");
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            info!(
+                "Transaction {} correctly rejected due to insufficient funds",
+                tx_id
+            );
         }
         Ok(_) => panic!("Expected transaction to be rejected due to insufficient funds"),
         Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
@@ -609,8 +612,11 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify that the transaction was rejected due to insufficient funds
     match tx_result {
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            info!("Transaction correctly rejected due to insufficient funds (nonexistent account)");
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            info!(
+                "Transaction {} correctly rejected due to insufficient funds (nonexistent account)",
+                tx_id
+            );
         }
         Ok(_) => panic!("Expected transaction to be rejected due to insufficient funds"),
         Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
