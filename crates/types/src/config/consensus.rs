@@ -522,7 +522,7 @@ impl ConsensusConfig {
                         map
                     },
                     nonce: 0,
-                    timestamp: 0, // TODO
+                    timestamp: 1763675936,
                     extra_data: Default::default(),
                     difficulty: U256::ZERO,
                     mix_hash: B256::ZERO,
@@ -537,7 +537,7 @@ impl ConsensusConfig {
             },
             genesis: GenesisConfig {
                 // The timestamp in milliseconds used for the genesis block
-                timestamp_millis: 0, // todo()
+                timestamp_millis: 1763675936389,
                 // Address that signs the genesis block
                 miner_address: Address::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
                     .unwrap(), // todo()
@@ -618,7 +618,9 @@ impl ConsensusConfig {
             // Tolerance for future block timestamps due to clock drift (ms)
             max_future_timestamp_drift_millis: 15_000,
             // Expected genesis block hash (when joining existing networks)
-            expected_genesis_hash: None, // todo()
+            expected_genesis_hash: Some(H256::from_base58(
+                "51H6fjQmLqpQeFSYtvpA54pvfpgPt92waKezutvBbcwo",
+            )),
         }
     }
 
