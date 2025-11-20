@@ -150,11 +150,11 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proof.proof;
 
     // Tx:1 - Base case, write tx index data without any overlaps
-    let num_chunks_in_tx = (proof.offset + 1) as u64 / config.consensus.chunk_size;
+    let num_chunks_in_tx = (proof.last_byte_index + 1) as u64 / config.consensus.chunk_size;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         LedgerChunkOffset::from(0),
         &partition_0_range,
-        proof.offset as u64,
+        proof.last_byte_index as u64,
         config.consensus.chunk_size,
     );
 
@@ -180,7 +180,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Tx:2 - Overlapping case, tx chunks start in one submodule and go to another
     let start_chunk_offset = LedgerChunkOffset::from(num_chunks_in_tx);
-    let bytes_in_tx = proofs[1].offset as u64 - proof.offset as u64;
+    let bytes_in_tx = proofs[1].last_byte_index as u64 - proof.last_byte_index as u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
         start_chunk_offset,
         &partition_0_range,
@@ -222,9 +222,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     // Tx:3 - Fill up the StorageModule leaving one empty chunk
     let tx_path = &proofs[2].proof;
     let data_root = tx_headers[2].data_root;
-    let offset = proofs[2].offset as u64;
+    let last_byte_index = proofs[2].last_byte_index as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
+        (last_byte_index + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
     let data_size = tx_headers[2].data_size;
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1_u64;
@@ -269,9 +269,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proofs[3].proof;
     let data_root = tx_headers[3].data_root;
     let data_size = tx_headers[3].data_size;
-    let offset = proofs[3].offset as u64;
+    let last_byte_index = proofs[3].last_byte_index as u64;
     let bytes_in_tx =
-        (offset + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
+        (last_byte_index + 1) - (*(tx_ledger_range.end() + 1_u64) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
@@ -317,8 +317,9 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
     let tx_path = &proofs[4].proof;
     let data_root = tx_headers[4].data_root;
     let data_size = tx_headers[4].data_size;
-    let offset = proofs[4].offset as u64;
-    let bytes_in_tx = (offset + 1) - ((*tx_ledger_range.end() + 1) * config.consensus.chunk_size);
+    let last_byte_index = proofs[4].last_byte_index as u64;
+    let bytes_in_tx =
+        (last_byte_index + 1) - ((*tx_ledger_range.end() + 1) * config.consensus.chunk_size);
     assert_eq!(bytes_in_tx, data_size);
     let start_chunk_offset = tx_ledger_range.end() + 1_u64;
     let (tx_ledger_range, tx_partition_range) = calculate_tx_ranges(
@@ -352,7 +353,8 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         info!("num chunks in tx: {:?}", tx.proofs.len());
         for (i, proof) in tx.proofs.iter().enumerate() {
             let chunk_bytes = Base64(
-                tx.data.clone().unwrap().0[prev_byte_offset as usize..=proof.offset].to_vec(),
+                tx.data.clone().unwrap().0[prev_byte_offset as usize..=proof.last_byte_index]
+                    .to_vec(),
             );
 
             // verify the chunk length
@@ -373,7 +375,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
             };
 
             let _ = db.update_eyre(|tx| cache_chunk(tx, &chunk));
-            prev_byte_offset = proof.offset as u64 + 1; // Update for next iteration
+            prev_byte_offset = proof.last_byte_index as u64 + 1; // Update for next iteration
         }
     }
 

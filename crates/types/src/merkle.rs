@@ -24,10 +24,10 @@ pub struct Node {
     pub right_child: Option<Box<Node>>,
 }
 
-/// Concatenated ids and offsets for full set of nodes for an original data chunk, starting with the root.
+/// Concatenated ids and max byte ranges for full set of nodes for an original data chunk, starting with the root.
 #[derive(Debug, PartialEq, Clone)]
 pub struct Proof {
-    pub offset: usize,
+    pub last_byte_index: usize,
     pub proof: Vec<u8>,
 }
 /// Populated with data from deserialized [`Proof`] for original data chunk (Leaf [`Node`]).
@@ -103,8 +103,8 @@ impl Helpers<Self> for usize {
 #[derive(Debug)]
 pub struct ValidatePathResult {
     pub leaf_hash: [u8; HASH_SIZE],
-    pub left_bound: u128,
-    pub right_bound: u128,
+    pub min_byte_range: u128,
+    pub max_byte_range: u128,
     pub is_rightmost_chunk: bool,
 }
 
@@ -121,7 +121,7 @@ pub fn get_leaf_proof(path_buff: &Base64) -> Result<LeafProof, Error> {
 pub fn validate_path(
     root_hash: [u8; HASH_SIZE],
     path_buff: &Base64,
-    target_offset: u128,
+    target_byte_position: u128,
 ) -> Result<ValidatePathResult, Error> {
     // Basic size checks to avoid underflow and malformed proofs
     let total_len = path_buff.len();
@@ -146,7 +146,7 @@ pub fn validate_path(
         .collect::<Result<Vec<_>, _>>()?;
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
 
-    let mut left_bound: u128 = 0;
+    let mut min_byte_range: u128 = 0;
     let mut expected_path_hash = root_hash;
     let mut is_rightmost_chunk = true;
 
@@ -164,29 +164,29 @@ pub fn validate_path(
             return Err(eyre!("Invalid Branch Proof"));
         }
 
-        let offset = branch_proof.offset() as u128;
-        let is_right_of_offset = target_offset >= offset;
+        let pivot = branch_proof.offset() as u128;
+        let is_right_of_pivot = target_byte_position >= pivot;
 
-        // Choose the next expected_path_hash based on weather the target_offset
-        // byte is to the left or right of the branch_proof's "offset" value
-        expected_path_hash = if is_right_of_offset {
+        // Choose the next expected_path_hash based on whether the target_byte_position
+        // is to the left or right of the branch_proof's pivot value
+        expected_path_hash = if is_right_of_pivot {
             branch_proof.right_id
         } else {
             branch_proof.left_id
         };
 
-        // Keep track of left bound as we traverse down the branches
-        if is_right_of_offset {
-            left_bound = offset;
+        // Keep track of min byte range as we traverse down the branches
+        if is_right_of_pivot {
+            min_byte_range = pivot;
         } else {
             is_rightmost_chunk = false;
         }
 
         debug!(
-            "BranchProof: left: {}{}, right: {}{},offset: {} => path_hash: {}",
-            if is_right_of_offset { "" } else { "✅" },
+            "BranchProof: left: {}{}, right: {}{},pivot: {} => path_hash: {}",
+            if is_right_of_pivot { "" } else { "✅" },
             base64_url::encode(&branch_proof.left_id),
-            if is_right_of_offset { "✅" } else { "" },
+            if is_right_of_pivot { "✅" } else { "" },
             base64_url::encode(&branch_proof.right_id),
             branch_proof.offset(),
             base64_url::encode(&path_hash)
@@ -200,7 +200,7 @@ pub fn validate_path(
     let path_hash_matches_leaf = leaf_node_id == expected_path_hash;
 
     debug!(
-        "  LeafProof: data_hash: {}, offset: {}",
+        "  LeafProof: data_hash: {}, max_byte_range: {}",
         base64_url::encode(&leaf_proof.data_hash),
         usize::from_be_bytes(leaf_proof.offset)
     );
@@ -213,24 +213,29 @@ pub fn validate_path(
         ));
     }
 
-    // Proof nodes (including leaf nodes) always contain their right bound
-    let right_bound = leaf_proof.offset() as u128;
+    // Proof nodes (including leaf nodes) always contain their max byte range
+    let max_byte_range = leaf_proof.offset() as u128;
 
-    // Ensure the provided target_offset lies within the computed [left_bound, right_bound]
-    if !(left_bound..=right_bound).contains(&target_offset) {
-        return Err(eyre!("Invalid target_offset: out of bounds"));
+    // Ensure the provided target_byte_position lies within [min_byte_range, max_byte_range] inclusive.
+    // Note: Accepts max_byte_range even though it's outside the chunk data range [min, max),
+    // allowing validation at chunk boundaries and EOF positions.
+    if !(min_byte_range..=max_byte_range).contains(&target_byte_position) {
+        return Err(eyre!("Invalid target_byte_position: out of bounds"));
     }
 
     Ok(ValidatePathResult {
         leaf_hash: leaf_proof.data_hash,
-        left_bound,
-        right_bound,
+        min_byte_range,
+        max_byte_range,
         is_rightmost_chunk,
     })
 }
 
 /// Utility method for logging a proof out to the terminal.
-pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128, u128), Error> {
+pub fn print_debug(
+    proof: &[u8],
+    target_byte_position: u128,
+) -> Result<([u8; 32], u128, u128), Error> {
     // Split proof into branches and leaf. Leaf is at the end and branches are
     // ordered from root to leaf.
     // Basic size checks to avoid underflow and malformed proofs
@@ -254,7 +259,7 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
         .collect::<Result<Vec<_>, _>>()?;
     let leaf_proof = LeafProof::try_from_proof_slice(leaf)?;
 
-    let mut left_bound: u128 = 0;
+    let mut min_byte_range: u128 = 0;
 
     // Validate branches.
     for branch_proof in branch_proofs.iter() {
@@ -265,46 +270,46 @@ pub fn print_debug(proof: &[u8], target_offset: u128) -> Result<([u8; 32], u128,
             &branch_proof.offset().to_note_vec(),
         ]);
 
-        let offset = branch_proof.offset() as u128;
-        let is_right_of_offset = target_offset > offset;
+        let pivot = branch_proof.offset() as u128;
+        let is_right_of_pivot = target_byte_position >= pivot;
 
-        // Keep track of left and right bounds as we traverse down the proof
-        if is_right_of_offset {
-            left_bound = offset;
+        // Keep track of byte ranges as we traverse down the proof
+        if is_right_of_pivot {
+            min_byte_range = pivot;
         }
 
         debug!(
-            "BranchProof: left: {}{}, right: {}{},offset: {} => path_hash: {}",
-            if is_right_of_offset { "" } else { "✅" },
+            "BranchProof: left: {}{}, right: {}{},pivot: {} => path_hash: {}",
+            if is_right_of_pivot { "" } else { "✅" },
             base64_url::encode(&branch_proof.left_id),
-            if is_right_of_offset { "✅" } else { "" },
+            if is_right_of_pivot { "✅" } else { "" },
             base64_url::encode(&branch_proof.right_id),
             branch_proof.offset(),
             base64_url::encode(&path_hash)
         );
     }
     debug!(
-        "  LeafProof: data_hash: {:?}, offset: {}",
+        "  LeafProof: data_hash: {:?}, max_byte_range: {}",
         base64_url::encode(&leaf_proof.data_hash),
         usize::from_be_bytes(leaf_proof.offset)
     );
 
-    let right_bound = leaf_proof.offset() as u128;
-    Ok((leaf_proof.data_hash, left_bound, right_bound))
+    let max_byte_range = leaf_proof.offset() as u128;
+    Ok((leaf_proof.data_hash, min_byte_range, max_byte_range))
 }
 
-/// (is_rightmost_chunk, max_byte_offset)
+/// (is_rightmost_chunk, max_byte_range)
 pub type ChunkInfo = (bool, u64);
 
 /// Validates chunk of data against provided [`Proof`].
-/// Returns a [ChunkInfo] if successful `(is_rightmost_chunk, max_byte_offset)`
+/// Returns a [ChunkInfo] if successful `(is_rightmost_chunk, max_byte_range)`
 pub fn validate_chunk(
     mut root_id: [u8; HASH_SIZE],
     chunk_node: &Node,
     proof: &Proof,
 ) -> Result<ChunkInfo, Error> {
     let mut is_rightmost_chunk = true;
-    let max_byte_offset: u64;
+    let max_byte_range_result: u64;
 
     match chunk_node {
         Node {
@@ -349,7 +354,7 @@ pub fn validate_chunk(
                     return Err(eyre!("Invalid Branch Proof"));
                 }
 
-                // If the offset from the proof is greater than the offset in the data chunk,
+                // If the max_byte_range from the proof is greater than the max_byte_range in the data chunk,
                 // then the next id to validate against is from the left.
                 root_id = if max_byte_range > &branch_proof.offset() {
                     branch_proof.right_id
@@ -370,13 +375,13 @@ pub fn validate_chunk(
                 return Err(eyre!("Invalid Leaf Proof: root mismatch"));
             }
 
-            max_byte_offset = (*max_byte_range).try_into().unwrap();
+            max_byte_range_result = (*max_byte_range).try_into().unwrap();
         }
         _ => {
             unreachable!()
         }
     }
-    Ok((is_rightmost_chunk, max_byte_offset))
+    Ok((is_rightmost_chunk, max_byte_range_result))
 }
 
 /// Generates data chunks from which the calculation of root id starts.
@@ -399,8 +404,8 @@ pub fn generate_leaves_from_chunks(
         let chunk = chunk?;
         let data_hash = hash_sha256(&chunk);
         let max_byte_range = min_byte_range + chunk.len();
-        let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &offset]);
+        let max_byte_range_bytes = max_byte_range.to_note_vec();
+        let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
 
         leaves.push(Node {
             id,
@@ -430,8 +435,8 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
         let bytes = chunk.as_ref();
         let data_hash = hash_ingress_sha256(bytes, address);
         let max_byte_range = min_byte_range + bytes.len();
-        let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![&data_hash, &offset]);
+        let max_byte_range_bytes = max_byte_range.to_note_vec();
+        let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
 
         leaves.push(Node {
             id,
@@ -444,7 +449,7 @@ pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
 
         if and_regular {
             let data_hash = hash_sha256(bytes);
-            let id = hash_all_sha256(vec![&data_hash, &offset]);
+            let id = hash_all_sha256(vec![&data_hash, &max_byte_range_bytes]);
             regular_leaves.push(Node {
                 id,
                 data_hash: Some(data_hash),
@@ -472,8 +477,8 @@ pub fn generate_leaves_from_data_roots(data_roots: &[DataRootLeaf]) -> Result<Ve
     for data_root in data_roots.iter() {
         let data_root_hash = &data_root.data_root.0;
         let max_byte_range = min_byte_range + data_root.tx_size;
-        let offset = max_byte_range.to_note_vec();
-        let id = hash_all_sha256(vec![data_root_hash, &offset]);
+        let max_byte_range_bytes = max_byte_range.to_note_vec();
+        let id = hash_all_sha256(vec![data_root_hash, &max_byte_range_bytes]);
 
         leaves.push(Node {
             id,
@@ -535,7 +540,7 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
         proof
     } else {
         Proof {
-            offset: 0,
+            last_byte_index: 0,
             proof: Vec::new(),
         }
     };
@@ -548,7 +553,7 @@ pub fn resolve_proofs(node: Node, proof: Option<Proof>) -> Result<Vec<Proof>, Er
             right_child: None,
             ..
         } => {
-            proof.offset = max_byte_range - 1;
+            proof.last_byte_index = max_byte_range - 1;
             proof.proof.extend(data_hash);
             proof.proof.extend(max_byte_range.to_note_vec());
             Ok(vec![proof])
@@ -633,8 +638,8 @@ mod tests {
         assert!(right_result.is_rightmost_chunk);
 
         // Last byte offset validation
-        assert_eq!(left_result.right_bound, 5);
-        assert_eq!(right_result.right_bound, 5 + 7);
+        assert_eq!(left_result.max_byte_range, 5);
+        assert_eq!(right_result.max_byte_range, 5 + 7);
 
         // Build a 3 leaf data_root to validate we can still detect the rightmost chunk in an unbalanced binary tree
         let leaves = generate_leaves_from_data_roots(&[
@@ -678,9 +683,9 @@ mod tests {
         assert!(right_result.is_rightmost_chunk);
 
         // Last byte offset validation
-        assert_eq!(left_result.right_bound, 5);
-        assert_eq!(center_result.right_bound, 5 + 7);
-        assert_eq!(right_result.right_bound, 5 + 7 + 11);
+        assert_eq!(left_result.max_byte_range, 5);
+        assert_eq!(center_result.max_byte_range, 5 + 7);
+        assert_eq!(right_result.max_byte_range, 5 + 7 + 11);
     }
 
     #[test]
@@ -749,13 +754,13 @@ mod tests {
             );
 
             // Deserialize and assert pivot == left.max_byte_range to guarantee proof correctness.
-            // Deserialize the branch and ensure the encoded offset equals left.max_byte_range
+            // Deserialize the branch and ensure the encoded max_byte_range equals left.max_byte_range
             let branch_proof =
                 BranchProof::try_from_proof_slice(branches).expect("expected BranchProof");
             assert_eq!(
                 branch_proof.offset(),
                 expected_left_max,
-                "branch proof offset must equal left_child.max_byte_range"
+                "branch proof max_byte_range must equal left_child.max_byte_range"
             );
         }
     }
@@ -772,7 +777,7 @@ mod tests {
             right_child: None,
         };
         let proof = Proof {
-            offset: 0,
+            last_byte_index: 0,
             proof: vec![0; HASH_SIZE - 1], // Intentionally too short
         };
         let result = validate_chunk(root_id, &chunk_node, &proof);
@@ -788,7 +793,7 @@ mod tests {
     #[test]
     fn validate_path_accepts_in_bounds_edges() {
         // Build a simple two-leaf tree: left size = 5 bytes, right size = 7 bytes
-        // So the branch pivot is 5, and the right leaf's right_bound is 12.
+        // So the branch pivot is 5, and the right leaf's max_byte_range is 12.
         let leaves = generate_leaves_from_data_roots(&[
             DataRootLeaf {
                 data_root: H256([9_u8; HASH_SIZE]),
@@ -805,7 +810,7 @@ mod tests {
         let proofs = resolve_proofs(root, None).expect("expected proofs");
         assert_eq!(proofs.len(), 2, "expected one proof per leaf");
 
-        // Classify the two leaf proofs by their leaf offsets (min = left, max = right)
+        // Classify the two leaf proofs by their max_byte_range (min = left, max = right)
         let leaf_infos: Vec<(&Proof, usize)> = proofs
             .iter()
             .map(|p| {
@@ -835,25 +840,25 @@ mod tests {
         let left_encoded = Base64(left_proof.proof.clone());
         let left_result =
             validate_path(root_id, &left_encoded, 0).expect("left leaf should validate at 0");
-        assert_eq!(left_result.left_bound, 0);
-        assert_eq!(left_result.right_bound, left_offset as u128);
+        assert_eq!(left_result.min_byte_range, 0);
+        assert_eq!(left_result.max_byte_range, left_offset as u128);
 
         // Validate right leaf at both inclusive bounds: left_offset and right_offset
         let right_encoded = Base64(right_proof.proof.clone());
 
         let at_left_edge = validate_path(root_id, &right_encoded, left_offset as u128)
             .expect("right leaf at left_offset");
-        assert_eq!(at_left_edge.left_bound, left_offset as u128);
-        assert_eq!(at_left_edge.right_bound, right_offset as u128);
+        assert_eq!(at_left_edge.min_byte_range, left_offset as u128);
+        assert_eq!(at_left_edge.max_byte_range, right_offset as u128);
 
         let at_right_edge = validate_path(root_id, &right_encoded, right_offset as u128)
-            .expect("right leaf at right_bound");
-        assert_eq!(at_right_edge.left_bound, left_offset as u128);
-        assert_eq!(at_right_edge.right_bound, right_offset as u128);
+            .expect("right leaf at max_byte_range");
+        assert_eq!(at_right_edge.min_byte_range, left_offset as u128);
+        assert_eq!(at_right_edge.max_byte_range, right_offset as u128);
     }
 
     #[test]
-    fn validate_path_rejects_above_right_bound() {
+    fn validate_path_rejects_above_max_byte_range() {
         // Same two-leaf setup as previous test
         let leaves = generate_leaves_from_data_roots(&[
             DataRootLeaf {
@@ -870,8 +875,8 @@ mod tests {
         let root_id = root.id;
         let proofs = resolve_proofs(root, None).expect("expected proofs");
 
-        // Pick the right (max offset) leaf proof and compute an out-of-bounds target (right_bound + 1)
-        let (right_proof, right_bound) = proofs
+        // Pick the leaf with max_byte_range and compute an out-of-bounds target (max_byte_range + 1)
+        let (right_proof, max_byte_range) = proofs
             .iter()
             .map(|p| {
                 let lp = get_leaf_proof(&Base64(p.proof.clone())).expect("LeafProof");
@@ -880,14 +885,14 @@ mod tests {
             .max_by_key(|(_, off)| *off)
             .expect("expected right proof");
         let encoded = Base64(right_proof.proof.clone());
-        let oob_target = (right_bound as u128) + 1;
+        let oob_target = (max_byte_range as u128) + 1;
 
         let err = validate_path(root_id, &encoded, oob_target)
-            .expect_err("target above right_bound must be rejected")
+            .expect_err("target above max_byte_range must be rejected")
             .to_string();
         assert!(
-            err.contains("Invalid target_offset: out of bounds"),
-            "expected 'Invalid target_offset: out of bounds', got: {err}"
+            err.contains("Invalid target_byte_position: out of bounds"),
+            "expected 'Invalid target_byte_position: out of bounds', got: {err}"
         );
     }
 }
