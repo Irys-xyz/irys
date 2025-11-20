@@ -12,7 +12,7 @@ use crate::{
 };
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
 use alloy_genesis::{Genesis, GenesisAccount};
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256, U256};
 use eyre::Result;
 use reth::rpc::types::serde_helpers::OtherFields;
 use reth_chainspec::Chain;
@@ -507,29 +507,30 @@ impl ConsensusConfig {
                         let mut map = BTreeMap::new();
                         map.insert(
                             Address::from_slice(
-                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                                hex::decode("3f0b21c8641c8cB28A9381fEa4F619B8d11dD35c")
                                     .unwrap()
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
+                                // 10 billion
+                                balance: alloy_primitives::U256::from(10 * 1_000_000_000_u128),
                                 ..Default::default()
                             },
                         );
                         map
                     },
-                    ..Default::default()
+                    nonce: 0,
+                    timestamp: 0, // TODO
+                    extra_data: Default::default(),
+                    difficulty: U256::ZERO,
+                    mix_hash: B256::ZERO,
+                    coinbase: Address::ZERO,
+
+                    // should always be None
+                    base_fee_per_gas: None,
+                    excess_blob_gas: None,
+                    blob_gas_used: None,
+                    number: None,
                 },
             },
             genesis: GenesisConfig {
