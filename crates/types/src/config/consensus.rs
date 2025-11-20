@@ -513,8 +513,9 @@ impl ConsensusConfig {
                                     .as_slice(),
                             ),
                             GenesisAccount {
-                                // 10 billion
-                                balance: alloy_primitives::U256::from(10 * 1_000_000_000_u128),
+                                // 10 billion IRYS
+                                balance: alloy_primitives::U256::from(10 * 1_000_000_000_u128)
+                                    * alloy_primitives::U256::from(1_000_000_000_000_000_000_u128),
                                 ..Default::default()
                             },
                         );
