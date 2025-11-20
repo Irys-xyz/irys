@@ -44,11 +44,13 @@ pub async fn post_commitment_tx(
     if let Err(err) = inner_result {
         tracing::warn!("API: {}", err);
         return match err {
-            TxIngressError::InvalidSignature => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err}")))
+            TxIngressError::InvalidSignature(address) => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("{err} (address: {address})")))
             }
-            TxIngressError::Unfunded => {
-                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED).body(format!("{err}")))
+            TxIngressError::Unfunded(tx_id) => {
+                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
+                    .body(format!("{err} (tx_id: {tx_id})")))
             }
             TxIngressError::Skipped => Ok(HttpResponse::Ok()
                 .body("Already processed: the transaction was previously handled")),
@@ -57,13 +59,14 @@ pub async fn post_commitment_tx(
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(format!("Failed to deliver transaction: {err}")))
             }
-            TxIngressError::InvalidAnchor => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err}")))
+            TxIngressError::InvalidAnchor(anchor) => {
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                    .body(format!("{err} (anchor: {anchor})")))
             }
-            TxIngressError::DatabaseError => {
+            TxIngressError::DatabaseError(ref db_err) => {
                 tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal database error: {err}")))
+                    .body(format!("Internal database error: {db_err}")))
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {}", err);

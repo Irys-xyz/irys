@@ -28,7 +28,7 @@ impl Inner {
                 .is_a_recent_invalid_fingerprint(&fingerprint)
                 .await
             {
-                return Err(TxIngressError::InvalidSignature);
+                return Err(TxIngressError::InvalidSignature(commitment_tx.signer));
             }
         }
         // Validate tx signature first to prevent ID poisoning
@@ -38,7 +38,7 @@ impl Inner {
                 &commitment_tx,
                 e
             );
-            return Err(TxIngressError::InvalidSignature);
+            return Err(TxIngressError::InvalidSignature(commitment_tx.signer));
         }
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted
@@ -249,7 +249,7 @@ impl Inner {
         let known_in_db = self
             .irys_db
             .view_eyre(|dbtx| commitment_tx_by_txid(dbtx, tx_id))
-            .map_err(|_| TxIngressError::DatabaseError)?
+            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
             .is_some();
         Ok(known_in_db)
     }

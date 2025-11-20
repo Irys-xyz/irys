@@ -38,7 +38,7 @@ impl Inner {
                 .is_a_recent_invalid_fingerprint(&fingerprint)
                 .await
             {
-                return Err(TxIngressError::InvalidSignature);
+                return Err(TxIngressError::InvalidSignature(tx.signer));
             }
         }
         // Early exit if already known in mempool or DB
@@ -263,7 +263,7 @@ impl Inner {
                 tx.signer = %tx.signer,
                 "Insufficient balance for data tx"
             );
-            return Err(TxIngressError::Unfunded);
+            return Err(TxIngressError::Unfunded(tx.id));
         }
 
         tracing::debug!(
