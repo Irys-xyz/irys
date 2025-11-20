@@ -284,15 +284,15 @@ impl Inner {
                 )?;
 
                 if let Some(compact_proof) = ingress_proof {
-                    match self.validate_ingress_proof_anchor_and_remove_if_invalid(&compact_proof.proof) {
-                        Ok(removed) => {
-                            if !removed {
+                    match self.is_ingress_proof_expired(&compact_proof.proof) {
+                        Ok(expired) => {
+                            if !expired {
                                 // Proof is valid, no need to proceed further
                                 return Ok(None);
                             } else {
                                 info!(
                                     proof.data_root = ?compact_proof.proof.data_root,
-                                    "Removed invalid ingress proof for data root {:?}", &compact_proof.proof.data_root
+                                    "Ingress proof for data root {:?} has expired", &compact_proof.proof.data_root
                                 );
                             }
                         }
@@ -383,16 +383,11 @@ impl Inner {
                         }
                     }
                     Err(e) => {
-                        // If the anchor is unknown or too old, prune the ingress proof if it exists
+                        // Don't broadcast expired proofs
                         debug!(
                             proof.data_root = ?proof.data_root,
-                            "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e);
-                        if let Err(err) = Self::remove_ingress_proofs_static(&db, proof.data_root) {
-                            error!(
-                                proof.data_root = ?proof.data_root,
-                                "Failed to prune ingress proof for data root {:?}: {:?}", &proof.data_root, err
-                            );
-                        }
+                            "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e
+                        );
                     }
                 }
             }.in_current_span());

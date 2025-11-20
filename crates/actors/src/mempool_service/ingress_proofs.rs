@@ -35,8 +35,6 @@ impl Inner {
         match self.validate_ingress_proof_anchor(&ingress_proof) {
             Ok(_) => {}
             Err(e) => {
-                // If the anchor is unknown or too old, prune the ingress proof if it exists
-                self.remove_ingress_proof(ingress_proof.data_root)?;
                 return Err(e);
             }
         }
@@ -125,11 +123,8 @@ impl Inner {
         }
     }
 
-    pub fn remove_ingress_proof(&self, data_root: DataRoot) -> Result<(), IngressProofError> {
-        Self::remove_ingress_proofs_static(&self.irys_db, data_root)
-    }
-
-    pub fn remove_ingress_proofs_static(
+    #[allow(dead_code)]
+    pub fn remove_ingress_proof(
         irys_db: &DatabaseProvider,
         data_root: DataRoot,
     ) -> Result<(), IngressProofError> {
@@ -148,7 +143,7 @@ impl Inner {
     /// Validate the ingress proof anchor, and if invalid, remove the ingress proof from the database.
     /// Returns `Ok(true)` if the proof was removed, `Ok(false)` if it was valid and not removed.
     #[instrument(skip_all, fields(proof.data_root = ?ingress_proof.data_root))]
-    pub fn validate_ingress_proof_anchor_and_remove_if_invalid(
+    pub fn is_ingress_proof_expired(
         &self,
         ingress_proof: &IngressProof,
     ) -> Result<bool, IngressProofError> {
@@ -160,8 +155,6 @@ impl Inner {
                     "Ingress proof anchor validation failed: {:?}. Pruning the proof",
                     e
                 );
-                // If the anchor is unknown or too old, prune the ingress proof if it exists
-                self.remove_ingress_proof(ingress_proof.data_root)?;
                 Ok(true)
             }
         }
