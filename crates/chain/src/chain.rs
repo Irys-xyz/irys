@@ -628,14 +628,13 @@ impl IrysNode {
 
     /// Initializes the node (genesis or non-genesis)
     #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
-    pub async fn start(&mut self) -> eyre::Result<IrysNodeCtx> {
+    pub async fn start(mut self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
-        let config = &self.config;
-        let node_mode = &config.node_config.node_mode;
+        let node_mode = &self.config.node_config.node_mode.clone();
 
         // In all startup modes, irys_db and block_index are prerequisites
-        let irys_db = init_irys_db(config).expect("could not open irys db");
-        let mut block_index = BlockIndex::new(&config.node_config)
+        let irys_db = init_irys_db(&self.config).expect("could not open irys db");
+        let mut block_index = BlockIndex::new(&self.config.node_config)
             .await
             .expect("initializing a new block index should be doable");
 
@@ -643,7 +642,7 @@ impl IrysNode {
         let (genesis_block, genesis_commitments, reth_chainspec) = self
             .get_or_create_genesis_info(
                 node_mode,
-                config.consensus.reth.clone(),
+                self.config.consensus.reth.clone(),
                 &irys_db,
                 &block_index,
             )
@@ -651,8 +650,11 @@ impl IrysNode {
 
         // update config with correct timestamp
         // TODO: improve! this is a hack so that the reward curve operates correctly
-        self.config.consensus.genesis.timestamp_millis = genesis_block.timestamp;
+        let mut config = (*self.config.0).clone();
+        config.consensus.genesis.timestamp_millis = genesis_block.timestamp;
+        self.config = Config(Arc::new(config));
 
+        assert_ne!(self.config.consensus.genesis.timestamp_millis, 0);
         // Capture the genesis hash for network consensus
         let genesis_hash = genesis_block.block_hash;
         info!("Node starting with genesis hash: {}", genesis_hash);

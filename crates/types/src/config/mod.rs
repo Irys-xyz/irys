@@ -11,7 +11,7 @@ use crate::irys::IrysSigner;
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
-pub struct Config(Arc<CombinedConfigInner>);
+pub struct Config(pub Arc<CombinedConfigInner>);
 
 impl Config {
     pub fn new(node_config: NodeConfig) -> Self {
@@ -84,7 +84,7 @@ impl From<NodeConfig> for Config {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CombinedConfigInner {
     pub consensus: ConsensusConfig,
     pub node_config: NodeConfig,
