@@ -4,6 +4,9 @@
 //!
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
+#[cfg(test)]
+use std::time::Duration;
+
 use eyre::{eyre, OptionExt as _, Result};
 use irys_types::storage_pricing::{exp_neg_fp18, phantoms::Irys, Amount, LN2_FP18};
 use irys_types::storage_pricing::{mul_div, safe_div, safe_sub, TOKEN_SCALE};
@@ -27,9 +30,9 @@ impl GenesisRelativeTimestamp {
 }
 
 #[cfg(test)]
-impl From<u128> for GenesisRelativeTimestamp {
-    fn from(value: u128) -> Self {
-        Self::new(0, value).unwrap()
+impl From<Duration> for GenesisRelativeTimestamp {
+    fn from(value: Duration) -> Self {
+        Self::new(0, value.as_millis()).unwrap()
     }
 }
 
@@ -158,8 +161,8 @@ mod tests {
     }
 
     /// Convenience: convert years -> seconds since genesis.
-    fn secs(years: u128) -> u128 {
-        years * SECS_PER_YEAR
+    fn secs(years: u128) -> Duration {
+        Duration::from_secs((years * SECS_PER_YEAR).try_into().unwrap())
     }
 
     /// Δ-supply between two years, via the same integer math.
