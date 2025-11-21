@@ -64,7 +64,7 @@ impl Config {
             .div_ceil(self.consensus.num_chunks_in_recall_range);
         ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
 
-        // ensure!(self.consensus.num_chunks_in_partition %self.consensus.num_chunks_in_recall_range == 0, "num chunks per partition should be exactly divisable by the number of chunks in the recall range.");
+        // ensure!(self.consensus.num_chunks_in_partition %self.consensus.num_chunks_in_recall_range == 0, "num chunks per partition should be exactly divisible by the number of chunks in the recall range.");
 
         Ok(())
     }
