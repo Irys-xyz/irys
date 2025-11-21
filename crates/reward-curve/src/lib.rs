@@ -221,9 +221,24 @@ mod tests {
     #[rstest]
     #[case(0, 0)]
     #[case(1, 206_834_660)]
-    #[case(2, 173_926_524)]
-    // #[case(3, 146_254_191)]
-    // #[case(4, 122_984_625)] THESE ERROR!!
+    #[case(2, 380_761_184)]
+    #[case(3, 527_015_375)]
+    #[case(4, 650_000_000)]
+    #[case(5, 753_417_330)]
+    #[case(6, 840_380_592)]
+    #[case(7, 913_507_688)]
+    #[case(8, 975_000_000)]
+    #[case(9, 1_026_708_665)]
+    #[case(10, 1_070_190_296)]
+    #[case(11, 1_106_753_844)]
+    #[case(12, 1_137_500_000)]
+    #[case(13, 1_163_354_333)]
+    #[case(14, 1_185_095_148)]
+    #[case(15, 1_203_376_922)]
+    #[case(16, 1_218_750_000)]
+    #[case(17, 1_231_677_166)]
+    #[case(18, 1_242_547_574)]
+    #[case(19, 1_251_688_461)]
     fn circulating_supply_matches_sheet(#[case] year: u128, #[case] expected: u128) -> Result<()> {
         let curve = test_curve2();
         let actual = circulating_supply(&curve, year)?;
