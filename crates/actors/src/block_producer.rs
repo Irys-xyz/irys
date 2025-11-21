@@ -28,7 +28,7 @@ use irys_reth::{
     IrysEthereumNode,
 };
 use irys_reth_node_bridge::node::NodeProvider;
-use irys_reward_curve::HalvingCurve;
+use irys_reward_curve::{GenesisRelativeTimestamp, HalvingCurve};
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
@@ -499,7 +499,11 @@ pub trait BlockProdStrategy {
 
         let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
 
-        let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
+        let block_reward = self.block_reward(
+            &prev_block_header,
+            current_timestamp,
+            self.inner().config.consensus.genesis.timestamp_millis,
+        )?;
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -1246,11 +1250,16 @@ pub trait BlockProdStrategy {
         &self,
         prev_block_header: &IrysBlockHeader,
         current_timestamp: u128,
+        genesis_timestamp_millis: u128,
     ) -> Result<Amount<irys_types::storage_pricing::phantoms::Irys>, eyre::Error> {
+        let new_ts = GenesisRelativeTimestamp::new(genesis_timestamp_millis, current_timestamp)?;
+        debug!(
+            "We are {}s since genesis",
+            &new_ts.millis_since().saturating_div(1000)
+        );
         let reward_amount = self.inner().reward_curve.reward_between(
-            // adjust ms -> sec
-            prev_block_header.timestamp.saturating_div(1000),
-            current_timestamp.saturating_div(1000),
+            GenesisRelativeTimestamp::new(genesis_timestamp_millis, prev_block_header.timestamp)?,
+            new_ts,
         )?;
         Ok(reward_amount)
     }

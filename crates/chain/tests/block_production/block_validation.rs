@@ -38,9 +38,13 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             &self,
             prev_block_header: &IrysBlockHeader,
             _current_timestamp: u128,
+            genesis_timestamp_millis: u128,
         ) -> eyre::Result<Amount<irys_types::storage_pricing::phantoms::Irys>> {
-            self.prod
-                .block_reward(prev_block_header, self.invalid_timestamp)
+            self.prod.block_reward(
+                prev_block_header,
+                self.invalid_timestamp,
+                genesis_timestamp_millis,
+            )
         }
 
         async fn create_evm_block(
