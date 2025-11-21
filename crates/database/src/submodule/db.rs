@@ -1,11 +1,13 @@
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash,
+    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash, MEGABYTE,
+    TERABYTE,
 };
 use reth_db::{
+    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     transaction::{DbTx, DbTxMut},
-    DatabaseEnv,
+    ClientVersion, DatabaseEnv,
 };
 
 use crate::{
@@ -20,7 +22,18 @@ use super::tables::{
 
 /// Creates or opens a *submodule* MDBX database
 pub fn create_or_open_submodule_db<P: AsRef<Path>>(path: P) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(path, SubmoduleTables::ALL, None)
+    open_or_create_db(
+        path,
+        SubmoduleTables::ALL,
+        Some(
+            DatabaseArguments::new(ClientVersion::default())
+                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+                // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+                .with_growth_step((10 * MEGABYTE).into())
+                .with_shrink_threshold((20 * MEGABYTE).try_into()?)
+                .with_geometry_max_size(Some(2 * TERABYTE)),
+        ),
+    )
 }
 
 /// gets the full data path for the chunk with the provided offset

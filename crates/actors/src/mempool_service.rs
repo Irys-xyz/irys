@@ -636,6 +636,15 @@ impl Inner {
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
                 .await?
             {
+                debug!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer,
+                    tx.commitment_type = ?tx.commitment_type,
+                    tx.anchor = ?tx.anchor,
+                    min_anchor_height = min_anchor_height,
+                    max_anchor_height = max_anchor_height,
+                    "Not promoting commitment tx - anchor validation failed"
+                );
                 continue;
             }
 
@@ -650,6 +659,12 @@ impl Inner {
                 );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.signer = ?tx.signer,
+                        tx.commitment_type = ?tx.commitment_type,
+                        "Not promoting commitment tx - signer already staked"
+                    );
                     continue;
                 }
             }
@@ -741,7 +756,7 @@ impl Inner {
         for tx in submit_ledger_txs {
             // Validate fees based on ledger type
             let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
-                trace!(
+                debug!(
                     tx.id = ?tx.id,
                     tx.ledger_id = tx.ledger_id,
                     "Skipping tx: invalid ledger ID"
@@ -757,6 +772,11 @@ impl Inner {
                         &ema_snapshot,
                         next_block_height,
                     ) else {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.data_size = tx.data_size,
+                            "Failed to calculate term fee"
+                        );
                         continue;
                     };
 
@@ -765,12 +785,17 @@ impl Inner {
                         expected_term_fee,
                         &ema_snapshot,
                     ) else {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.data_size = tx.data_size,
+                            "Failed to calculate perm fee"
+                        );
                         continue;
                     };
 
                     // Validate term fee
                     if tx.term_fee < expected_term_fee {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.actual_term_fee = ?tx.term_fee,
                             tx.expected_term_fee = ?expected_term_fee,
@@ -791,7 +816,7 @@ impl Inner {
                         continue;
                     };
                     if perm_fee < expected_perm_fee.amount {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.actual_perm_fee = ?perm_fee,
                             tx.expected_perm_fee = ?expected_perm_fee.amount,
@@ -804,7 +829,7 @@ impl Inner {
                     if TermFeeCharges::new(tx.term_fee, &self.config.node_config.consensus_config())
                         .is_err()
                     {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.term_fee = ?tx.term_fee,
                             "Skipping Publish tx: invalid term fee structure"
@@ -819,7 +844,7 @@ impl Inner {
                     )
                     .is_err()
                     {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.perm_fee = ?perm_fee,
                             tx.term_fee = ?tx.term_fee,
@@ -830,6 +855,12 @@ impl Inner {
                 }
                 irys_types::DataLedger::Submit => {
                     // todo: add to list of invalid txs because we don't support Submit txs
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.signer = ?tx.signer(),
+                        "Not promoting data tx - Submit ledger not eligible for promotion"
+                    );
+                    continue;
                 }
             }
 
@@ -837,6 +868,14 @@ impl Inner {
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
                 .await?
             {
+                debug!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.anchor = ?tx.anchor,
+                    min_anchor_height = min_anchor_height,
+                    max_anchor_height = max_anchor_height,
+                    "Not promoting data tx - anchor validation failed"
+                );
                 continue;
             }
 
@@ -1022,8 +1061,9 @@ impl Inner {
                 if is_promoted {
                     // If it's promoted skip it
                     warn!(
-                        "Publish candidate {} is already promoted? {}",
-                        &tx_header.id, &is_promoted
+                        tx.id = ?tx_header.id,
+                        tx.promoted_height = ?tx_header.promoted_height,
+                        "Publish candidate is already promoted"
                     );
                     continue;
                 }
@@ -1042,8 +1082,9 @@ impl Inner {
                         {
                             // no previous inclusion
                             warn!(
-                                "Unable to find previous submit inclusion for publish candidate {}",
-                                &tx_header.id
+                                tx.id = ?tx_header.id,
+                                tx.data_root = ?tx_header.data_root,
+                                "Unable to find previous submit inclusion for publish candidate"
                             );
                             continue;
                         }
