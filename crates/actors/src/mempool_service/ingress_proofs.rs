@@ -4,8 +4,12 @@ use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::{
     ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
-    IngressProof,
+    IngressProof, H256,
 };
+use irys_types::irys::IrysSigner;
+use irys_database::db::IrysDatabaseExt as _;
+#[allow(unused_imports)]
+use irys_database::tables::CachedChunksIndex;
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
 use tracing::{instrument, warn};
 
@@ -140,7 +144,8 @@ impl Inner {
     }
 
     /// Validate the ingress proof anchor, and if invalid, remove the ingress proof from the database.
-    /// Returns `Ok(true)` if the proof was removed, `Ok(false)` if it was valid and not removed.
+    /// Returns `Ok(true)` if the proof is expired (anchor invalid), `Ok(false)` if it is still valid.
+    /// This function DOES NOT delete the proof; deletion is performed exclusively by the cache service.
     #[instrument(skip_all, fields(proof.data_root = ?ingress_proof.data_root))]
     pub fn is_ingress_proof_expired(
         &self,
@@ -151,11 +156,85 @@ impl Inner {
             Ok(()) => Ok(false),
             Err(e) => {
                 warn!(
-                    "Ingress proof anchor validation failed: {:?}. Pruning the proof",
+                    "Ingress proof anchor validation failed: {:?}. Marking as expired",
                     e
                 );
                 Ok(true)
             }
         }
     }
+}
+
+/// Generates (and stores) an ingress proof for the provided `data_root` if all chunks are present.
+/// Validates the generated proof's anchor against the canonical chain and gossips it if valid.
+/// Returns the generated proof on success.
+pub fn generate_and_store_ingress_proof(
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+    data_root: DataRoot,
+    anchor_hint: Option<H256>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+) -> eyre::Result<IngressProof> {
+    use irys_database::{cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex};
+    #[allow(unused_imports)]
+    use reth_db::cursor::DbDupCursorRO as _;
+
+    let signer: IrysSigner = config.irys_signer();
+    let chain_id = config.consensus.chain_id;
+    let chunk_size = config.consensus.chunk_size;
+
+    // Load data_size & confirm we have metadata for this root
+    let (data_size, chunk_count) = db.view_eyre(|tx| {
+        let data_size = cached_data_root_by_data_root(tx, data_root)
+            .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
+            .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
+            .data_size;
+        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+        let count = cursor
+            .dup_count(data_root.0)?
+            .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
+        Ok((data_size, count))
+    })?;
+
+    let expected = data_size_to_chunk_count(data_size, chunk_size)?;
+    if chunk_count != expected {
+        return Err(eyre::eyre!(
+            "Cannot generate ingress proof: have {chunk_count} chunks expected {expected}"
+        ));
+    }
+
+    // Pick anchor: hint or latest canonical block
+    let latest_anchor = block_tree_guard
+        .read()
+        .get_latest_canonical_entry()
+        .block_hash;
+    let anchor = anchor_hint.unwrap_or(latest_anchor);
+
+    // Generate + persist
+    let proof = crate::mempool_service::chunks::generate_ingress_proof(
+        db.clone(),
+        data_root,
+        data_size,
+        chunk_size,
+        signer,
+        chain_id,
+        anchor,
+    )?;
+
+    // Validate anchor freshness prior to broadcast
+    match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &proof) {
+        Ok(()) => {
+            let msg = GossipBroadcastMessage::from(proof.clone());
+            if let Err(e) = gossip_sender.send(msg) {
+                tracing::error!(proof.data_root = ?proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
+            }
+        }
+        Err(e) => {
+            // Skip gossip; proof stored for potential later use/regeneration.
+            tracing::debug!(proof.data_root = ?proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
+        }
+    }
+
+    Ok(proof)
 }

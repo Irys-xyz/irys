@@ -1,4 +1,5 @@
 use crate::mempool_service::Inner;
+use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
 use eyre::eyre;
 use irys_database::{
     confirm_data_size_for_data_root,
@@ -292,66 +293,64 @@ impl Inner {
         //  TODO: hook into whatever manages ingress proofs
         let signer_addr = self.config.irys_signer().address();
 
-        // Check if ingress proof exists and get chunk count in a single transaction
-        let chunk_count_opt = self
+        // Determine existing proof state and chunk count
+        let (chunk_count_opt, existing_local_proof, existing_local_proof_expired) = self
             .irys_db
             .view_eyre(|tx| {
-                // First check if proof already exists
                 let ingress_proof = irys_database::ingress_proof_by_data_root_address(
                     tx,
                     chunk.data_root,
                     signer_addr,
                 )?;
 
-                if let Some(compact_proof) = ingress_proof {
-                    match self.is_ingress_proof_expired(&compact_proof.proof) {
+                let mut existing_local_proof: Option<IngressProof> = None;
+                let mut existing_local_proof_expired = false;
+
+                if let Some(compact) = ingress_proof.clone() {
+                    match self.is_ingress_proof_expired(&compact.proof) {
                         Ok(expired) => {
-                            if !expired {
-                                // Proof is valid, no need to proceed further
-                                return Ok(None);
-                            } else {
+                            if expired {
                                 info!(
-                                    proof.data_root = ?compact_proof.proof.data_root,
-                                    "Ingress proof for data root {:?} has expired", &compact_proof.proof.data_root
+                                    proof.data_root = ?compact.proof.data_root,
+                                    "Local ingress proof for data root {:?} expired", &compact.proof.data_root
                                 );
+                                existing_local_proof_expired = true;
+                                existing_local_proof = Some(compact.proof.clone());
+                            } else {
+                                // Valid existing proof - we can early return without chunk counting
+                                return Ok((None, Some(compact.proof.clone()), false));
                             }
                         }
                         Err(e) => {
-                            let message = format!(
-                                "Error validating ingress proof anchor for data root {:?}: {:?}",
-                                &compact_proof.proof.data_root, e
-                            );
                             error!(
-                                proof.data_root = ?compact_proof.proof.data_root,
-                                message
+                                proof.data_root = ?compact.proof.data_root,
+                                "Error validating ingress proof anchor for data root {:?}: {:?}",
+                                &compact.proof.data_root, e
                             );
-                            return Err(eyre::eyre!(message));
+                            return Err(eyre::eyre!("Validation error: {e}"));
                         }
                     }
-                    // Return None to signal early return needed
-                    return Ok(None);
                 }
 
+                // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
                 let count = cursor
                     .dup_count(root_hash)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
-
-                Ok(Some(count))
+                Ok((Some(count), existing_local_proof, existing_local_proof_expired))
             })
             .map_err(|e| {
                 error!("Database error: {:?}", e);
                 CriticalChunkIngressError::DatabaseError
             })?;
 
-        // Handle early return case
-        let Some(chunk_count) = chunk_count_opt else {
-            info!(
-                "Our ingress proof already exists for data root {}",
-                &root_hash
-            );
+        // Early return if we have a valid existing local proof
+        if chunk_count_opt.is_none() && existing_local_proof.is_some() && !existing_local_proof_expired {
+            info!("Local ingress proof already exists and is valid for data root {}", &root_hash);
             return Ok(());
-        };
+        }
+
+        let chunk_count = chunk_count_opt.expect("chunk_count present when proof missing or expired");
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
@@ -368,57 +367,67 @@ impl Inner {
             // we *should* have all the chunks
             // dispatch a ingress proof task
 
-            let db = self.irys_db.clone();
+            // Regenerate if existing local proof expired and transaction(s) are not yet promoted
             let signer = self.config.irys_signer();
-            let chain_id = self.config.consensus.chain_id;
-            let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            if existing_local_proof_expired {
+                // Check if any associated tx is already promoted; if so skip regeneration
+                let should_regenerate = self
+                    .irys_db
+                    .view_eyre(|tx| {
+                        if let Some(cached) = irys_database::cached_data_root_by_data_root(tx, chunk.data_root)? {
+                            for txid in cached.txid_set.iter() {
+                                if let Some(header) = irys_database::tx_header_by_txid(tx, txid)? {
+                                    if header.promoted_height.is_some() {
+                                        return Ok(false);
+                                    }
+                                }
+                            }
+                            Ok(true)
+                        } else {
+                            Ok(false)
+                        }
+                    })
+                    .unwrap_or(false);
 
-            let latest_migrated = self
-                .block_tree_read_guard
-                .read()
-                .get_latest_canonical_entry()
-                .clone();
-
-            let block_tree_read_guard = self.block_tree_read_guard.clone();
-            let config = self.config.clone();
-            self.exec.clone().spawn_blocking(
-                async move {
-                    let proof = generate_ingress_proof(
-                        db.clone(),
-                        root_hash,
-                        data_size,
-                        chunk_size,
-                        signer,
-                        chain_id,
-                        latest_migrated.block_hash,
-                    )
-                    // TODO: handle results instead of unwrapping
-                    .unwrap();
-
-                    match Self::validate_ingress_proof_anchor_static(
+                if should_regenerate {
+                    let db = self.irys_db.clone();
+                    let block_tree_read_guard = self.block_tree_read_guard.clone();
+                    let config = self.config.clone();
+                    let gossip_sender = self.service_senders.gossip_broadcast.clone();
+                    self.exec.clone().spawn_blocking(async move {
+                        if let Err(e) = generate_and_store_ingress_proof(
+                            &block_tree_read_guard,
+                            &db,
+                            &config,
+                            chunk.data_root,
+                            None,
+                            &gossip_sender,
+                        ) {
+                            tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to regenerate expired local ingress proof: {e}");
+                        }
+                    }).in_current_span();
+                } else {
+                    debug!(proof.data_root = ?chunk.data_root, "Skipping regeneration (promoted or missing cached data root)");
+                }
+            } else {
+                // New proof generation path
+                let db = self.irys_db.clone();
+                let block_tree_read_guard = self.block_tree_read_guard.clone();
+                let config = self.config.clone();
+                let gossip_sender = self.service_senders.gossip_broadcast.clone();
+                self.exec.clone().spawn_blocking(async move {
+                    if let Err(e) = generate_and_store_ingress_proof(
                         &block_tree_read_guard,
                         &db,
                         &config,
-                        &proof,
+                        chunk.data_root,
+                        None,
+                        &gossip_sender,
                     ) {
-                        Ok(()) => {
-                            // Gossip the ingress proof
-                            let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
-                            if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-                                tracing::error!("Failed to send gossip data: {:?}", error);
-                            }
-                        }
-                        Err(e) => {
-                            // Don't broadcast expired proofs
-                            debug!(
-                                proof.data_root = ?proof.data_root,
-                                "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e
-                            );
-                        }
+                        tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
                     }
-                }
-                .in_current_span(),
-            );
+                }).in_current_span();
+            }
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
