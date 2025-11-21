@@ -492,14 +492,17 @@ pub async fn prevalidate_block(
         return Err(PreValidationError::EmaMismatch);
     }
 
-    // Check valid curve price
+    let target_block_time_seconds = config.consensus.difficulty_adjustment.block_time;
+
+    // Use height * target_block_time for consistent reward curve positioning
+    let previous_block_seconds = (previous_block.height() * target_block_time_seconds) as u128;
+    let current_block_seconds = previous_block_seconds + target_block_time_seconds as u128;
+
     let reward = reward_curve
-        .reward_between(
-            // adjust ms to sec
-            previous_block.timestamp.saturating_div(1000),
-            block.timestamp.saturating_div(1000),
-        )
+        .reward_between(previous_block_seconds, current_block_seconds)
         .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+
+    // Check valid curve price
     if reward.amount != block.reward_amount {
         return Err(PreValidationError::RewardMismatch {
             got: block.reward_amount,
