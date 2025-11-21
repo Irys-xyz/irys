@@ -4,10 +4,34 @@
 //!
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
-use eyre::{eyre, Result};
+use eyre::{eyre, OptionExt as _, Result};
 use irys_types::storage_pricing::{exp_neg_fp18, phantoms::Irys, Amount, LN2_FP18};
 use irys_types::storage_pricing::{mul_div, safe_div, safe_sub, TOKEN_SCALE};
 use irys_types::U256;
+
+// strict wrapper ensuring that the inner milliseconds value is genesis-relative
+// IF IT IS NOT IT WILL CAUSE EMISSION TO BE INCORRECT
+pub struct GenesisRelativeTimestamp(u128);
+
+impl GenesisRelativeTimestamp {
+    pub fn new(genesis_ts: u128, current_ts: u128) -> eyre::Result<Self> {
+        Ok(Self(
+            current_ts
+                .checked_sub(genesis_ts)
+                .ok_or_eyre("current ts is older than genesis ts")?,
+        ))
+    }
+    pub fn millis_since(&self) -> u128 {
+        self.0
+    }
+}
+
+#[cfg(test)]
+impl From<u128> for GenesisRelativeTimestamp {
+    fn from(value: u128) -> Self {
+        Self::new(0, value).unwrap()
+    }
+}
 
 /// Continuous halving emission curve
 ///
@@ -24,7 +48,14 @@ impl HalvingCurve {
     ///
     /// Returns Ok(0) if the interval is empty.
     /// Returns Err if new_ts is earlier than prev_ts.
-    pub fn reward_between(&self, prev_ts: u128, new_ts: u128) -> Result<Amount<Irys>> {
+    pub fn reward_between(
+        &self,
+        prev_ts: GenesisRelativeTimestamp,
+        new_ts: GenesisRelativeTimestamp,
+    ) -> Result<Amount<Irys>> {
+        // convert to seconds
+        let prev_ts = prev_ts.millis_since().saturating_div(1000);
+        let new_ts = new_ts.millis_since().saturating_div(1000);
         if new_ts < prev_ts {
             return Err(eyre!("new_ts ({new_ts}) < prev_ts ({prev_ts})"));
         }
@@ -188,7 +219,9 @@ mod tests {
         let curve = test_curve();
 
         // what the curve says
-        let actual = curve.reward_between(secs(from_year), secs(to_year))?.amount;
+        let actual = curve
+            .reward_between(secs(from_year).into(), secs(to_year).into())?
+            .amount;
 
         // what the integral says
         let expected = expected_reward(&curve, from_year, to_year)?;
@@ -216,7 +249,9 @@ mod tests {
         };
 
         // what the curve says
-        let actual = curve.reward_between(secs(from_year), secs(to_year))?.amount;
+        let actual = curve
+            .reward_between(secs(from_year).into(), secs(to_year).into())?
+            .amount;
 
         // what the integral says
         let expected = expected_reward(&curve, from_year, to_year)?;
@@ -234,7 +269,7 @@ mod tests {
     fn reward_between_zero_interval_is_zero() -> Result<()> {
         let curve = test_curve();
         let ts = secs(5); // arbitrary
-        let reward = curve.reward_between(ts, ts)?;
+        let reward = curve.reward_between(ts.into(), ts.into())?;
         assert!(reward.amount.is_zero());
         Ok(())
     }
@@ -259,7 +294,7 @@ mod tests {
     #[test]
     fn reward_between_invalid_interval_errors() {
         let curve = test_curve();
-        let res = curve.reward_between(secs(10), secs(9)); // reversed
+        let res = curve.reward_between(secs(10).into(), secs(9).into()); // reversed
         assert!(res.is_err(), "expected error for reversed interval");
     }
 }

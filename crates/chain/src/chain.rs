@@ -628,7 +628,7 @@ impl IrysNode {
 
     /// Initializes the node (genesis or non-genesis)
     #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
-    pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
+    pub async fn start(&mut self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
         let node_mode = &config.node_config.node_mode;
@@ -648,6 +648,10 @@ impl IrysNode {
                 &block_index,
             )
             .await?;
+
+        // update config with correct timestamp
+        // TODO: improve! this is a hack so that the reward curve operates correctly
+        self.config.consensus.genesis.timestamp_millis = genesis_block.timestamp;
 
         // Capture the genesis hash for network consensus
         let genesis_hash = genesis_block.block_hash;
