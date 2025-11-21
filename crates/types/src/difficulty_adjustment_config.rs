@@ -5,9 +5,12 @@ use rust_decimal_macros::dec;
 
 pub fn calculate_initial_difficulty(
     consensus_config: &ConsensusConfig,
-    storage_module_count: u64,
+    // fractional to support 0-packing bootstrapping
+    fully_packed_storage_modules: f64,
 ) -> eyre::Result<U256> {
-    let hashes_per_sec = consensus_config.num_chunks_in_recall_range * storage_module_count;
+    let hashes_per_sec = (consensus_config.num_chunks_in_recall_range as f64
+        * fully_packed_storage_modules)
+        .round() as u64;
     let block_time = consensus_config.difficulty_adjustment.block_time;
 
     eyre::ensure!(
@@ -202,7 +205,7 @@ mod tests {
         let hashes_per_second = consensus_config.num_chunks_in_recall_range * storage_module_count;
 
         let difficulty =
-            calculate_initial_difficulty(&consensus_config, storage_module_count).unwrap();
+            calculate_initial_difficulty(&consensus_config, storage_module_count as f64).unwrap();
 
         let num_blocks = 2000;
         let (block_time, seed) = simulate_mining(num_blocks, hashes_per_second, seed, difficulty);
