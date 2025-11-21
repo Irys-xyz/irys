@@ -1,7 +1,7 @@
 use std::fs::File;
 
 use clap::Parser;
-use irys_reward_curve::{GenesisRelativeTimestamp, HalvingCurve};
+use irys_reward_curve::HalvingCurve;
 use irys_types::{
     storage_pricing::{safe_add, Amount},
     U256,
@@ -54,12 +54,7 @@ fn main() -> eyre::Result<()> {
         s.spawn(move || {
             while prev_ts < total_seconds {
                 let next_ts = (prev_ts + args.block_interval_secs).min(total_seconds);
-                let reward = curve
-                    .reward_between(
-                        GenesisRelativeTimestamp::new(0, prev_ts).unwrap(),
-                        GenesisRelativeTimestamp::new(0, next_ts).unwrap(),
-                    )
-                    .unwrap();
+                let reward = curve.reward_between(prev_ts, next_ts).unwrap();
                 cumulative = safe_add(cumulative, reward.amount).unwrap();
 
                 tx.send([

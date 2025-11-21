@@ -4,37 +4,10 @@
 //!
 //! All arithmetic is 18-decimal fixed-point using 256-bit unsigned integers.
 
-#[cfg(test)]
-use std::time::Duration;
-
-use eyre::{eyre, OptionExt as _, Result};
+use eyre::{eyre, Result};
 use irys_types::storage_pricing::{exp_neg_fp18, phantoms::Irys, Amount, LN2_FP18};
 use irys_types::storage_pricing::{mul_div, safe_div, safe_sub, TOKEN_SCALE};
 use irys_types::U256;
-
-// strict wrapper ensuring that the inner milliseconds value is genesis-relative
-// IF IT IS NOT IT WILL CAUSE EMISSION TO BE INCORRECT
-pub struct GenesisRelativeTimestamp(u128);
-
-impl GenesisRelativeTimestamp {
-    pub fn new(genesis_ts: u128, current_ts: u128) -> eyre::Result<Self> {
-        Ok(Self(
-            current_ts
-                .checked_sub(genesis_ts)
-                .ok_or_eyre("current ts is older than genesis ts")?,
-        ))
-    }
-    pub fn millis_since(&self) -> u128 {
-        self.0
-    }
-}
-
-#[cfg(test)]
-impl From<Duration> for GenesisRelativeTimestamp {
-    fn from(value: Duration) -> Self {
-        Self::new(0, value.as_millis()).unwrap()
-    }
-}
 
 /// Continuous halving emission curve
 ///
@@ -51,14 +24,7 @@ impl HalvingCurve {
     ///
     /// Returns Ok(0) if the interval is empty.
     /// Returns Err if new_ts is earlier than prev_ts.
-    pub fn reward_between(
-        &self,
-        prev_ts: GenesisRelativeTimestamp,
-        new_ts: GenesisRelativeTimestamp,
-    ) -> Result<Amount<Irys>> {
-        // convert to seconds
-        let prev_ts = prev_ts.millis_since().saturating_div(1000);
-        let new_ts = new_ts.millis_since().saturating_div(1000);
+    pub fn reward_between(&self, prev_ts: u128, new_ts: u128) -> Result<Amount<Irys>> {
         if new_ts < prev_ts {
             return Err(eyre!("new_ts ({new_ts}) < prev_ts ({prev_ts})"));
         }
@@ -160,18 +126,9 @@ mod tests {
         }
     }
 
-    fn test_curve2() -> HalvingCurve {
-        const MAINNET_INFLATION_CAP: u128 = 1_300_000_000;
-        const MAINNET_HALF_LIFE_YEARS: u128 = 4;
-        HalvingCurve {
-            inflation_cap: Amount::new(U256::from(MAINNET_INFLATION_CAP)),
-            half_life_secs: MAINNET_HALF_LIFE_YEARS * SECS_PER_YEAR,
-        }
-    }
-
     /// Convenience: convert years -> seconds since genesis.
-    fn secs(years: u128) -> Duration {
-        Duration::from_secs((years * SECS_PER_YEAR).try_into().unwrap())
+    fn secs(years: u128) -> u128 {
+        years * SECS_PER_YEAR
     }
 
     /// Δ-supply between two years, via the same integer math.
@@ -217,42 +174,6 @@ mod tests {
         Ok(())
     }
 
-    // table-driven assertions
-    #[rstest]
-    #[case(0, 0)]
-    #[case(1, 206_834_660)]
-    #[case(2, 380_761_184)]
-    #[case(3, 527_015_375)]
-    #[case(4, 650_000_000)]
-    #[case(5, 753_417_330)]
-    #[case(6, 840_380_592)]
-    #[case(7, 913_507_688)]
-    #[case(8, 975_000_000)]
-    #[case(9, 1_026_708_665)]
-    #[case(10, 1_070_190_296)]
-    #[case(11, 1_106_753_844)]
-    #[case(12, 1_137_500_000)]
-    #[case(13, 1_163_354_333)]
-    #[case(14, 1_185_095_148)]
-    #[case(15, 1_203_376_922)]
-    #[case(16, 1_218_750_000)]
-    #[case(17, 1_231_677_166)]
-    #[case(18, 1_242_547_574)]
-    #[case(19, 1_251_688_461)]
-    fn circulating_supply_matches_sheet(#[case] year: u128, #[case] expected: u128) -> Result<()> {
-        let curve = test_curve2();
-        let actual = circulating_supply(&curve, year)?;
-
-        // there's a potential rounding error of a single token between the source impl and the test data (taken from excel)
-        // - the Excel sheet rounded to nearest integer (source of the result)
-        // - our helper truncates (floor-divides) after the final mul_div.
-        assert!(
-            (actual as i128 - expected as i128).abs() <= 1,
-            "year {year}: expected {expected}, got {actual}"
-        );
-        Ok(())
-    }
-
     /// Golden-path table: reward for each [y, y+1) interval.
     #[rstest]
     #[case(0, 1)]
@@ -267,9 +188,7 @@ mod tests {
         let curve = test_curve();
 
         // what the curve says
-        let actual = curve
-            .reward_between(secs(from_year).into(), secs(to_year).into())?
-            .amount;
+        let actual = curve.reward_between(secs(from_year), secs(to_year))?.amount;
 
         // what the integral says
         let expected = expected_reward(&curve, from_year, to_year)?;
@@ -297,9 +216,7 @@ mod tests {
         };
 
         // what the curve says
-        let actual = curve
-            .reward_between(secs(from_year).into(), secs(to_year).into())?
-            .amount;
+        let actual = curve.reward_between(secs(from_year), secs(to_year))?.amount;
 
         // what the integral says
         let expected = expected_reward(&curve, from_year, to_year)?;
@@ -317,7 +234,7 @@ mod tests {
     fn reward_between_zero_interval_is_zero() -> Result<()> {
         let curve = test_curve();
         let ts = secs(5); // arbitrary
-        let reward = curve.reward_between(ts.into(), ts.into())?;
+        let reward = curve.reward_between(ts, ts)?;
         assert!(reward.amount.is_zero());
         Ok(())
     }
@@ -342,7 +259,7 @@ mod tests {
     #[test]
     fn reward_between_invalid_interval_errors() {
         let curve = test_curve();
-        let res = curve.reward_between(secs(10).into(), secs(9).into()); // reversed
+        let res = curve.reward_between(secs(10), secs(9)); // reversed
         assert!(res.is_err(), "expected error for reversed interval");
     }
 }

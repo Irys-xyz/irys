@@ -21,7 +21,7 @@ use irys_domain::{
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_reward_curve::{GenesisRelativeTimestamp, HalvingCurve};
+use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
@@ -495,23 +495,9 @@ pub async fn prevalidate_block(
     // Check valid curve price
     let reward = reward_curve
         .reward_between(
-            GenesisRelativeTimestamp::new(
-                config.consensus.genesis.timestamp_millis,
-                previous_block.timestamp,
-            )
-            // TODO: proper error type
-            .map_err(|_e| PreValidationError::TimestampOlderThanParent {
-                current: previous_block.timestamp,
-                parent: config.consensus.genesis.timestamp_millis,
-            })?,
-            GenesisRelativeTimestamp::new(
-                config.consensus.genesis.timestamp_millis,
-                block.timestamp,
-            )
-            .map_err(|_e| PreValidationError::TimestampOlderThanParent {
-                current: block.timestamp,
-                parent: config.consensus.genesis.timestamp_millis,
-            })?,
+            // adjust ms to sec
+            previous_block.timestamp.saturating_div(1000),
+            block.timestamp.saturating_div(1000),
         )
         .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
     if reward.amount != block.reward_amount {
