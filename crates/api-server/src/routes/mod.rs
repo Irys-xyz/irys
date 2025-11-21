@@ -15,4 +15,5 @@ pub mod post_version;
 pub mod price;
 pub mod proxy;
 pub mod storage;
+pub mod supply;
 pub mod tx;

@@ -9,6 +9,7 @@ irys-actors.workspace = true
 irys-database.workspace = true
 irys-domain.workspace = true
 irys-reth-node-bridge.workspace = true
+irys-reward-curve.workspace = true
 irys-types.workspace = true
 
 reth.workspace = true
