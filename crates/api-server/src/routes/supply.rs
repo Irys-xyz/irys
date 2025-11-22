@@ -13,7 +13,7 @@ const PERCENT_DIVISOR: u128 = 100;
 #[derive(Debug, Deserialize)]
 pub struct SupplyQuery {
     #[serde(default)]
-    pub estimate: bool,
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,13 +34,14 @@ pub struct SupplyResponse {
 /// Returns the current total token supply including genesis allocation and emissions
 ///
 /// Query parameters:
-/// - `estimate`: boolean (optional) - If true, uses height-based formula calculation. Default: false (sums actual block rewards)
+/// - `exact`: boolean (optional) - If true, sums actual block rewards. Default: false (uses height-based formula)
 ///
-/// Default behavior sums the actual `reward_amount` from all blocks in the canonical chain,
-/// ensuring 100% accuracy. The estimate mode simulates elapsed time as `block_height * target_block_time`
-/// and applies the reward curve formula, matching how individual block rewards are calculated.
+/// Default behavior uses height-based formula calculation, simulating elapsed time as
+/// `block_height * target_block_time` and applying the reward curve formula, matching how
+/// individual block rewards are calculated. Use `?exact=true` to sum the actual `reward_amount`
+/// from all blocks in the canonical chain for absolute accuracy.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
-    match calculate_supply(&state, query.estimate) {
+    match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
             HttpResponse::InternalServerError().body(format!("Error calculating supply: {}", e))
@@ -48,7 +49,7 @@ pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) 
     }
 }
 
-fn calculate_supply(state: &ApiState, use_estimate: bool) -> Result<SupplyResponse> {
+fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
     let tree = state.block_tree.read();
     let (canonical, _) = tree.get_canonical_chain();
 
@@ -75,18 +76,7 @@ fn calculate_supply(state: &ApiState, use_estimate: bool) -> Result<SupplyRespon
             acc + U256::from_le_bytes(account.balance.to_le_bytes())
         });
 
-    let (emitted_amount, calculation_method) = if use_estimate {
-        let curve = HalvingCurve {
-            inflation_cap: config.block_reward_config.inflation_cap,
-            half_life_secs: config.block_reward_config.half_life_secs as u128,
-        };
-
-        let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
-        let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
-
-        let emitted = curve.reward_between(0, simulated_time_seconds)?;
-        (emitted.amount, "estimated")
-    } else {
+    let (emitted_amount, calculation_method) = if use_exact {
         let total_emitted = state.db.view_eyre(|tx| {
             let mut sum = U256::zero();
             for entry in canonical.iter() {
@@ -98,6 +88,17 @@ fn calculate_supply(state: &ApiState, use_estimate: bool) -> Result<SupplyRespon
         })?;
 
         (total_emitted, "actual")
+    } else {
+        let curve = HalvingCurve {
+            inflation_cap: config.block_reward_config.inflation_cap,
+            half_life_secs: config.block_reward_config.half_life_secs as u128,
+        };
+
+        let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
+        let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
+
+        let emitted = curve.reward_between(0, simulated_time_seconds)?;
+        (emitted.amount, "estimated")
     };
 
     let total_supply = genesis_supply + emitted_amount;
