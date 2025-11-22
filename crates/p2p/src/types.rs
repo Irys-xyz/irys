@@ -46,13 +46,15 @@ impl From<IngressProofError> for GossipError {
             IngressProofError::InvalidSignature => {
                 Self::InvalidData(InvalidDataError::IngressProofSignature)
             }
-            IngressProofError::DatabaseError => Self::Internal(InternalGossipError::Database),
+            IngressProofError::DatabaseError(err) => {
+                Self::Internal(InternalGossipError::Database(err))
+            }
             IngressProofError::Other(error) => Self::Internal(InternalGossipError::Unknown(error)),
             IngressProofError::UnstakedAddress => {
                 Self::Internal(InternalGossipError::Unknown("Unstaked Address".into()))
             }
-            IngressProofError::InvalidAnchor(_anchor) => {
-                Self::InvalidData(InvalidDataError::IngressProofAnchor)
+            IngressProofError::InvalidAnchor(anchor) => {
+                Self::InvalidData(InvalidDataError::IngressProofAnchor(anchor))
             }
         }
     }
@@ -67,24 +69,26 @@ impl From<TxIngressError> for GossipError {
                 Self::TransactionIsAlreadyHandled
             }
             // ==== External errors
-            TxIngressError::InvalidSignature => {
+            TxIngressError::InvalidSignature(address) => {
                 // Invalid signature, decrease source reputation
-                Self::InvalidData(InvalidDataError::TransactionSignature)
+                Self::InvalidData(InvalidDataError::TransactionSignature(address))
             }
-            TxIngressError::Unfunded => {
+            TxIngressError::Unfunded(tx_id) => {
                 // Unfunded transaction, decrease source reputation
-                Self::InvalidData(InvalidDataError::TransactionUnfunded)
+                Self::InvalidData(InvalidDataError::TransactionUnfunded(tx_id))
             }
-            TxIngressError::InvalidAnchor => {
+            TxIngressError::InvalidAnchor(anchor) => {
                 // Invalid anchor, decrease source reputation
-                Self::InvalidData(InvalidDataError::TransactionAnchor)
+                Self::InvalidData(InvalidDataError::TransactionAnchor(anchor))
             }
-            TxIngressError::InvalidLedger(_) => {
+            TxIngressError::InvalidLedger(ledger_id) => {
                 // Invalid ledger type, decrease source reputation
-                Self::InvalidData(InvalidDataError::TransactionAnchor)
+                Self::InvalidData(InvalidDataError::TransactionInvalidLedger(ledger_id))
             }
             // ==== Internal errors - shouldn't be communicated to outside
-            TxIngressError::DatabaseError => Self::Internal(InternalGossipError::Database),
+            TxIngressError::DatabaseError(err) => {
+                Self::Internal(InternalGossipError::Database(err))
+            }
             TxIngressError::ServiceUninitialized => {
                 Self::Internal(InternalGossipError::ServiceUninitialized)
             }
@@ -139,16 +143,18 @@ impl GossipError {
 
 #[derive(Debug, Error, Clone)]
 pub enum InvalidDataError {
-    #[error("Invalid transaction signature")]
-    TransactionSignature,
-    #[error("Invalid transaction anchor")]
-    TransactionAnchor,
-    #[error("Transaction unfunded")]
-    TransactionUnfunded,
+    #[error("Invalid transaction signature for address {0}")]
+    TransactionSignature(irys_types::Address),
+    #[error("Invalid transaction anchor: {0}")]
+    TransactionAnchor(irys_types::H256),
+    #[error("Invalid or unsupported ledger ID: {0}")]
+    TransactionInvalidLedger(u32),
+    #[error("Transaction {0} unfunded")]
+    TransactionUnfunded(irys_types::H256),
     #[error("Invalid chunk proof")]
     ChunkInvalidProof,
     #[error("Invalid chunk data hash")]
-    ChinkInvalidDataHash,
+    ChunkInvalidDataHash,
     #[error("Invalid chunk size")]
     ChunkInvalidChunkSize,
     #[error("Invalid chunk data size")]
@@ -163,16 +169,16 @@ pub enum InvalidDataError {
     ExecutionPayloadInvalidStructure,
     #[error("Invalid ingress proof signature")]
     IngressProofSignature,
-    #[error("Invalid ingress proof anchor")]
-    IngressProofAnchor,
+    #[error("Invalid ingress proof anchor: {0}")]
+    IngressProofAnchor(irys_types::BlockHash),
 }
 
 #[derive(Debug, Error, Clone)]
 pub enum InternalGossipError {
     #[error("Unknown internal error: {0}")]
     Unknown(String),
-    #[error("Database error")]
-    Database,
+    #[error("Database error: {0}")]
+    Database(String),
     #[error("Mempool is full")]
     MempoolFull(String),
     #[error("Fund misalignment")]
