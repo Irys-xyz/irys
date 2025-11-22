@@ -8,6 +8,7 @@ use reth::{
     rpc::types::RpcBlockHash,
 };
 use serde::{Deserialize, Serialize};
+use tracing::error;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -44,20 +45,18 @@ pub async fn get_balance(
     let (balance, block_height) = match block_id {
         BlockId::Number(block_number_or_tag) => {
             let resolved_block_num = match block_number_or_tag {
-                BlockNumberOrTag::Latest => {
-                    provider
-                        .last_block_number()
-                        .map_err(|e| ApiError::BalanceUnavailable {
-                            reason: format!("Failed to get latest block number: {}", e),
-                        })?
-                }
-                BlockNumberOrTag::Pending => {
-                    provider
-                        .best_block_number()
-                        .map_err(|e| ApiError::BalanceUnavailable {
-                            reason: format!("Failed to get pending block number: {}", e),
-                        })?
-                }
+                BlockNumberOrTag::Latest => provider.last_block_number().map_err(|e| {
+                    error!("Failed to get latest block number: {}", e);
+                    ApiError::BalanceUnavailable {
+                        reason: "Unable to retrieve latest block".to_string(),
+                    }
+                })?,
+                BlockNumberOrTag::Pending => provider.best_block_number().map_err(|e| {
+                    error!("Failed to get pending block number: {}", e);
+                    ApiError::BalanceUnavailable {
+                        reason: "Unable to retrieve pending block".to_string(),
+                    }
+                })?,
                 BlockNumberOrTag::Earliest => 0,
                 BlockNumberOrTag::Number(num) => num,
                 _ => {
@@ -69,8 +68,11 @@ pub async fn get_balance(
 
             let state_provider = provider
                 .history_by_block_number(resolved_block_num)
-                .map_err(|e| ApiError::BalanceUnavailable {
-                    reason: format!("Failed to get state at block {}: {}", resolved_block_num, e),
+                .map_err(|e| {
+                    error!("Failed to get state at block {}: {}", resolved_block_num, e);
+                    ApiError::BalanceUnavailable {
+                        reason: "Unable to retrieve state at requested block".to_string(),
+                    }
                 })?;
 
             let balance = query_balance(&state_provider, &address)?;
@@ -80,19 +82,34 @@ pub async fn get_balance(
         BlockId::Hash(rpc_block_hash) => {
             let state_provider = provider
                 .state_by_block_hash(rpc_block_hash.block_hash)
-                .map_err(|e| ApiError::BalanceUnavailable {
-                    reason: format!("Failed to get state at block hash: {}", e),
+                .map_err(|e| {
+                    error!(
+                        "Failed to get state at block hash {:?}: {}",
+                        rpc_block_hash.block_hash, e
+                    );
+                    ApiError::BalanceUnavailable {
+                        reason: "Unable to retrieve state at requested block hash".to_string(),
+                    }
                 })?;
 
             let balance = query_balance(&state_provider, &address)?;
 
             let block_height = provider
                 .block_number(rpc_block_hash.block_hash)
-                .map_err(|e| ApiError::BalanceUnavailable {
-                    reason: format!("Failed to get block number for hash: {}", e),
+                .map_err(|e| {
+                    error!(
+                        "Failed to get block number for hash {:?}: {}",
+                        rpc_block_hash.block_hash, e
+                    );
+                    ApiError::BalanceUnavailable {
+                        reason: "Unable to retrieve block number".to_string(),
+                    }
                 })?
-                .ok_or_else(|| ApiError::BalanceUnavailable {
-                    reason: format!("Block not found for hash: {:?}", rpc_block_hash.block_hash),
+                .ok_or_else(|| {
+                    error!("Block not found for hash: {:?}", rpc_block_hash.block_hash);
+                    ApiError::BalanceUnavailable {
+                        reason: "Block not found".to_string(),
+                    }
                 })?;
 
             (balance, block_height)
@@ -113,8 +130,11 @@ fn query_balance(
 ) -> Result<U256, ApiError> {
     Ok(state_provider
         .account_balance(address)
-        .map_err(|e| ApiError::BalanceUnavailable {
-            reason: format!("Failed to query balance: {}", e),
+        .map_err(|e| {
+            error!("Failed to query balance for address {}: {}", address, e);
+            ApiError::BalanceUnavailable {
+                reason: "Unable to retrieve account balance".to_string(),
+            }
         })?
         .map(std::convert::Into::into)
         .unwrap_or(U256::zero()))
