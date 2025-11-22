@@ -3,7 +3,7 @@ use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{Address, BlockHash, U256};
+use irys_types::{u64_stringify, Address, BlockHash, U256};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -14,6 +14,7 @@ use tracing::{debug, error};
 pub struct BalanceResponse {
     pub address: Address,
     pub balance: U256,
+    #[serde(with = "u64_stringify")]
     pub block_height: u64,
     pub block_parameter: String,
 }
