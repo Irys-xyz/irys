@@ -3,6 +3,7 @@ use actix_web::{
     HttpRequest, HttpResponse,
 };
 use awc::Client;
+use std::time::Duration;
 
 use crate::ApiState;
 
@@ -52,7 +53,8 @@ pub async fn proxy(
         actix_web::http::Method::PATCH => client.patch(target_uri),
         _ => return Err(ProxyError::MethodNotAllowed),
     }
-    .no_decompress(); // <- very important!
+    .no_decompress() // <- very important!
+    .timeout(Duration::from_secs(30));
 
     // Forward relevant headers
     for (header_name, header_value) in req.headers() {
