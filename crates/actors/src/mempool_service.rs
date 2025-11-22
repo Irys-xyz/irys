@@ -2653,11 +2653,9 @@ impl MempoolService {
                                         Ok(permit_result) => {
                                             match permit_result {
                                                 Ok(permit) => {
-                                                    let task_info = format!("Mempool message handler for {:?}", msg);
-                                                    let exec = inner.exec.clone();
-
-                                                    exec.spawn_critical("mempool message handler", async move {
+                                                    runtime_handle.spawn(async move {
                                                         let _permit = permit; // Hold until task completes
+                                                        let task_info = format!("Mempool message handler for {:?}", msg);
                                                         if let Err(err) = wait_with_progress(
                                                             inner.handle_message(msg),
                                                             20,
