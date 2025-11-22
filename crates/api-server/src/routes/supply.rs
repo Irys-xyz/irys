@@ -1,7 +1,7 @@
 use actix_web::{web, HttpResponse, Responder};
 use eyre::{eyre, Result};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_reward_curve::{GenesisRelativeTimestamp, HalvingCurve};
+use irys_reward_curve::HalvingCurve;
 use irys_types::U256;
 use serde::{Deserialize, Serialize};
 
@@ -42,10 +42,11 @@ pub struct SupplyResponse {
 /// Returns the current total token supply including genesis allocation and emissions
 ///
 /// Query parameters:
-/// - `estimate`: boolean (optional) - If true, uses fast formula-based calculation. Default: false (sums actual block rewards)
+/// - `estimate`: boolean (optional) - If true, uses height-based formula calculation. Default: false (sums actual block rewards)
 ///
 /// Default behavior sums the actual `reward_amount` from all blocks in the canonical chain,
-/// ensuring 100% accuracy. Use `?estimate=true` for calculation.
+/// ensuring 100% accuracy. The estimate mode simulates elapsed time as `block_height * target_block_time`
+/// and applies the reward curve formula, matching how individual block rewards are calculated.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.estimate) {
         Ok(response) => HttpResponse::Ok().json(response),
@@ -72,7 +73,6 @@ fn calculate_supply(state: &ApiState, use_estimate: bool) -> Result<SupplyRespon
     let block_height = last_block.height;
 
     let config = &state.config.consensus;
-    let genesis_timestamp_millis = config.genesis.timestamp_millis;
 
     let genesis_supply: U256 = config
         .reth
@@ -84,15 +84,15 @@ fn calculate_supply(state: &ApiState, use_estimate: bool) -> Result<SupplyRespon
         });
 
     let (emitted_amount, calculation_method) = if use_estimate {
-        let elapsed =
-            GenesisRelativeTimestamp::new(genesis_timestamp_millis, current_timestamp_millis)?;
-
         let curve = HalvingCurve {
             inflation_cap: config.block_reward_config.inflation_cap,
             half_life_secs: config.block_reward_config.half_life_secs as u128,
         };
 
-        let emitted = curve.total_emitted_estimated(elapsed)?;
+        let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
+        let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
+
+        let emitted = curve.reward_between(0, simulated_time_seconds)?;
         (emitted.amount, "estimated")
     } else {
         let total_emitted = state.db.view_eyre(|tx| {

@@ -41,31 +41,6 @@ impl HalvingCurve {
         Ok(Amount::new(delta))
     }
 
-    /// Returns estimated total tokens emitted from genesis up to the given timestamp
-    ///
-    /// Calculates theoretical cumulative emission using the exponential decay formula:
-    /// `S(t) = R_max × (1 - 2^{-t/T_half})`
-    ///
-    /// # Important
-    /// This provides an **estimated** emission value based on time elapsed and the formula.
-    /// It may differ from actual blockchain emissions if there were any deviations in
-    /// block reward calculations. For accurate values, sum `reward_amount` from all
-    /// blocks in the canonical chain.
-    ///
-    /// # Arguments
-    /// * `timestamp` - Genesis-relative timestamp (milliseconds since genesis)
-    ///
-    /// # Returns
-    /// Estimated total amount of tokens emitted since genesis
-    pub fn total_emitted_estimated(
-        &self,
-        timestamp: GenesisRelativeTimestamp,
-    ) -> Result<Amount<Irys>> {
-        let secs = timestamp.millis_since().saturating_div(1000);
-        let emitted = self.emitted_until(secs)?;
-        Ok(Amount::new(emitted))
-    }
-
     /// Returns total tokens emitted from genesis up to time t (in seconds)
     fn emitted_until(&self, t: u128) -> Result<U256> {
         // decay = 2^-(t / T_half) in fixed-point
