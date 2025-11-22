@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod balance;
 pub mod block;
 pub mod block_index;
 pub mod block_tree;

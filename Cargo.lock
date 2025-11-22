@@ -5018,9 +5018,11 @@ version = "0.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "alloy-eips",
  "awc",
  "base58",
  "eyre",
+ "hex",
  "irys-actors",
  "irys-database",
  "irys-domain",

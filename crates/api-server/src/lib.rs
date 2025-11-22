@@ -1,5 +1,6 @@
 pub mod error;
 pub mod routes;
+pub mod utils;
 
 use actix_cors::Cors;
 use actix_web::{
@@ -17,8 +18,8 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerLi
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
 use routes::{
-    block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool, mining,
-    peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
+    mining, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -125,6 +126,7 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
+        .route("/balance/{address}", web::get().to(balance::get_balance))
         // Ledger endpoints
         .route(
             "/ledger/submit/{miner_address}/summary",
