@@ -165,6 +165,8 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         // Mining endpoint
         .route("/mining/info", web::get().to(mining::get_mining_info))
+        // Supply endpoint
+        .route("/supply", web::get().to(routes::supply::supply))
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {

@@ -5027,6 +5027,7 @@ dependencies = [
  "irys-database",
  "irys-domain",
  "irys-reth-node-bridge",
+ "irys-reward-curve",
  "irys-testing-utils",
  "irys-types",
  "reth",
