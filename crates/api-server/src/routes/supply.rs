@@ -22,7 +22,6 @@ pub struct SupplyResponse {
     pub total_supply: String,
     pub genesis_supply: String,
     pub emitted_supply: String,
-    pub timestamp_millis: u128,
     pub block_height: u64,
     pub inflation_cap: String,
     pub inflation_progress_percent: String,
@@ -62,7 +61,6 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash, false))?
         .ok_or_else(|| eyre!("Block header not found for tip"))?;
 
-    let current_timestamp_millis = last_block.timestamp;
     let block_height = last_block.height;
 
     let config = &state.config.consensus;
@@ -107,7 +105,6 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         total_supply: total_supply.to_string(),
         genesis_supply: genesis_supply.to_string(),
         emitted_supply: emitted_amount.to_string(),
-        timestamp_millis: current_timestamp_millis,
         block_height,
         inflation_cap: config.block_reward_config.inflation_cap.amount.to_string(),
         inflation_progress_percent: calculate_inflation_progress(
