@@ -2708,12 +2708,33 @@ impl MempoolService {
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            let MempoolServiceMessageWithSpan { message: msg, span } = msg;
-            self.inner.handle_message(msg).instrument(span).await?;
+
+        // Process remaining messages with timeout
+        let process_remaining = async {
+            while let Ok(msg) = self.msg_rx.try_recv() {
+                let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+                self.inner.handle_message(msg).instrument(span).await?;
+            }
+            Ok::<(), eyre::Error>(())
+        };
+
+        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
+            Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
+            Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
+            Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
         }
 
-        self.inner.persist_mempool_to_disk().await?;
+        // Persist to disk with timeout
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.persist_mempool_to_disk(),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
+            Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
+            Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+        }
 
         tracing::info!("shutting down Mempool service");
         Ok(())

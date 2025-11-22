@@ -150,6 +150,19 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         unsafe {
             libc::kill(pid, libc::SIGINT);
         }
+
+        // Spawn watchdog thread to force exit if graceful shutdown hangs
+        std::thread::spawn(move || {
+            const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration =
+                std::time::Duration::from_secs(30);
+            std::thread::sleep(GRACEFUL_SHUTDOWN_TIMEOUT);
+
+            eprintln!(
+                "\x1b[1;31mGraceful shutdown timeout after {:?}, forcing exit\x1b[0m",
+                GRACEFUL_SHUTDOWN_TIMEOUT
+            );
+            std::process::abort();
+        });
     }));
 
     Ok(())
