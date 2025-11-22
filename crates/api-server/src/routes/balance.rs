@@ -1,11 +1,13 @@
 use crate::{error::ApiError, utils::address::parse_address, ApiState};
 use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
-use irys_database::{block_header_by_hash, reth_db::Database as _};
+use irys_actors::mempool_service::MempoolServiceMessage;
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_types::{Address, BlockHash, U256};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
-use tracing::error;
+use tokio::sync::oneshot;
+use tracing::{debug, error};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -75,30 +77,43 @@ pub async fn get_balance(
             (balance, resolved_block_num)
         }
         BlockParameter::IrysBlockHash(irys_block_hash) => {
-            let db_tx = state.db.tx().map_err(|e| {
-                error!("Failed to open database transaction: {}", e);
-                ApiError::BalanceUnavailable {
-                    reason: "Unable to access database".to_string(),
-                }
-            })?;
-
-            let irys_block_header =
-                block_header_by_hash(&db_tx, &irys_block_hash, false).map_err(|e| {
-                    error!(
-                        "Failed to get Irys block header for hash {}: {}",
-                        irys_block_hash, e
-                    );
+            let irys_block_header = {
+                let (tx, rx) = oneshot::channel();
+                state
+                    .mempool_service
+                    .send(MempoolServiceMessage::GetBlockHeader(irys_block_hash, false, tx).into())
+                    .expect("expected send to mempool to succeed");
+                let mempool_response = rx.await.map_err(|e| {
+                    error!("Mempool response error: {}", e);
                     ApiError::BalanceUnavailable {
                         reason: "Unable to retrieve block header".to_string(),
                     }
                 })?;
-
-            let irys_block_header = irys_block_header.ok_or_else(|| {
-                error!("Irys block not found for hash: {}", irys_block_hash);
-                ApiError::BalanceUnavailable {
-                    reason: "Block not found".to_string(),
+                match mempool_response {
+                    Some(h) => {
+                        debug!(block.hash = %irys_block_hash, "Found block in mempool");
+                        h
+                    }
+                    None => {
+                        debug!(block.hash = %irys_block_hash, "Block not in mempool, checking database");
+                        state
+                            .db
+                            .view_eyre(|tx| block_header_by_hash(tx, &irys_block_hash, false))
+                            .map_err(|e| {
+                                error!("DB error when reading block header: {}", e);
+                                ApiError::BalanceUnavailable {
+                                    reason: "Unable to retrieve block header".to_string(),
+                                }
+                            })?
+                            .ok_or_else(|| {
+                                error!(block.hash = %irys_block_hash, "Irys block not found in mempool or database");
+                                ApiError::BalanceUnavailable {
+                                    reason: "Block not found".to_string(),
+                                }
+                            })?
+                    }
                 }
-            })?;
+            };
 
             let resolved_block_num = irys_block_header.height;
 
