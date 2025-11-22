@@ -7,10 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::ApiState;
 
-const TOKEN_DECIMALS: u32 = 18;
-const BILLION_DECIMALS: u32 = 9;
-const BILLION_SCALE_POW: u32 = TOKEN_DECIMALS + BILLION_DECIMALS;
-const BILLION_DECIMAL_PLACES: u32 = 6;
 const PERCENT_SCALE: u128 = 10000;
 const PERCENT_DIVISOR: u128 = 100;
 
@@ -24,15 +20,11 @@ pub struct SupplyQuery {
 #[serde(rename_all = "camelCase")]
 pub struct SupplyResponse {
     pub total_supply: String,
-    pub total_supply_billions: String,
     pub genesis_supply: String,
-    pub genesis_supply_billions: String,
     pub emitted_supply: String,
-    pub emitted_supply_billions: String,
     pub timestamp_millis: u128,
     pub block_height: u64,
     pub inflation_cap: String,
-    pub inflation_cap_billions: String,
     pub inflation_progress_percent: String,
     pub calculation_method: String,
 }
@@ -112,37 +104,17 @@ fn calculate_supply(state: &ApiState, use_estimate: bool) -> Result<SupplyRespon
 
     Ok(SupplyResponse {
         total_supply: total_supply.to_string(),
-        total_supply_billions: format_to_billions(total_supply),
         genesis_supply: genesis_supply.to_string(),
-        genesis_supply_billions: format_to_billions(genesis_supply),
         emitted_supply: emitted_amount.to_string(),
-        emitted_supply_billions: format_to_billions(emitted_amount),
         timestamp_millis: current_timestamp_millis,
         block_height,
         inflation_cap: config.block_reward_config.inflation_cap.amount.to_string(),
-        inflation_cap_billions: format_to_billions(config.block_reward_config.inflation_cap.amount),
         inflation_progress_percent: calculate_inflation_progress(
             emitted_amount,
             config.block_reward_config.inflation_cap.amount,
         ),
         calculation_method: calculation_method.to_string(),
     })
-}
-
-fn format_to_billions(amount: U256) -> String {
-    let billion_scale = U256::from(10_u128.pow(BILLION_SCALE_POW));
-
-    if amount.is_zero() {
-        return "0.000000".to_string();
-    }
-
-    let billions = amount / billion_scale;
-    let remainder = amount % billion_scale;
-
-    let decimals = (remainder * U256::from(10_u128.pow(BILLION_DECIMAL_PLACES))) / billion_scale;
-    let decimals_u128: u128 = decimals.try_into().unwrap_or(0);
-
-    format!("{}.{:06}", billions, decimals_u128)
 }
 
 fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
@@ -164,16 +136,6 @@ fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    #[rstest]
-    #[case(0_u128, "0.000000")]
-    #[case(10_000_000_000_u128, "10.000000")]
-    #[case(1_500_000_000_u128, "1.500000")]
-    #[case(123_456_u128, "0.000123")]
-    fn test_format_to_billions(#[case] amount: u128, #[case] expected: &str) {
-        let amount_with_decimals = U256::from(amount) * U256::from(10_u128.pow(18));
-        assert_eq!(format_to_billions(amount_with_decimals), expected);
-    }
 
     #[rstest]
     #[case(0_u128, "0.00")]
