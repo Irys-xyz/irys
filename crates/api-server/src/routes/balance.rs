@@ -1,12 +1,9 @@
 use crate::{error::ApiError, utils::address::parse_address, ApiState};
 use actix_web::web::{self, Json, Path, Query};
-use alloy_eips::{BlockId, BlockNumberOrTag};
-use alloy_primitives::FixedBytes;
-use irys_types::{Address, U256};
-use reth::{
-    providers::{BlockNumReader as _, StateProviderFactory as _},
-    rpc::types::RpcBlockHash,
-};
+use alloy_eips::BlockNumberOrTag;
+use irys_database::{block_header_by_hash, reth_db::Database as _};
+use irys_types::{Address, BlockHash, U256};
+use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -30,6 +27,12 @@ fn default_block_param() -> String {
     "latest".to_string()
 }
 
+#[derive(Debug)]
+enum BlockParameter {
+    NumberOrTag(BlockNumberOrTag),
+    IrysBlockHash(BlockHash),
+}
+
 /// Query account balance at specified block.
 /// Supports hex (0x...) and Base58 addresses.
 pub async fn get_balance(
@@ -39,11 +42,11 @@ pub async fn get_balance(
 ) -> Result<Json<BalanceResponse>, ApiError> {
     let address = parse_address(&path)?;
     let BalanceQuery { block } = query.into_inner();
-    let block_id = parse_block_parameter(&block)?;
+    let block_param = parse_block_parameter(&block)?;
     let provider = &state.reth_provider.provider;
 
-    let (balance, block_height) = match block_id {
-        BlockId::Number(block_number_or_tag) => {
+    let (balance, block_height) = match block_param {
+        BlockParameter::NumberOrTag(block_number_or_tag) => {
             let resolved_block_num = match block_number_or_tag {
                 BlockNumberOrTag::Latest => provider.last_block_number().map_err(|e| {
                     error!("Failed to get latest block number: {}", e);
@@ -66,53 +69,43 @@ pub async fn get_balance(
                 }
             };
 
-            let state_provider = provider
-                .history_by_block_number(resolved_block_num)
-                .map_err(|e| {
-                    error!("Failed to get state at block {}: {}", resolved_block_num, e);
-                    ApiError::BalanceUnavailable {
-                        reason: "Unable to retrieve state at requested block".to_string(),
-                    }
-                })?;
-
+            let state_provider = get_state_at_block(provider, resolved_block_num)?;
             let balance = query_balance(&state_provider, &address)?;
 
             (balance, resolved_block_num)
         }
-        BlockId::Hash(rpc_block_hash) => {
-            let state_provider = provider
-                .state_by_block_hash(rpc_block_hash.block_hash)
-                .map_err(|e| {
+        BlockParameter::IrysBlockHash(irys_block_hash) => {
+            let db_tx = state.db.tx().map_err(|e| {
+                error!("Failed to open database transaction: {}", e);
+                ApiError::BalanceUnavailable {
+                    reason: "Unable to access database".to_string(),
+                }
+            })?;
+
+            let irys_block_header =
+                block_header_by_hash(&db_tx, &irys_block_hash, false).map_err(|e| {
                     error!(
-                        "Failed to get state at block hash {:?}: {}",
-                        rpc_block_hash.block_hash, e
+                        "Failed to get Irys block header for hash {}: {}",
+                        irys_block_hash, e
                     );
                     ApiError::BalanceUnavailable {
-                        reason: "Unable to retrieve state at requested block hash".to_string(),
+                        reason: "Unable to retrieve block header".to_string(),
                     }
                 })?;
 
+            let irys_block_header = irys_block_header.ok_or_else(|| {
+                error!("Irys block not found for hash: {}", irys_block_hash);
+                ApiError::BalanceUnavailable {
+                    reason: "Block not found".to_string(),
+                }
+            })?;
+
+            let resolved_block_num = irys_block_header.height;
+
+            let state_provider = get_state_at_block(provider, resolved_block_num)?;
             let balance = query_balance(&state_provider, &address)?;
 
-            let block_height = provider
-                .block_number(rpc_block_hash.block_hash)
-                .map_err(|e| {
-                    error!(
-                        "Failed to get block number for hash {:?}: {}",
-                        rpc_block_hash.block_hash, e
-                    );
-                    ApiError::BalanceUnavailable {
-                        reason: "Unable to retrieve block number".to_string(),
-                    }
-                })?
-                .ok_or_else(|| {
-                    error!("Block not found for hash: {:?}", rpc_block_hash.block_hash);
-                    ApiError::BalanceUnavailable {
-                        reason: "Block not found".to_string(),
-                    }
-                })?;
-
-            (balance, block_height)
+            (balance, resolved_block_num)
         }
     };
 
@@ -122,6 +115,18 @@ pub async fn get_balance(
         block_height,
         block_parameter: block,
     }))
+}
+
+fn get_state_at_block(
+    provider: &impl reth::providers::StateProviderFactory,
+    block_num: u64,
+) -> Result<impl reth::providers::StateProvider, ApiError> {
+    provider.history_by_block_number(block_num).map_err(|e| {
+        error!("Failed to get state at block {}: {}", block_num, e);
+        ApiError::BalanceUnavailable {
+            reason: "Unable to retrieve state at requested block".to_string(),
+        }
+    })
 }
 
 fn query_balance(
@@ -140,34 +145,43 @@ fn query_balance(
         .unwrap_or(U256::zero()))
 }
 
-fn parse_block_parameter(block: &str) -> Result<BlockId, ApiError> {
+fn parse_block_parameter(block: &str) -> Result<BlockParameter, ApiError> {
     match block {
-        "latest" => Ok(BlockId::Number(BlockNumberOrTag::Latest)),
-        "pending" => Ok(BlockId::Number(BlockNumberOrTag::Pending)),
-        "earliest" => Ok(BlockId::Number(BlockNumberOrTag::Earliest)),
-        "safe" => Ok(BlockId::Number(BlockNumberOrTag::Safe)),
-        "finalized" => Ok(BlockId::Number(BlockNumberOrTag::Finalized)),
+        "latest" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Latest)),
+        "pending" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Pending)),
+        "earliest" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Earliest)),
+        "safe" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Safe)),
+        "finalized" => Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Finalized)),
         _ => {
+            // Try parsing as a block number
             if let Ok(num) = block.parse::<u64>() {
-                return Ok(BlockId::Number(BlockNumberOrTag::Number(num)));
+                return Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(num)));
             }
 
+            // Try parsing as hex (with or without 0x prefix)
             if let Some(hex_str) = block.strip_prefix("0x") {
+                // If it's 64 hex chars, treat as Irys block hash
                 if hex_str.len() == 64 {
                     let hash_bytes =
                         hex::decode(hex_str).map_err(|_| ApiError::InvalidBlockParameter {
                             parameter: block.to_string(),
                         })?;
 
-                    let block_hash = FixedBytes::<32>::from_slice(&hash_bytes);
-                    return Ok(BlockId::Hash(RpcBlockHash {
-                        block_hash,
-                        require_canonical: Some(true),
-                    }));
+                    let irys_block_hash = BlockHash::from_slice(&hash_bytes);
+                    return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
                 }
 
+                // Otherwise try as hex block number
                 if let Ok(num) = u64::from_str_radix(hex_str, 16) {
-                    return Ok(BlockId::Number(BlockNumberOrTag::Number(num)));
+                    return Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(num)));
+                }
+            }
+
+            // Try parsing as base58 (Irys block hash format)
+            if let Ok(decoded) = base58::FromBase58::from_base58(block) {
+                if decoded.len() == 32 {
+                    let irys_block_hash = BlockHash::from_slice(&decoded);
+                    return Ok(BlockParameter::IrysBlockHash(irys_block_hash));
                 }
             }
 
@@ -193,7 +207,7 @@ mod tests {
         let result = parse_block_parameter(input);
         assert!(result.is_ok());
 
-        if let Ok(BlockId::Number(BlockNumberOrTag::Number(num))) = result {
+        if let Ok(BlockParameter::NumberOrTag(BlockNumberOrTag::Number(num))) = result {
             assert_eq!(num, expected);
         } else {
             panic!("Expected BlockNumberOrTag::Number({})", expected);
@@ -209,21 +223,51 @@ mod tests {
     fn test_parse_block_tag(#[case] input: &str, #[case] expected: BlockNumberOrTag) {
         let result = parse_block_parameter(input);
         assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), BlockId::Number(tag) if tag == expected));
+        assert!(matches!(result.unwrap(), BlockParameter::NumberOrTag(tag) if tag == expected));
     }
 
     #[rstest]
     #[case("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")]
     #[case("0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")]
     #[case("0x0000000000000000000000000000000000000000000000000000000000000000")]
-    fn test_parse_block_hash(#[case] input: &str) {
+    fn test_parse_irys_block_hash_hex(#[case] input: &str) {
         let result = parse_block_parameter(input);
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "Failed to parse hex Irys block hash: {}",
+            input
+        );
 
-        if let Ok(BlockId::Hash(rpc_hash)) = result {
-            assert_eq!(rpc_hash.require_canonical, Some(true));
+        if let Ok(BlockParameter::IrysBlockHash(_)) = result {
+            // Success
         } else {
-            panic!("Expected BlockId::Hash for input: {}", input);
+            panic!(
+                "Expected BlockParameter::IrysBlockHash for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_irys_block_hash_base58() {
+        // Create a test Irys block hash and encode it as base58
+        let test_hash = BlockHash::from([42_u8; 32]);
+        let base58_encoded = base58::ToBase58::to_base58(test_hash.as_bytes());
+
+        let result = parse_block_parameter(&base58_encoded);
+        assert!(
+            result.is_ok(),
+            "Failed to parse base58 Irys block hash: {}",
+            base58_encoded
+        );
+
+        if let Ok(BlockParameter::IrysBlockHash(parsed_hash)) = result {
+            assert_eq!(parsed_hash, test_hash);
+        } else {
+            panic!(
+                "Expected BlockParameter::IrysBlockHash for base58 input: {}",
+                base58_encoded
+            );
         }
     }
 
