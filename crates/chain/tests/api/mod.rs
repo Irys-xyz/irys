@@ -24,7 +24,7 @@ pub async fn block_index_endpoint_request(
 ) -> reqwest::Response {
     client_request(&format!(
         "{}{}?height={}&limit={}",
-        &address, "/v1/block_index", &height, &limit
+        &address, "/v1/block-index", &height, &limit
     ))
     .await
 }
