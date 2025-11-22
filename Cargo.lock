@@ -5019,7 +5019,6 @@ dependencies = [
  "actix-cors",
  "actix-web",
  "alloy-eips",
- "alloy-primitives",
  "awc",
  "base58",
  "eyre",
