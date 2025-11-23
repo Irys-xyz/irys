@@ -64,7 +64,7 @@ pub async fn post_commitment_tx(
                     .body(format!("{err} (anchor: {anchor})")))
             }
             TxIngressError::DatabaseError(ref db_err) => {
-                tracing::error!("API: {}", err);
+                tracing::error!("API: Database error: {}", db_err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
                     .body("Internal database error"))
             }
