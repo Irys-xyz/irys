@@ -27,7 +27,7 @@ pub async fn post_commitment_tx(
             err
         );
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {err}")));
+            .body("Failed to deliver transaction"));
     }
 
     let msg_result = oneshot_rx.await;
@@ -36,7 +36,7 @@ pub async fn post_commitment_tx(
     if let Err(err) = msg_result {
         tracing::error!("API: {}", err);
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {err}")));
+            .body("Failed to deliver transaction"));
     }
 
     // If message delivery succeeded, check for validation errors within the response
@@ -57,7 +57,7 @@ pub async fn post_commitment_tx(
             TxIngressError::Other(err) => {
                 tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Failed to deliver transaction: {err}")))
+                    .body("Failed to deliver transaction"))
             }
             TxIngressError::InvalidAnchor(anchor) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
@@ -66,12 +66,12 @@ pub async fn post_commitment_tx(
             TxIngressError::DatabaseError(ref db_err) => {
                 tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal database error: {db_err}")))
+                    .body("Internal database error"))
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {}", err);
                 Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal service error: {err}")))
+                    .body("Internal service error"))
             }
             TxIngressError::CommitmentValidationError(commitment_validation_error) => {
                 Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
@@ -84,20 +84,16 @@ pub async fn post_commitment_tx(
             TxIngressError::BalanceFetchError { address, reason } => {
                 tracing::error!("API: Balance fetch error for {}: {}", address, reason);
                 Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
-                    .body(format!("Unable to verify balance for {address}: {reason}")))
+                    .body("Unable to verify balance"))
             }
             TxIngressError::MempoolFull(reason) => {
                 tracing::warn!("API: Mempool at capacity: {}", reason);
-                Ok(
-                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
-                        "Mempool is at capacity. Please try again later. {reason}"
-                    )),
-                )
+                Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
+                    .body("Mempool is at capacity. Please try again later."))
             }
             TxIngressError::FundMisalignment(reason) => {
                 tracing::debug!("Tx has invalid funding params: {}", reason);
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("Funding for tx is invalid. {reason}")))
+                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body("Funding for tx is invalid"))
             }
         };
     }
