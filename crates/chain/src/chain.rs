@@ -2098,7 +2098,10 @@ async fn stake_and_pledge(
         signer.sign_commitment(&mut stake_tx)?;
 
         post_commitment_tx(&stake_tx).await.unwrap();
-        debug!("Posted stake tx {:?} (value: {}, fee: {})", &stake_tx.id, &stake_tx.value, &stake_tx.fee);
+        debug!(
+            "Posted stake tx {:?} (value: {}, fee: {})",
+            &stake_tx.id, &stake_tx.value, &stake_tx.fee
+        );
         stake_tx.id
     } else {
         debug!("Local mining address {:?} is staked", &address);
