@@ -87,7 +87,7 @@ struct CudaDeviceProp {
     can_use_host_pointer_for_registered_mem: c_int,
     cooperative_launch: c_int,
     cooperative_multi_device_launch: c_int,
-    // spellchecker:disable-line
+    // spellchecker:ignore-next-line
     shared_mem_per_block_optin: usize,
     pageable_memory_access_uses_host_page_tables: c_int,
     direct_managed_mem_access_from_host: c_int,
