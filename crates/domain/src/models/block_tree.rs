@@ -347,7 +347,8 @@ impl BlockTree {
                 // Mid-epoch blocks: accumulate new commitment transactions into the existing
                 // commitment snapshot without triggering epoch state transitions
                 for commitment_tx in &commitment_txs {
-                    let _status = commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
+                    let _status =
+                        commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
                     // TODO: we should be asserting the status here... should it always be `Accepted`??
                 }
 
@@ -1294,7 +1295,6 @@ pub fn build_current_commitment_snapshot_from_index(
 
     let start = last_epoch_block_height + 1;
 
-
     // Loop though all the blocks starting with the first block following the last epoch block
     for height in start..=latest.height {
         // Query each block to see if they have commitment txids
@@ -1313,8 +1313,7 @@ pub fn build_current_commitment_snapshot_from_index(
 
                 // Apply them to the commitment snapshot
                 let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
-                 // TODO: we should be asserting the status here... should it always be `Accepted`??
-
+                // TODO: we should be asserting the status here... should it always be `Accepted`??
             }
         }
     }
