@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod balance;
 pub mod block;
 pub mod block_index;
 pub mod block_tree;
@@ -15,4 +16,5 @@ pub mod post_version;
 pub mod price;
 pub mod proxy;
 pub mod storage;
+pub mod supply;
 pub mod tx;

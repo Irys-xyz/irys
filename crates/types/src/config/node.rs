@@ -680,6 +680,7 @@ impl NodeConfig {
                 .expect("consensus cfg does not exist"),
             ConsensusOptions::Testnet => ConsensusConfig::testnet(),
             ConsensusOptions::Testing => ConsensusConfig::testing(),
+            ConsensusOptions::Mainnet => ConsensusConfig::mainnet(),
             ConsensusOptions::Custom(consensus_config) => consensus_config.clone(),
         }
     }

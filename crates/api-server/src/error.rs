@@ -27,6 +27,12 @@ pub enum ApiError {
     EmptyCanonicalChain,
     #[error("Block not found: {block_hash}")]
     BlockNotFound { block_hash: String },
+    #[error("Invalid address format '{address}': {error}")]
+    InvalidAddressFormat { address: String, error: String },
+    #[error("Balance unavailable: {reason}")]
+    BalanceUnavailable { reason: String },
+    #[error("Invalid block parameter: {parameter}")]
+    InvalidBlockParameter { parameter: String },
 }
 
 impl ApiError {
@@ -48,6 +54,9 @@ impl ResponseError for ApiError {
             Self::CanonicalChainError(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::EmptyCanonicalChain => StatusCode::SERVICE_UNAVAILABLE,
             Self::BlockNotFound { .. } => StatusCode::NOT_FOUND,
+            Self::InvalidAddressFormat { .. } => StatusCode::BAD_REQUEST,
+            Self::BalanceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InvalidBlockParameter { .. } => StatusCode::BAD_REQUEST,
         }
     }
 
