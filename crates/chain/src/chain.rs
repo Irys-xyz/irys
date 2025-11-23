@@ -663,6 +663,24 @@ impl IrysNode {
             )?;
         }
 
+        #[cfg(feature = "nvidia")]
+        {
+            use irys_packing::cuda_config::{CUDAConfig, NvidiaGpuConfig};
+            let device_count =
+                NvidiaGpuConfig::get_device_count().map_err(|e| eyre::eyre!("{}", &e))?;
+            // only check GPU0, we can only use a single GPU right now.
+            let gpu_info = NvidiaGpuConfig::query_device(0).map_err(|e| eyre::eyre!("{}", &e))?;
+            if device_count > 1 {
+                warn!("Unable to use multiple GPUs right now - using device 0")
+            }
+            info!("Found 1 CUDA GPUs - {}", &gpu_info.device_name);
+            let gpu_config = CUDAConfig::from_device_default()?;
+            info!(
+                "Using blocks: {}, threads per block: {}",
+                &gpu_config.blocks, &gpu_config.threads_per_block
+            );
+        }
+
         // all async tasks will be run on a new tokio runtime
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "packing-bench"
+path = "src/bench.rs"
+required-features = ["nvidia"]
+
 [dependencies]
 irys-c.workspace = true
 irys-types.workspace = true

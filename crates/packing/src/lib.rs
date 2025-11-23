@@ -7,7 +7,12 @@ use irys_types::{
 };
 
 #[cfg(feature = "nvidia")]
+pub use crate::cuda_config::CUDAConfig;
+#[cfg(feature = "nvidia")]
+pub mod cuda_config;
+#[cfg(feature = "nvidia")]
 pub use irys_c::capacity_cuda;
+
 use serde::{Deserialize, Serialize};
 
 /// Unpacks a PackedChunk into an UnpackedChunk by recomputing the required entropy,
@@ -117,9 +122,9 @@ pub fn capacity_pack_range_cuda_c(
     partition_hash: PartitionHash,
     entropy_packing_iterations: u32,
     irys_chain_id: u64,
+    config: CUDAConfig,
     entropy: &mut Vec<u8>,
 ) -> eyre::Result<()> {
-
     let mining_addr_len = mining_address.len();
     let partition_hash_len = partition_hash.0.len();
     let mining_addr = mining_address.as_ptr() as *const std::os::raw::c_uchar;
@@ -138,15 +143,10 @@ pub fn capacity_pack_range_cuda_c(
     );
 
     let result;
-    let blocks: i32 = std::env::var("JDBG_BLOCKS")
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(40);
 
-    let threads_per_block: i32 =std::env::var("JDBG_THREADS")
-    .ok()
-    .and_then(|s| s.parse().ok())
-    .unwrap_or(128);
+    let blocks = config.blocks;
+    let threads_per_block = config.threads_per_block;
+    println!("blocks: {}, threads: {}", &blocks, &threads_per_block);
 
     unsafe {
         result = capacity_cuda::compute_entropy_chunks_cuda(
@@ -160,7 +160,7 @@ pub fn capacity_pack_range_cuda_c(
             entropy_ptr,
             entropy_packing_iterations,
             blocks,
-            threads_per_block
+            threads_per_block,
         );
 
         entropy.set_len(entropy.capacity());
@@ -168,7 +168,7 @@ pub fn capacity_pack_range_cuda_c(
     use capacity_cuda::entropy_chunk_errors::*;
     match result {
         NO_ERROR => Ok(()),
-       _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result))
+        _ => Err(eyre::eyre!("GPU kernel error: {:?}", &result)),
     }
 }
 
@@ -193,6 +193,7 @@ pub fn capacity_pack_range_with_data_cuda_c(
         partition_hash,
         entropy_packing_iterations,
         irys_chain_id,
+        CUDAConfig::from_device_default()?,
         &mut entropy,
     )?;
 
@@ -433,7 +434,7 @@ mod tests {
             mining_address,
             chunk_offset,
             partition_hash,
-             testing_config.entropy_packing_iterations,
+            testing_config.entropy_packing_iterations,
             testing_config.chunk_size as usize,
             &mut chunk,
             testing_config.chain_id,
@@ -443,7 +444,7 @@ mod tests {
             mining_address,
             chunk_offset + 1,
             partition_hash,
-             testing_config.entropy_packing_iterations,
+            testing_config.entropy_packing_iterations,
             testing_config.chunk_size as usize,
             &mut chunk2,
             testing_config.chain_id,
@@ -490,10 +491,10 @@ mod tests {
             partition_hash.into(),
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
+            CUDAConfig::from_device_default().unwrap(),
             &mut c_chunk_cuda,
-        ).unwrap();
-
-
+        )
+        .unwrap();
 
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);
@@ -594,7 +595,7 @@ mod tests {
     #[test]
     fn test_bench_chunks_packing_cuda() {
         let mut testing_config = ConsensusConfig::testing();
-        testing_config.chunk_size =ConsensusConfig::CHUNK_SIZE;
+        testing_config.chunk_size = ConsensusConfig::CHUNK_SIZE;
         testing_config.entropy_packing_iterations = 100_000;
         let mut rng = rand::thread_rng();
         let mining_address = Address::random();
@@ -625,7 +626,8 @@ mod tests {
             partition_hash.into(),
             testing_config.entropy_packing_iterations,
             testing_config.chain_id,
-        ).unwrap();
+        )
+        .unwrap();
 
         let elapsed = now.elapsed();
         println!("C CUDA implementation: {:.2?}", elapsed);

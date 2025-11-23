@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
-use irys_packing::capacity_pack_range_cuda_c;
+use irys_packing::{capacity_pack_range_cuda_c, CUDAConfig};
 use irys_types::{partition::PartitionHash, split_interval, Config, PartitionChunkRange};
 use tokio::sync::Semaphore;
 use tokio::task::yield_now;
@@ -83,7 +83,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
             // Pack batch on GPU
             let handle = runtime_handle.clone().spawn(async move {
                 let out = runtime_handle
-                    .spawn_blocking(move || {
+                    .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
                         let mut out: Vec<u8> = Vec::with_capacity(
                             (num_chunks * chunk_size as u32).try_into().unwrap(),
                         );
@@ -94,11 +94,13 @@ impl super::PackingStrategy for CudaPackingStrategy {
                             partition_hash,
                             entropy_iterations,
                             chain_id,
+                            CUDAConfig::from_device_default()?,
                             &mut out,
-                        );
-                        out
+                        )?;
+                        eyre::Result::Ok(out)
                     })
                     .await
+                    .unwrap() // TODO: error handling
                     .unwrap();
 
                 // Write packed chunks

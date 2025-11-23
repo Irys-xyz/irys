@@ -154,6 +154,11 @@ __global__ void compute_entropy_chunks_cuda_kernel(
     }
 }
 
+extern "C" int get_registers() {
+        cudaFuncAttributes attr;
+        cudaFuncGetAttributes(&attr, compute_entropy_chunks_cuda_kernel);
+        return attr.numRegs;
+}
 
 /**
  * Computes the entropy chunks for the given list of chunks.
@@ -198,14 +203,12 @@ extern "C" entropy_chunk_errors compute_entropy_chunks_cuda(const unsigned char 
 
 
     // Launch kernel
-    // int blocks = (chunks_count + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-    // int blocks = 160;
-    // int threads_per_block = 256; 
-    // int blocks = 40;
-    // int threads_per_block = 128;
     // Record start event
     cudaEventRecord(start);
+    
     printf("%ix%i\n", threads_per_block, blocks);
+
+
     compute_entropy_chunks_cuda_kernel<<<blocks, threads_per_block>>>(d_chunk_id, chunk_offset_start, chunks_count, d_chunks, packing_sha_1_5_s);
 
     // Record stop event

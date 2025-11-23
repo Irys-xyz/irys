@@ -64,7 +64,7 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
         .flag("-O3")
         .flag("--use_fast_math")
         .flag("--gpu-architecture=native") // optimise for local GPU
-        // .flag("--ptxas-options=-v")
+        // .flag("--ptxas-options=-v") // enable to see register usage
         .flag("--extra-device-vectorization")
         .flag("--fmad=true")
         .flag("--maxrregcount=0")

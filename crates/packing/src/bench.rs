@@ -5,15 +5,17 @@ use std::time::*;
 
 #[cfg(feature = "nvidia")]
 pub fn main() {
+    use irys_packing::CUDAConfig;
     use irys_types::Address;
 
-    std::env::set_var("JDBG_BLOCKS", "82"); // 3090: 82, 5090: 170
-    std::env::set_var("JDBG_THREADS", "128");
+    // std::env::set_var("JDBG_BLOCKS", "40"); // 3090: 82, 5090: 170
+    // std::env::set_var("JDBG_THREADS", "128");
+
     // std::env::set_var("OPENSSL_ia32cap", "~0x200000200000000");
 
     let mut testing_config = ConsensusConfig::testing();
     testing_config.chunk_size = ConsensusConfig::CHUNK_SIZE;
-    testing_config.entropy_packing_iterations = 1000000;
+    testing_config.entropy_packing_iterations = 1_000_000;
 
     let counts = [
         1, 100, 500, 1000, 1500, 2000, 2500, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000,
@@ -24,6 +26,7 @@ pub fn main() {
 
     let runs_per = 2;
     let mut out = counts.map(|c| (c, vec![]));
+    let device_config = CUDAConfig::from_device_default().unwrap();
     for (count, times) in &mut out {
         let mut total_elapsed = Duration::ZERO;
 
@@ -49,13 +52,17 @@ pub fn main() {
                 partition_hash,
                 testing_config.entropy_packing_iterations,
                 testing_config.chain_id,
+                device_config.clone(),
                 &mut entropy,
             )
             .unwrap();
 
             let elapsed = now.elapsed();
             total_elapsed += elapsed;
-            println!("size {} run {} C CUDA implementation: {:.2?}", count, run, elapsed);
+            println!(
+                "size {} run {} C CUDA implementation: {:.2?}",
+                count, run, elapsed
+            );
 
             times.push(elapsed);
             // let chunked = entropy.chunks(ConsensusConfig::CHUNK_SIZE as usize);
@@ -90,13 +97,18 @@ pub fn main() {
                 }
             }
         }
-        
     }
 
     println!("RESULTS");
     for (count, times) in out {
-        println!("{} {:?} {}ms", &count, &times.iter().map(std::time::Duration::as_millis).collect::<Vec<_>>(), (times.iter().fold(Duration::ZERO, |acc, v| {
-            acc + *v
-        }) / runs_per).as_millis())
+        println!(
+            "{} {:?} {}ms",
+            &count,
+            &times
+                .iter()
+                .map(std::time::Duration::as_millis)
+                .collect::<Vec<_>>(),
+            (times.iter().fold(Duration::ZERO, |acc, v| { acc + *v }) / runs_per).as_millis()
+        )
     }
 }
