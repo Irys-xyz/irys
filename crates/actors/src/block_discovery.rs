@@ -273,6 +273,10 @@ impl BlockDiscoveryServiceInner {
         let epoch_config = self.config.consensus.epoch.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
+        let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
+
+        let is_epoch_block =
+            new_block_header.height > 0 && new_block_header.height % blocks_in_epoch == 0;
 
         debug!(
             block.height = ?new_block_header.height,
@@ -280,9 +284,10 @@ impl BlockDiscoveryServiceInner {
             block.global_step_counter = new_block_header.vdf_limiter_info.global_step_number,
             block.output = ?new_block_header.vdf_limiter_info.output,
             block.prev_output = ?new_block_header.vdf_limiter_info.prev_output,
-            "\nPre Validating block height {} hash {}",
+            "\nPre Validating block height {} hash {} (epoch block? {})",
             new_block_header.height,
-            new_block_header.block_hash
+            new_block_header.block_hash,
+            is_epoch_block
         );
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
@@ -607,13 +612,17 @@ impl BlockDiscoveryServiceInner {
                 });
             }
         }
-        // for commitments
-        for tx in commitments.iter() {
-            if !valid_tx_anchor_blocks.contains(&tx.anchor) {
-                return Err(BlockDiscoveryError::InvalidAnchor {
-                    item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
-                    anchor: tx.anchor,
-                });
+
+        // for commitments, only validate if we're not an epoch block
+        // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
+        if !is_epoch_block {
+            for tx in commitments.iter() {
+                if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+                    return Err(BlockDiscoveryError::InvalidAnchor {
+                        item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
+                        anchor: tx.anchor,
+                    });
+                }
             }
         }
 
@@ -678,8 +687,6 @@ impl BlockDiscoveryServiceInner {
                 all_txs.extend_from_slice(&publish_txs);
 
                 // Check if we've reached the end of an epoch and should finalize commitments
-                let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
-                let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
 
                 let arc_commitment_txs = Arc::new(commitments);
 
