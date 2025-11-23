@@ -256,6 +256,7 @@ impl BlockTree {
         let mut commitment_snapshot: CommitmentSnapshot =
             build_current_commitment_snapshot_from_index(
                 block_index_guard.clone(),
+                start_block_hash,
                 arc_epoch_snapshot.clone(),
                 db.clone(),
                 consensus_config,
@@ -346,7 +347,8 @@ impl BlockTree {
                 // Mid-epoch blocks: accumulate new commitment transactions into the existing
                 // commitment snapshot without triggering epoch state transitions
                 for commitment_tx in &commitment_txs {
-                    commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
+                    let _status = commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
+                    // TODO: we should be asserting the status here... should it always be `Accepted`??
                 }
 
                 epoch_snapshot
@@ -1273,45 +1275,46 @@ pub async fn get_canonical_chain(
 /// Initialized commitment snapshot containing all commitments from the current epoch
 pub fn build_current_commitment_snapshot_from_index(
     block_index_guard: BlockIndexReadGuard,
+    start_block_hash: BlockHash,
     epoch_snapshot: Arc<EpochSnapshot>,
     db: DatabaseProvider,
     consensus_config: &ConsensusConfig,
 ) -> CommitmentSnapshot {
     let num_blocks_in_epoch = consensus_config.epoch.num_blocks_in_epoch;
     let block_index = block_index_guard.read();
-    let latest_item = block_index.get_latest_item();
 
     let mut snapshot = CommitmentSnapshot::default();
 
-    if let Some(latest_item) = latest_item {
-        let tx = db.tx().unwrap();
+    let tx = db.tx().unwrap();
 
-        let latest = block_header_by_hash(&tx, &latest_item.block_hash, false)
+    let latest = block_header_by_hash(&tx, &start_block_hash, false)
+        .unwrap()
+        .expect("block_index block to be in database");
+    let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
+
+    let start = last_epoch_block_height + 1;
+
+
+    // Loop though all the blocks starting with the first block following the last epoch block
+    for height in start..=latest.height {
+        // Query each block to see if they have commitment txids
+        let block_item = block_index.get_item(height).unwrap();
+        let block = block_header_by_hash(&tx, &block_item.block_hash, false)
             .unwrap()
             .expect("block_index block to be in database");
-        let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
 
-        let start = last_epoch_block_height + 1;
+        let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+        if !commitment_tx_ids.is_empty() {
+            // If so, retrieve the full commitment transactions
+            for txid in commitment_tx_ids {
+                let commitment_tx = commitment_tx_by_txid(&tx, &txid)
+                    .unwrap()
+                    .expect("commitment transactions to be in database");
 
-        // Loop though all the blocks starting with the first block following the last epoch block
-        for height in start..=latest.height {
-            // Query each block to see if they have commitment txids
-            let block_item = block_index.get_item(height).unwrap();
-            let block = block_header_by_hash(&tx, &block_item.block_hash, false)
-                .unwrap()
-                .expect("block_index block to be in database");
+                // Apply them to the commitment snapshot
+                let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
+                 // TODO: we should be asserting the status here... should it always be `Accepted`??
 
-            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
-            if !commitment_tx_ids.is_empty() {
-                // If so, retrieve the full commitment transactions
-                for txid in commitment_tx_ids {
-                    let commitment_tx = commitment_tx_by_txid(&tx, &txid)
-                        .unwrap()
-                        .expect("commitment transactions to be in database");
-
-                    // Apply them to the commitment snapshot
-                    let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
-                }
             }
         }
     }
