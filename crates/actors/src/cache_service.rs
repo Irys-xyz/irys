@@ -1,4 +1,4 @@
-use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
+use crate::ingress_proofs::reanchor_and_store_ingress_proof;
 use crate::mempool_service::Inner;
 use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
 use irys_database::{
@@ -11,7 +11,7 @@ use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::{
     CacheEvictionStrategy, Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage,
-    LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
+    IngressProof, LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -24,6 +24,8 @@ use tokio::sync::{
     oneshot,
 };
 use tracing::{debug, info, warn, Instrument as _};
+
+pub const REGENERATE_PROOFS: bool = true;
 
 /// Maximum evictions per invocation to prevent blocking the service.
 /// If this limit is reached, eviction will continue in the next cycle.
@@ -539,12 +541,13 @@ impl ChunkCacheService {
     /// - (c) Unpromoted + expired + under capacity + local author: regenerate
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_ingress_proofs(&self) -> eyre::Result<()> {
-        let local_addr = self.config.irys_signer().address();
+        let signer = self.config.irys_signer();
+        let local_addr = signer.address();
         let tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
         let mut walker = cursor.walk(None)?;
         let mut to_delete: Vec<DataRoot> = Vec::new();
-        let mut to_regen: Vec<DataRoot> = Vec::new();
+        let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
 
         // Determine if cache is at capacity based on eviction strategy
@@ -603,9 +606,10 @@ impl ChunkCacheService {
             } else if address == local_addr {
                 // (c) Unpromoted + expired + under capacity + local author: regenerate
                 if check_result.should_regenerate {
-                    to_regen.push(data_root);
+                    to_regen.push(proof);
                     debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
                 } else {
+                    to_delete.push(data_root);
                     debug!(ingress_proof.data_root = ?data_root, "Expired local proof does not meet regeneration criteria; leaving intact");
                 }
             } else {
@@ -628,24 +632,30 @@ impl ChunkCacheService {
         }
 
         // Regenerate local expired proofs (only when under capacity)
-        for root in to_regen.iter() {
-            if let Err(e) = generate_and_store_ingress_proof(
-                &self.block_tree_guard,
-                &self.db,
-                &self.config,
-                *root,
-                None,
-                &self.gossip_broadcast,
-            ) {
-                warn!(ingress_proof.data_root = ?root, "Failed to regenerate ingress proof: {e}");
+        for proof in to_regen.iter() {
+            if REGENERATE_PROOFS {
+                if let Err(e) = reanchor_and_store_ingress_proof(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    &signer,
+                    proof,
+                    &self.gossip_broadcast,
+                ) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                }
+            } else if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
             }
         }
+
         if !to_regen.is_empty() {
             info!(
                 proofs.regenerated = to_regen.len(),
-                "Regenerated expired local ingress proofs (under capacity)"
+                "Reanchored expired local ingress proofs (under capacity)"
             );
         }
+
         Ok(())
     }
 }

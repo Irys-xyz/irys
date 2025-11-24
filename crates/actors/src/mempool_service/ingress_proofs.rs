@@ -1,11 +1,11 @@
 use crate::mempool_service::{IngressProofError, Inner};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
-use irys_database::delete_ingress_proof;
 use irys_database::reth_db::transaction::DbTx as _;
 use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
 };
+use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::{
@@ -157,10 +157,7 @@ impl Inner {
     /// Returns `Ok(true)` if the proof is expired (anchor invalid), `Ok(false)` if it is still valid.
     /// This function DOES NOT delete the proof; deletion is performed exclusively by the cache service.
     #[instrument(skip_all, fields(proof.data_root = ?ingress_proof.data_root))]
-    pub fn is_ingress_proof_expired(
-        &self,
-        ingress_proof: &IngressProof,
-    ) -> ProofCheckResult {
+    pub fn is_ingress_proof_expired(&self, ingress_proof: &IngressProof) -> ProofCheckResult {
         Self::is_ingress_proof_expired_static(
             &self.block_tree_read_guard,
             &self.irys_db,
@@ -181,7 +178,7 @@ impl Inner {
             config,
             ingress_proof,
         ) {
-            // Not removed
+            // Fully valid
             Ok(()) => {
                 debug!(
                     ingress_proof.data_root = ?ingress_proof.data_root,
@@ -191,7 +188,7 @@ impl Inner {
                     expired_or_invalid: false,
                     should_regenerate: false,
                 }
-            },
+            }
             Err(e) => {
                 match e {
                     IngressProofError::InvalidAnchor(_block_hash) => {
@@ -205,7 +202,7 @@ impl Inner {
                             expired_or_invalid: true,
                             should_regenerate: true,
                         }
-                    },
+                    }
                     IngressProofError::InvalidSignature => {
                         warn!(
                             ingress_proof.data_root = ?ingress_proof.data_root,
@@ -290,6 +287,86 @@ pub fn generate_and_store_ingress_proof(
     let chain_id = config.consensus.chain_id;
     let chunk_size = config.consensus.chunk_size;
 
+    let data_size = calculate_and_validate_data_size(db, data_root, chunk_size)?;
+
+    // Pick anchor: hint or latest canonical block
+    let latest_anchor = block_tree_guard
+        .read()
+        .get_latest_canonical_entry()
+        .block_hash;
+    let anchor = anchor_hint.unwrap_or(latest_anchor);
+
+    // Generate + persist
+    let proof = crate::mempool_service::chunks::generate_ingress_proof(
+        db.clone(),
+        data_root,
+        data_size,
+        chunk_size,
+        signer,
+        chain_id,
+        anchor,
+    )?;
+
+    gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
+
+    Ok(proof)
+}
+
+pub fn reanchor_and_store_ingress_proof(
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+    signer: &IrysSigner,
+    proof: &IngressProof,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+) -> eyre::Result<IngressProof> {
+    calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)?;
+
+    let latest_anchor = block_tree_guard
+        .read()
+        .get_latest_canonical_entry()
+        .block_hash;
+    let anchor = latest_anchor;
+
+    let mut proof = proof.clone();
+    // Re-anchor and re-sign
+    proof.anchor = anchor;
+    signer.sign_ingress_proof(&mut proof)?;
+
+    store_ingress_proof(db, &proof, signer)?;
+
+    gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
+
+    Ok(proof)
+}
+
+pub fn gossip_ingress_proof(
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    ingress_proof: &IngressProof,
+    block_tree_guard: &BlockTreeReadGuard,
+    db: &DatabaseProvider,
+    config: &Config,
+) {
+    // Validate anchor freshness prior to broadcast
+    match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, ingress_proof) {
+        Ok(()) => {
+            let msg = GossipBroadcastMessage::from(ingress_proof.clone());
+            if let Err(e) = gossip_sender.send(msg) {
+                tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
+            }
+        }
+        Err(e) => {
+            // Skip gossip; proof stored for potential later use/regeneration.
+            tracing::debug!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
+        }
+    }
+}
+
+pub fn calculate_and_validate_data_size(
+    db: &DatabaseProvider,
+    data_root: DataRoot,
+    chunk_size: u64,
+) -> eyre::Result<u64> {
     // Load data_size & confirm we have metadata for this root
     let (data_size, chunk_count) = db.view_eyre(|tx| {
         let data_size = cached_data_root_by_data_root(tx, data_root)
@@ -310,37 +387,5 @@ pub fn generate_and_store_ingress_proof(
         ));
     }
 
-    // Pick anchor: hint or latest canonical block
-    let latest_anchor = block_tree_guard
-        .read()
-        .get_latest_canonical_entry()
-        .block_hash;
-    let anchor = anchor_hint.unwrap_or(latest_anchor);
-
-    // Generate + persist
-    let proof = crate::mempool_service::chunks::generate_ingress_proof(
-        db.clone(),
-        data_root,
-        data_size,
-        chunk_size,
-        signer,
-        chain_id,
-        anchor,
-    )?;
-
-    // Validate anchor freshness prior to broadcast
-    match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &proof) {
-        Ok(()) => {
-            let msg = GossipBroadcastMessage::from(proof.clone());
-            if let Err(e) = gossip_sender.send(msg) {
-                tracing::error!(proof.data_root = ?proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
-            }
-        }
-        Err(e) => {
-            // Skip gossip; proof stored for potential later use/regeneration.
-            tracing::debug!(proof.data_root = ?proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
-        }
-    }
-
-    Ok(proof)
+    Ok(data_size)
 }

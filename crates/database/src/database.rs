@@ -10,10 +10,12 @@ use crate::tables::{
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
+use irys_types::ingress::CachedIngressProof;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
-    H256, MEGABYTE,
+    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, PeerListItem,
+    TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -26,6 +28,7 @@ use reth_db::{
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
+use reth_db_api::Database as _;
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use tracing::{debug, warn};
 
@@ -364,6 +367,22 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
 
 pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
     Ok(tx.delete::<IngressProofs>(data_root, None)?)
+}
+
+pub fn store_ingress_proof(
+    db: &DatabaseProvider,
+    ingress_proof: &IngressProof,
+    signer: &IrysSigner,
+) -> eyre::Result<()> {
+    Ok(db.update(|rw_tx| {
+        rw_tx.put::<IngressProofs>(
+            ingress_proof.data_root,
+            CompactCachedIngressProof(CachedIngressProof {
+                address: signer.address(),
+                proof: ingress_proof.clone(),
+            }),
+        )
+    })??)
 }
 
 pub fn walk_all<T: Table, TX: DbTx>(

@@ -1,3 +1,8 @@
+use crate::irys::IrysSigner;
+use crate::{
+    decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves, DataRoot,
+    IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
+};
 use alloy_primitives::{Address, ChainId};
 use alloy_rlp::Encodable as _;
 use arbitrary::Arbitrary;
@@ -10,12 +15,6 @@ use reth_db_api::table::{Compress, Decompress};
 use reth_primitives::transaction::recover_signer;
 use serde::{Deserialize, Serialize};
 use std::ops::{Deref, DerefMut};
-
-use crate::irys::IrysSigner;
-use crate::{
-    decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves, DataRoot,
-    IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
-};
 
 #[derive(Debug, Clone, PartialEq, IntegerTagged, Eq, Compact, Arbitrary)]
 #[repr(u8)]

@@ -10,7 +10,6 @@ use irys_types::{ingress::IngressProof, Config, DataTransactionHeader, DatabaseP
 
 /// Computes promotion status for a single data transaction header.
 /// Returns (status, optionally filtered proofs ready for inclusion).
-#[expect(clippy::too_many_arguments)]
 pub fn compute_promotion_status(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
