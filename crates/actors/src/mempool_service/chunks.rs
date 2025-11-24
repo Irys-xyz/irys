@@ -1,5 +1,5 @@
-use crate::mempool_service::Inner;
 use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
+use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
     confirm_data_size_for_data_root,
@@ -345,12 +345,19 @@ impl Inner {
             })?;
 
         // Early return if we have a valid existing local proof
-        if chunk_count_opt.is_none() && existing_local_proof.is_some() && !existing_local_proof_expired {
-            info!("Local ingress proof already exists and is valid for data root {}", &root_hash);
+        if chunk_count_opt.is_none()
+            && existing_local_proof.is_some()
+            && !existing_local_proof_expired
+        {
+            info!(
+                "Local ingress proof already exists and is valid for data root {}",
+                &root_hash
+            );
             return Ok(());
         }
 
-        let chunk_count = chunk_count_opt.expect("chunk_count present when proof missing or expired");
+        let chunk_count =
+            chunk_count_opt.expect("chunk_count present when proof missing or expired");
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
@@ -374,7 +381,9 @@ impl Inner {
                 let should_regenerate = self
                     .irys_db
                     .view_eyre(|tx| {
-                        if let Some(cached) = irys_database::cached_data_root_by_data_root(tx, chunk.data_root)? {
+                        if let Some(cached) =
+                            irys_database::cached_data_root_by_data_root(tx, chunk.data_root)?
+                        {
                             for txid in cached.txid_set.iter() {
                                 if let Some(header) = irys_database::tx_header_by_txid(tx, txid)? {
                                     if header.promoted_height.is_some() {
