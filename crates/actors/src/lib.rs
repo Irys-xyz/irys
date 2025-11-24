@@ -13,13 +13,13 @@ pub mod mempool_service;
 pub mod mining_bus;
 pub mod packing_service;
 pub mod partition_mining_service;
+pub mod promotion;
 pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
 pub mod storage_module_service;
 pub mod test_helpers;
 pub mod validation_service;
-pub mod promotion;
 
 pub use block_producer::*;
 pub use data_sync_service::*;
@@ -27,10 +27,10 @@ pub use mempool_guard::*;
 pub use mempool_service::*;
 pub use mining_bus::MiningBus;
 pub use partition_mining_service::*;
+pub use promotion::*;
 pub use reth_ethereum_primitives;
 pub use shadow_tx_generator::ShadowMetadata;
 pub use storage_module_service::*;
-pub use promotion::*;
 
 pub use async_trait;
 pub use openssl::sha;

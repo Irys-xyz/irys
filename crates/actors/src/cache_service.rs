@@ -1,3 +1,6 @@
+use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
+use crate::mempool_service::Inner;
+use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
 use irys_database::{
     db::IrysDatabaseExt as _,
     db_cache::CachedDataRoot,
@@ -5,15 +8,13 @@ use irys_database::{
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
+use irys_types::ingress::CachedIngressProof;
 use irys_types::{
     CacheEvictionStrategy, Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage,
     LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
 };
-use crate::mempool_service::Inner;
-use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
-use tracing::{debug, info, warn, Instrument as _};
-use irys_types::ingress::CachedIngressProof;
 use reth::tasks::shutdown::Shutdown;
+use reth_db::cursor::DbCursorRO as _;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
@@ -23,8 +24,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
-use reth_db::cursor::DbCursorRO as _;
+use tracing::{debug, info, warn, Instrument as _};
 
 /// Maximum evictions per invocation to prevent blocking the service.
 /// If this limit is reached, eviction will continue in the next cycle.
@@ -553,14 +553,19 @@ impl ChunkCacheService {
         //  determine if we're at capacity
         let at_capacity = match &self.config.node_config.cache.eviction_strategy {
             CacheEvictionStrategy::TimeBased { .. } => false, // Time-based has no size capacity constraint
-            CacheEvictionStrategy::SizeBased { max_cache_size_bytes } => {
-                let (_, chunk_cache_size) = get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+            CacheEvictionStrategy::SizeBased {
+                max_cache_size_bytes,
+            } => {
+                let (_, chunk_cache_size) =
+                    get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
                 chunk_cache_size >= *max_cache_size_bytes
             }
         };
 
         while let Some((data_root, compact)) = walker.next().transpose()? {
-            if processed >= MAX_PROOF_CHECKS_PER_RUN { break; }
+            if processed >= MAX_PROOF_CHECKS_PER_RUN {
+                break;
+            }
             processed += 1;
             let CachedIngressProof { address, proof } = compact.0;
             let expired = Inner::is_ingress_proof_expired_static(
@@ -569,7 +574,9 @@ impl ChunkCacheService {
                 &self.config,
                 &proof,
             )?;
-            if !expired { continue; }
+            if !expired {
+                continue;
+            }
             // Associated txids
             let Some(cached_dr) = cached_data_root_by_data_root(&tx, data_root)? else {
                 debug!(proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
@@ -578,7 +585,10 @@ impl ChunkCacheService {
             let mut any_promoted = false;
             for txid in cached_dr.txid_set.iter() {
                 if let Some(h) = tx_header_by_txid(&tx, txid)? {
-                    if h.promoted_height.is_some() { any_promoted = true; break; }
+                    if h.promoted_height.is_some() {
+                        any_promoted = true;
+                        break;
+                    }
                 }
             }
 
@@ -608,7 +618,10 @@ impl ChunkCacheService {
                     warn!(proof.data_root = ?root, "Failed to remove ingress proof: {e}");
                 }
             }
-            info!(proofs.deleted = to_delete.len(), "Deleted expired ingress proofs");
+            info!(
+                proofs.deleted = to_delete.len(),
+                "Deleted expired ingress proofs"
+            );
         }
 
         // Regenerate local expired proofs (only when under capacity)
@@ -620,9 +633,16 @@ impl ChunkCacheService {
                 *root,
                 None,
                 &self.gossip_broadcast,
-            ) { warn!(proof.data_root = ?root, "Failed to regenerate ingress proof: {e}"); }
+            ) {
+                warn!(proof.data_root = ?root, "Failed to regenerate ingress proof: {e}");
+            }
         }
-        if !to_regen.is_empty() { info!(proofs.regenerated = to_regen.len(), "Regenerated expired local ingress proofs (under capacity)"); }
+        if !to_regen.is_empty() {
+            info!(
+                proofs.regenerated = to_regen.len(),
+                "Regenerated expired local ingress proofs (under capacity)"
+            );
+        }
         Ok(())
     }
 }

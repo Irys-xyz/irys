@@ -2,15 +2,13 @@
 //! Allows both mempool service and cache service to evaluate whether a data tx
 //! is ready (or close) to promotion based on ingress proofs and prior submit inclusion.
 
+use crate::mempool_service::{Inner, PromotionStatus};
 use eyre::eyre;
+use irys_database::{ingress_proofs_by_data_root, tx_header_by_txid};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::{
-    ingress::IngressProof,
-    data::DataTransactionHeader,
-    DataRoot, Config, DatabaseProvider, H256,
+    data::DataTransactionHeader, ingress::IngressProof, Config, DataRoot, DatabaseProvider, H256,
 };
-use crate::mempool_service::{PromotionStatus, Inner};
-use irys_database::{tx_header_by_txid, ingress_proofs_by_data_root};
 
 /// Computes promotion status for a single data transaction header.
 /// Returns (status, optionally filtered proofs ready for inclusion).
@@ -47,7 +45,12 @@ pub fn compute_promotion_status(
         .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
         .into_iter()
         .filter_map(|(_root, cached)| {
-            match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &cached.proof) {
+            match Inner::validate_ingress_proof_anchor_static(
+                block_tree_guard,
+                db,
+                config,
+                &cached.proof,
+            ) {
                 Ok(()) => Some(cached.proof.clone()),
                 Err(_) => None,
             }
@@ -72,15 +75,23 @@ pub fn compute_promotion_status(
     let mut fresh: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
     for p in all_proofs.into_iter() {
         // Reuse mempool anchor inclusion check
-        let anchor_is_valid = match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &p) {
-            Ok(()) => {
-                // Height based pruning for inclusion
-                let anchor_height = Inner::get_anchor_height_static(block_tree_guard, db, p.anchor, false)?;
-                if let Some(h) = anchor_height { h >= min_ingress_proof_anchor_height } else { false }
-            }
-            Err(_) => false,
-        };
-        if anchor_is_valid { fresh.push(p); }
+        let anchor_is_valid =
+            match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &p) {
+                Ok(()) => {
+                    // Height based pruning for inclusion
+                    let anchor_height =
+                        Inner::get_anchor_height_static(block_tree_guard, db, p.anchor, false)?;
+                    if let Some(h) = anchor_height {
+                        h >= min_ingress_proof_anchor_height
+                    } else {
+                        false
+                    }
+                }
+                Err(_) => false,
+            };
+        if anchor_is_valid {
+            fresh.push(p);
+        }
     }
     if fresh.len() < proofs_per_tx {
         return Ok((PromotionStatus::InsufficientProofs, None));

@@ -1063,7 +1063,10 @@ impl Inner {
                     PromotionStatus::Ready => {
                         let proofs_vec = final_proofs.unwrap_or_default();
                         let assigned_count = proofs_vec.len().min(
-                            self.config.consensus.number_of_ingress_proofs_from_assignees as usize,
+                            self.config
+                                .consensus
+                                .number_of_ingress_proofs_from_assignees
+                                as usize,
                         );
                         publish_txs.push(tx_header.clone());
                         publish_proofs.extend(proofs_vec.clone());

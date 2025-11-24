@@ -1,23 +1,25 @@
-use std::collections::HashSet;
-use eyre::eyre;
-use reth::revm::primitives::alloy_primitives::ChainId;
 use crate::mempool_service::{IngressProofError, Inner};
+use eyre::eyre;
+use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 use irys_database::delete_ingress_proof;
+use irys_database::reth_db::transaction::DbTx;
 use irys_database::tables::{CachedChunks, CompactCachedIngressProof, IngressProofs};
+use irys_database::{
+    cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
+};
 use irys_domain::BlockTreeReadGuard;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
     IngressProof, H256,
 };
-use irys_types::irys::IrysSigner;
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt};
-#[allow(unused_imports)]
-use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
-use tracing::{info, instrument, warn};
-use irys_database::{cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex};
+use reth::revm::primitives::alloy_primitives::ChainId;
 #[allow(unused_imports)]
 use reth_db::cursor::DbDupCursorRO as _;
-use irys_database::reth_db::transaction::DbTx;
+#[allow(unused_imports)]
+use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
+use std::collections::HashSet;
+use tracing::{info, instrument, warn};
 
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
@@ -206,12 +208,8 @@ impl Inner {
                         // Should not happen; prune, our own address should not be unstaked unexpectedly
                         Ok(true)
                     }
-                    IngressProofError::InvalidAnchor(block_hash) => {
-                        Ok(true)
-                    }
-                    IngressProofError::Other(reason_message) => {
-                        Ok(true)
-                    }
+                    IngressProofError::InvalidAnchor(block_hash) => Ok(true),
+                    IngressProofError::Other(reason_message) => Ok(true),
                 }
             }
         }
@@ -240,7 +238,8 @@ pub fn generate_and_store_ingress_proof(
             .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
             .data_size;
         let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-        let count = cursor.dup_count(data_root)?
+        let count = cursor
+            .dup_count(data_root)?
             .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
         Ok((data_size, count))
     })?;
