@@ -2,6 +2,7 @@ use actix_web::{web, HttpResponse, Responder};
 use eyre::{eyre, Result};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_reward_curve::HalvingCurve;
+use irys_types::IrysBlockHeader;
 use irys_types::U256;
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +49,9 @@ pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) 
     }
 }
 
-fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
+/// Gets the latest block header from the canonical chain.
+/// Tries the block tree first, falls back to database if not found.
+fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
     let tree = state.block_tree.read();
     let (canonical, _) = tree.get_canonical_chain();
 
@@ -56,12 +59,18 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         .last()
         .ok_or_else(|| eyre!("No blocks in canonical chain"))?;
 
-    let last_block = state
+    if let Some(block) = tree.get_block(&last_entry.block_hash) {
+        return Ok(block.clone());
+    }
+
+    state
         .db
         .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash, false))?
-        .ok_or_else(|| eyre!("Block header not found for tip"))?;
+        .ok_or_else(|| eyre!("Block header not found for tip in tree or database"))
+}
 
-    let block_height = last_block.height;
+fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
+    let block_height = get_latest_block(state)?.height;
 
     let config = &state.config.consensus;
 
@@ -75,17 +84,26 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         });
 
     let (emitted_amount, calculation_method) = if use_exact {
-        let total_emitted = state.db.view_eyre(|tx| {
-            let mut sum = U256::zero();
-            for entry in canonical.iter() {
-                if let Some(block) = block_header_by_hash(tx, &entry.block_hash, false)? {
-                    sum += block.reward_amount;
-                }
-            }
-            Ok(sum)
-        })?;
+        let tree = state.block_tree.read();
+        let (canonical, _) = tree.get_canonical_chain();
 
-        (total_emitted, "actual")
+        let mut sum = U256::zero();
+
+        for entry in canonical.iter() {
+            let block = tree.get_block(&entry.block_hash).cloned().or_else(|| {
+                state
+                    .db
+                    .view_eyre(|tx| block_header_by_hash(tx, &entry.block_hash, false))
+                    .ok()
+                    .flatten()
+            });
+
+            if let Some(block) = block {
+                sum += block.reward_amount;
+            }
+        }
+
+        (sum, "actual")
     } else {
         let curve = HalvingCurve {
             inflation_cap: config.block_reward_config.inflation_cap,
