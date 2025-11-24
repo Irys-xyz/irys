@@ -19,6 +19,41 @@ fn main() {
     if std::env::var("CARGO_FEATURE_NVIDIA").is_ok() {
         capacity::build_capacity_cuda(&c_src, &include_dir);
         capacity::bind_capacity_cuda(&c_src);
+        link_cuda()
+    }
+}
+
+fn link_cuda() {
+    {
+        // Try to find CUDA in common locations
+        let cuda_paths = vec![
+            "/usr/local/cuda/lib64",
+            "/usr/lib/x86_64-linux-gnu",
+            "/opt/cuda/lib64",
+        ];
+
+        let mut found = false;
+        for path in &cuda_paths {
+            if std::path::Path::new(path).exists() {
+                println!("cargo:rustc-link-search=native={}", path);
+                found = true;
+                break;
+            }
+        }
+
+        // Also check CUDA_PATH environment variable
+        if let Ok(cuda_path) = std::env::var("CUDA_PATH") {
+            println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
+            found = true;
+        }
+
+        if !found {
+            println!("cargo:warning=CUDA library path not found in standard locations. Set CUDA_PATH or add -L flag manually.");
+        }
+
+        println!("cargo:rustc-link-lib=cudart");
+        println!("cargo:rerun-if-changed=build.rs");
+        println!("cargo:rerun-if-env-changed=CUDA_PATH");
     }
 }
 

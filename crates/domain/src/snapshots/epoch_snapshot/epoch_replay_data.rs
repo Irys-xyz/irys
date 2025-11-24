@@ -117,7 +117,7 @@ impl EpochReplayData {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .unwrap_or_else(|_| panic!("Able to fetch all commitment transactions from database for epoch block {} at height {}", block.block_hash, block.height));
+                .unwrap_or_else(|e| panic!("Able to fetch all commitment transactions from database for epoch block {} at height {} - {}", block.block_hash, block.height, &e));
 
             epoch_block_data.push_back(EpochBlockData {
                 epoch_block: block,

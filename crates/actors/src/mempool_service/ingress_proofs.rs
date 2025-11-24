@@ -115,13 +115,17 @@ impl Inner {
 
         let too_old = anchor_height < min_anchor_height;
 
-        if too_old {
-            warn!("Ingress proof anchor is too old");
-            Err(IngressProofError::InvalidAnchor(ingress_proof.anchor))
-        } else {
-            Ok(())
+            if too_old {
+                warn!(
+                    "Ingress proof anchor {} has height {}, which is too old (min: {})",
+                    ingress_proof.anchor, anchor_height, min_anchor_height
+                );
+                return Err(IngressProofError::InvalidAnchor(ingress_proof.anchor));
+            }
+            else {
+                Ok(())
+            }
         }
-    }
 
     pub fn remove_ingress_proof(
         irys_db: &DatabaseProvider,
