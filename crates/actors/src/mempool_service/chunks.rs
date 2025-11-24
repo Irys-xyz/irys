@@ -412,7 +412,7 @@ impl Inner {
                             // Don't broadcast expired proofs
                             debug!(
                                 proof.data_root = ?proof.data_root,
-                                "Ingress proof anchor is too old or unknown: {:?}, pruning proof", e
+                                "Ingress proof anchor is too old or unknown, skipping broadcast: {:?}", e
                             );
                         }
                     }
