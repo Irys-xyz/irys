@@ -415,7 +415,7 @@ impl Inner {
                 let block_tree_read_guard = self.block_tree_read_guard.clone();
                 let config = self.config.clone();
                 let gossip_sender = self.service_senders.gossip_broadcast.clone();
-                self.exec.clone().spawn_blocking(async move {
+                let _ = self.exec.clone().spawn_blocking(async move {
                     if let Err(e) = generate_and_store_ingress_proof(
                         &block_tree_read_guard,
                         &db,

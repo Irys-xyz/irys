@@ -549,6 +549,8 @@ impl ChunkCacheService {
         let mut processed = 0usize;
 
         // Determine if cache is at capacity based on eviction strategy
+        // TODO: when the eviction strategy is removed, leave the code in the SizeBased branch to
+        //  determine if we're at capacity
         let at_capacity = match &self.config.node_config.cache.eviction_strategy {
             CacheEvictionStrategy::TimeBased { .. } => false, // Time-based has no size capacity constraint
             CacheEvictionStrategy::SizeBased { max_cache_size_bytes } => {

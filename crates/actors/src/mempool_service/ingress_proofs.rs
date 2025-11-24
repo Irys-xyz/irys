@@ -187,12 +187,15 @@ impl Inner {
                 );
                 match e {
                     IngressProofError::InvalidSignature => {
+                        // Prune, don't regenerate
                         Ok(true)
                     }
                     IngressProofError::DatabaseError => {
+                        // Don't do anything
                         Ok(true)
                     }
                     IngressProofError::UnstakedAddress => {
+                        // Should not happen; prune, our own address should not be unstaked unexpectedly
                         Ok(true)
                     }
                     IngressProofError::InvalidAnchor(block_hash) => {
