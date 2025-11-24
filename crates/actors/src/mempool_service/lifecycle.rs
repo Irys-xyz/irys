@@ -281,7 +281,7 @@ impl Inner {
                         .remove_valid_submit_ledger_tx(&tx_id)
                         .await;
                     self.mempool_state
-                        .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor)
+                        .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor(tx.anchor))
                         .await;
                 }
             }
@@ -304,7 +304,7 @@ impl Inner {
                     if self.should_prune_tx(current_height, &tx) {
                         self.mempool_state.remove_commitment_tx(&tx.id).await;
                         self.mempool_state
-                            .mark_tx_as_invalid(tx.id, TxIngressError::InvalidAnchor)
+                            .mark_tx_as_invalid(tx.id, TxIngressError::InvalidAnchor(tx.anchor))
                             .await;
                     }
                 }

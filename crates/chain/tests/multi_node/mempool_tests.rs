@@ -2081,8 +2081,8 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
         .await
         .expect_err("expected failure but got success");
     match res {
-        AddTxError::TxIngress(TxIngressError::InvalidSignature) => {
-            // it failed to ingress, as expected!
+        AddTxError::TxIngress(TxIngressError::InvalidSignature(address)) => {
+            tracing::info!("Transaction from address {} failed to ingress with invalid signature, as expected!", address);
         }
         e => {
             panic!("Expected InvalidSignature but got: {:?}", e);
@@ -2118,8 +2118,8 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
         .await
         .expect_err("expected failure but got success");
     match res {
-        AddTxError::TxIngress(TxIngressError::InvalidSignature) => {
-            // it failed to ingress, as expected!
+        AddTxError::TxIngress(TxIngressError::InvalidSignature(address)) => {
+            tracing::info!("Transaction from address {} failed to ingress with invalid signature, as expected!", address);
         }
         e => {
             panic!("Expected InvalidSignature but got: {:?}", e);
@@ -2171,7 +2171,10 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
         .await
         .expect_err("expected failure but got success");
     assert!(
-        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
+        matches!(
+            res,
+            AddTxError::TxIngress(TxIngressError::InvalidSignature(_))
+        ),
         "Expected InvalidSignature for pledge with invalid id, got: {:?}",
         res
     );
@@ -2215,7 +2218,10 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
         .await
         .expect_err("expected failure but got success");
     assert!(
-        matches!(res, AddTxError::TxIngress(TxIngressError::InvalidSignature)),
+        matches!(
+            res,
+            AddTxError::TxIngress(TxIngressError::InvalidSignature(_))
+        ),
         "Expected InvalidSignature but got: {:?}",
         res
     );
