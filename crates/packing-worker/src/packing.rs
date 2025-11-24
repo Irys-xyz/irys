@@ -8,6 +8,8 @@ use tracing::trace;
 #[cfg(feature = "nvidia")]
 use irys_packing::capacity_pack_range_cuda_c;
 #[cfg(feature = "nvidia")]
+use irys_packing::CUDAConfig;
+#[cfg(feature = "nvidia")]
 use irys_types::split_interval;
 
 use crate::types::RemotePackingRequest;
@@ -109,6 +111,7 @@ impl PackingWorkerState {
 
                         let out = runtime_handle
                             .spawn_blocking(move || {
+
                                 let mut out: Vec<u8> = Vec::with_capacity(
                                     (num_chunks * chunk_size as u32).try_into().unwrap(),
                                 );
@@ -119,8 +122,9 @@ impl PackingWorkerState {
                                     partition_hash,
                                     entropy_packing_iterations,
                                     chain_id,
+                                    CUDAConfig::from_device_default().unwrap(),
                                     &mut out,
-                                );
+                                ).unwrap();
                                 out
                             })
                             .await?;

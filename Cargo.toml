@@ -528,6 +528,7 @@ ignored = ["modular-bitfield", "test-fuzz"]
 default.extend-ignore-re = [
   "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # disable a single line: spellchecker:disable-line
   "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # disable blocks of lines: spellchecker:<on|off>
+  "(#|//)\\s*spellchecker:ignore-next-line\\n.*",                      # disable the next line: spellchecker:ignore-next-line
 ]
 default.extend-words = { ratatui = "ratatui" }
 files.extend-exclude = ["ext/*", "fixtures/*"]

@@ -5290,6 +5290,7 @@ dependencies = [
 name = "irys-packing"
 version = "0.1.0"
 dependencies = [
+ "eyre",
  "irys-c",
  "irys-types",
  "rand 0.8.5",
