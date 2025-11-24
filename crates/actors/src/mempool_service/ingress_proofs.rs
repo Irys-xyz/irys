@@ -1,9 +1,8 @@
 use crate::mempool_service::{IngressProofError, Inner};
-use eyre::eyre;
-use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt};
+use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::delete_ingress_proof;
-use irys_database::reth_db::transaction::DbTx;
-use irys_database::tables::{CachedChunks, CompactCachedIngressProof, IngressProofs};
+use irys_database::reth_db::transaction::DbTx as _;
+use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
 };
@@ -13,13 +12,11 @@ use irys_types::{
     ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
     IngressProof, H256,
 };
-use reth::revm::primitives::alloy_primitives::ChainId;
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 use reth_db::cursor::DbDupCursorRO as _;
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
-use std::collections::HashSet;
-use tracing::{info, instrument, warn};
+use tracing::{instrument, warn};
 
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]

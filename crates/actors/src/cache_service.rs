@@ -546,7 +546,7 @@ impl ChunkCacheService {
         let mut walker = cursor.walk(None)?;
         let mut to_delete: Vec<DataRoot> = Vec::new();
         let mut to_regen: Vec<DataRoot> = Vec::new();
-        let mut processed = 0usize;
+        let mut processed = 0_usize;
 
         // Determine if cache is at capacity based on eviction strategy
         // TODO: when the eviction strategy is removed, leave the code in the SizeBased branch to

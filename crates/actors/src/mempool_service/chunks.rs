@@ -303,7 +303,7 @@ impl Inner {
                     signer_addr,
                 )?;
 
-                let mut existing_local_proof: Option<IngressProof> = None;
+                let existing_local_proof: Option<IngressProof> = None;
 
                 // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;

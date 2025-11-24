@@ -3,16 +3,14 @@
 //! is ready (or close) to promotion based on ingress proofs and prior submit inclusion.
 
 use crate::mempool_service::{Inner, PromotionStatus};
-use eyre::eyre;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{ingress_proofs_by_data_root, tx_header_by_txid};
 use irys_domain::BlockTreeReadGuard;
-use irys_types::{
-    data::DataTransactionHeader, ingress::IngressProof, Config, DataRoot, DatabaseProvider, H256,
-};
+use irys_types::{ingress::IngressProof, Config, DataTransactionHeader, DatabaseProvider, H256};
 
 /// Computes promotion status for a single data transaction header.
 /// Returns (status, optionally filtered proofs ready for inclusion).
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn compute_promotion_status(
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -73,7 +71,7 @@ pub fn compute_promotion_status(
 
     // 4. Anchor freshness filter using height threshold
     let mut fresh: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
-    for p in all_proofs.into_iter() {
+    for p in all_proofs {
         // Reuse mempool anchor inclusion check
         let anchor_is_valid =
             match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &p) {
