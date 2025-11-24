@@ -290,19 +290,10 @@ impl Inner {
         // check if we have generated an ingress proof for this tx already
         // if we have, update it's expiry height
 
-        //  TODO: hook into whatever manages ingress proofs
-        let signer_addr = self.config.irys_signer().address();
-
         // Determine existing proof state and chunk count
         let (chunk_count_opt, existing_local_proof) = self
             .irys_db
             .view_eyre(|tx| {
-                let ingress_proof = irys_database::ingress_proof_by_data_root_address(
-                    tx,
-                    chunk.data_root,
-                    signer_addr,
-                )?;
-
                 let existing_local_proof: Option<IngressProof> = None;
 
                 // Count chunks (needed for generation & potential regeneration)
@@ -342,10 +333,6 @@ impl Inner {
 
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
-
-            // Regenerate if existing local proof expired and transaction(s) are not yet promoted
-            let signer = self.config.irys_signer();
-            // New proof generation path
             let db = self.irys_db.clone();
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();

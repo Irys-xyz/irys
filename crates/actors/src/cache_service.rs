@@ -15,7 +15,6 @@ use irys_types::{
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
-use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
@@ -568,18 +567,18 @@ impl ChunkCacheService {
             }
             processed += 1;
             let CachedIngressProof { address, proof } = compact.0;
-            let expired = Inner::is_ingress_proof_expired_static(
+            let check_result = Inner::is_ingress_proof_expired_static(
                 &self.block_tree_guard,
                 &self.db,
                 &self.config,
                 &proof,
-            )?;
-            if !expired {
+            );
+            if !check_result.expired_or_invalid {
                 continue;
             }
             // Associated txids
             let Some(cached_dr) = cached_data_root_by_data_root(&tx, data_root)? else {
-                debug!(proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
+                debug!(ingress_proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
                 continue;
             };
             let mut any_promoted = false;
@@ -596,18 +595,22 @@ impl ChunkCacheService {
             if any_promoted {
                 // (a) Promoted + expired: delete
                 to_delete.push(data_root);
-                debug!(proof.data_root = ?data_root, "Marking expired proof for deletion (promoted)");
+                debug!(ingress_proof.data_root = ?data_root, "Marking expired proof for deletion (promoted)");
             } else if at_capacity {
                 // (b) Unpromoted + expired + at capacity: delete
                 to_delete.push(data_root);
-                debug!(proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
             } else if address == local_addr {
                 // (c) Unpromoted + expired + under capacity + local author: regenerate
-                to_regen.push(data_root);
-                debug!(proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
+                if check_result.should_regenerate {
+                    to_regen.push(data_root);
+                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
+                } else {
+                    debug!(ingress_proof.data_root = ?data_root, "Expired local proof does not meet regeneration criteria; leaving intact");
+                }
             } else {
                 // Unpromoted + expired + under capacity + non-local: leave intact
-                debug!(proof.data_root = ?data_root, "Leaving expired non-local proof (under capacity)");
+                debug!(ingress_proof.data_root = ?data_root, "Leaving expired non-local proof (under capacity)");
             }
         }
 
@@ -615,7 +618,7 @@ impl ChunkCacheService {
         if !to_delete.is_empty() {
             for root in to_delete.iter() {
                 if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
-                    warn!(proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
                 }
             }
             info!(
@@ -634,7 +637,7 @@ impl ChunkCacheService {
                 None,
                 &self.gossip_broadcast,
             ) {
-                warn!(proof.data_root = ?root, "Failed to regenerate ingress proof: {e}");
+                warn!(ingress_proof.data_root = ?root, "Failed to regenerate ingress proof: {e}");
             }
         }
         if !to_regen.is_empty() {

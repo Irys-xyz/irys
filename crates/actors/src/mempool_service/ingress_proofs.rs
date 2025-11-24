@@ -12,11 +12,8 @@ use irys_types::{
     ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
     IngressProof, H256,
 };
-#[expect(unused_imports)]
-use reth_db::cursor::DbDupCursorRO as _;
-#[expect(unused_imports)]
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
-use tracing::{instrument, warn};
+use tracing::{debug, error, instrument, warn};
 
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
@@ -163,7 +160,7 @@ impl Inner {
     pub fn is_ingress_proof_expired(
         &self,
         ingress_proof: &IngressProof,
-    ) -> Result<bool, IngressProofError> {
+    ) -> ProofCheckResult {
         Self::is_ingress_proof_expired_static(
             &self.block_tree_read_guard,
             &self.irys_db,
@@ -177,7 +174,7 @@ impl Inner {
         irys_db: &DatabaseProvider,
         config: &Config,
         ingress_proof: &IngressProof,
-    ) -> Result<bool, IngressProofError> {
+    ) -> ProofCheckResult {
         match Self::validate_ingress_proof_anchor_static(
             block_tree_read_guard,
             irys_db,
@@ -185,31 +182,96 @@ impl Inner {
             ingress_proof,
         ) {
             // Not removed
-            Ok(()) => Ok(false),
-            Err(e) => {
-                warn!(
-                    data_root = ?ingress_proof.data_root,
-                    "Ingress proof anchor validation failed: {:?}",
-                    e
+            Ok(()) => {
+                debug!(
+                    ingress_proof.data_root = ?ingress_proof.data_root,
+                    "Ingress proof anchor is valid"
                 );
+                ProofCheckResult {
+                    expired_or_invalid: false,
+                    should_regenerate: false,
+                }
+            },
+            Err(e) => {
                 match e {
+                    IngressProofError::InvalidAnchor(_block_hash) => {
+                        warn!(
+                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.anchor = ?ingress_proof.anchor,
+                            "Ingress proof anchor has an invalid anchor",
+                        );
+                        // Prune, regenerate if not at capacity
+                        ProofCheckResult {
+                            expired_or_invalid: true,
+                            should_regenerate: true,
+                        }
+                    },
                     IngressProofError::InvalidSignature => {
+                        warn!(
+                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.anchor = ?ingress_proof.anchor,
+                            "Ingress proof anchor has an invalid signature and is going to be pruned",
+                        );
                         // Prune, don't regenerate
-                        Ok(true)
-                    }
-                    IngressProofError::DatabaseError(message) => {
-                        // Don't do anything
-                        Ok(true)
+                        ProofCheckResult {
+                            expired_or_invalid: true,
+                            should_regenerate: false,
+                        }
                     }
                     IngressProofError::UnstakedAddress => {
+                        warn!(
+                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            ingress_proof.anchor = ?ingress_proof.anchor,
+                            "Ingress proof has been created by an unstaked address and is going to be pruned",
+                        );
                         // Should not happen; prune, our own address should not be unstaked unexpectedly
-                        Ok(true)
+                        ProofCheckResult {
+                            expired_or_invalid: true,
+                            should_regenerate: false,
+                        }
                     }
-                    IngressProofError::InvalidAnchor(block_hash) => Ok(true),
-                    IngressProofError::Other(reason_message) => Ok(true),
+                    IngressProofError::DatabaseError(message) => {
+                        // Don't do anything, we don't know the proof status
+                        error!(
+                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            "Database error during ingress proof expiration validation: {}", message
+                        );
+                        ProofCheckResult {
+                            expired_or_invalid: false,
+                            should_regenerate: false,
+                        }
+                    }
+                    IngressProofError::Other(reason_message) => {
+                        error!(
+                            ingress_proof.data_root = ?ingress_proof.data_root,
+                            "Unexpected error during ingress proof expiration validation: {}", reason_message
+                        );
+                        ProofCheckResult {
+                            expired_or_invalid: false,
+                            should_regenerate: false,
+                        }
+                    }
                 }
             }
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct ProofCheckResult {
+    /// Whether the proof is expired/invalid and should be pruned
+    pub expired_or_invalid: bool,
+    /// Whether the proof should be regenerated after pruning if possible
+    pub should_regenerate: bool,
+}
+
+impl ProofCheckResult {
+    pub fn is_expired(&self) -> bool {
+        self.expired_or_invalid
+    }
+
+    pub fn should_regenerate(&self) -> bool {
+        self.should_regenerate
     }
 }
 
