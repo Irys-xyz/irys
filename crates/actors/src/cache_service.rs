@@ -23,6 +23,8 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
+use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
+use reth_db::cursor::DbCursorRO as _;
 
 /// Maximum evictions per invocation to prevent blocking the service.
 /// If this limit is reached, eviction will continue in the next cycle.
@@ -381,98 +383,6 @@ impl ChunkCacheService {
         Ok(())
     }
 
-    /// Scans ingress proofs with capacity-aware deletion and regeneration:
-    /// - (a) Promoted + expired: delete
-    /// - (b) Unpromoted + expired + at capacity: delete
-    /// - (c) Unpromoted + expired + under capacity + local author: regenerate
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn prune_ingress_proofs(&self) -> eyre::Result<()> {
-        use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
-        use reth_db::cursor::DbCursorRO as _;
-        let local_addr = self.config.irys_signer().address();
-        let tx = self.db.tx()?;
-        let mut cursor = tx.cursor_read::<IngressProofs>()?;
-        let mut walker = cursor.walk(None)?;
-        let mut to_delete: Vec<DataRoot> = Vec::new();
-        let mut to_regen: Vec<DataRoot> = Vec::new();
-        let mut processed = 0usize;
-
-        // Determine if cache is at capacity based on eviction strategy
-        let at_capacity = match &self.config.node_config.cache.eviction_strategy {
-            CacheEvictionStrategy::TimeBased { .. } => false, // Time-based has no size capacity constraint
-            CacheEvictionStrategy::SizeBased { max_cache_size_bytes } => {
-                let (_, chunk_cache_size) = get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
-                chunk_cache_size >= *max_cache_size_bytes
-            }
-        };
-
-        while let Some((data_root, compact)) = walker.next().transpose()? {
-            if processed >= MAX_PROOF_CHECKS_PER_RUN { break; }
-            processed += 1;
-            let CachedIngressProof { address, proof } = compact.0;
-            let expired = matches!(Inner::validate_ingress_proof_anchor_static(
-                &self.block_tree_guard,
-                &self.db,
-                &self.config,
-                &proof,
-            ), Err(_));
-            if !expired { continue; }
-            // Associated txids
-            let Some(cached_dr) = cached_data_root_by_data_root(&tx, data_root)? else {
-                debug!(proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
-                continue;
-            };
-            let mut any_promoted = false;
-            for txid in cached_dr.txid_set.iter() {
-                if let Some(h) = tx_header_by_txid(&tx, txid)? {
-                    if h.promoted_height.is_some() { any_promoted = true; break; }
-                }
-            }
-            
-            // Decision logic per requirements:
-            if any_promoted {
-                // (a) Promoted + expired: delete
-                to_delete.push(data_root);
-                debug!(proof.data_root = ?data_root, "Marking expired proof for deletion (promoted)");
-            } else if at_capacity {
-                // (b) Unpromoted + expired + at capacity: delete
-                to_delete.push(data_root);
-                debug!(proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
-            } else if address == local_addr {
-                // (c) Unpromoted + expired + under capacity + local author: regenerate
-                to_regen.push(data_root);
-                debug!(proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
-            } else {
-                // Unpromoted + expired + under capacity + non-local: leave intact
-                debug!(proof.data_root = ?data_root, "Leaving expired non-local proof (under capacity)");
-            }
-        }
-        
-        // Delete expired proofs using proper removal function
-        if !to_delete.is_empty() {
-            for root in to_delete.iter() {
-                if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
-                    warn!(proof.data_root = ?root, "Failed to remove ingress proof: {e}");
-                }
-            }
-            info!(proofs.deleted = to_delete.len(), "Deleted expired ingress proofs");
-        }
-        
-        // Regenerate local expired proofs (only when under capacity)
-        for root in to_regen.iter() {
-            if let Err(e) = generate_and_store_ingress_proof(
-                &self.block_tree_guard,
-                &self.db,
-                &self.config,
-                *root,
-                None,
-                &self.gossip_broadcast,
-            ) { warn!(proof.data_root = ?root, "Failed to regenerate ingress proof: {e}"); }
-        }
-        if !to_regen.is_empty() { info!(proofs.regenerated = to_regen.len(), "Regenerated expired local ingress proofs (under capacity)"); }
-        Ok(())
-    }
-
     /// Collects all cached data roots with their metadata for FIFO eviction
     /// Returns entries sorted by cached_at timestamp (oldest first)
     fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
@@ -623,6 +533,96 @@ impl ChunkCacheService {
 
         Ok(())
     }
+
+    /// Scans ingress proofs with capacity-aware deletion and regeneration:
+    /// - (a) Promoted + expired: delete
+    /// - (b) Unpromoted + expired + at capacity: delete
+    /// - (c) Unpromoted + expired + under capacity + local author: regenerate
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn prune_ingress_proofs(&self) -> eyre::Result<()> {
+        let local_addr = self.config.irys_signer().address();
+        let tx = self.db.tx()?;
+        let mut cursor = tx.cursor_read::<IngressProofs>()?;
+        let mut walker = cursor.walk(None)?;
+        let mut to_delete: Vec<DataRoot> = Vec::new();
+        let mut to_regen: Vec<DataRoot> = Vec::new();
+        let mut processed = 0usize;
+
+        // Determine if cache is at capacity based on eviction strategy
+        let at_capacity = match &self.config.node_config.cache.eviction_strategy {
+            CacheEvictionStrategy::TimeBased { .. } => false, // Time-based has no size capacity constraint
+            CacheEvictionStrategy::SizeBased { max_cache_size_bytes } => {
+                let (_, chunk_cache_size) = get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+                chunk_cache_size >= *max_cache_size_bytes
+            }
+        };
+
+        while let Some((data_root, compact)) = walker.next().transpose()? {
+            if processed >= MAX_PROOF_CHECKS_PER_RUN { break; }
+            processed += 1;
+            let CachedIngressProof { address, proof } = compact.0;
+            let expired = Inner::is_ingress_proof_expired_static(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                &proof,
+            )?;
+            if !expired { continue; }
+            // Associated txids
+            let Some(cached_dr) = cached_data_root_by_data_root(&tx, data_root)? else {
+                debug!(proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
+                continue;
+            };
+            let mut any_promoted = false;
+            for txid in cached_dr.txid_set.iter() {
+                if let Some(h) = tx_header_by_txid(&tx, txid)? {
+                    if h.promoted_height.is_some() { any_promoted = true; break; }
+                }
+            }
+
+            // Decision logic per requirements:
+            if any_promoted {
+                // (a) Promoted + expired: delete
+                to_delete.push(data_root);
+                debug!(proof.data_root = ?data_root, "Marking expired proof for deletion (promoted)");
+            } else if at_capacity {
+                // (b) Unpromoted + expired + at capacity: delete
+                to_delete.push(data_root);
+                debug!(proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+            } else if address == local_addr {
+                // (c) Unpromoted + expired + under capacity + local author: regenerate
+                to_regen.push(data_root);
+                debug!(proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
+            } else {
+                // Unpromoted + expired + under capacity + non-local: leave intact
+                debug!(proof.data_root = ?data_root, "Leaving expired non-local proof (under capacity)");
+            }
+        }
+
+        // Delete expired proofs using proper removal function
+        if !to_delete.is_empty() {
+            for root in to_delete.iter() {
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
+                    warn!(proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+                }
+            }
+            info!(proofs.deleted = to_delete.len(), "Deleted expired ingress proofs");
+        }
+
+        // Regenerate local expired proofs (only when under capacity)
+        for root in to_regen.iter() {
+            if let Err(e) = generate_and_store_ingress_proof(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                *root,
+                None,
+                &self.gossip_broadcast,
+            ) { warn!(proof.data_root = ?root, "Failed to regenerate ingress proof: {e}"); }
+        }
+        if !to_regen.is_empty() { info!(proofs.regenerated = to_regen.len(), "Regenerated expired local ingress proofs (under capacity)"); }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -701,6 +701,7 @@ mod tests {
             db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
@@ -775,6 +776,7 @@ mod tests {
             db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
@@ -829,6 +831,7 @@ mod tests {
             db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
         })
     }
 

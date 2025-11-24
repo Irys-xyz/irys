@@ -1,17 +1,23 @@
+use std::collections::HashSet;
+use eyre::eyre;
+use reth::revm::primitives::alloy_primitives::ChainId;
 use crate::mempool_service::{IngressProofError, Inner};
 use irys_database::delete_ingress_proof;
-use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
+use irys_database::tables::{CachedChunks, CompactCachedIngressProof, IngressProofs};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::{
     ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
     IngressProof, H256,
 };
 use irys_types::irys::IrysSigner;
-use irys_database::db::IrysDatabaseExt as _;
+use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt};
 #[allow(unused_imports)]
-use irys_database::tables::CachedChunksIndex;
 use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
+use irys_database::{cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex};
+#[allow(unused_imports)]
+use reth_db::cursor::DbDupCursorRO as _;
+use irys_database::reth_db::transaction::DbTx;
 
 impl Inner {
     #[tracing::instrument(level = "trace", skip_all, fields(data_root = %ingress_proof.data_root))]
@@ -151,15 +157,51 @@ impl Inner {
         &self,
         ingress_proof: &IngressProof,
     ) -> Result<bool, IngressProofError> {
-        match self.validate_ingress_proof_anchor(ingress_proof) {
+        Self::is_ingress_proof_expired_static(
+            &self.block_tree_read_guard,
+            &self.irys_db,
+            &self.config,
+            ingress_proof,
+        )
+    }
+
+    pub fn is_ingress_proof_expired_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+        irys_db: &DatabaseProvider,
+        config: &Config,
+        ingress_proof: &IngressProof,
+    ) -> Result<bool, IngressProofError> {
+        match Self::validate_ingress_proof_anchor_static(
+            block_tree_read_guard,
+            irys_db,
+            config,
+            ingress_proof,
+        ) {
             // Not removed
             Ok(()) => Ok(false),
             Err(e) => {
                 warn!(
-                    "Ingress proof anchor validation failed: {:?}. Marking as expired",
+                    data_root = ?ingress_proof.data_root,
+                    "Ingress proof anchor validation failed: {:?}",
                     e
                 );
-                Ok(true)
+                match e {
+                    IngressProofError::InvalidSignature => {
+                        Ok(true)
+                    }
+                    IngressProofError::DatabaseError => {
+                        Ok(true)
+                    }
+                    IngressProofError::UnstakedAddress => {
+                        Ok(true)
+                    }
+                    IngressProofError::InvalidAnchor(block_hash) => {
+                        Ok(true)
+                    }
+                    IngressProofError::Other(reason_message) => {
+                        Ok(true)
+                    }
+                }
             }
         }
     }
@@ -176,10 +218,6 @@ pub fn generate_and_store_ingress_proof(
     anchor_hint: Option<H256>,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
 ) -> eyre::Result<IngressProof> {
-    use irys_database::{cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex};
-    #[allow(unused_imports)]
-    use reth_db::cursor::DbDupCursorRO as _;
-
     let signer: IrysSigner = config.irys_signer();
     let chain_id = config.consensus.chain_id;
     let chunk_size = config.consensus.chunk_size;
@@ -191,8 +229,7 @@ pub fn generate_and_store_ingress_proof(
             .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
             .data_size;
         let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-        let count = cursor
-            .dup_count(data_root.0)?
+        let count = cursor.dup_count(data_root)?
             .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
         Ok((data_size, count))
     })?;
