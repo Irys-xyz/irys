@@ -226,8 +226,11 @@ async fn test_api_rejects_insufficient_funds() -> eyre::Result<()> {
 
     // Assert that it was rejected with Unfunded error
     match result {
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            tracing::info!("Transaction correctly rejected with Unfunded error");
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            tracing::info!(
+                "Transaction {} correctly rejected with Unfunded error",
+                tx_id
+            );
         }
         Ok(_) => {
             panic!(
@@ -298,8 +301,11 @@ async fn test_api_rejects_zero_balance() -> eyre::Result<()> {
 
     // Assert that it was rejected with Unfunded error
     match result {
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            tracing::info!("Transaction correctly rejected with Unfunded error");
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            tracing::info!(
+                "Transaction {} correctly rejected with Unfunded error",
+                tx_id
+            );
         }
         Ok(_) => {
             panic!("Expected transaction to be rejected due to zero balance but it was accepted");

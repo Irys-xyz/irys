@@ -103,7 +103,7 @@ where
                                 GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
                             ),
                             CriticalChunkIngressError::InvalidDataHash => Err(
-                                GossipError::InvalidData(InvalidDataError::ChinkInvalidDataHash),
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash),
                             ),
                             CriticalChunkIngressError::InvalidChunkSize => Err(
                                 GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
@@ -113,7 +113,9 @@ where
                             ),
                             // ===== Internal errors
                             CriticalChunkIngressError::DatabaseError => {
-                                Err(GossipError::Internal(InternalGossipError::Database))
+                                Err(GossipError::Internal(InternalGossipError::Database(
+                                    "Chunk ingress database error".to_string(),
+                                )))
                             }
                             CriticalChunkIngressError::ServiceUninitialized => Err(
                                 GossipError::Internal(InternalGossipError::ServiceUninitialized),

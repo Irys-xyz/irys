@@ -150,8 +150,8 @@ async fn generate_test_transaction_and_add_to_block(
         Ok(tx) => {
             irys_txs.insert(tx.header.id, tx);
         }
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            panic!("unfunded account error")
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            panic!("unfunded account error for tx {}", tx_id)
         }
         Err(AddTxError::TxIngress(TxIngressError::Skipped)) => {}
         Err(e) => panic!("unexpected error {:?}", e),
