@@ -294,7 +294,7 @@ impl Inner {
         let signer_addr = self.config.irys_signer().address();
 
         // Determine existing proof state and chunk count
-        let (chunk_count_opt, existing_local_proof, existing_local_proof_expired) = self
+        let (chunk_count_opt, existing_local_proof) = self
             .irys_db
             .view_eyre(|tx| {
                 let ingress_proof = irys_database::ingress_proof_by_data_root_address(
@@ -304,40 +304,13 @@ impl Inner {
                 )?;
 
                 let mut existing_local_proof: Option<IngressProof> = None;
-                let mut existing_local_proof_expired = false;
-
-                if let Some(compact) = ingress_proof.clone() {
-                    match self.is_ingress_proof_expired(&compact.proof) {
-                        Ok(expired) => {
-                            if expired {
-                                info!(
-                                    proof.data_root = ?compact.proof.data_root,
-                                    "Local ingress proof for data root {:?} expired", &compact.proof.data_root
-                                );
-                                existing_local_proof_expired = true;
-                                existing_local_proof = Some(compact.proof.clone());
-                            } else {
-                                // Valid existing proof - we can early return without chunk counting
-                                return Ok((None, Some(compact.proof.clone()), false));
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                proof.data_root = ?compact.proof.data_root,
-                                "Error validating ingress proof anchor for data root {:?}: {:?}",
-                                &compact.proof.data_root, e
-                            );
-                            return Err(eyre::eyre!("Validation error: {e}"));
-                        }
-                    }
-                }
 
                 // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
                 let count = cursor
                     .dup_count(root_hash)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
-                Ok((Some(count), existing_local_proof, existing_local_proof_expired))
+                Ok((Some(count), existing_local_proof))
             })
             .map_err(|e| {
                 error!("Database error: {:?}", e);
@@ -345,10 +318,7 @@ impl Inner {
             })?;
 
         // Early return if we have a valid existing local proof
-        if chunk_count_opt.is_none()
-            && existing_local_proof.is_some()
-            && !existing_local_proof_expired
-        {
+        if chunk_count_opt.is_none() && existing_local_proof.is_some() {
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
                 &root_hash
@@ -372,71 +342,26 @@ impl Inner {
 
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
-            // dispatch a ingress proof task
 
             // Regenerate if existing local proof expired and transaction(s) are not yet promoted
             let signer = self.config.irys_signer();
-            if existing_local_proof_expired {
-                // Check if any associated tx is already promoted; if so skip regeneration
-                let should_regenerate = self
-                    .irys_db
-                    .view_eyre(|tx| {
-                        if let Some(cached) =
-                            irys_database::cached_data_root_by_data_root(tx, chunk.data_root)?
-                        {
-                            for txid in cached.txid_set.iter() {
-                                if let Some(header) = irys_database::tx_header_by_txid(tx, txid)? {
-                                    if header.promoted_height.is_some() {
-                                        return Ok(false);
-                                    }
-                                }
-                            }
-                            Ok(true)
-                        } else {
-                            Ok(false)
-                        }
-                    })
-                    .unwrap_or(false);
-
-                if should_regenerate {
-                    let db = self.irys_db.clone();
-                    let block_tree_read_guard = self.block_tree_read_guard.clone();
-                    let config = self.config.clone();
-                    let gossip_sender = self.service_senders.gossip_broadcast.clone();
-                    let _ = self.exec.clone().spawn_blocking(async move {
-                        if let Err(e) = generate_and_store_ingress_proof(
-                            &block_tree_read_guard,
-                            &db,
-                            &config,
-                            chunk.data_root,
-                            None,
-                            &gossip_sender,
-                        ) {
-                            tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to regenerate expired local ingress proof: {e}");
-                        }
-                    }).in_current_span();
-                } else {
-                    debug!(proof.data_root = ?chunk.data_root, "Skipping regeneration (promoted or missing cached data root)");
+            // New proof generation path
+            let db = self.irys_db.clone();
+            let block_tree_read_guard = self.block_tree_read_guard.clone();
+            let config = self.config.clone();
+            let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let _ = self.exec.clone().spawn_blocking(async move {
+                if let Err(e) = generate_and_store_ingress_proof(
+                    &block_tree_read_guard,
+                    &db,
+                    &config,
+                    chunk.data_root,
+                    None,
+                    &gossip_sender,
+                ) {
+                    tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
                 }
-            } else {
-                // New proof generation path
-                let db = self.irys_db.clone();
-                let block_tree_read_guard = self.block_tree_read_guard.clone();
-                let config = self.config.clone();
-                let gossip_sender = self.service_senders.gossip_broadcast.clone();
-                let _ = self.exec.clone().spawn_blocking(async move {
-                    if let Err(e) = generate_and_store_ingress_proof(
-                        &block_tree_read_guard,
-                        &db,
-                        &config,
-                        chunk.data_root,
-                        None,
-                        &gossip_sender,
-                    ) {
-                        tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
-                    }
-                }).in_current_span();
-            }
+            }).in_current_span();
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
