@@ -2561,10 +2561,8 @@ where
             .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
             .expect("creating a read tx should succeed")
             .expect("db query should succeed")
-            .expect(&format!(
-                "CachedDataRoot should be found for data_root {} (tx_id {})",
-                tx_header.data_root, tx_header.id
-            ))
+            .unwrap_or_else(|| panic!("CachedDataRoot should be found for data_root {} (tx_id {})",
+                tx_header.data_root, tx_header.id))
             .block_set;
 
         //  b) Get the submit ledger offset intervals for each of the blocks
