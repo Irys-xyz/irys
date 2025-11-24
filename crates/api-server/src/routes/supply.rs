@@ -72,25 +72,9 @@ fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
 }
 
 fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
-    let block_height = if use_exact {
-        // For exact calculation, always query database for consistency
-        let tree = state.block_tree.read();
-        let (canonical, _) = tree.get_canonical_chain();
-
-        let last_entry = canonical
-            .last()
-            .ok_or_else(|| eyre!("No blocks in canonical chain"))?;
-
-        let last_block = state
-            .db
-            .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash, false))?
-            .ok_or_else(|| eyre!("Block header not found for tip"))?;
-
-        last_block.height
-    } else {
-        // For estimated calculation, use helper with tree + DB fallback
-        get_latest_block(state)?.height
-    };
+    // Always use tree + DB fallback for getting the latest block
+    // (tip may not be migrated to DB yet)
+    let block_height = get_latest_block(state)?.height;
 
     let config = &state.config.consensus;
 
@@ -107,17 +91,24 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         let tree = state.block_tree.read();
         let (canonical, _) = tree.get_canonical_chain();
 
-        let total_emitted = state.db.view_eyre(|tx| {
-            let mut sum = U256::zero();
-            for entry in canonical.iter() {
-                if let Some(block) = block_header_by_hash(tx, &entry.block_hash, false)? {
-                    sum += block.reward_amount;
-                }
-            }
-            Ok(sum)
-        })?;
+        let mut sum = U256::zero();
 
-        (total_emitted, "actual")
+        // Query each block from tree first, fallback to database
+        for entry in canonical.iter() {
+            let block = tree.get_block(&entry.block_hash).cloned().or_else(|| {
+                state
+                    .db
+                    .view_eyre(|tx| block_header_by_hash(tx, &entry.block_hash, false))
+                    .ok()
+                    .flatten()
+            });
+
+            if let Some(block) = block {
+                sum += block.reward_amount;
+            }
+        }
+
+        (sum, "actual")
     } else {
         let curve = HalvingCurve {
             inflation_cap: config.block_reward_config.inflation_cap,

@@ -3,6 +3,7 @@ mod api;
 mod client;
 mod external_api;
 mod pricing_endpoint;
+mod supply_endpoint;
 mod tx;
 mod tx_commitments;
 mod tx_duplicates;
