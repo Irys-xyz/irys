@@ -213,7 +213,10 @@ impl super::PackingStrategy for RemotePackingStrategy {
                     }
                 }
                 Err(e) => {
-                    error!("Remote packing failed: {}", e);
+                    error!(
+                        "Remote packing failed for storage_module {} partition_hash {}: {}",
+                        storage_module_id, partition_hash, e
+                    );
                     continue;
                 }
             }

@@ -100,7 +100,10 @@ impl DataSyncServiceInner {
                 if let Err(e) =
                     self.on_chunk_completed(storage_module_id, chunk_offset, peer_addr, chunk)
                 {
-                    error!("Failed to handle chunk completion: {e:?}");
+                    error!(
+                        "Failed to handle chunk completion for storage_module {} chunk_offset {} from peer {}: {e:?}",
+                        storage_module_id, chunk_offset, peer_addr
+                    );
                 }
             }
             DataSyncServiceMessage::ChunkFailed {
@@ -109,7 +112,10 @@ impl DataSyncServiceInner {
                 peer_addr,
             } => {
                 if let Err(e) = self.on_chunk_failed(storage_module_id, chunk_offset, peer_addr) {
-                    error!("Failed to handle chunk failure: {e:?}");
+                    error!(
+                        "Failed to handle chunk failure for storage_module {} chunk_offset {} from peer {}: {e:?}",
+                        storage_module_id, chunk_offset, peer_addr
+                    );
                 }
             }
             DataSyncServiceMessage::ChunkTimedOut {
@@ -118,7 +124,10 @@ impl DataSyncServiceInner {
                 peer_address: peer_addr,
             } => {
                 if let Err(e) = self.on_chunk_timeout(storage_module_id, chunk_offset, peer_addr) {
-                    error!("Failed to handle chunk timeout: {e:?}");
+                    error!(
+                        "Failed to handle chunk timeout for storage_module {} chunk_offset {} from peer {}: {e:?}",
+                        storage_module_id, chunk_offset, peer_addr
+                    );
                 }
             }
             DataSyncServiceMessage::PeerListUpdated => self.handle_peer_list_updated(),
