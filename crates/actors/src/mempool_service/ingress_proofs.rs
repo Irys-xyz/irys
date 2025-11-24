@@ -48,7 +48,7 @@ impl Inner {
                 return Err(e);
             }
         }
-
+        // TODO: we should only overwrite a proof we already have if the new one has a newer anchor than the old one
         let res = self
             .irys_db
             .update(|rw_tx| -> Result<(), DatabaseError> {
@@ -198,7 +198,7 @@ impl Inner {
                         // Prune, don't regenerate
                         Ok(true)
                     }
-                    IngressProofError::DatabaseError => {
+                    IngressProofError::DatabaseError(message) => {
                         // Don't do anything
                         Ok(true)
                     }
