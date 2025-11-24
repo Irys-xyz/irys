@@ -2,6 +2,7 @@ use actix_web::{web, HttpResponse, Responder};
 use eyre::{eyre, Result};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_reward_curve::HalvingCurve;
+use irys_types::IrysBlockHeader;
 use irys_types::U256;
 use serde::{Deserialize, Serialize};
 
@@ -48,7 +49,9 @@ pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) 
     }
 }
 
-fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
+/// Gets the latest block header from the canonical chain.
+/// Tries the block tree first for performance, falls back to database if not found.
+fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
     let tree = state.block_tree.read();
     let (canonical, _) = tree.get_canonical_chain();
 
@@ -56,12 +59,38 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         .last()
         .ok_or_else(|| eyre!("No blocks in canonical chain"))?;
 
-    let last_block = state
+    // Try block tree first (fast, in-memory)
+    if let Some(block) = tree.get_block(&last_entry.block_hash) {
+        return Ok(block.clone());
+    }
+
+    // Fallback to database
+    state
         .db
         .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash, false))?
-        .ok_or_else(|| eyre!("Block header not found for tip"))?;
+        .ok_or_else(|| eyre!("Block header not found for tip in tree or database"))
+}
 
-    let block_height = last_block.height;
+fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
+    let block_height = if use_exact {
+        // For exact calculation, always query database for consistency
+        let tree = state.block_tree.read();
+        let (canonical, _) = tree.get_canonical_chain();
+
+        let last_entry = canonical
+            .last()
+            .ok_or_else(|| eyre!("No blocks in canonical chain"))?;
+
+        let last_block = state
+            .db
+            .view_eyre(|tx| block_header_by_hash(tx, &last_entry.block_hash, false))?
+            .ok_or_else(|| eyre!("Block header not found for tip"))?;
+
+        last_block.height
+    } else {
+        // For estimated calculation, use helper with tree + DB fallback
+        get_latest_block(state)?.height
+    };
 
     let config = &state.config.consensus;
 
@@ -75,6 +104,9 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         });
 
     let (emitted_amount, calculation_method) = if use_exact {
+        let tree = state.block_tree.read();
+        let (canonical, _) = tree.get_canonical_chain();
+
         let total_emitted = state.db.view_eyre(|tx| {
             let mut sum = U256::zero();
             for entry in canonical.iter() {
