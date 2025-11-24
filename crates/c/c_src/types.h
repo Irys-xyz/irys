@@ -21,3 +21,6 @@ typedef enum {
     HIP_ERROR,
     HIP_KERNEL_LAUNCH_FAILED,
 } entropy_chunk_errors;
+
+// TODO: add an error struct that passes through the underlying error code & some text context
+// so we can remove the `print`s

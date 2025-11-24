@@ -102,7 +102,7 @@ pub fn validate_funding(
             tx.signer = %commitment_tx.signer,
             "Insufficient balance for commitment tx"
         );
-        return Err(TxIngressError::Unfunded);
+        return Err(TxIngressError::Unfunded(commitment_tx.id));
     }
 
     tracing::debug!(
@@ -436,14 +436,14 @@ impl Inner {
         // ingress proof anchors must be canonical for inclusion
         let anchor_height = match self
             .get_anchor_height(anchor, true)
-            .map_err(|_e| TxIngressError::DatabaseError)?
+            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
         {
             Some(height) => height,
             None => {
                 self.mempool_state
-                    .mark_tx_as_invalid(tx_id, "Unknown anchor")
+                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
                     .await;
-                return Err(TxIngressError::InvalidAnchor.into());
+                return Err(TxIngressError::InvalidAnchor(anchor).into());
             }
         };
 
@@ -472,7 +472,7 @@ impl Inner {
         let anchor = ingress_proof.anchor;
         let anchor_height = match self
             .get_anchor_height(anchor, true)
-            .map_err(|_e| TxIngressError::DatabaseError)?
+            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
         {
             Some(height) => height,
             None => {
@@ -1207,14 +1207,14 @@ impl Inner {
 
         let anchor_height = match self
             .get_anchor_height(anchor, false /* does not need to be canonical */)
-            .map_err(|_e| TxIngressError::DatabaseError)?
+            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
         {
             Some(height) => height,
             None => {
                 self.mempool_state
-                    .mark_tx_as_invalid(tx_id, "Unknown anchor")
+                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
                     .await;
-                return Err(TxIngressError::InvalidAnchor);
+                return Err(TxIngressError::InvalidAnchor(anchor));
             }
         };
 
@@ -1236,7 +1236,7 @@ impl Inner {
                 )
             ).await;
 
-            return Err(TxIngressError::InvalidAnchor);
+            return Err(TxIngressError::InvalidAnchor(anchor));
         }
     }
 
@@ -1371,7 +1371,7 @@ impl Inner {
                     &e, &tx
                 ))
             );
-            Err(TxIngressError::InvalidSignature)
+            Err(TxIngressError::InvalidSignature(tx.signer()))
         }
     }
 
@@ -2331,23 +2331,23 @@ impl TxReadError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
-    #[error("Transaction signature is invalid")]
-    InvalidSignature,
+    #[error("Transaction signature is invalid for address {0}")]
+    InvalidSignature(Address),
     /// The account does not have enough tokens to fund this transaction
-    #[error("Account has insufficient funds for this transaction")]
-    Unfunded,
+    #[error("Account has insufficient funds for transaction {0}")]
+    Unfunded(H256),
     /// This transaction id is already in the cache
     #[error("Transaction already exists in cache")]
     Skipped,
     /// Invalid anchor value (unknown or too old)
-    #[error("Anchor is either unknown or has expired")]
-    InvalidAnchor,
+    #[error("Anchor {0} is either unknown or has expired")]
+    InvalidAnchor(H256),
     /// Invalid ledger type specified in transaction
     #[error("Invalid or unsupported ledger ID: {0}")]
     InvalidLedger(u32),
     /// Some database error occurred
-    #[error("Database operation failed")]
-    DatabaseError,
+    #[error("Database operation failed: {0}")]
+    DatabaseError(String),
     /// The service is uninitialized
     #[error("Mempool service is not initialized")]
     ServiceUninitialized,
@@ -2392,8 +2392,8 @@ pub enum IngressProofError {
     #[error("Ingress proof signature is invalid")]
     InvalidSignature,
     /// There was a database error storing the proof
-    #[error("Database error")]
-    DatabaseError,
+    #[error("Database error: {0}")]
+    DatabaseError(String),
     /// The proof does not come from a staked address
     #[error("Unstaked address")]
     UnstakedAddress,
@@ -2604,12 +2604,33 @@ impl MempoolService {
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            let MempoolServiceMessageWithSpan { message: msg, span } = msg;
-            self.inner.handle_message(msg).instrument(span).await?;
+
+        // Process remaining messages with timeout
+        let process_remaining = async {
+            while let Ok(msg) = self.msg_rx.try_recv() {
+                let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+                self.inner.handle_message(msg).instrument(span).await?;
+            }
+            Ok::<(), eyre::Error>(())
+        };
+
+        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
+            Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
+            Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
+            Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
         }
 
-        self.inner.persist_mempool_to_disk().await?;
+        // Persist to disk with timeout
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.persist_mempool_to_disk(),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
+            Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
+            Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+        }
 
         tracing::info!("shutting down Mempool service");
         Ok(())

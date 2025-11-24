@@ -78,8 +78,8 @@ pub enum EpochSnapshotError {
     #[error("provided previous epoch block does not match snapshot history")]
     IncorrectPreviousEpochBlock,
     /// Validation of commitments failed
-    #[error("validation of epoch commitments failed")]
-    InvalidCommitments,
+    #[error("validation of epoch commitments failed: {0}")]
+    InvalidCommitments(String),
     /// Unpledge targeted partition not found in assignments
     #[error("unpledge target partition {partition_hash:?} for signer {signer:?} not found in assignments")]
     UnpledgeTargetNotFound {
@@ -272,7 +272,7 @@ impl EpochSnapshot {
 
         // Validate the commitments
         Self::validate_commitments(new_epoch_block, &new_epoch_commitments)
-            .map_err(|_| EpochSnapshotError::InvalidCommitments)?;
+            .map_err(|e| EpochSnapshotError::InvalidCommitments(e.to_string()))?;
 
         debug!(
             block.height = new_epoch_block.height,

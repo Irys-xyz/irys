@@ -499,7 +499,7 @@ pub trait BlockProdStrategy {
 
         let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
 
-        let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
+        let block_reward = self.block_reward(&prev_block_header)?;
 
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
@@ -1245,13 +1245,28 @@ pub trait BlockProdStrategy {
     fn block_reward(
         &self,
         prev_block_header: &IrysBlockHeader,
-        current_timestamp: u128,
     ) -> Result<Amount<irys_types::storage_pricing::phantoms::Irys>, eyre::Error> {
-        let reward_amount = self.inner().reward_curve.reward_between(
-            // adjust ms -> sec
-            prev_block_header.timestamp.saturating_div(1000),
-            current_timestamp.saturating_div(1000),
-        )?;
+        // Calculate rewards using fixed block intervals, not actual timestamps.
+        // This prevents block producers from manipulating timestamps to maximize rewards
+        // and ensures consistent emissions over time.
+
+        let previous_height = prev_block_header.height();
+
+        let target_block_time_seconds = self
+            .inner()
+            .config
+            .consensus
+            .difficulty_adjustment
+            .block_time;
+
+        // Use height * target_block_time for consistent reward curve positioning
+        let previous_block_seconds = (previous_height * target_block_time_seconds) as u128;
+        let current_block_seconds = previous_block_seconds + target_block_time_seconds as u128;
+
+        let reward_amount = self
+            .inner()
+            .reward_curve
+            .reward_between(previous_block_seconds, current_block_seconds)?;
         Ok(reward_amount)
     }
 

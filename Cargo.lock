@@ -5018,13 +5018,16 @@ version = "0.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "alloy-eips",
  "awc",
  "base58",
  "eyre",
+ "hex",
  "irys-actors",
  "irys-database",
  "irys-domain",
  "irys-reth-node-bridge",
+ "irys-reward-curve",
  "irys-testing-utils",
  "irys-types",
  "reth",
@@ -5287,6 +5290,7 @@ dependencies = [
 name = "irys-packing"
 version = "0.1.0"
 dependencies = [
+ "eyre",
  "irys-c",
  "irys-types",
  "rand 0.8.5",

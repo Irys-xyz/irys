@@ -61,10 +61,15 @@ impl Inner {
                 )?;
                 Ok(())
             })
-            .map_err(|_| IngressProofError::DatabaseError)?;
+            .map_err(|e| IngressProofError::DatabaseError(e.to_string()))?;
 
-        if res.is_err() {
-            return Err(IngressProofError::DatabaseError);
+        if let Err(e) = res {
+            tracing::error!(
+                ingress_proof.data_root = ?ingress_proof.data_root,
+                "Failed to store ingress proof data root: {:?}",
+                e
+            );
+            return Err(IngressProofError::DatabaseError(e.to_string()));
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
@@ -109,7 +114,7 @@ impl Inner {
             ingress_proof.anchor,
             false, /* does not need to be canonical */
         )
-        .map_err(|_e| IngressProofError::DatabaseError)?
+        .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?
         {
             Some(height) => height,
             None => {
@@ -126,7 +131,10 @@ impl Inner {
         let too_old = anchor_height < min_anchor_height;
 
         if too_old {
-            warn!("Ingress proof anchor is too old");
+            warn!(
+                "Ingress proof anchor {} has height {}, which is too old (min: {})",
+                ingress_proof.anchor, anchor_height, min_anchor_height
+            );
             Err(IngressProofError::InvalidAnchor(ingress_proof.anchor))
         } else {
             Ok(())
@@ -143,8 +151,8 @@ impl Inner {
                     .map_err(|report| DatabaseError::Other(report.to_string()))?;
                 Ok(())
             })
-            .map_err(|_| IngressProofError::DatabaseError)?
-            .map_err(|_| IngressProofError::DatabaseError)?;
+            .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?
+            .map_err(|db_err| IngressProofError::DatabaseError(db_err.to_string()))?;
 
         Ok(())
     }

@@ -5,27 +5,30 @@ use std::{
 
 pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
-    cc.flag("-O3");
-    cc.flag("-ffast-math");
+    // Optimization flags
+    cc.flag("-O3")
+        .flag("-ffast-math")
+        .flag("-finline-functions")
+        .flag("-fPIC")
+        .flag("-g0");
+
     // TODO: enable below for debug
-    // cc.flag("-O0 -g")
-    cc.flag("-std=c99");
-    cc.flag("-finline-functions");
-    cc.flag("-Wall");
-    cc.flag("-Wmissing-prototypes");
+    // cc.flag("-O0").flag("-g");
 
-    let ossl = pkg_config::probe_library("openssl").expect("unable to find openssl");
-    for inc_path in ossl.include_paths {
-        cc.flag(format!("-I{}", inc_path.to_string_lossy()));
+    cc.flag("-std=c99")
+        .flag("-Wall")
+        .flag("-Wmissing-prototypes");
+
+    // Add library include paths
+    for library in &["openssl", "gmp"] {
+        let lib = pkg_config::probe_library(library)
+            .unwrap_or_else(|_| panic!("unable to find {}", library));
+
+        for inc_path in lib.include_paths {
+            cc.flag(format!("-I{}", inc_path.display()));
+        }
     }
 
-    let gmp = pkg_config::probe_library("gmp").expect("unable to find gmp");
-    for inc_path in gmp.include_paths {
-        cc.flag(format!("-I{}", inc_path.to_string_lossy()));
-    }
-
-    cc.flag("-fPIC");
-    cc.flag("-g0");
     let nix_disables_native = env::var("NIX_ENFORCE_NO_NATIVE")
         .map(|v| v != "0")
         .unwrap_or(false);
@@ -39,8 +42,6 @@ pub(crate) fn build_capacity(c_src: &Path, _ssl_inc_dir: &Path) {
 pub(crate) fn bind_capacity(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity.h").to_string_lossy())
-        // .raw_line("#![allow(clippy::all)]")
-        // .raw_line_before_rustfmt("#![allow(clippy::all)]")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
@@ -53,18 +54,26 @@ pub(crate) fn bind_capacity(c_src: &Path) {
 
 pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
     let mut cc = cc::Build::new();
-
-    cc.cuda(true);
-    cc.cudart("static");
-
-    cc.flag("-O3");
-    // TODO: enable below for debug
-    //cc.flag("-O0");
-    //cc.flag("-g");
-    cc.flag("-std=c++17");
-    cc.flag("-Xcompiler");
-    cc.flag("-fPIC");
-    cc.flag("-DCAP_IMPL_CUDA");
+    cc.cuda(true)
+        .cudart("static")
+        .opt_level(3)
+        .cpp(true)
+        .std("c++17")
+        .pic(true)
+        .define("CAP_IMPL_CUDA", None)
+        .flag("-O3")
+        .flag("--use_fast_math")
+        .flag("--gpu-architecture=native") // optimise for local GPU
+        // .flag("--ptxas-options=-v") // enable to see register usage
+        .flag("--extra-device-vectorization")
+        .flag("--fmad=true")
+        .flag("--maxrregcount=0")
+        .flag("-Xcompiler=-O3")
+        .flag("-Xcompiler=-march=native")
+        .flag("-Xcompiler=-mtune=native")
+        .flag("-Xcompiler=-ffast-math")
+        .flag("-dlto")
+        .debug(false);
 
     let ossl = pkg_config::probe_library("openssl").expect("unable to find openssl");
     for inc_path in ossl.include_paths {
@@ -83,8 +92,7 @@ pub(crate) fn build_capacity_cuda(c_src: &Path, _ssl_inc_dir: &Path) {
 pub(crate) fn bind_capacity_cuda(c_src: &Path) {
     let bindings = bindgen::Builder::default()
         .header(c_src.join("capacity_cuda.h").to_string_lossy())
-        // .raw_line("#![allow(clippy::all)]")
-        // .raw_line_before_rustfmt("#![allow(clippy::all)]")
+        .rustified_enum("entropy_chunk_errors")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
