@@ -73,7 +73,7 @@ impl reth_db::Database for RethDbWrapper {
 
     fn view<T, F>(&self, f: F) -> Result<T, DatabaseError>
     where
-        F: FnOnce(&Self::TX) -> T,
+        F: FnOnce(&mut Self::TX) -> T,
     {
         let guard = self.db.read().map_err(db_read_error)?;
         guard

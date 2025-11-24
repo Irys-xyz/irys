@@ -35,15 +35,17 @@ use reth::{
     transaction_pool::TransactionValidationTaskExecutor,
 };
 use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_engine_local::LocalPayloadAttributesBuilder;
 pub use reth_ethereum_engine_primitives;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
 pub use reth_node_ethereum;
 use reth_node_ethereum::{
-    node::{EthereumAddOns, EthereumConsensusBuilder, EthereumNetworkBuilder},
+    node::{EthereumAddOns, EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumEngineValidatorBuilder, EthereumNetworkBuilder},
     EthEngineTypes, EthEvmConfig,
 };
+use alloy_evm::EthEvmFactory;
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
@@ -53,7 +55,6 @@ use reth_transaction_pool::{
     TransactionValidator,
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
-use reth_trie_db::MerklePatriciaTrie;
 use shadow_tx::ShadowTransaction;
 use tracing::info;
 
@@ -105,7 +106,6 @@ pub struct IrysEthereumNode {
 impl NodeTypes for IrysEthereumNode {
     type Primitives = EthPrimitives;
     type ChainSpec = ChainSpec;
-    type StateCommitment = MerklePatriciaTrie;
     type Storage = EthStorage;
     type Payload = EthEngineTypes;
 }
@@ -163,6 +163,8 @@ where
 
     type AddOns = EthereumAddOns<
         NodeAdapter<N, <Self::ComponentsBuilder as NodeComponentsBuilder<N>>::Components>,
+        EthereumEthApiBuilder,
+        EthereumEngineValidatorBuilder,
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
@@ -195,6 +197,12 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
                 withdrawals,
             },
         }
+    }
+
+    fn local_payload_attributes_builder(
+        chain_spec: &Self::ChainSpec,
+    ) -> impl reth::api::PayloadAttributesBuilder<<Self::Payload as reth::api::PayloadTypes>::PayloadAttributes> {
+        LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
     }
 }
 
@@ -260,10 +268,12 @@ where
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let eth_tx_validator = Arc::try_unwrap(validator.validator)
+            .expect("validator Arc should have only one strong reference");
         let validator = TransactionValidationTaskExecutor {
-            validator: IrysShadowTxValidator {
-                eth_tx_validator: validator.validator,
-            },
+            validator: Arc::new(IrysShadowTxValidator {
+                eth_tx_validator,
+            }),
             to_validation_task: validator.to_validation_task,
         };
 
@@ -330,7 +340,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
 }
@@ -433,7 +443,6 @@ where
     type EVM = evm::IrysEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        // TODO: figure out if this needs to be EthEvmConfig<IrysEvmFactory> - so far it doesn't seem like it needs to.
         let evm_config = EthEvmConfig::new(ctx.chain_spec())
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
 
@@ -2654,7 +2663,7 @@ pub mod test_utils {
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
     use reth::{
-        api::{FullNodePrimitives, PayloadAttributesBuilder},
+        api::{NodePrimitives, PayloadAttributesBuilder},
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
         builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
         providers::{AccountReader as _, BlockHashReader as _},
@@ -2817,7 +2826,7 @@ pub mod test_utils {
                 .try_into_recovered()
                 .unwrap();
         let normal_pooled_tx = EthPooledTransaction::new(normal_tx.clone(), 300);
-        let tx_hash = node
+        let outcome = node
             .inner
             .pool
             .add_transaction(
@@ -2825,7 +2834,7 @@ pub mod test_utils {
                 normal_pooled_tx,
             )
             .await?;
-        Ok(tx_hash)
+        Ok(outcome.hash)
     }
 
     /// Helper for creating multiple normal transactions
@@ -3218,7 +3227,7 @@ pub mod test_utils {
     where
         N: FullNodeComponents<Provider: CanonStateSubscriptions>,
         AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
-        N::Types: NodeTypes<Primitives: FullNodePrimitives>,
+        N::Types: NodeTypes<Primitives: reth::api::NodePrimitives>,
     {
         node.provider
             .basic_account(&addr)
@@ -3234,7 +3243,7 @@ pub mod test_utils {
     where
         N: FullNodeComponents<Provider: CanonStateSubscriptions>,
         AddOns: RethRpcAddOns<N, EthApi: EthTransactions>,
-        N::Types: NodeTypes<Primitives: FullNodePrimitives>,
+        N::Types: NodeTypes<Primitives: reth::api::NodePrimitives>,
     {
         node.provider
             .basic_account(&addr)

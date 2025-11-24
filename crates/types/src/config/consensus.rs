@@ -472,6 +472,7 @@ impl ConsensusConfig {
             reth: RethChainSpec {
                 chain: Chain::from_id(IRYS_MAINNET_CHAIN_ID),
                 genesis: Genesis {
+                    parent_hash: None,
                     gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
                     config: alloy_genesis::ChainConfig {
                         chain_id: IRYS_MAINNET_CHAIN_ID,
@@ -495,6 +496,11 @@ impl ConsensusConfig {
                         cancun_time: None,
                         prague_time: None,
                         osaka_time: None,
+                        bpo1_time: None,
+                        bpo2_time: None,
+                        bpo3_time: None,
+                        bpo4_time: None,
+                        bpo5_time: None,
                         terminal_total_difficulty: None,
                         terminal_total_difficulty_passed: true,
                         ethash: None,
@@ -728,6 +734,7 @@ impl ConsensusConfig {
             reth: RethChainSpec {
                 chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
                 genesis: Genesis {
+                    parent_hash: None,
                     gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
                     config: alloy_genesis::ChainConfig {
                         chain_id: IRYS_TESTNET_CHAIN_ID,
@@ -751,6 +758,11 @@ impl ConsensusConfig {
                         cancun_time: None,
                         prague_time: None,
                         osaka_time: None,
+                        bpo1_time: None,
+                        bpo2_time: None,
+                        bpo3_time: None,
+                        bpo4_time: None,
+                        bpo5_time: None,
                         terminal_total_difficulty: None,
                         terminal_total_difficulty_passed: true,
                         ethash: None,
