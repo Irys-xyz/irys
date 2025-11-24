@@ -70,8 +70,7 @@ impl Inner {
             }
         }
 
-        let res = self
-            .irys_db
+        self.irys_db
             .update(|rw_tx| -> Result<(), DatabaseError> {
                 rw_tx.put::<IngressProofs>(
                     ingress_proof.data_root,
@@ -82,14 +81,8 @@ impl Inner {
                 )?;
                 Ok(())
             })
+            .map_err(|e| IngressProofError::DatabaseError(e.to_string()))?
             .map_err(|e| IngressProofError::DatabaseError(e.to_string()))?;
-
-        if res.is_err() {
-            return Err(IngressProofError::DatabaseError(format!(
-                "{:?}",
-                res.unwrap_err()
-            )));
-        }
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
         let gossip_broadcast_message = GossipBroadcastMessage::from(ingress_proof);
