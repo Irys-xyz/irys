@@ -5,7 +5,7 @@ use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_types::{
     ii, partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
-    Config, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
+    Address, Config, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
 };
 use reth::revm::primitives::bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
@@ -48,7 +48,7 @@ impl RemotePackingStrategy {
         short_writes_before_sync: u32,
         storage_module_id: usize,
         partition_hash: PartitionHash,
-        mining_address: [u8; 20],
+        mining_address: Address,
     ) -> Result<u32, String> {
         let chunk_size = self.config.consensus.chunk_size as usize;
         let mut buffer = BytesMut::with_capacity(
@@ -116,7 +116,7 @@ impl RemotePackingStrategy {
         storage_module: &Arc<StorageModule>,
         range_start: u32,
         range_end: u32,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
@@ -142,7 +142,7 @@ impl RemotePackingStrategy {
 
         // Prepare request
         let request = RemotePackingRequest {
-            mining_address: mining_address.into(),
+            mining_address,
             partition_hash,
             chunk_range: current_chunk_range,
             chain_id: self.packing_config.chain_id,
@@ -182,7 +182,7 @@ impl super::PackingStrategy for RemotePackingStrategy {
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
