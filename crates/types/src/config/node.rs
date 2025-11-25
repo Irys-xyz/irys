@@ -407,56 +407,35 @@ pub struct RemotePackingConfig {
     pub timeout: Option<Duration>,
 }
 
-/// Default maximum cache size: 10 GB
-pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
-
-/// Cache eviction strategy - node operators select one
+/// # Cache Configuration
+///
+/// Settings for in-memory caching to improve performance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum CacheEvictionStrategy {
-    /// Time-based eviction: remove cached data after a fixed time period
-    /// Runs on every prune_cache() call, evicts entries older than max_age
-    TimeBased {
-        /// Maximum age of cached data in seconds before eviction
-        /// Example: 86400 = 24 hours, 604800 = 7 days
-        max_age_seconds: u64,
-    },
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Number of blocks cache cleaning will lag behind block finalization
+    /// Higher values keep more data in cache but use more memory
+    #[serde(default)]
+    pub cache_clean_lag: u8,
 
-    /// Size-based eviction: remove oldest cached data (FIFO) when limits exceeded
-    /// Runs on every prune_cache() call, evicts oldest entries when over limit
-    SizeBased {
-        /// Maximum cache size in bytes
-        /// Default: 10737418240 (10 GB)
-        #[serde(default = "default_max_cache_size_bytes")]
-        max_cache_size_bytes: u64,
-    },
+    #[serde(default = "default_max_cache_size_bytes")]
+    pub max_cache_size_bytes: u64,
 }
+
+/// Default maximum cache size: 10 GiB
+pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
 
 const fn default_max_cache_size_bytes() -> u64 {
     DEFAULT_MAX_CACHE_SIZE_BYTES
 }
 
-impl Default for CacheEvictionStrategy {
+impl Default for CacheConfig {
     fn default() -> Self {
-        Self::SizeBased {
+        Self {
+            cache_clean_lag: 0,
             max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
         }
     }
-}
-
-/// # Cache Configuration
-///
-/// Settings for in-memory caching to improve performance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheConfig {
-    /// Number of blocks cache cleaning will lag behind block finalization
-    /// Higher values keep more data in cache but use more memory
-    pub cache_clean_lag: u8,
-
-    /// Cache eviction strategy - choose time-based OR size-based
-    #[serde(default)]
-    pub eviction_strategy: CacheEvictionStrategy,
 }
 
 /// # HTTP API Configuration
@@ -810,7 +789,7 @@ impl NodeConfig {
             },
             cache: CacheConfig {
                 cache_clean_lag: 2,
-                eviction_strategy: CacheEvictionStrategy::default(),
+                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
             },
             http: HttpConfig {
                 public_ip: None,
@@ -953,7 +932,7 @@ impl NodeConfig {
             },
             cache: CacheConfig {
                 cache_clean_lag: 2,
-                eviction_strategy: CacheEvictionStrategy::default(),
+                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
             },
             http: HttpConfig {
                 public_ip: None,
