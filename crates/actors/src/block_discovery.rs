@@ -226,6 +226,8 @@ impl BlockDiscoveryService {
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
+                let block_hash = irys_block_header.block_hash;
+                let block_height = irys_block_header.height;
                 let result = self
                     .inner
                     .clone()
@@ -233,7 +235,12 @@ impl BlockDiscoveryService {
                     .await;
                 if let Some(sender) = sender {
                     if let Err(e) = sender.send(result) {
-                        tracing::error!("sender error: {:?}", e);
+                        tracing::error!(
+                            "Block discovery sender error for block {} (height {}): {:?}",
+                            block_hash,
+                            block_height,
+                            e
+                        );
                     };
                 }
             }
@@ -466,7 +473,14 @@ impl BlockDiscoveryServiceInner {
                     commitments = tx;
                 }
                 Err(e) => {
-                    error!("Failed to collect commitment transactions: {:?}", e);
+                    error!(
+                        "Failed to collect commitment transactions for block {} (height {}): {:?}. Missing {} tx(s): {:?}",
+                        new_block_header.block_hash,
+                        new_block_header.height,
+                        e,
+                        commitment_ledger.tx_ids.0.len(),
+                        commitment_ledger.tx_ids.0
+                    );
                     return Err(BlockDiscoveryError::MissingTransactions(
                         commitment_ledger.tx_ids.0.clone(),
                     ));
@@ -831,16 +845,28 @@ impl BlockDiscoveryServiceInner {
                     "sending block to bus: block height {:?}",
                     &new_block_header.height
                 );
+                let block_hash_for_log = new_block_header.block_hash;
+                let block_height_for_log = new_block_header.height;
                 if let Err(error) =
                     gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
                 {
-                    tracing::error!("Failed to send gossip message: {}", error);
+                    tracing::error!(
+                        "Failed to send gossip message for block {} (height {}): {}",
+                        block_hash_for_log,
+                        block_height_for_log,
+                        error
+                    );
                 }
 
                 Ok(())
             }
             Err(err) => {
-                tracing::error!("Block validation error {:?}", err);
+                tracing::error!(
+                    "Block validation error for block {} (height {}): {:?}",
+                    new_block_header.block_hash,
+                    new_block_header.height,
+                    err
+                );
                 Err(BlockDiscoveryError::BlockValidationError(err))
             }
         }

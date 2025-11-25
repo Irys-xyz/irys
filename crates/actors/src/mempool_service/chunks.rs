@@ -51,7 +51,13 @@ impl Inner {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
                     .map(|opt| opt.map(|cdr| cdr.data_size))
             })
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)?
+            .map_err(|e| {
+                error!(
+                    "Database error fetching cached data_root for chunk data_root {:?} tx_offset {}: {:?}",
+                    chunk.data_root, chunk.tx_offset, e
+                );
+                CriticalChunkIngressError::DatabaseError
+            })?
             .or_else(|| {
                 debug!(
                     chunk.data_root = ?chunk.data_root,
@@ -253,9 +259,14 @@ impl Inner {
         if let Err(e) = self
             .irys_db
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
-            .map_err(|_| CriticalChunkIngressError::DatabaseError)
+            .map_err(|e| {
+                error!(
+                    "Database error caching chunk data_root {:?} tx_offset {}: {:?}",
+                    chunk.data_root, chunk.tx_offset, e
+                );
+                CriticalChunkIngressError::DatabaseError
+            })
         {
-            error!("Database error: {:?}", e);
             return Err(e.into());
         }
 
@@ -276,9 +287,16 @@ impl Inner {
                 info!(target: "irys::mempool::chunk_ingress", "Writing chunk with offset {} for data_root {} to sm {}", &chunk.tx_offset, &chunk.data_root, &sm.id );
                 let result = sm
                     .write_data_chunk(&chunk)
-                    .map_err(|_| CriticalChunkIngressError::Other("Internal error".to_owned()));
+                    .map_err(|e| {
+                        error!(
+                            "Failed to write chunk data_root {:?} tx_offset {} to storage_module {}: {:?}",
+                            chunk.data_root, chunk.tx_offset, sm.id, e
+                        );
+                        CriticalChunkIngressError::Other(format!(
+                            "Failed to write chunk to storage_module {}", sm.id
+                        ))
+                    });
                 if let Err(e) = result {
-                    error!("Internal error: {:?}", e);
                     return Err(e.into());
                 }
             }
@@ -304,7 +322,10 @@ impl Inner {
                 Ok((Some(count), existing_local_proof))
             })
             .map_err(|e| {
-                error!("Database error: {:?}", e);
+                error!(
+                    "Database error checking ingress proof/chunk count for data_root {:?}: {:?}",
+                    root_hash, e
+                );
                 CriticalChunkIngressError::DatabaseError
             })?;
 
@@ -352,10 +373,17 @@ impl Inner {
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();
+        let chunk_data_root = chunk.data_root;
+        let chunk_tx_offset = chunk.tx_offset;
         let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
 
         if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-            tracing::error!("Failed to send gossip data: {:?}", error);
+            tracing::error!(
+                "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
+                chunk_data_root,
+                chunk_tx_offset,
+                error
+            );
         }
 
         Ok(())

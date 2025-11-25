@@ -104,7 +104,11 @@ impl ChunkMigrationServiceInner {
             } => {
                 let response_value = self.on_update_storage_module_indexes(block_hash);
                 if let Err(e) = receiver.send(response_value) {
-                    tracing::error!("UpdateStorageModuleIndexes receiver.send() error: {:?}", e);
+                    tracing::error!(
+                        "UpdateStorageModuleIndexes receiver.send() error for block {}: {:?}",
+                        block_hash,
+                        e
+                    );
                 };
             }
         }
@@ -446,7 +450,10 @@ fn write_chunk_to_module(
         };
 
         storage_module.write_data_chunk(&chunk).map_err(|e| {
-            error!("{:?}", e);
+            error!(
+                "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
+                tx.data_root, chunk_offset, tx.data_size, e
+            );
             MigrationError::ChunkIndexWrite
         })?;
     }

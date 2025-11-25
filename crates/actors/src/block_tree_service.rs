@@ -410,9 +410,16 @@ impl BlockTreeServiceInner {
             {
                 debug!("No reorg subscribers: {:?}", e);
             }
+            let block_hash = block_to_migrate.block_hash;
+            let block_height = block_to_migrate.height;
             self.send_block_migration_message(block_to_migrate)
                 .await
-                .inspect_err(|e| error!("Unable to send block migration message: {:?}", e))?
+                .inspect_err(|e| {
+                    error!(
+                        "Unable to send block migration message for block {} (height {}): {:?}",
+                        block_hash, block_height, e
+                    )
+                })?
         }
         Ok(())
     }
@@ -484,7 +491,10 @@ impl BlockTreeServiceInner {
         if add_result.is_ok() {
             // Mark as scheduled and schedule validation
             if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
-                error!("Unable to mark block as ValidationScheduled: {:?}", err);
+                error!(
+                    "Unable to mark block {} as ValidationScheduled: {:?}",
+                    block_hash, err
+                );
                 return Err(PreValidationError::UpdateCacheForScheduledValidationError(
                     *block_hash,
                 ));
@@ -553,7 +563,11 @@ impl BlockTreeServiceInner {
 
             // Remove the block
             if let Err(err) = cache.remove_block(&block_hash) {
-                tracing::error!(?err, "Failed to remove block from cache");
+                tracing::error!(
+                    block.hash = %block_hash,
+                    ?err,
+                    "Failed to remove block from cache"
+                );
             }
 
             let event = BlockStateUpdated {
@@ -608,7 +622,7 @@ impl BlockTreeServiceInner {
 
             // Mark block as validated in cache, this will update the canonical chain
             if let Err(err) = cache.mark_block_as_valid(&block_hash) {
-                error!("{}", err);
+                error!("Failed to mark block {} as valid: {}", block_hash, err);
                 return Ok(());
             }
 
@@ -918,7 +932,7 @@ impl BlockTreeServiceInner {
                     None,
                 ),
             ) {
-                error!("Failed to send EpochProcessed event to CacheService: {}", e);
+                error!("Failed to send EpochProcessed event to CacheService for block {} (height {}): {}", block_hash, epoch_block.height(), e);
             }
         }
 

@@ -69,10 +69,15 @@ impl Inner {
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
+        let data_root = ingress_proof.data_root;
         let gossip_broadcast_message = GossipBroadcastMessage::from(ingress_proof);
 
         if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-            tracing::error!("Failed to send gossip data: {:?}", error);
+            tracing::error!(
+                "Failed to send gossip data for ingress proof data_root {:?}: {:?}",
+                data_root,
+                error
+            );
         }
 
         Ok(())
