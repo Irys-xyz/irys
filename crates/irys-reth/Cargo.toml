@@ -55,7 +55,7 @@ arbitrary.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 either = "1.15"
-sha2 = "0.10"
+sha2.workspace = true
 alloy-rlp.workspace = true
 
 [dev-dependencies]
