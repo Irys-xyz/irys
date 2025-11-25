@@ -43,7 +43,11 @@ pub type NodeHelperType =
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
-pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapter>;
+pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<
+    RethNodeAdapter,
+    reth_node_ethereum::node::EthereumEthApiBuilder,
+    reth_node_ethereum::node::EthereumEngineValidatorBuilder,
+>;
 
 pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddOns>;
 
@@ -167,7 +171,6 @@ pub async fn run_node(
             shadow_tx_store: shadow_tx_store.clone(),
         })
         .launch_with_debug_capabilities()
-        .in_current_span()
         .await?;
 
     let context = IrysRethNodeAdapter::new(handle.node.clone(), shadow_tx_store).await?;

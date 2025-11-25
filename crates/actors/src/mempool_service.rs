@@ -18,7 +18,7 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
-use futures::FutureExt as _;
+use futures::{FutureExt as _, TryFutureExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
@@ -72,7 +72,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span
 /// covers the total cost (value + fee) of the transaction.
 #[inline]
 #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
-pub fn validate_funding(
+pub async fn validate_funding(
     reth_adapter: &IrysRethNodeAdapter,
     commitment_tx: &irys_types::CommitmentTransaction,
     parent_evm_block_id: Option<BlockId>,
@@ -81,6 +81,7 @@ pub fn validate_funding(
     let balance: irys_types::U256 = reth_adapter
         .rpc
         .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
+        .await
         .map_err(|e| {
             tracing::error!(
                 tx.id = %commitment_tx.id,
@@ -125,7 +126,7 @@ pub fn validate_funding(
 /// - value must match the commitment type rules
 #[inline]
 #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
-pub fn validate_commitment_transaction(
+pub async fn validate_commitment_transaction(
     reth_adapter: &IrysRethNodeAdapter,
     consensus: &irys_types::ConsensusConfig,
     commitment_tx: &irys_types::CommitmentTransaction,
@@ -148,7 +149,7 @@ pub fn validate_commitment_transaction(
     })?;
 
     // Funding
-    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).await.map_err(|e| {
         warn!(
             tx.id = ?commitment_tx.id,
             tx.signer = ?commitment_tx.signer,
@@ -627,7 +628,7 @@ impl Inner {
                 &self.config.consensus,
                 tx,
                 parent_evm_block_id,
-            ) {
+            ).await {
                 tracing::warn!(tx.error = ?error, "rejecting commitment tx");
                 continue;
             }
@@ -749,7 +750,7 @@ impl Inner {
             &self.reth_node_adapter,
             parent_evm_block_id,
             &submit_ledger_txs,
-        ));
+        ).await);
 
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
@@ -2793,7 +2794,7 @@ pub fn handle_broadcast_recv<T>(
     }
 }
 
-fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
+async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     reth_adapter: &IrysRethNodeAdapter,
     block_id: Option<BlockId>,
     txs: &[T],
@@ -2806,6 +2807,7 @@ fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
         .reth_node
         .rpc
         .get_balances_irys(&signers, block_id)
+        .await
 }
 
 // Helper function that verifies transaction funding and tracks cumulative fees

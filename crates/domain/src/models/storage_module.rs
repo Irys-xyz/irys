@@ -1340,7 +1340,7 @@ impl StorageModule {
         fetch_from_db: S,
     ) -> eyre::Result<R>
     where
-        S: FnOnce(&reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>) -> eyre::Result<R>,
+        S: FnOnce(&mut reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>) -> eyre::Result<R>,
     {
         let (_, submodule) = self.get_submodule_for_offset(chunk_offset)?;
         submodule.db.view(fetch_from_db)?

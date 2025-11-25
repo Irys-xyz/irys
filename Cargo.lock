@@ -5545,9 +5545,11 @@ name = "irys-reth-node-bridge"
 version = "0.1.0"
 dependencies = [
  "alloy-eips",
+ "alloy-evm",
  "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
+ "async-trait",
  "clap",
  "eyre",
  "irys-database",
@@ -5565,6 +5567,7 @@ dependencies = [
  "reth-payload-builder",
  "reth-provider",
  "reth-rpc-eth-api",
+ "reth-tasks",
  "serde",
  "serde_json",
  "tokio",

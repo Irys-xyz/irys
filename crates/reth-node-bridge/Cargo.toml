@@ -29,6 +29,9 @@ serde.workspace = true
 serde_json.workspace = true
 alloy-genesis.workspace = true
 rayon.workspace = true
+alloy-evm.workspace = true
+reth-tasks.workspace = true
+async-trait = "0.1"
 
 [lints]
 workspace = true

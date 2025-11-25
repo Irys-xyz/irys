@@ -1,6 +1,7 @@
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
 use eyre::eyre;
+use futures::TryFutureExt as _;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
 };
@@ -204,7 +205,7 @@ impl Inner {
         self.validate_data_tx_ema_pricing(&tx)?;
 
         // Validate funding against canonical chain (API only)
-        self.validate_data_tx_funding(&tx)?;
+        self.validate_data_tx_funding(&tx).await?;
 
         // Protocol fee structure checks (API only)
         //
@@ -234,12 +235,13 @@ impl Inner {
     /// Validates that a data transaction has sufficient balance to cover its fees.
     /// Checks the balance against the canonical chain tip.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.signer = ?tx.signer))]
-    fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
+    async fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
             .reth_node_adapter
             .rpc
             .get_balance_irys_canonical_and_pending(tx.signer, None)
+            .await
             .map_err(|e| {
                 tracing::error!(
                     tx.id = %tx.id,
