@@ -58,7 +58,7 @@ use reth_transaction_pool::{
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use shadow_tx::ShadowTransaction;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::{
     payload::ShadowTxStore, payload_builder_builder::IrysPayloadBuilderBuilder,
@@ -220,7 +220,7 @@ pub struct IrysPoolBuilder;
 /// This will be used to build the transaction pool and its maintenance tasks during launch.
 ///
 /// Original code from:
-/// <https://github.com/Irys-xyz/reth-irys/blob/67abdf25dda69a660d44040d4493421b93d8de7b/crates/ethereum/node/src/node.rs?plain=1#L322>
+/// <https://github.com/Irys-xyz/reth-irys/blob/6c892d38bfcd6689c618386bd7ccc6fde7fbb64e/crates/ethereum/node/src/node.rs?plain=1#L453>
 ///
 /// Notable changes from the original: we reject all shadow txs, as they are not allowed to land in a the pool.
 impl<Node> PoolBuilder<Node> for IrysPoolBuilder
@@ -236,11 +236,13 @@ where
     >;
 
     async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
-        let data_dir = ctx.config().datadir();
         let pool_config = ctx.pool_config();
 
+        let blobs_disabled = ctx.config().txpool.disable_blobs_support
+            || ctx.config().txpool.blobpool_max_count == 0;
+
         let blob_cache_size = if let Some(blob_cache_size) = pool_config.blob_cache_size {
-            blob_cache_size
+            Some(blob_cache_size)
         } else {
             // get the current blob params for the current timestamp, fallback to default Cancun
             // params
@@ -254,89 +256,47 @@ where
 
             // Derive the blob cache size from the target blob count, to auto scale it by
             // multiplying it with the slot count for 2 epochs: 384 for pectra
-            let calculated_size = blob_params
-                .target_blob_count
-                .saturating_mul(EPOCH_SLOTS)
-                .saturating_mul(2);
-            u32::try_from(calculated_size).unwrap_or(u32::MAX)
+            Some((blob_params.target_blob_count * EPOCH_SLOTS * 2) as u32)
         };
 
-        let custom_config =
-            DiskFileBlobStoreConfig::default().with_max_cached_entries(blob_cache_size);
+        let blob_store =
+            reth_node_builder::components::create_blob_store_with_cache(ctx, blob_cache_size)?;
 
-        let blob_store = DiskFileBlobStore::open(data_dir.blobstore(), custom_config)?;
         let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
             .with_head_timestamp(ctx.head().timestamp)
+            .set_eip4844(!blobs_disabled)
             .kzg_settings(ctx.kzg_settings()?)
+            .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
             .with_local_transactions_config(pool_config.local_transactions_config.clone())
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+            .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+            .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
-        let eth_tx_validator = Arc::try_unwrap(validator.validator)
-            .expect("validator Arc should have only one strong reference");
         let validator = TransactionValidationTaskExecutor {
-            validator: Arc::new(IrysShadowTxValidator { eth_tx_validator }),
+            validator: Arc::new(IrysShadowTxValidator {
+                eth_tx_validator: validator.validator,
+            }),
             to_validation_task: validator.to_validation_task,
         };
 
-        let ordering = CoinbaseTipOrdering::default();
-        let transaction_pool =
-            reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
+        if validator.validator().eth_tx_validator.eip4844() {
+            // initializing the KZG settings can be expensive, this should be done upfront so that
+            // it doesn't impact the first block or the first gossiped blob transaction, so we
+            // initialize this in the background
+            let kzg_settings = validator.validator().eth_tx_validator.kzg_settings().clone();
+            ctx.task_executor().spawn_blocking(async move {
+                let _ = kzg_settings.get();
+                tracing::debug!(target: "reth::cli", "Initialized KZG settings");
+            });
+        }
+
+        let transaction_pool =  reth_node_builder::components::TxPoolBuilder::new(ctx)
+            .with_validator(validator)
+            .build_and_spawn_maintenance_task(blob_store, pool_config)?;
+
         info!(target: "reth::cli", "Transaction pool initialized");
-
-        // Cache config values before moving the transaction_pool into the block
-        let max_queued_lifetime = transaction_pool.config().max_queued_lifetime;
-        let no_local_exemptions = transaction_pool
-            .config()
-            .local_transactions_config
-            .no_exemptions;
-
-        // spawn txpool maintenance task
-        {
-            let pool = &transaction_pool;
-            let client = ctx.provider();
-            // Only spawn backup task if not disabled
-            if !ctx.config().txpool.disable_transactions_backup {
-                // Use configured backup path or default to data dir
-                let transactions_path = ctx
-                    .config()
-                    .txpool
-                    .transactions_backup_path
-                    .clone()
-                    .unwrap_or_else(|| data_dir.txpool_transactions());
-
-                let transactions_backup_config =
-                    reth_transaction_pool::maintain::LocalTransactionBackupConfig::with_local_txs_backup(transactions_path);
-
-                ctx.task_executor()
-                    .spawn_critical_with_graceful_shutdown_signal(
-                        "local transactions backup task",
-                        |shutdown| {
-                            reth_transaction_pool::maintain::backup_local_transactions_task(
-                                shutdown,
-                                pool.clone(),
-                                transactions_backup_config,
-                            )
-                        },
-                    );
-            }
-
-            // spawn the maintenance task
-            ctx.task_executor().spawn_critical(
-                "txpool maintenance task",
-                reth_transaction_pool::maintain::maintain_transaction_pool_future(
-                    client.clone(),
-                    pool.clone(),
-                    ctx.provider().canonical_state_stream(),
-                    ctx.task_executor().clone(),
-                    reth_transaction_pool::maintain::MaintainPoolConfig {
-                        max_tx_lifetime: max_queued_lifetime,
-                        no_local_exemptions,
-                        ..Default::default()
-                    },
-                ),
-            );
-        };
+        debug!(target: "reth::cli", "Spawned txpool maintenance task");
 
         Ok(transaction_pool)
     }
@@ -344,7 +304,7 @@ where
 
 #[derive(Debug)]
 pub struct IrysShadowTxValidator<Client, T> {
-    eth_tx_validator: EthTransactionValidator<Client, T>,
+    eth_tx_validator: Arc<EthTransactionValidator<Client, T>>,
 }
 
 impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
@@ -585,7 +545,7 @@ mod tests {
         // Submit shadow transaction to node b
         let shadow_tx = create_shadow_tx(BLOCK_REWARD_ID, ctx.block_producer_b.address());
         let shadow_tx =
-            sign_shadow_tx(shadow_tx, &ctx.block_producer_b, DEFAULT_PRIORITY_FEE).await?;
+            sign_shadow_tx(shadow_tx, &ctx.block_producer_b, 0).await?;
         let shadow_tx_hash = *shadow_tx.hash();
         let _payload_node_b =
             advance_block(&mut node_b, &shadow_tx_store_b, vec![shadow_tx]).await?;
