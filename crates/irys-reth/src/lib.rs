@@ -48,9 +48,8 @@ use reth_evm_ethereum::RethReceiptBuilder;
 use reth_node_api::node::AddOnsContext;
 use reth_node_api::{
     payload::{EngineApiMessageVersion, EngineObjectValidationError, PayloadOrAttributes},
-    validate_version_specific_fields, BuiltPayload, EngineApiValidator,
-    InvalidPayloadAttributesError, NewPayloadError, NodePrimitives, PayloadAttributes,
-    PayloadBuilderAttributes, PayloadValidator,
+    validate_version_specific_fields, BuiltPayload, EngineApiValidator, NewPayloadError,
+    NodePrimitives, PayloadAttributes, PayloadBuilderAttributes, PayloadValidator,
 };
 use reth_node_builder::rpc::{PayloadValidatorBuilder, RpcAddOns};
 pub use reth_node_ethereum;
@@ -310,15 +309,6 @@ impl PayloadValidator<EthEngineTypes<IrysPayloadTypes>> for IrysEngineValidator 
         sealed_block
             .try_recover()
             .map_err(|e| NewPayloadError::Other(e.into()))
-    }
-
-    fn validate_payload_attributes_against_header(
-        &self,
-        _attr: &IrysPayloadAttributes,
-        _header: &<Self::Block as reth_node_api::Block>::Header,
-    ) -> Result<(), InvalidPayloadAttributesError> {
-        // Skip default timestamp validation - we handle this ourselves
-        Ok(())
     }
 }
 
