@@ -1590,10 +1590,10 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // ensure recipients have 0 balance
     let recipient1_init_balance = genesis_reth_context
         .rpc
-        .get_balance(recipient1.address(), None)?;
+        .get_balance(recipient1.address(), None).await?;
     let recipient2_init_balance = genesis_reth_context
         .rpc
-        .get_balance(recipient2.address(), None)?;
+        .get_balance(recipient2.address(), None).await?;
     assert_eq!(recipient1_init_balance, U256::from(0));
     assert_eq!(recipient2_init_balance, U256::from(0));
 
@@ -1695,11 +1695,11 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     let recipient1_balance = genesis_reth_context
         .rpc
-        .get_balance(recipient1.address(), Some(BlockId::latest()))?;
+        .get_balance(recipient1.address(), Some(BlockId::latest())).await?;
 
     let recipient2_balance = genesis_reth_context
         .rpc
-        .get_balance(recipient2.address(), None)?;
+        .get_balance(recipient2.address(), None).await?;
 
     assert_eq!(recipient1_balance, expected_recipient1_balance);
     assert_eq!(recipient2_balance, expected_recipient2_balance);
@@ -1713,7 +1713,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         // wait until the tx shows up
         let rpc = ctx.rpc_client().unwrap();
         loop {
-            match EthApiClient::<Transaction, Block, Receipt, Header>::transaction_by_hash(
+            match EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header, Bytes>::transaction_by_hash(
                 &rpc, *hash,
             )
             .await?
@@ -1761,19 +1761,19 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     let peer1_recipient1_balance = peer1_reth_context
         .rpc
-        .get_balance(recipient1.address(), None)?;
+        .get_balance(recipient1.address(), None).await?;
 
     let peer1_recipient2_balance = peer1_reth_context
         .rpc
-        .get_balance(recipient2.address(), None)?;
+        .get_balance(recipient2.address(), None).await?;
 
     let peer2_recipient1_balance = peer2_reth_context
         .rpc
-        .get_balance(recipient1.address(), None)?;
+        .get_balance(recipient1.address(), None).await?;
 
     let peer2_recipient2_balance = peer2_reth_context
         .rpc
-        .get_balance(recipient2.address(), None)?;
+        .get_balance(recipient2.address(), None).await?;
 
     // verify the fork
     assert_eq!(peer1_recipient1_balance, expected_recipient1_balance);
@@ -1935,10 +1935,10 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     // ensure recipients have 0 balance
     let recipient1_init_balance = genesis_reth_context
         .rpc
-        .get_balance(recipient1.address(), None)?;
+        .get_balance(recipient1.address(), None).await?;
     let recipient2_init_balance = genesis_reth_context
         .rpc
-        .get_balance(recipient2.address(), None)?;
+        .get_balance(recipient2.address(), None).await?;
     assert_eq!(recipient1_init_balance, U256::from(0));
     assert_eq!(recipient2_init_balance, U256::from(0));
 
@@ -2020,15 +2020,15 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
     let recipient1_balance = peer1_reth_context.rpc.get_balance(
         recipient1.address(),
         Some(BlockId::Hash(evm_block_hash.into())),
-    )?;
+    ).await?;
 
     let recipient1_balance2 = peer1_reth_context
         .rpc
-        .get_balance(recipient1.address(), None)?;
+        .get_balance(recipient1.address(), None).await?;
 
     let recipient1_balance3 = peer2_reth_context
         .rpc
-        .get_balance(recipient1.address(), None)?;
+        .get_balance(recipient1.address(), None).await?;
 
     // assert reth "head" state is the state we expect on both peers
     assert_eq!(recipient1_balance, recipient1_balance2);

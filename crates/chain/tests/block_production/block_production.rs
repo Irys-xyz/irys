@@ -338,7 +338,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
-    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
+    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None).await?;
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.address())),
@@ -426,11 +426,11 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await?;
 
     // Verify recipient received the transfer
-    let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
+    let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None).await?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
     // Get account1's final balance after all transactions
-    let final_balance = reth_context.rpc.get_balance(account1.address(), None)?;
+    let final_balance = reth_context.rpc.get_balance(account1.address(), None).await?;
 
     // Calculate how much account1 actually spent
     // actual_spent = initial_balance - final_balance
@@ -466,7 +466,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
+    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
 
     for _ in 0..3 {
         // mine a single block
@@ -483,7 +483,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
-        _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
+        _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
         sleep(Duration::from_millis(1_500)).await;
     }
 
@@ -1016,7 +1016,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        let expected_stake_amount = stake_tx.deref().value.into();
+        let expected_stake_amount: U256 = stake_tx.deref().value.into();
         assert_eq!(
             bd.amount, expected_stake_amount,
             "Stake amount should be fee + stake_fee.amount"
@@ -1030,7 +1030,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        let expected_pledge_amount = consensus_config.pledge_base_value.amount.into();
+        let expected_pledge_amount: U256 = consensus_config.pledge_base_value.amount.into();
         assert_eq!(
             bd.amount, expected_pledge_amount,
             "Pledge amount should be fee + pledge_fee.amount"
