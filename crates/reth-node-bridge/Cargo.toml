@@ -30,7 +30,7 @@ serde_json.workspace = true
 alloy-consensus.workspace = true
 alloy-genesis.workspace = true
 alloy-evm.workspace = true
-async-trait = "0.1"
+async-trait.workspace = true
 
 [lints]
 workspace = true
