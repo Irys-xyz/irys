@@ -10,8 +10,8 @@ use irys_database::{
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::{
-    CacheEvictionStrategy, Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage,
-    IngressProof, LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
+    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -538,19 +538,13 @@ impl ChunkCacheService {
         let mut to_delete: Vec<DataRoot> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
+        let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
         // Determine if cache is at capacity based on eviction strategy
-        // TODO: when the eviction strategy is removed, leave the code in the SizeBased branch to
-        //  determine if we're at capacity
-        let at_capacity = match &self.config.node_config.cache.eviction_strategy {
-            CacheEvictionStrategy::TimeBased { .. } => false, // Time-based has no size capacity constraint
-            CacheEvictionStrategy::SizeBased {
-                max_cache_size_bytes,
-            } => {
-                let (_, chunk_cache_size) =
-                    get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
-                chunk_cache_size >= *max_cache_size_bytes
-            }
+        let at_capacity = {
+            let (_, chunk_cache_size) =
+                get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+            chunk_cache_size >= *max_cache_size_bytes
         };
 
         while let Some((data_root, compact)) = walker.next().transpose()? {

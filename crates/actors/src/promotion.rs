@@ -70,16 +70,17 @@ pub fn compute_promotion_status(
 
     // 4. Anchor freshness filter using height threshold
     let mut fresh: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
-    for p in all_proofs {
+    for proof in all_proofs {
         // Reuse mempool anchor inclusion check
         let anchor_is_valid =
-            match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &p) {
+            match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, &proof)
+            {
                 Ok(()) => {
                     // Height based pruning for inclusion
-                    let anchor_height =
-                        Inner::get_anchor_height_static(block_tree_guard, db, p.anchor, false)?;
-                    if let Some(h) = anchor_height {
-                        h >= min_ingress_proof_anchor_height
+                    let maybe_canonical_anchor_height =
+                        Inner::get_anchor_height_static(block_tree_guard, db, proof.anchor, true)?;
+                    if let Some(canonical_anchor_height) = maybe_canonical_anchor_height {
+                        canonical_anchor_height >= min_ingress_proof_anchor_height
                     } else {
                         false
                     }
@@ -87,7 +88,7 @@ pub fn compute_promotion_status(
                 Err(_) => false,
             };
         if anchor_is_valid {
-            fresh.push(p);
+            fresh.push(proof);
         }
     }
     if fresh.len() < proofs_per_tx {
