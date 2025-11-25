@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
 use irys_packing::{capacity_pack_range_cuda_c, CUDAConfig};
-use irys_types::{partition::PartitionHash, split_interval, Config, PartitionChunkRange};
+use irys_types::{partition::PartitionHash, split_interval, Address, Config, PartitionChunkRange};
 use tokio::sync::Semaphore;
 use tokio::task::yield_now;
 use tracing::{debug, warn};
@@ -39,7 +39,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
