@@ -1789,7 +1789,7 @@ impl IrysNode {
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
             shadow_tx_store,
-            beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
+            consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
         });
 

@@ -868,7 +868,7 @@ impl BlockTreeServiceInner {
             validation_result: ValidationResult::Valid,
         };
         if let Err(e) = self.service_senders.block_state_events.send(event) {
-            tracing::warn!(
+            tracing::trace!(
                 block.hash = ?block_hash,
                 block.height = height,
                 "Failed to broadcast block state update event: {}", e

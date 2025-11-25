@@ -1446,6 +1446,9 @@ fn validate_shadow_transactions_match(
     expected: impl Iterator<Item = ShadowTransaction>,
     block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
+    // Verify solution hash matches the block
+    let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
+
     // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
@@ -1462,13 +1465,11 @@ fn validate_shadow_transactions_match(
             solution_hash,
         } = &actual
         {
-            // Verify solution hash matches the block
-            let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
             if *solution_hash != expected_hash {
                 eyre::bail!(
                     "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
                     idx,
-                    block_header.solution_hash,
+                    expected_hash,
                     solution_hash
                 );
             }

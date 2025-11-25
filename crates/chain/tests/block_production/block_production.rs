@@ -1325,7 +1325,6 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
 }
 
 #[test_log::test(tokio::test)]
-#[ignore = "something broken"]
 async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<()> {
     let mut config = NodeConfig::testing_with_epochs(2);
     config.consensus.get_mut().chunk_size = 32;
