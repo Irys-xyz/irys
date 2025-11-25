@@ -42,10 +42,12 @@ use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
 pub use reth_node_ethereum;
 use reth_node_ethereum::{
-    node::{EthereumAddOns, EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumEngineValidatorBuilder, EthereumNetworkBuilder},
+    node::{
+        EthereumAddOns, EthereumConsensusBuilder, EthereumEngineValidatorBuilder,
+        EthereumEthApiBuilder, EthereumNetworkBuilder,
+    },
     EthEngineTypes, EthEvmConfig,
 };
-use alloy_evm::EthEvmFactory;
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
@@ -201,7 +203,9 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 
     fn local_payload_attributes_builder(
         chain_spec: &Self::ChainSpec,
-    ) -> impl reth::api::PayloadAttributesBuilder<<Self::Payload as reth::api::PayloadTypes>::PayloadAttributes> {
+    ) -> impl reth::api::PayloadAttributesBuilder<
+        <Self::Payload as reth::api::PayloadTypes>::PayloadAttributes,
+    > {
         LocalPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
     }
 }
@@ -271,9 +275,7 @@ where
         let eth_tx_validator = Arc::try_unwrap(validator.validator)
             .expect("validator Arc should have only one strong reference");
         let validator = TransactionValidationTaskExecutor {
-            validator: Arc::new(IrysShadowTxValidator {
-                eth_tx_validator,
-            }),
+            validator: Arc::new(IrysShadowTxValidator { eth_tx_validator }),
             to_validation_task: validator.to_validation_task,
         };
 
@@ -2663,7 +2665,7 @@ pub mod test_utils {
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
     use reth::{
-        api::{NodePrimitives, PayloadAttributesBuilder},
+        api::PayloadAttributesBuilder,
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
         builder::{rpc::RethRpcAddOns, FullNode, NodeBuilder, NodeConfig, NodeHandle},
         providers::{AccountReader as _, BlockHashReader as _},

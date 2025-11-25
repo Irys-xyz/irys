@@ -131,7 +131,7 @@ pub fn run_vdf<B: BlockProvider>(
         // If the next step is a reset step, we need to be sure that the canonical chain tip
         // is higher than the previous reset step. Otherwise, we'll end up applying a reset seed
         // that belongs to the previous reset range
-        let is_too_far_ahead = (global_step_number + 1) % vdf_reset_frequency == 0
+        let is_too_far_ahead = (global_step_number + 1).is_multiple_of(vdf_reset_frequency)
             && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
@@ -199,7 +199,7 @@ pub fn process_reset(
     reset_frequency: u64,
     reset_seed: H256,
 ) -> H256 {
-    if global_step_number % reset_frequency == 0 {
+    if global_step_number.is_multiple_of(reset_frequency) {
         info!(
             "Reset seed {:?} applied to step {}",
             reset_seed, global_step_number
@@ -381,7 +381,7 @@ mod tests {
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % config.vdf.reset_frequency as u64 == 0 {
+        if step_num > 0 && (step_num - 1).is_multiple_of(config.vdf.reset_frequency as u64) {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
@@ -494,7 +494,7 @@ mod tests {
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % config.vdf.reset_frequency as u64 == 0 {
+        if step_num > 0 && (step_num - 1).is_multiple_of(config.vdf.reset_frequency as u64) {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(

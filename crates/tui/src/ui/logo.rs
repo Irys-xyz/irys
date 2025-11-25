@@ -6,17 +6,12 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IrysLogoSize {
     Small,
+    #[default]
     Medium,
     Large,
-}
-
-impl Default for IrysLogoSize {
-    fn default() -> Self {
-        Self::Medium
-    }
 }
 
 pub struct IrysLogo {

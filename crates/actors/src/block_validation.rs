@@ -621,7 +621,7 @@ pub fn last_diff_timestamp_is_valid(
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> Result<(), PreValidationError> {
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
-    let expected = if block.height % blocks_between_adjustments == 0 {
+    let expected = if block.height.is_multiple_of(blocks_between_adjustments) {
         block.timestamp
     } else {
         previous_block.last_diff_timestamp
@@ -1296,7 +1296,9 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let initial_treasury_balance = prev_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let expired_ledger_fees = if is_epoch_block {
         ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -1377,7 +1379,9 @@ async fn extract_commitment_txs(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let commitment_txs = if is_epoch_block {
         // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
         vec![]
@@ -1563,7 +1567,9 @@ pub async fn commitment_txs_are_valid(
         (commitment_snapshot, epoch_snapshot)
     };
 
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         debug!(

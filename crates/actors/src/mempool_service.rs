@@ -149,15 +149,17 @@ pub async fn validate_commitment_transaction(
     })?;
 
     // Funding
-    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).await.map_err(|e| {
-        warn!(
-            tx.id = ?commitment_tx.id,
-            tx.signer = ?commitment_tx.signer,
-            tx.error = ?e,
-            "Commitment tx funding validation failed"
-        );
-        e
-    })?;
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id)
+        .await
+        .map_err(|e| {
+            warn!(
+                tx.id = ?commitment_tx.id,
+                tx.signer = ?commitment_tx.signer,
+                tx.error = ?e,
+                "Commitment tx funding validation failed"
+            );
+            e
+        })?;
 
     // Value
     commitment_tx.validate_value(consensus).map_err(|e| {
@@ -628,7 +630,9 @@ impl Inner {
                 &self.config.consensus,
                 tx,
                 parent_evm_block_id,
-            ).await {
+            )
+            .await
+            {
                 tracing::warn!(tx.error = ?error, "rejecting commitment tx");
                 continue;
             }
@@ -746,11 +750,14 @@ impl Inner {
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
 
-        balances.extend(fetch_balances_for_transactions(
-            &self.reth_node_adapter,
-            parent_evm_block_id,
-            &submit_ledger_txs,
-        ).await);
+        balances.extend(
+            fetch_balances_for_transactions(
+                &self.reth_node_adapter,
+                parent_evm_block_id,
+                &submit_ledger_txs,
+            )
+            .await,
+        );
 
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block

@@ -146,7 +146,9 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance_before_unstake = genesis_node.get_balance(peer_addr, head_block.evm_block_hash).await;
+    let balance_before_unstake = genesis_node
+        .get_balance(peer_addr, head_block.evm_block_hash)
+        .await;
     let treasury_before_unstake = head_block.treasury;
 
     genesis_node.post_commitment_tx(&unstake_tx).await?;
@@ -206,7 +208,8 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         unstake_block.evm_block_hash,
         balance_before_unstake - U256::from(unstake_tx.fee),
         "Unstake inclusion should reduce balance by priority fee only",
-    ).await;
+    )
+    .await;
     assert_treasury(
         &unstake_block,
         treasury_before_unstake,
@@ -276,7 +279,8 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         epoch_block.evm_block_hash,
         expected_final_balance,
         "Net effect should be -fee at inclusion + full refund at epoch",
-    ).await;
+    )
+    .await;
 
     assert_no_stake_in_epoch(
         &genesis_node,
@@ -329,8 +333,9 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance_before_unstake_attempt =
-        genesis_node.get_balance(peer_addr, head_block.evm_block_hash).await;
+    let balance_before_unstake_attempt = genesis_node
+        .get_balance(peer_addr, head_block.evm_block_hash)
+        .await;
     let treasury_before_unstake_attempt = head_block.treasury;
 
     // Submit the unstake transaction (should be accepted by mempool)
@@ -372,7 +377,8 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         first_block.evm_block_hash,
         balance_before_unstake_attempt,
         "Balance must be unchanged when unstake is not included in block",
-    ).await;
+    )
+    .await;
 
     // Assert treasury is unchanged
     assert_treasury(
@@ -425,7 +431,8 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         first_epoch_block.evm_block_hash,
         balance_before_unstake_attempt,
         "Balance must remain unchanged at epoch when unstake was not processed",
-    ).await;
+    )
+    .await;
 
     // Assert stake remains in epoch snapshot
     assert_stake_exists_in_epoch(
@@ -503,7 +510,8 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
         second_epoch_block.evm_block_hash,
         balance_before_unstake_attempt,
         "Balance must remain unchanged after multiple epochs with rejected unstake",
-    ).await;
+    )
+    .await;
 
     genesis_node.stop().await;
     peer_node.stop().await;
@@ -578,7 +586,9 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     // Submit both pledge and unstake transactions
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance_before = genesis_node.get_balance(peer_addr, head_block.evm_block_hash).await;
+    let balance_before = genesis_node
+        .get_balance(peer_addr, head_block.evm_block_hash)
+        .await;
     let treasury_before = head_block.treasury;
 
     // Create and submit pledge transaction
@@ -716,7 +726,8 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         block_header.evm_block_hash,
         expected_balance,
         "Balance should decrease by pledge value + fee only (unstake was rejected)",
-    ).await;
+    )
+    .await;
 
     // Verify peer state after pledge inclusion
     // Peer should still have stake
@@ -787,7 +798,8 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         second_block_header.evm_block_hash,
         expected_balance,
         "Balance should remain unchanged from first block (no unstake processing in second block)",
-    ).await;
+    )
+    .await;
 
     genesis_node.stop().await;
     peer_node.stop().await;
@@ -942,8 +954,7 @@ fn assert_unstake_refund_packet<T: alloy_rpc_types_eth::TransactionTrait>(
                 if increment.target == peer_addr {
                     let expected_amount_alloy: alloy_primitives::U256 = expected_amount.into();
                     assert_eq!(
-                        increment.amount,
-                        expected_amount_alloy,
+                        increment.amount, expected_amount_alloy,
                         "Unstake refund amount must equal configured stake value"
                     );
                     assert_eq!(
@@ -1032,7 +1043,9 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance_before = genesis_node.get_balance(peer_addr, head_block.evm_block_hash).await;
+    let balance_before = genesis_node
+        .get_balance(peer_addr, head_block.evm_block_hash)
+        .await;
 
     // Submit all unpledge transactions
     let mut unpledge_txs = Vec::with_capacity(assigned_partitions.len());
@@ -1140,8 +1153,7 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
                 if refund.target == peer_addr {
                     let refund_amount_alloy: alloy_primitives::U256 = unstake_refund_amount.into();
                     assert_eq!(
-                        refund.amount,
-                        refund_amount_alloy,
+                        refund.amount, refund_amount_alloy,
                         "Unstake refund amount must match stake value"
                     );
                     assert_eq!(
@@ -1181,7 +1193,8 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
         epoch_block.evm_block_hash,
         expected_final_balance,
         "Balance should equal initial - fees + total refunds",
-    ).await;
+    )
+    .await;
 
     // Verify all storage modules are unassigned
     let post_epoch_assignments: Vec<_> = {

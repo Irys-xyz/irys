@@ -23,7 +23,9 @@ use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, CommitChanges};
 use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use reth_evm::precompiles::PrecompilesMap;
-use reth_evm::{ConfigureEngineEvm, ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes};
+use reth_evm::{
+    ConfigureEngineEvm, ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes,
+};
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
 // External crate imports - Revm
@@ -267,7 +269,10 @@ pub struct IrysEvmConfig {
 }
 
 impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
-    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<reth_evm::EvmEnvFor<Self>, Self::Error> {
+    fn evm_env_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<reth_evm::EvmEnvFor<Self>, Self::Error> {
         self.inner.evm_env_for_payload(payload)
     }
 
@@ -455,8 +460,13 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     /// Consumes self and return the inner EVM instance.
     pub fn into_inner(
         self,
-    ) -> RevmEvm<EthEvmContext<DB>, I, EthInstructions<EthInterpreter, EthEvmContext<DB>>, PRECOMPILE, EthFrame>
-    {
+    ) -> RevmEvm<
+        EthEvmContext<DB>,
+        I,
+        EthInstructions<EthInterpreter, EthEvmContext<DB>>,
+        PRECOMPILE,
+        EthFrame,
+    > {
         self.inner
     }
 

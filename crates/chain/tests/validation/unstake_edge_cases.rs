@@ -252,7 +252,9 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     // Verify the user has balance but no stake
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance = genesis_node.get_balance(never_staked_addr, head_block.evm_block_hash).await;
+    let balance = genesis_node
+        .get_balance(never_staked_addr, head_block.evm_block_hash)
+        .await;
     eyre::ensure!(
         balance > irys_types::U256::from(0_u64),
         "user must have balance (was funded in genesis)"

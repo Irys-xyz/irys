@@ -1346,8 +1346,8 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .rpc_client()
             .ok_or_eyre("Unable to get RPC client")?;
-        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         use alloy_primitives::Bytes;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         reth::rpc::api::EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header, Bytes>::block_by_hash(
             &client, hash, true,
         )
@@ -1385,8 +1385,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: &alloy_core::primitives::B256,
         seconds_to_wait: usize,
     ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
-        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         use alloy_primitives::Bytes;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
 
@@ -1398,10 +1398,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_eyre("Unable to get RPC client")?;
 
         for retry in 0..max_retries {
-            if let Some(tx) = reth::rpc::api::EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header, Bytes>::transaction_by_hash(
-                &rpc, *hash,
-            )
-            .await? {
+            if let Some(tx) = reth::rpc::api::EthApiClient::<
+                TransactionRequest,
+                Transaction,
+                Block,
+                Receipt,
+                Header,
+                Bytes,
+            >::transaction_by_hash(&rpc, *hash)
+            .await?
+            {
                 info!(
                     "tx {} found in {:?} reth after {} retries",
                     &hash, &self.name, &retry

@@ -235,7 +235,10 @@ impl Inner {
     /// Validates that a data transaction has sufficient balance to cover its fees.
     /// Checks the balance against the canonical chain tip.
     #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id, tx.signer = ?tx.signer))]
-    async fn validate_data_tx_funding(&self, tx: &DataTransactionHeader) -> Result<(), TxIngressError> {
+    async fn validate_data_tx_funding(
+        &self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
         // Fetch balance from canonical chain (None = canonical tip)
         let balance: U256 = self
             .reth_node_adapter

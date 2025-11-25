@@ -12,15 +12,11 @@ use std::ops::{Index, IndexMut};
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
 )]
 #[repr(u32)]
+#[derive(Default)]
 pub enum SystemLedger {
     /// The commitments ledger, for pledging and staking related transactions
+    #[default]
     Commitment = 0,
-}
-
-impl Default for SystemLedger {
-    fn default() -> Self {
-        Self::Commitment
-    }
 }
 
 impl SystemLedger {

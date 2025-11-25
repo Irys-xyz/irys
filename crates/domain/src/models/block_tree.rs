@@ -1346,7 +1346,9 @@ pub fn create_commitment_snapshot_for_block(
     epoch_snapshot: Arc<EpochSnapshot>,
     consensus_config: &ConsensusConfig,
 ) -> Arc<CommitmentSnapshot> {
-    let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(consensus_config.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         return Arc::new(CommitmentSnapshot::default());
@@ -1368,7 +1370,9 @@ pub fn create_epoch_snapshot_for_block(
     parent_block_entry: &BlockMetadata,
     consensus_config: &ConsensusConfig,
 ) -> eyre::Result<Arc<EpochSnapshot>> {
-    let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(consensus_config.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         let prev_epoch_snapshot = parent_block_entry.epoch_snapshot.clone();

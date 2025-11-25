@@ -99,7 +99,7 @@ impl BlockValidationTask {
 
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
-    pub async fn execute_concurrent(self) -> ValidationResult {
+    pub(super) async fn execute_concurrent(self) -> ValidationResult {
         let parent_got_cancelled = || {
             // Task was cancelled due to height difference
             // Return invalid to prevent this block from being accepted

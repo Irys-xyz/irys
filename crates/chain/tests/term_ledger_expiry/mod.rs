@@ -266,7 +266,8 @@ impl LedgerExpiryTestContext {
         let miner_address = node.node_ctx.config.node_config.miner_address();
         let genesis_block = node.get_block_by_height(0).await?;
         let initial_balance = U256::from_be_bytes(
-            node.get_balance(miner_address, genesis_block.evm_block_hash).await
+            node.get_balance(miner_address, genesis_block.evm_block_hash)
+                .await
                 .to_be_bytes(),
         );
 
@@ -547,7 +548,8 @@ impl LedgerExpiryTestContext {
     /// Get current balance for miner
     async fn get_miner_balance(&self, block_hash: B256) -> U256 {
         U256::from_be_bytes(
-            self.get_balance(self.miner_address, block_hash).await
+            self.get_balance(self.miner_address, block_hash)
+                .await
                 .to_be_bytes(),
         )
     }

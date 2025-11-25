@@ -879,7 +879,9 @@ impl BlockTreeServiceInner {
     }
 
     fn is_epoch_block(&self, block_header: &Arc<IrysBlockHeader>) -> bool {
-        block_header.height() % self.config.consensus.epoch.num_blocks_in_epoch == 0
+        block_header
+            .height()
+            .is_multiple_of(self.config.consensus.epoch.num_blocks_in_epoch)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %epoch_block.block_hash(), block.height = epoch_block.height()))]

@@ -368,7 +368,7 @@ pub fn vdf_steps_are_valid(
             let mut checkpoints: Vec<H256> =
                 vec![H256::default(); config.num_checkpoints_in_vdf_step];
             if start_step_number + i as u64 > 0
-                && (start_step_number + i as u64) % config.reset_frequency as u64 == 0
+                && (start_step_number + i as u64).is_multiple_of(config.reset_frequency as u64)
             {
                 info!(
                     "Applying reset seed {:?} to step number {}",

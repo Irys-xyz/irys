@@ -1349,7 +1349,7 @@ pub trait BlockProdStrategy {
     }
 
     fn is_epoch_block(&self, height: u64) -> bool {
-        height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
+        height.is_multiple_of(self.inner().config.consensus.epoch.num_blocks_in_epoch)
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

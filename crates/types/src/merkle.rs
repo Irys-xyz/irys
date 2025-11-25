@@ -131,7 +131,7 @@ pub fn validate_path(
     let branches_len = total_len - leaf_len;
     let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
     eyre::ensure!(
-        branches_len % branch_item_len == 0,
+        branches_len.is_multiple_of(branch_item_len),
         "Invalid proof: misaligned branch length"
     );
 
@@ -246,7 +246,7 @@ pub fn print_debug(
     let branches_len = total_len - leaf_len;
     let branch_item_len = HASH_SIZE * 2 + NOTE_SIZE;
     eyre::ensure!(
-        branches_len % branch_item_len == 0,
+        branches_len.is_multiple_of(branch_item_len),
         "Invalid proof: misaligned branch length"
     );
 
@@ -511,7 +511,8 @@ pub fn hash_branch(left: Node, right: Node) -> Result<Node, Error> {
 
 /// Builds one layer of branch nodes from a layer of child nodes.
 pub fn build_layer(nodes: Vec<Node>) -> Result<Vec<Node>, Error> {
-    let mut layer = Vec::<Node>::with_capacity(nodes.len() / 2 + (nodes.len() % 2 != 0) as usize);
+    let mut layer =
+        Vec::<Node>::with_capacity(nodes.len() / 2 + !nodes.len().is_multiple_of(2) as usize);
     let mut nodes_iter = nodes.into_iter();
     while let Some(left) = nodes_iter.next() {
         if let Some(right) = nodes_iter.next() {

@@ -546,7 +546,7 @@ mod tests {
         // 3. CanonicalExtension, height 10, 100 VDF steps
         // 4. Canonical, height 9, 1 VDF step
 
-        let items = vec![
+        let items = [
             (
                 h2.block_hash,
                 mkprio(&h2, BlockPriority::CanonicalExtension),

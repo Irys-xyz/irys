@@ -276,7 +276,7 @@ impl BlockDiscoveryServiceInner {
         let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
 
         let is_epoch_block =
-            new_block_header.height > 0 && new_block_header.height % blocks_in_epoch == 0;
+            new_block_header.height > 0 && new_block_header.height.is_multiple_of(blocks_in_epoch);
 
         debug!(
             block.height = ?new_block_header.height,

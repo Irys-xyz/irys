@@ -180,7 +180,7 @@ pub async fn last_step_checkpoints_is_valid(
         .wrap_err("Should run in a 64 bits architecture!")?;
 
     // If the vdf reset happened on this step, apply the entropy to the seed (special case is step 0 that no reset is applied, then the > 1)
-    if (global_step_number > 1) && ((global_step_number - 1) % config.reset_frequency == 0) {
+    if (global_step_number > 1) && (global_step_number - 1).is_multiple_of(config.reset_frequency) {
         tracing::info!(
             "Applying reset step: {} seed {:?}",
             global_step_number,

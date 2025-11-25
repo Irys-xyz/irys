@@ -338,7 +338,10 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
-    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None).await?;
+    let _recipient_init_balance = reth_context
+        .rpc
+        .get_balance(recipient.address(), None)
+        .await?;
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.address())),
@@ -426,11 +429,17 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await?;
 
     // Verify recipient received the transfer
-    let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None).await?;
+    let recipient_balance = reth_context
+        .rpc
+        .get_balance(recipient.address(), None)
+        .await?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
     // Get account1's final balance after all transactions
-    let final_balance = reth_context.rpc.get_balance(account1.address(), None).await?;
+    let final_balance = reth_context
+        .rpc
+        .get_balance(account1.address(), None)
+        .await?;
 
     // Calculate how much account1 actually spent
     // actual_spent = initial_balance - final_balance
