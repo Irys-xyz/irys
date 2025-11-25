@@ -147,7 +147,7 @@ pub async fn run_node(
 
     reth_config.txpool.queued_max_count = subpool_max_tx_count;
     reth_config.txpool.queued_max_size = subpool_max_size_mb;
-    // improtant: keep blobs disabled in our mempool
+    // important: keep blobs disabled in our mempool
     reth_config.txpool.disable_blobs_support = true;
 
     reth_config.txpool.additional_validation_tasks = 2;
