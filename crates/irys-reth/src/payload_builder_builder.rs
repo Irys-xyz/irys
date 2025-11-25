@@ -14,7 +14,7 @@ use reth_node_builder::{
 };
 use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 
-use crate::payload::ShadowTxStore;
+use crate::{payload::ShadowTxStore, IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 
 /// A basic ethereum payload service.
 #[derive(Clone, Debug)]
@@ -33,8 +33,8 @@ where
         > + 'static,
     Types::Payload: PayloadTypes<
         BuiltPayload = EthBuiltPayload,
-        PayloadAttributes = EthPayloadAttributes,
-        PayloadBuilderAttributes = EthPayloadBuilderAttributes,
+        PayloadAttributes = IrysPayloadAttributes,
+        PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
     >,
 {
     type PayloadBuilder = crate::payload::IrysPayloadBuilder<Pool, Node::Provider, Evm>;

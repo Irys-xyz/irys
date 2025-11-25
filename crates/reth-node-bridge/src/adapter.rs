@@ -10,12 +10,12 @@ use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
 use irys_reth::{
     payload::{DeterministicShadowTxKey, ShadowTxStore},
-    IrysEthereumNode,
+    IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes,
 };
 use irys_types::Address;
 use reth::transaction_pool::EthPooledTransaction;
 use reth_e2e_test_utils::node::NodeTestContext;
-use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes};
+use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes, PayloadBuilderAttributes};
 use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_payload_builder::PayloadKind;
 use reth_provider::BlockReaderIdExt as _;
@@ -95,12 +95,14 @@ impl IrysRethNodeAdapter {
     {
         let current_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
         let attributes = (self.reth_node.payload.attributes_generator)(current_timestamp.as_secs());
-        let attributes = PayloadAttributes {
-            timestamp: attributes.timestamp,
-            prev_randao: B256::ZERO,
-            suggested_fee_recipient: Address::ZERO,
-            withdrawals: None,
-            parent_beacon_block_root: Some(B256::ZERO),
+        let attributes = IrysPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: attributes.inner.timestamp,
+                prev_randao: B256::ZERO,
+                suggested_fee_recipient: Address::ZERO,
+                withdrawals: None,
+                parent_beacon_block_root: Some(B256::ZERO),
+            },
         };
         let payload = self
             .build_submit_payload_irys(B256::ZERO, attributes, vec![])
@@ -145,7 +147,9 @@ impl IrysRethNodeAdapter {
         shadow_txs: Vec<EthPooledTransaction>,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
-        let attributes = EthPayloadBuilderAttributes::new(parent, attributes);
+        let attributes = IrysPayloadBuilderAttributes {
+            inner: EthPayloadBuilderAttributes::new(parent, attributes.inner),
+        };
         let key = DeterministicShadowTxKey::new(attributes.payload_id());
         self.shadow_tx_store.set_shadow_txs(key, shadow_txs);
         let payload_id = self

@@ -12,10 +12,13 @@
 //! - Balance decrements correspond to storage transaction fees
 
 use std::{sync::Arc, time::SystemTime};
+use std::convert::Infallible;
 
 use alloy_consensus::TxEip1559;
-use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
-use alloy_primitives::{TxKind, U256};
+use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS, eip4895::Withdrawal};
+use alloy_primitives::{TxKind, U256, B256};
+use alloy_rpc_types::Withdrawals;
+use alloy_rpc_types_engine::{ExecutionData, ExecutionPayload};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
@@ -40,14 +43,26 @@ pub use reth_ethereum_engine_primitives;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_ethereum_primitives::TransactionSigned;
 use reth_evm_ethereum::RethReceiptBuilder;
+use reth_node_api::{
+    BuiltPayload, NodePrimitives, PayloadAttributes, PayloadBuilderAttributes,
+    EngineApiValidator, PayloadValidator, InvalidPayloadAttributesError, NewPayloadError,
+    payload::{EngineApiMessageVersion, EngineObjectValidationError, PayloadOrAttributes},
+    validate_version_specific_fields,
+};
 pub use reth_node_ethereum;
 use reth_node_ethereum::{
     node::{
-        EthereumAddOns, EthereumConsensusBuilder, EthereumEngineValidatorBuilder,
-        EthereumEthApiBuilder, EthereumNetworkBuilder,
+        EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder,
     },
     EthEngineTypes, EthEvmConfig,
 };
+use reth_node_builder::rpc::{PayloadValidatorBuilder, RpcAddOns};
+use reth_node_api::node::AddOnsContext;
+use reth_ethereum_payload_builder::EthereumExecutionPayloadValidator;
+use reth_payload_primitives::PayloadAttributesBuilder;
+use reth_ethereum_primitives::Block;
+use reth_primitives_traits::RecoveredBlock;
+use reth_payload_builder::PayloadId;
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
@@ -57,6 +72,7 @@ use reth_transaction_pool::{
     TransactionValidator,
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
+use revm_primitives::Address;
 use shadow_tx::ShadowTransaction;
 use tracing::{debug, info};
 
@@ -99,6 +115,206 @@ pub fn compose_shadow_tx(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IrysPayloadAttributes {
+    pub inner: EthPayloadAttributes,
+}
+
+impl PayloadAttributes for IrysPayloadAttributes {
+    fn timestamp(&self) -> u64 {
+        self.inner.timestamp
+    }
+
+    fn withdrawals(&self) -> Option<&Vec<Withdrawal>> {
+        self.inner.withdrawals.as_ref()
+    }
+
+    fn parent_beacon_block_root(&self) -> Option<B256> {
+        self.inner.parent_beacon_block_root
+    }
+}
+/// Container type for all components required to build a payload.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IrysPayloadBuilderAttributes {
+    pub inner: EthPayloadBuilderAttributes
+}
+
+impl PayloadBuilderAttributes for IrysPayloadBuilderAttributes {
+    type RpcPayloadAttributes = IrysPayloadAttributes;
+    type Error = Infallible;
+
+    /// Creates a new payload builder for the given parent block and the attributes.
+    ///
+    /// Derives the unique [`PayloadId`] for the given parent and attributes
+    fn try_new(
+        parent: B256,
+        attributes: IrysPayloadAttributes,
+        _version: u8,
+    ) -> Result<Self, Infallible> {
+        Ok(Self {
+            inner: EthPayloadBuilderAttributes::new(parent, attributes.inner)
+        })
+    }
+
+    fn payload_id(&self) -> PayloadId {
+        self.inner.id
+    }
+
+    fn parent(&self) -> B256 {
+        self.inner.parent
+    }
+
+    fn timestamp(&self) -> u64 {
+        self.inner.timestamp
+    }
+
+    fn parent_beacon_block_root(&self) -> Option<B256> {
+        self.inner.parent_beacon_block_root
+    }
+
+    fn suggested_fee_recipient(&self) -> Address {
+        self.inner.suggested_fee_recipient
+    }
+
+    fn prev_randao(&self) -> B256 {
+        self.inner.prev_randao
+    }
+
+    fn withdrawals(&self) -> &Withdrawals {
+        &self.inner.withdrawals
+    }
+}
+
+/// A default payload type for [`IrysPayloadTypes`]
+#[derive(Debug, Default, Clone, serde::Deserialize, serde::Serialize)]
+#[non_exhaustive]
+pub struct IrysPayloadTypes;
+
+impl PayloadTypes for IrysPayloadTypes {
+    type BuiltPayload = EthBuiltPayload;
+    type PayloadAttributes = IrysPayloadAttributes;
+    type PayloadBuilderAttributes = IrysPayloadBuilderAttributes;
+    type ExecutionData = ExecutionData;
+
+    fn block_to_payload(
+        block: SealedBlock<
+            <<Self::BuiltPayload as BuiltPayload>::Primitives as NodePrimitives>::Block,
+        >,
+    ) -> Self::ExecutionData {
+        let (payload, sidecar) =
+            ExecutionPayload::from_block_unchecked(block.hash(), &block.into_block());
+        ExecutionData { payload, sidecar }
+    }
+}
+
+/// Custom engine validator for Irys that wraps the Ethereum execution payload validator.
+#[derive(Debug, Clone)]
+pub struct IrysEngineValidator {
+    inner: EthereumExecutionPayloadValidator<ChainSpec>,
+}
+
+impl IrysEngineValidator {
+    /// Instantiates a new validator.
+    pub const fn new(chain_spec: Arc<ChainSpec>) -> Self {
+        Self { inner: EthereumExecutionPayloadValidator::new(chain_spec) }
+    }
+
+    /// Returns the chain spec used by the validator.
+    #[inline]
+    fn chain_spec(&self) -> &ChainSpec {
+        self.inner.chain_spec()
+    }
+}
+
+impl PayloadValidator<EthEngineTypes<IrysPayloadTypes>> for IrysEngineValidator {
+    type Block = Block;
+
+    fn ensure_well_formed_payload(
+        &self,
+        payload: ExecutionData,
+    ) -> Result<RecoveredBlock<Self::Block>, NewPayloadError> {
+        let sealed_block = self.inner.ensure_well_formed_payload(payload)?;
+        sealed_block.try_recover().map_err(|e| NewPayloadError::Other(e.into()))
+    }
+
+    fn validate_payload_attributes_against_header(
+        &self,
+        _attr: &IrysPayloadAttributes,
+        _header: &<Self::Block as reth_node_api::Block>::Header,
+    ) -> Result<(), InvalidPayloadAttributesError> {
+        // Skip default timestamp validation - we handle this ourselves
+        Ok(())
+    }
+}
+
+impl EngineApiValidator<EthEngineTypes<IrysPayloadTypes>> for IrysEngineValidator {
+    fn validate_version_specific_fields(
+        &self,
+        version: EngineApiMessageVersion,
+        payload_or_attrs: PayloadOrAttributes<'_, ExecutionData, IrysPayloadAttributes>,
+    ) -> Result<(), EngineObjectValidationError> {
+        // Convert IrysPayloadAttributes to EthPayloadAttributes for validation
+        match payload_or_attrs {
+            PayloadOrAttributes::ExecutionPayload(payload) => {
+                validate_version_specific_fields(
+                    self.chain_spec(),
+                    version,
+                    PayloadOrAttributes::<ExecutionData, EthPayloadAttributes>::ExecutionPayload(payload),
+                )
+            }
+            PayloadOrAttributes::PayloadAttributes(attrs) => {
+                validate_version_specific_fields(
+                    self.chain_spec(),
+                    version,
+                    PayloadOrAttributes::<ExecutionData, EthPayloadAttributes>::PayloadAttributes(&attrs.inner),
+                )
+            }
+        }
+    }
+
+    fn ensure_well_formed_attributes(
+        &self,
+        version: EngineApiMessageVersion,
+        attributes: &IrysPayloadAttributes,
+    ) -> Result<(), EngineObjectValidationError> {
+        validate_version_specific_fields(
+            self.chain_spec(),
+            version,
+            PayloadOrAttributes::<ExecutionData, EthPayloadAttributes>::PayloadAttributes(&attributes.inner),
+        )
+    }
+}
+
+/// Custom engine validator builder for Irys
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct IrysEngineValidatorBuilder;
+
+impl<N> PayloadValidatorBuilder<N> for IrysEngineValidatorBuilder
+where
+    N: FullNodeComponents<Types = IrysEthereumNode>,
+{
+    type Validator = IrysEngineValidator;
+
+    async fn build(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::Validator> {
+        Ok(IrysEngineValidator::new(ctx.config.chain.clone()))
+    }
+}
+
+/// Implement PayloadAttributesBuilder for LocalPayloadAttributesBuilder to support IrysPayloadAttributes
+impl<CS> PayloadAttributesBuilder<IrysPayloadAttributes> for LocalPayloadAttributesBuilder<CS>
+where
+    CS: EthereumHardforks + Send + Sync + 'static,
+{
+    fn build(&self, timestamp: u64) -> IrysPayloadAttributes {
+        IrysPayloadAttributes {
+            inner: <Self as PayloadAttributesBuilder<EthPayloadAttributes>>::build(self, timestamp),
+        }
+    }
+}
+
 /// Type configuration for an Irys-Ethereum node.
 #[derive(Debug, Clone)]
 pub struct IrysEthereumNode {
@@ -109,7 +325,7 @@ impl NodeTypes for IrysEthereumNode {
     type Primitives = EthPrimitives;
     type ChainSpec = ChainSpec;
     type Storage = EthStorage;
-    type Payload = EthEngineTypes;
+    type Payload = EthEngineTypes<IrysPayloadTypes>;
 }
 
 impl IrysEthereumNode {
@@ -129,8 +345,8 @@ impl IrysEthereumNode {
         Node: FullNodeTypes<Types = Self>,
         <Node::Types as NodeTypes>::Payload: PayloadTypes<
             BuiltPayload = EthBuiltPayload,
-            PayloadAttributes = EthPayloadAttributes,
-            PayloadBuilderAttributes = EthPayloadBuilderAttributes,
+            PayloadAttributes = IrysPayloadAttributes,
+            PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
         >,
     {
         ComponentsBuilder::default()
@@ -163,10 +379,10 @@ where
         EthereumConsensusBuilder,
     >;
 
-    type AddOns = EthereumAddOns<
+    type AddOns = RpcAddOns<
         NodeAdapter<N, <Self::ComponentsBuilder as NodeComponentsBuilder<N>>::Components>,
         EthereumEthApiBuilder,
-        EthereumEngineValidatorBuilder,
+        IrysEngineValidatorBuilder,
     >;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
@@ -174,7 +390,7 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        EthereumAddOns::default()
+        RpcAddOns::default()
     }
 }
 
@@ -1163,7 +1379,7 @@ mod tests {
             move |timestamp: u64, beneficiary: Address| {
                 let parent = *parent_tracker.lock().unwrap();
                 let mut attrs = eth_payload_attributes_with_parent(timestamp, parent);
-                attrs.suggested_fee_recipient = beneficiary;
+                attrs.inner.suggested_fee_recipient = beneficiary;
                 attrs
             }
         };
@@ -1344,7 +1560,7 @@ mod tests {
             move |timestamp: u64, beneficiary: Address| {
                 let parent = *parent_tracker.lock().unwrap();
                 let mut attrs = eth_payload_attributes_with_parent(timestamp, parent);
-                attrs.suggested_fee_recipient = beneficiary;
+                attrs.inner.suggested_fee_recipient = beneficiary;
                 attrs
             }
         };
@@ -2663,7 +2879,7 @@ pub mod test_utils {
         }
 
         pub async fn new_with_custom_attributes(
-            payload_attributes: impl Fn(u64, Address) -> EthPayloadBuilderAttributes
+            payload_attributes: impl Fn(u64, Address) -> IrysPayloadBuilderAttributes
                 + Send
                 + Sync
                 + Clone
@@ -3347,7 +3563,7 @@ pub mod test_utils {
     }
 
     /// Returns payload attributes for a given timestamp.
-    pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+    pub fn eth_payload_attributes(timestamp: u64) -> IrysPayloadBuilderAttributes {
         let attributes = PayloadAttributes {
             timestamp,
             prev_randao: B256::ZERO,
@@ -3355,14 +3571,16 @@ pub mod test_utils {
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
         };
-        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+        IrysPayloadBuilderAttributes {
+            inner: EthPayloadBuilderAttributes::new(B256::ZERO, attributes),
+        }
     }
 
     /// Returns payload attributes with a custom beneficiary address.
     pub fn eth_payload_attributes_with_beneficiary(
         timestamp: u64,
         beneficiary: Address,
-    ) -> EthPayloadBuilderAttributes {
+    ) -> IrysPayloadBuilderAttributes {
         let attributes = PayloadAttributes {
             timestamp,
             prev_randao: B256::ZERO,
@@ -3370,14 +3588,16 @@ pub mod test_utils {
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
         };
-        EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+        IrysPayloadBuilderAttributes {
+            inner: EthPayloadBuilderAttributes::new(B256::ZERO, attributes),
+        }
     }
 
     /// Returns payload attributes for a given timestamp and parent block hash.
     pub fn eth_payload_attributes_with_parent(
         timestamp: u64,
         parent_block_hash: B256,
-    ) -> EthPayloadBuilderAttributes {
+    ) -> IrysPayloadBuilderAttributes {
         let attributes = PayloadAttributes {
             timestamp,
             prev_randao: B256::ZERO,
@@ -3385,7 +3605,9 @@ pub mod test_utils {
             withdrawals: Some(vec![]),
             parent_beacon_block_root: Some(B256::ZERO),
         };
-        EthPayloadBuilderAttributes::new(parent_block_hash, attributes)
+        IrysPayloadBuilderAttributes {
+            inner: EthPayloadBuilderAttributes::new(parent_block_hash, attributes),
+        }
     }
 
     /// Launches and connects multiple Irys+reth nodes for integration tests.

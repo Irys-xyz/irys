@@ -10,7 +10,9 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
-use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadId};
+use reth_payload_builder::{EthBuiltPayload, PayloadId};
+use reth_payload_primitives::PayloadBuilderAttributes;
+use crate::IrysPayloadBuilderAttributes;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
@@ -303,20 +305,29 @@ where
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
     Pool: TransactionPool<Transaction = EthPooledTransaction>,
 {
-    type Attributes = EthPayloadBuilderAttributes;
+    type Attributes = IrysPayloadBuilderAttributes;
     type BuiltPayload = EthBuiltPayload;
 
     fn try_build(
         &self,
-        args: BuildArguments<EthPayloadBuilderAttributes, EthBuiltPayload>,
+        args: BuildArguments<IrysPayloadBuilderAttributes, EthBuiltPayload>,
     ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
         let payload_id = args.config.attributes.payload_id();
+        // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
+        let BuildArguments { cached_reads, config, cancel, best_payload } = args;
+        let PayloadConfig { parent_header, attributes } = config;
+        let eth_args = BuildArguments {
+            cached_reads,
+            config: PayloadConfig { parent_header, attributes: attributes.inner },
+            cancel,
+            best_payload,
+        };
         let result = default_ethereum_payload(
             self.evm_config.clone(),
             self.client.clone(),
             self.pool.clone(),
             self.builder_config.clone(),
-            args,
+            eth_args,
             |attributes| self.best_transactions_with_attributes(attributes, payload_id),
         )?;
         Ok(result)
@@ -338,7 +349,10 @@ where
         config: PayloadConfig<Self::Attributes>,
     ) -> Result<EthBuiltPayload, PayloadBuilderError> {
         let payload_id = config.attributes.payload_id();
-        let args = BuildArguments::new(Default::default(), config, Default::default(), None);
+        // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
+        let PayloadConfig { parent_header, attributes } = config;
+        let eth_config = PayloadConfig { parent_header, attributes: attributes.inner };
+        let args = BuildArguments::new(Default::default(), eth_config, Default::default(), None);
 
         default_ethereum_payload(
             self.evm_config.clone(),

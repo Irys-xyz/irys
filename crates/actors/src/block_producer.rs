@@ -25,7 +25,7 @@ use irys_reth::{
     compose_shadow_tx,
     payload::{DeterministicShadowTxKey, ShadowTxStore},
     reth_node_ethereum::EthEngineTypes,
-    IrysEthereumNode,
+    IrysEthereumNode, IrysPayloadTypes, IrysPayloadBuilderAttributes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
@@ -47,7 +47,7 @@ use reth::{
     revm::primitives::B256,
     tasks::shutdown::Shutdown,
 };
-use reth_payload_primitives::PayloadBuilderError;
+use reth_payload_primitives::{PayloadBuilderAttributes, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
 use std::time::UNIX_EPOCH;
 use std::{
@@ -170,7 +170,7 @@ pub struct BlockProducerInner {
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
     /// Reth node payload builder
-    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
+    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes<IrysPayloadTypes>>,
     /// Reth blockchain provider
     pub reth_provider: NodeProvider,
     /// Shadow tx store
@@ -503,6 +503,7 @@ pub trait BlockProdStrategy {
             );
             return Ok(None);
         }
+        tracing::error!(solution = ?solution.solution_hash, "\n\n solution hash");
 
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
@@ -599,7 +600,7 @@ pub trait BlockProdStrategy {
             {
                 Ok(result) => {
                     if retry_count > 0 {
-                        info!(
+                        error!(
                             solution.hash = %solution.solution_hash,
                             solution.vdf_step = solution.vdf_step,
                             retry.count = retry_count,
@@ -875,8 +876,9 @@ pub trait BlockProdStrategy {
             "Payload attributes created"
         );
 
-        let attributes =
-            EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes);
+        let attributes = IrysPayloadBuilderAttributes {
+            inner: EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes),
+        };
 
         let payload_builder = &self.inner().reth_payload_builder;
         let consensus_engine_handle = &self.inner().consensus_engine_handle;

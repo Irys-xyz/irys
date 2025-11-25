@@ -1,7 +1,7 @@
 use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
-use irys_reth::{payload::ShadowTxStore, IrysEthereumNode};
+use irys_reth::{payload::ShadowTxStore, IrysEthereumNode, IrysPayloadBuilderAttributes, IrysEngineValidatorBuilder};
 use irys_types::{Address, NetworkConfigWithDefaults as _};
 use reth::{
     args::DatabaseArgs,
@@ -16,6 +16,7 @@ use reth_db::init_db;
 use reth_node_builder::{
     FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder, NodeComponentsBuilder,
     NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
+    rpc::RpcAddOns,
 };
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
@@ -44,15 +45,15 @@ pub type NodeHelperType =
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
-pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<
+pub type RethNodeAddOns = RpcAddOns<
     RethNodeAdapter,
     reth_node_ethereum::node::EthereumEthApiBuilder,
-    reth_node_ethereum::node::EthereumEngineValidatorBuilder,
+    IrysEngineValidatorBuilder,
 >;
 
 pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddOns>;
 
-pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
+pub fn eth_payload_attributes(timestamp: u64) -> IrysPayloadBuilderAttributes {
     let attributes = PayloadAttributes {
         timestamp,
         prev_randao: B256::ZERO,
@@ -60,7 +61,9 @@ pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
     };
-    EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+    IrysPayloadBuilderAttributes {
+        inner: EthPayloadBuilderAttributes::new(B256::ZERO, attributes),
+    }
 }
 
 #[derive(Clone)]
