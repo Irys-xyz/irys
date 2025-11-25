@@ -89,7 +89,7 @@ impl super::PackingStrategy for CudaPackingStrategy {
                         );
                         capacity_pack_range_cuda_c(
                             num_chunks,
-                            mining_address.into(),
+                            mining_address,
                             start as u64,
                             partition_hash,
                             entropy_iterations,
