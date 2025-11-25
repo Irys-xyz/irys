@@ -567,27 +567,24 @@ impl ChunkCacheService {
                 debug!(ingress_proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
                 continue;
             };
-            let mut any_promoted = false;
+            let mut any_tx_promoted = false;
             for txid in cached_dr.txid_set.iter() {
                 if let Some(h) = tx_header_by_txid(&tx, txid)? {
                     if h.promoted_height.is_some() {
-                        any_promoted = true;
+                        any_tx_promoted = true;
                         break;
                     }
                 }
             }
 
-            // Decision logic per requirements:
-            if any_promoted {
-                // (a) Promoted + expired: delete
-                to_delete.push(data_root);
-                debug!(ingress_proof.data_root = ?data_root, "Marking expired proof for deletion (promoted)");
-            } else if at_capacity {
-                // (b) Unpromoted + expired + at capacity: delete
+            let is_locally_produced = address == local_addr;
+
+            if at_capacity {
+                // Unpromoted + expired + at capacity: delete
                 to_delete.push(data_root);
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
-            } else if address == local_addr {
-                // (c) Unpromoted + expired + under capacity + local author: regenerate
+            } else if is_locally_produced && any_tx_promoted {
+                // Has promoted txs + expired + under capacity + local author: regenerate
                 if check_result.should_regenerate {
                     to_regen.push(proof);
                     debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
@@ -596,8 +593,9 @@ impl ChunkCacheService {
                     debug!(ingress_proof.data_root = ?data_root, "Expired local proof does not meet regeneration criteria; leaving intact");
                 }
             } else {
-                // Unpromoted + expired + under capacity + non-local: leave intact
-                debug!(ingress_proof.data_root = ?data_root, "Leaving expired non-local proof (under capacity)");
+                // Not local + expired: delete
+                to_delete.push(data_root);
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (promoted)");
             }
         }
 

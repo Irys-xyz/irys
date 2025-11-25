@@ -26,7 +26,7 @@ pub fn compute_promotion_status(
 
     // 2. Prior submit inclusion (canonical or single-block promotion or historical inclusion)
     if !submit_txs_from_canonical.contains(&tx_header.id) {
-        let single_block = submit_tx_slice.iter().any(|h| h.id == tx_header.id);
+        let single_block = submit_tx_slice.iter().any(|data_tx_header| data_tx_header.id == tx_header.id);
         if !single_block {
             let previously_included = db
                 .view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?
