@@ -94,8 +94,8 @@ pub fn block_header_by_hash<T: DbTx>(
     if include_chunk {
         if let Some(ref mut b) = block {
             b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
-            if b.poa.chunk.is_none() {
-                tracing::error!(block.hash = ?b.block_hash, target = "db::block_header", "poa chunk not present when reading the header");
+            if b.poa.chunk.is_none() && b.height != 0 {
+                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
             }
         }
     }
