@@ -13,7 +13,7 @@ pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
-use crate::block_validation::calculate_perm_storage_total_fee;
+use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
@@ -21,7 +21,9 @@ use eyre::{eyre, OptionExt as _};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
-use irys_database::{cached_data_root_by_data_root, SystemLedger};
+use irys_database::{
+    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
+};
 use irys_domain::{
     get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
     StorageModulesReadGuard,
@@ -1050,43 +1052,200 @@ impl Inner {
             });
 
             for tx_header in &tx_headers {
-                debug!("Evaluating publish candidate {}", tx_header.id);
-                let (status, final_proofs) = self
-                    .get_promotion_status(
-                        tx_header,
-                        submit_tx,
-                        &submit_txs_from_canonical,
-                        min_ingress_proof_anchor_height,
-                    )
-                    .await?;
-                match status {
-                    PromotionStatus::Ready => {
-                        let proofs_vec = final_proofs.unwrap_or_default();
-                        let assigned_count = proofs_vec.len().min(
-                            self.config
-                                .consensus
-                                .number_of_ingress_proofs_from_assignees
-                                as usize,
-                        );
-                        publish_txs.push(tx_header.clone());
-                        publish_proofs.extend(proofs_vec.clone());
-                        info!(
-                            tx.id = ?tx_header.id,
-                            tx.promoted.proofs_total = proofs_vec.len(),
-                            tx.promoted.assigned_estimate = assigned_count,
-                            "Promoting tx"
-                        );
-                    }
-                    PromotionStatus::AlreadyPromoted => {
-                        warn!(tx.id = ?tx_header.id, "Skipping already-promoted candidate");
-                    }
-                    PromotionStatus::MissingSubmitInclusion => {
-                        warn!(tx.id = ?tx_header.id, "Skipping candidate - missing prior submit inclusion");
-                    }
-                    PromotionStatus::InsufficientProofs => {
-                        info!(tx.id = ?tx_header.id, "Skipping candidate - insufficient proofs");
+                debug!(
+                    "Processing publish candidate tx {} {:#?}",
+                    &tx_header.id, &tx_header
+                );
+                let is_promoted = tx_header.promoted_height.is_some();
+
+                if is_promoted {
+                    // If it's promoted skip it
+                    warn!(
+                        tx.id = ?tx_header.id,
+                        tx.promoted_height = ?tx_header.promoted_height,
+                        "Publish candidate is already promoted"
+                    );
+                    continue;
+                }
+                // check for previous submit inclusion
+                // we do this by checking if the tx is in the block tree or database.
+                // if it is, we know it could've only gotten there by being included in the submit ledger.
+                // if it's not, we also check if the submit ledger for this block contains the tx (single-block promotion). if it does, we also promote it.
+                if !submit_txs_from_canonical.contains(&tx_header.id) {
+                    // check for single-block promotion
+                    if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
+                        // check database
+                        if self
+                            .irys_db
+                            .view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?
+                            .is_none()
+                        {
+                            // no previous inclusion
+                            warn!(
+                                tx.id = ?tx_header.id,
+                                tx.data_root = ?tx_header.data_root,
+                                "Unable to find previous submit inclusion for publish candidate"
+                            );
+                            continue;
+                        }
                     }
                 }
+
+                // If it's not promoted, validate the proofs
+
+                // Get all the proofs for this tx
+                let all_proofs = self
+                    .irys_db
+                    .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
+                    .into_iter()
+                    .filter(|(_root, cached_proof)| {
+                        let expired = self
+                            .is_ingress_proof_expired(&cached_proof.proof)
+                            .expired_or_invalid;
+                        !expired
+                    })
+                    .collect::<Vec<_>>();
+
+                // Check for minimum number of ingress proofs
+                let total_miners = self
+                    .block_tree_read_guard
+                    .read()
+                    .canonical_epoch_snapshot()
+                    .commitment_state
+                    .stake_commitments
+                    .len();
+
+                // Take the smallest value, the configured total proofs count or the number
+                // of staked miners that can produce a valid proof.
+                let proofs_per_tx = std::cmp::min(
+                    self.config.consensus.number_of_ingress_proofs_total as usize,
+                    total_miners,
+                );
+
+                if all_proofs.len() < proofs_per_tx {
+                    info!(
+                        "Not promoting tx {} - insufficient proofs (got {} wanted {})",
+                        &tx_header.id,
+                        &all_proofs.len(),
+                        proofs_per_tx
+                    );
+                    continue;
+                }
+
+                let mut all_tx_proofs: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
+
+                //filter all these ingress proofs by their anchor validity
+                for (_hash, proof) in all_proofs {
+                    let proof = proof.0.proof;
+                    // validate the anchor is still valid
+                    let anchor_is_valid = self.validate_ingress_proof_anchor_for_inclusion(
+                        min_ingress_proof_anchor_height,
+                        &proof,
+                    )?;
+                    if anchor_is_valid {
+                        all_tx_proofs.push(proof)
+                    }
+                    // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
+                }
+
+                // Get assigned and unassigned proofs using the existing utility function
+                let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
+                    &all_tx_proofs,
+                    tx_header,
+                    |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
+                    &self.block_tree_read_guard,
+                    &self.irys_db,
+                    &self.config,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        warn!(
+                            "Failed to get assigned proofs for tx {}: {}",
+                            &tx_header.id, e
+                        );
+                        continue;
+                    }
+                };
+
+                // Calculate expected assigned proofs, clamping to available miners
+                let mut expected_assigned_proofs =
+                    self.config
+                        .consensus
+                        .number_of_ingress_proofs_from_assignees as usize;
+
+                if assigned_miners < expected_assigned_proofs {
+                    warn!(
+                        "Clamping expected_assigned_proofs from {} to {} for tx {}",
+                        expected_assigned_proofs, assigned_miners, &tx_header.id
+                    );
+                    expected_assigned_proofs = assigned_miners;
+                }
+
+                // Check if we have enough assigned proofs
+                if assigned_proofs.len() < expected_assigned_proofs {
+                    info!(
+                        "Not promoting tx {} - insufficient assigned proofs (got {} wanted {})",
+                        &tx_header.id,
+                        assigned_proofs.len(),
+                        expected_assigned_proofs
+                    );
+                    continue;
+                }
+
+                // Separate assigned and unassigned proofs
+                let assigned_proof_set: HashSet<_> = assigned_proofs
+                    .iter()
+                    .map(|p| &p.proof.0) // Use signature as unique identifier
+                    .collect();
+
+                let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
+                    .iter()
+                    .filter(|p| !assigned_proof_set.contains(&p.proof.0))
+                    .cloned()
+                    .collect();
+
+                // Build the final proof list
+                let mut final_proofs = Vec::new();
+
+                // First, add assigned proofs up to the total network limit
+                // Use all available assigned proofs, but don't exceed the network total
+                let total_network_limit =
+                    self.config.consensus.number_of_ingress_proofs_total as usize;
+                let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
+                final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
+
+                // Then fill remaining slots with unassigned proofs if needed
+                let remaining_slots = total_network_limit - final_proofs.len();
+                if remaining_slots > 0 {
+                    let unassigned_to_use = std::cmp::min(unassigned_proofs.len(), remaining_slots);
+                    final_proofs.extend_from_slice(&unassigned_proofs[..unassigned_to_use]);
+                }
+
+                // Final check - do we have enough total proofs?
+                if final_proofs.len()
+                    < self.config.consensus.number_of_ingress_proofs_total as usize
+                {
+                    info!(
+                            "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
+                            &tx_header.id,
+                            final_proofs.len(),
+                            self.config.consensus.number_of_ingress_proofs_total
+                        );
+                    continue;
+                }
+
+                // Success - add this transaction and its proofs
+                publish_txs.push(tx_header.clone());
+                publish_proofs.extend(final_proofs.clone()); // Clone to avoid moving final_proofs
+
+                info!(
+                    "Promoting tx {} with {} assigned proofs and {} total proofs",
+                    &tx_header.id,
+                    assigned_to_use, // Show actual assigned proofs used (capped by network limit)
+                    final_proofs.len()
+                );
             }
         }
 
@@ -1105,27 +1264,6 @@ impl Inner {
         })
     }
 
-    /// Determines the promotion status for a candidate publish transaction, reproducing
-    /// the gating logic previously inline in `get_publish_txs_and_proofs`.
-    /// Returns a `PromotionStatus` and, if Ready, the finalized set of proofs to include.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx_header.id))]
-    pub async fn get_promotion_status(
-        &self,
-        tx_header: &DataTransactionHeader,
-        submit_tx: &[DataTransactionHeader],
-        submit_txs_from_canonical: &std::collections::HashSet<H256>,
-        min_ingress_proof_anchor_height: u64,
-    ) -> eyre::Result<(PromotionStatus, Option<Vec<IngressProof>>)> {
-        crate::promotion::compute_promotion_status(
-            &self.block_tree_read_guard,
-            &self.irys_db,
-            &self.config,
-            tx_header,
-            submit_tx,
-            submit_txs_from_canonical,
-            min_ingress_proof_anchor_height,
-        )
-    }
     /// return block header from mempool, if found
     /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_hash, include_chunk = include_chunk))]

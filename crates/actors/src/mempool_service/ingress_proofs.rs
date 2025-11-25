@@ -186,7 +186,8 @@ impl Inner {
                 );
                 ProofCheckResult {
                     expired_or_invalid: false,
-                    should_regenerate: false,
+                    should_reanchor: false,
+                    should_fully_regenerate: false,
                 }
             }
             Err(e) => {
@@ -200,7 +201,8 @@ impl Inner {
                         // Prune, regenerate if not at capacity
                         ProofCheckResult {
                             expired_or_invalid: true,
-                            should_regenerate: true,
+                            should_reanchor: true,
+                            should_fully_regenerate: false,
                         }
                     }
                     IngressProofError::InvalidSignature => {
@@ -209,10 +211,12 @@ impl Inner {
                             ingress_proof.anchor = ?ingress_proof.anchor,
                             "Ingress proof anchor has an invalid signature and is going to be pruned",
                         );
-                        // Prune, don't regenerate
+                        // Fully regenerate
                         ProofCheckResult {
                             expired_or_invalid: true,
-                            should_regenerate: false,
+                            should_reanchor: false,
+
+                            should_fully_regenerate: true,
                         }
                     }
                     IngressProofError::UnstakedAddress => {
@@ -224,7 +228,8 @@ impl Inner {
                         // Should not happen; prune, our own address should not be unstaked unexpectedly
                         ProofCheckResult {
                             expired_or_invalid: true,
-                            should_regenerate: false,
+                            should_reanchor: false,
+                            should_fully_regenerate: false,
                         }
                     }
                     IngressProofError::DatabaseError(message) => {
@@ -235,7 +240,8 @@ impl Inner {
                         );
                         ProofCheckResult {
                             expired_or_invalid: false,
-                            should_regenerate: false,
+                            should_reanchor: false,
+                            should_fully_regenerate: false,
                         }
                     }
                     IngressProofError::Other(reason_message) => {
@@ -245,7 +251,8 @@ impl Inner {
                         );
                         ProofCheckResult {
                             expired_or_invalid: false,
-                            should_regenerate: false,
+                            should_reanchor: false,
+                            should_fully_regenerate: false,
                         }
                     }
                 }
@@ -258,8 +265,18 @@ impl Inner {
 pub struct ProofCheckResult {
     /// Whether the proof is expired/invalid and should be pruned
     pub expired_or_invalid: bool,
-    /// Whether the proof should be regenerated after pruning if possible
-    pub should_regenerate: bool,
+    /// Whether the proof should be reanchored after pruning if possible
+    pub should_reanchor: bool,
+    /// Whether the proof should be fully regenerated (not just reanchored, in case of an invalid
+    /// signature, for example)
+    pub should_fully_regenerate: bool,
+}
+
+// TODO: finish this
+pub enum RegenerationStatus {
+    Reanchor,
+    Regenerate,
+    None,
 }
 
 impl ProofCheckResult {
@@ -268,7 +285,7 @@ impl ProofCheckResult {
     }
 
     pub fn should_regenerate(&self) -> bool {
-        self.should_regenerate
+        self.should_reanchor
     }
 }
 

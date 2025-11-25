@@ -23,7 +23,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, info, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _};
 
 pub const REGENERATE_PROOFS: bool = true;
 
@@ -536,6 +536,7 @@ impl ChunkCacheService {
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
         let mut walker = cursor.walk(None)?;
         let mut to_delete: Vec<DataRoot> = Vec::new();
+        let mut to_reanchor: Vec<IngressProof> = Vec::new();
         let mut to_regen: Vec<IngressProof> = Vec::new();
         let mut processed = 0_usize;
         let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
@@ -563,15 +564,15 @@ impl ChunkCacheService {
                 continue;
             }
             // Associated txids
-            let Some(cached_dr) = cached_data_root_by_data_root(&tx, data_root)? else {
+            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
                 debug!(ingress_proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
                 continue;
             };
-            let mut any_tx_promoted = false;
-            for txid in cached_dr.txid_set.iter() {
-                if let Some(h) = tx_header_by_txid(&tx, txid)? {
-                    if h.promoted_height.is_some() {
-                        any_tx_promoted = true;
+            let mut any_unpromoted = false;
+            for txid in cached_data_root.txid_set.iter() {
+                if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
+                    if tx_header.promoted_height.is_none() {
+                        any_unpromoted = true;
                         break;
                     }
                 }
@@ -583,14 +584,16 @@ impl ChunkCacheService {
                 // Unpromoted + expired + at capacity: delete
                 to_delete.push(data_root);
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
-            } else if is_locally_produced && any_tx_promoted {
-                // Has promoted txs + expired + under capacity + local author: regenerate
-                if check_result.should_regenerate {
-                    to_regen.push(proof);
+            } else if is_locally_produced && any_unpromoted {
+                // Has unpromoted txs + expired + under capacity + local author: regenerate
+                if check_result.should_reanchor {
+                    to_reanchor.push(proof);
                     debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
-                } else {
-                    to_delete.push(data_root);
+                } else if check_result.should_fully_regenerate {
+                    to_regen.push(proof);
                     debug!(ingress_proof.data_root = ?data_root, "Expired local proof does not meet regeneration criteria; leaving intact");
+                } else {
+                    error!("We're under capacity, and the proof is expired, but it does not meet reanchoring or regeneration criteria. This should not happen.");
                 }
             } else {
                 // Not local + expired: delete
@@ -599,7 +602,7 @@ impl ChunkCacheService {
             }
         }
 
-        // Delete expired proofs using proper removal function
+        // Delete expired proofs using a proper removal function
         if !to_delete.is_empty() {
             for root in to_delete.iter() {
                 if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
@@ -613,7 +616,7 @@ impl ChunkCacheService {
         }
 
         // Regenerate local expired proofs (only when under capacity)
-        for proof in to_regen.iter() {
+        for proof in to_reanchor.iter() {
             if REGENERATE_PROOFS {
                 if let Err(e) = reanchor_and_store_ingress_proof(
                     &self.block_tree_guard,
@@ -630,9 +633,25 @@ impl ChunkCacheService {
             }
         }
 
-        if !to_regen.is_empty() {
+        for proof in to_regen.iter() {
+            if REGENERATE_PROOFS {
+                // TODO: do the full regeneration instead of reanchoring
+                if let Err(e) = reanchor_and_store_ingress_proof(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    &signer,
+                    proof,
+                    &self.gossip_broadcast,
+                ) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                }
+            }
+        }
+
+        if !to_reanchor.is_empty() {
             info!(
-                proofs.regenerated = to_regen.len(),
+                proofs.regenerated = to_reanchor.len(),
                 "Reanchored expired local ingress proofs (under capacity)"
             );
         }
