@@ -1081,7 +1081,7 @@ impl Inner {
                         warn!(tx.id = ?tx_header.id, "Skipping already-promoted candidate");
                     }
                     PromotionStatus::MissingSubmitInclusion => {
-                        info!(tx.id = ?tx_header.id, "Skipping candidate - missing prior submit inclusion");
+                        warn!(tx.id = ?tx_header.id, "Skipping candidate - missing prior submit inclusion");
                     }
                     PromotionStatus::InsufficientProofs => {
                         info!(tx.id = ?tx_header.id, "Skipping candidate - insufficient proofs");
