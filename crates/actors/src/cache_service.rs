@@ -1,4 +1,4 @@
-use crate::ingress_proofs::reanchor_and_store_ingress_proof;
+use crate::ingress_proofs::{generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction};
 use crate::mempool_service::Inner;
 use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
 use irys_database::{
@@ -585,15 +585,18 @@ impl ChunkCacheService {
                 to_delete.push(data_root);
                 debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
             } else if is_locally_produced && any_unpromoted {
-                // Has unpromoted txs + expired + under capacity + local author: regenerate
-                if check_result.should_reanchor {
-                    to_reanchor.push(proof);
-                    debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for regeneration");
-                } else if check_result.should_fully_regenerate {
-                    to_regen.push(proof);
-                    debug!(ingress_proof.data_root = ?data_root, "Expired local proof does not meet regeneration criteria; leaving intact");
-                } else {
-                    error!("We're under capacity, and the proof is expired, but it does not meet reanchoring or regeneration criteria. This should not happen.");
+                match check_result.regeneration_action {
+                    RegenAction::Reanchor => {
+                        to_reanchor.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for reanchoring");
+                    }
+                    RegenAction::Regenerate => {
+                        to_regen.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
+                    }
+                    RegenAction::DoNotRegenerate => {
+                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but it does not meet reanchoring or regeneration criteria. This should not happen.");
+                    }
                 }
             } else {
                 // Not local + expired: delete
@@ -628,23 +631,36 @@ impl ChunkCacheService {
                 ) {
                     warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
                 }
-            } else if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
-                warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
+            } else {
+                debug!(
+                    ingress_proof.data_root = ?proof.data_root,
+                    "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
+                );
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
+                }
             }
         }
 
         for proof in to_regen.iter() {
             if REGENERATE_PROOFS {
-                // TODO: do the full regeneration instead of reanchoring
-                if let Err(e) = reanchor_and_store_ingress_proof(
+                if let Err(report) = generate_and_store_ingress_proof(
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
-                    &signer,
-                    proof,
+                    proof.data_root,
+                    None,
                     &self.gossip_broadcast,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
+                }
+            } else {
+                debug!(
+                    ingress_proof.data_root = ?proof.data_root,
+                    "Regeneration disabled, removing ingress proof for data root"
+                );
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
                 }
             }
         }
