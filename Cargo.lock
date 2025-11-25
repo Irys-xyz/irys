@@ -5284,10 +5284,13 @@ dependencies = [
  "irys-chain",
  "irys-database",
  "irys-domain",
+ "irys-reth",
  "irys-reth-node-bridge",
  "irys-tui",
  "irys-types",
  "reth-node-core",
+ "reth-node-types",
+ "reth-provider",
  "tokio",
  "toml",
  "tracing",
@@ -5544,6 +5547,7 @@ dependencies = [
 name = "irys-reth-node-bridge"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-eips",
  "alloy-evm",
  "alloy-genesis",

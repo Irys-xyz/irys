@@ -200,6 +200,7 @@ reth-node-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38
 reth-node-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
 reth-node-core = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
 reth-node-metrics = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-types = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
 reth-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
 reth-primitives-traits = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
 reth-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
