@@ -61,7 +61,7 @@ impl Inner {
                     if db_tx.promoted_height.is_none() {
                         db_tx.promoted_height = Some(block.height);
                         if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
-                            error!("Failed to update tx header in DB: {}", e);
+                            error!("Failed to update tx header in DB for tx {}: {}", txid, e);
                         }
                     }
                 }

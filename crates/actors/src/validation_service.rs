@@ -269,7 +269,11 @@ impl ValidationService {
                                     validation_result: validation.validation_result,
                                 }
                             ) {
-                                error!(custom.error = ?e, "Failed to send validation result to block tree service");
+                                error!(
+                                    block.hash = %validation.block_hash,
+                                    custom.error = ?e,
+                                    "Failed to send validation result to block tree service"
+                                );
                             }
                         }
                         Some(Err(e)) => {

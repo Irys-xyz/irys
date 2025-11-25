@@ -1222,6 +1222,9 @@ pub trait BlockProdStrategy {
             .send(execution_payload_gossip_data)
         {
             error!(
+                block.hash = ?block.block_hash,
+                block.height = ?block.height,
+                payload.hash = ?eth_built_payload.block().hash(),
                 "Failed to broadcast execution payload: {:?}",
                 payload_broadcast_error
             );

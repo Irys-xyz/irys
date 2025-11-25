@@ -428,8 +428,15 @@ impl Inner {
                 let msg_result = self.handle_chunk_ingress_message(chunk).await;
 
                 if let Err(err) = msg_result {
-                    tracing::error!("oneshot failure: {:?}", err);
-                    return Err(TxIngressError::Other("oneshot failure".to_owned()));
+                    tracing::error!(
+                        "Failed to handle chunk ingress for data_root {:?}: {:?}",
+                        data_root,
+                        err
+                    );
+                    return Err(TxIngressError::Other(format!(
+                        "Failed to handle chunk ingress for data_root {:?}",
+                        data_root
+                    )));
                 }
             }
         }
@@ -444,7 +451,7 @@ impl Inner {
             .gossip_broadcast
             .send(gossip_broadcast_message)
         {
-            tracing::error!("Failed to send gossip data: {:?}", error);
+            tracing::error!("Failed to send gossip data for tx {}: {:?}", tx.id, error);
         }
     }
 
