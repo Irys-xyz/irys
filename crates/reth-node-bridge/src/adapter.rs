@@ -8,22 +8,17 @@ use crate::node::{eth_payload_attributes, NodeHelperType, RethNode};
 use alloy_eips::BlockNumberOrTag;
 use alloy_primitives::{BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
-use irys_reth::{
-    payload::{DeterministicShadowTxKey, ShadowTxStore},
-    IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes,
-};
+use irys_reth::{IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 use irys_types::Address;
 use reth::transaction_pool::EthPooledTransaction;
 use reth_e2e_test_utils::node::NodeTestContext;
-use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes, PayloadBuilderAttributes};
-use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadBuilderAttributes, PayloadTypes};
 use reth_payload_builder::PayloadKind;
 use reth_provider::BlockReaderIdExt as _;
 
 #[derive(Clone)]
 pub struct IrysRethNodeAdapter {
     pub reth_node: Arc<NodeHelperType>,
-    pub shadow_tx_store: ShadowTxStore,
 }
 
 impl std::fmt::Debug for IrysRethNodeAdapter {
@@ -33,11 +28,10 @@ impl std::fmt::Debug for IrysRethNodeAdapter {
 }
 
 impl IrysRethNodeAdapter {
-    pub async fn new(node: RethNode, shadow_tx_store: ShadowTxStore) -> eyre::Result<Self> {
+    pub async fn new(node: RethNode) -> eyre::Result<Self> {
         let reth_node = NodeTestContext::new(node, eth_payload_attributes).await?;
         Ok(Self {
             reth_node: Arc::new(reth_node),
-            shadow_tx_store,
         })
     }
 }
@@ -103,6 +97,7 @@ impl IrysRethNodeAdapter {
                 withdrawals: None,
                 parent_beacon_block_root: Some(B256::ZERO),
             },
+            shadow_txs: vec![],
         };
         let payload = self
             .build_submit_payload_irys(B256::ZERO, attributes, vec![])
@@ -147,16 +142,25 @@ impl IrysRethNodeAdapter {
         shadow_txs: Vec<EthPooledTransaction>,
     ) -> eyre::Result<<<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::BuiltPayload>
     {
-        let attributes = IrysPayloadBuilderAttributes {
-            inner: EthPayloadBuilderAttributes::new(parent, attributes.inner),
+        // Create IrysPayloadAttributes with shadow transactions
+        let rpc_attributes = IrysPayloadAttributes {
+            inner: attributes.inner,
+            shadow_txs,
         };
-        let key = DeterministicShadowTxKey::new(attributes.payload_id());
-        self.shadow_tx_store.set_shadow_txs(key, shadow_txs);
+
+        // Convert to builder attributes - this computes the payload ID including shadow txs
+        let builder_attributes = IrysPayloadBuilderAttributes::try_new(
+            parent,
+            rpc_attributes,
+            0, // version
+        )
+        .expect("IrysPayloadBuilderAttributes::try_new is infallible");
+
         let payload_id = self
             .reth_node
             .payload
             .payload_builder
-            .send_new_payload(attributes.clone())
+            .send_new_payload(builder_attributes)
             .await??;
 
         let payload = self

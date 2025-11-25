@@ -7,6 +7,7 @@ mod unpledge_partition;
 mod unstake_edge_cases;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,
@@ -528,7 +529,6 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
-
     // Tamper with last_epoch_hash to make it invalid
     let mut irys_block = (*block).clone();
     irys_block.last_epoch_hash = H256::random(); // Use random hash to ensure it's invalid
@@ -563,6 +563,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         - (current_height % num_blocks_in_epoch_u64))
         % num_blocks_in_epoch_u64;
     if blocks_until_boundary > 0 {
+        tracing::error!(?blocks_until_boundary, "mining new blocks");
         genesis_node
             .mine_blocks(blocks_until_boundary as usize)
             .await?;

@@ -1465,7 +1465,6 @@ fn validate_shadow_transactions_match(
             solution_hash,
         } = &actual
         {
-
             if *solution_hash != expected_hash {
                 eyre::bail!(
                     "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
