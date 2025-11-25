@@ -1687,9 +1687,12 @@ pub async fn commitment_txs_are_valid(
             }
             _ => {
                 // This should never happen since we're comparing the same filtered set
-                error!("Internal error: commitment ordering validation mismatch");
+                error!(
+                    "Internal error: commitment ordering validation mismatch for block {} (height {})",
+                    block.block_hash, block.height
+                );
                 return Err(ValidationError::CommitmentOrderingFailed(
-                    "Internal error: commitment ordering validation mismatch".to_string(),
+                    format!("Internal error: commitment ordering validation mismatch for block {} (height {})", block.block_hash, block.height),
                 ));
             }
         }
@@ -2235,7 +2238,10 @@ pub async fn data_txs_are_valid(
                             )
                             .map_err(|e| {
                                 PreValidationError::DatabaseError {
-                                    error: e.to_string(),
+                                    error: format!(
+                                        "Failed to fetch chunk for tx {} (data_root: {:?}, chunk_offset: {}): {}",
+                                        tx_header.id, tx_header.data_root, tx_chunk_offset, e
+                                    ),
                                 }
                             })?;
 

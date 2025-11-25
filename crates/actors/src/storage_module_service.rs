@@ -113,7 +113,10 @@ impl StorageModuleServiceInner {
         for sm in storage_modules.iter() {
             if sm.last_pending_write().elapsed() > Duration::from_secs(5) {
                 if let Err(e) = sm.force_sync_pending_chunks() {
-                    error!("Couldn't flush pending chunks: {}", e);
+                    error!(
+                        "Couldn't flush pending chunks for storage_module {}: {}",
+                        sm.id, e
+                    );
                 }
             }
         }
@@ -405,8 +408,8 @@ impl StorageModuleServiceInner {
                     },
                 ) {
                     error!(
-                        "Failed to send migration request for block {}: {}",
-                        block_height, e
+                        "Failed to send migration request for block {} (height {}): {}",
+                        block_hash, block_height, e
                     );
                     return Err(eyre!(
                         "Unable to index storage module chunks do to mpsc send failure: {}",
@@ -417,8 +420,8 @@ impl StorageModuleServiceInner {
                 // We await responses so we only perform one migration at a time
                 if let Err(e) = rx.await {
                     error!(
-                        "Failed to receive migration response for block {}: {}",
-                        block_height, e
+                        "Failed to receive migration response for block {} (height {}): {}",
+                        block_hash, block_height, e
                     );
                 }
             }

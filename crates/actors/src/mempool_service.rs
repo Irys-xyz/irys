@@ -287,8 +287,15 @@ impl Inner {
                 };
             }
             MempoolServiceMessage::BlockConfirmed(block) => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
                 if let Err(e) = self.handle_block_confirmed_message(block).await {
-                    tracing::error!("Failed to handle block confirmed message: {:#}", e);
+                    tracing::error!(
+                        "Failed to handle block confirmed message for block {} (height {}): {:#}",
+                        block_hash,
+                        block_height,
+                        e
+                    );
                 }
             }
             MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
@@ -439,10 +446,12 @@ impl Inner {
         let tx_id = tx.id();
         let anchor = tx.anchor();
         // ingress proof anchors must be canonical for inclusion
-        let anchor_height = match self
-            .get_anchor_height(anchor, true)
-            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
-        {
+        let anchor_height = match self.get_anchor_height(anchor, true).map_err(|e| {
+            TxIngressError::DatabaseError(format!(
+                "Error getting anchor height for {}: {}",
+                anchor, e
+            ))
+        })? {
             Some(height) => height,
             None => {
                 self.mempool_state
@@ -475,10 +484,12 @@ impl Inner {
         ingress_proof: &IngressProof,
     ) -> eyre::Result<bool> {
         let anchor = ingress_proof.anchor;
-        let anchor_height = match self
-            .get_anchor_height(anchor, true)
-            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
-        {
+        let anchor_height = match self.get_anchor_height(anchor, true).map_err(|e| {
+            TxIngressError::DatabaseError(format!(
+                "Error getting anchor height for {}: {}",
+                anchor, e
+            ))
+        })? {
             Some(height) => height,
             None => {
                 // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
@@ -1360,8 +1371,12 @@ impl Inner {
 
         let anchor_height = match self
             .get_anchor_height(anchor, false /* does not need to be canonical */)
-            .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?
-        {
+            .map_err(|e| {
+                TxIngressError::DatabaseError(format!(
+                    "Error getting anchor height for {}: {}",
+                    anchor, e
+                ))
+            })? {
             Some(height) => height,
             None => {
                 self.mempool_state
@@ -2662,16 +2677,17 @@ impl MempoolService {
                             match semaphore.try_acquire_owned() {
                                 Ok(permit) => {
                                     let inner = Arc::clone(&self.inner);
+                                    let msg_type = format!("{:?}", msg);
                                     // Permit acquired immediately
                                     runtime_handle.spawn(async move {
                                         let _permit = permit; // Hold until task completes
-                                        let task_info = format!("Mempool message handler for {:?}", msg);
+                                        let task_info = format!("Mempool message handler for {}", msg_type);
                                         if let Err(err) = wait_with_progress(
                                             inner.handle_message(msg),
                                             20,
                                             &task_info,
                                         ).in_current_span().await {
-                                            error!("Error handling mempool message: {:?}", err);
+                                            error!("Error handling mempool message {}: {:?}", msg_type, err);
                                         }
                                     }.in_current_span());
                                 }
@@ -2688,6 +2704,7 @@ impl MempoolService {
                                     // No permits available, will wait
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
+                                    let msg_type = format!("{:?}", msg);
                                     // Wait a minute before crashing out
                                     match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
                                         Ok(permit_result) => {
@@ -2695,13 +2712,13 @@ impl MempoolService {
                                                 Ok(permit) => {
                                                     runtime_handle.spawn(async move {
                                                         let _permit = permit; // Hold until task completes
-                                                        let task_info = format!("Mempool message handler for {:?}", msg);
+                                                        let task_info = format!("Mempool message handler for {}", msg_type);
                                                         if let Err(err) = wait_with_progress(
                                                             inner.handle_message(msg),
                                                             20,
                                                             &task_info,
                                                         ).in_current_span().await {
-                                                            error!("Error handling mempool message: {:?}", err);
+                                                            error!("Error handling mempool message {}: {:?}", msg_type, err);
                                                         }
                                                     }.in_current_span());
                                                 }

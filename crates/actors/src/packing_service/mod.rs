@@ -57,12 +57,12 @@ pub(crate) fn log_packing_progress(
     chunk_range: &irys_types::PartitionChunkRange,
     storage_module_id: usize,
     partition_hash: &irys_types::partition::PartitionHash,
-    mining_address: &[u8; 20],
+    mining_address: &Address,
 ) {
     if current_offset.is_multiple_of(LOG_PER_CHUNKS) {
         debug!(
             target: "irys::packing::update",
-            "{} packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {:?}",
+            "{} packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {}",
             strategy,
             chunk_range.0.start(),
             current_offset,
@@ -92,7 +92,7 @@ pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest};
 use dashmap::DashMap;
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_types::{
-    ii, partition_chunk_offset_ii, Config, PartitionChunkOffset, PartitionChunkRange,
+    ii, partition_chunk_offset_ii, Address, Config, PartitionChunkOffset, PartitionChunkRange,
     TokioServiceHandle,
 };
 use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
@@ -271,7 +271,7 @@ impl PackingService {
                     .pack(
                         &storage_module,
                         current_chunk_range,
-                        **mining_address,
+                        mining_address,
                         partition_hash,
                         storage_module_id,
                         short_writes_before_sync,
@@ -289,7 +289,7 @@ impl PackingService {
                 .pack(
                     &storage_module,
                     current_chunk_range,
-                    **mining_address,
+                    mining_address,
                     partition_hash,
                     storage_module_id,
                     short_writes_before_sync,

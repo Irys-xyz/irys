@@ -3,11 +3,43 @@ node_mode = "Peer"
 sync_mode = "Full"
 base_directory = ".irys"
 mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
-trusted_peers = []
-initial_stake_and_pledge_whitelist = []
 reward_address = "0x0000000000000000000000000000000000000000"
 stake_pledge_drives = false
 genesis_peer_discovery_timeout_millis = 10000
+
+
+# mainnet-node-1 (GENESIS)
+[[trusted_peers]]
+gossip = "194.164.87.66:9009"
+api = "194.164.87.66:80"
+
+[trusted_peers.execution]
+peering_tcp_addr = "194.164.87.66:9010"
+
+# mainnet-node-2
+[[trusted_peers]]
+gossip = "157.180.51.67:9009"
+api = "157.180.51.67:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "157.180.51.67:9010"
+
+# mainnet-node-3
+[[trusted_peers]]
+gossip = "57.129.145.193:9009"
+api = "57.129.145.193:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "57.129.145.193:9010"
+
+# mainnet-node-4
+[[trusted_peers]]
+gossip = "89.35.53.102:9009"
+api = "89.35.53.102:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "89.35.53.102:9010"
+
 
 # Default network configuration used by all services (http, gossip, reth)
 # Individual services can override these values if needed

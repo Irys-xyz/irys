@@ -58,21 +58,45 @@ Note that the “consensus” values that are in some of the other template conf
  sync_mode = "Full"
  base_directory = ".irys"
  mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
- trusted_peers = []
  initial_stake_and_pledge_whitelist = []
  reward_address = "0x0000000000000000000000000000000000000000"
  stake_pledge_drives = false
  genesis_peer_discovery_timeout_millis = 10000
 ```
 
-The main things to configure in this section of the template are `mining_key`, `reward_address`, `base_directory` and `trusted_peers`.
+The main things to configure in this section of the template are `mining_key`, `reward_address`, `base_directory`
 
 * `mining_key` is the hex encoded bytes of your node's private key which will be used for signing the blocks your node produces.
 * `reward_address` is the hex encoded actress of the account that will receive the block rewards for any blocks your node produces. In most cases this will be the account address of your `mining_key` but it can be any valid account address you wish to receive the block rewards.
 * `base_directory` is the path to the folder you want irys to store all it’s state in (consensus data)
 **Note:** Irys will not store any protocol data in this folder, instead it will symlink to locations provided in the `submodules.toml` (see [Storage Configuration](#storage-configuration))
-* `trusted_peers` This is a set of trusted peers (operated by Irys) that are used to bootstrap the node securely
 
+Next, you will notice a set of entries for "trusted peers" that look like the following:
+```toml
+# mainnet-node-1 (GENESIS)
+[[trusted_peers]]
+gossip = "194.164.87.66:9009"
+api = "194.164.87.66:80"
+
+[trusted_peers.execution]
+peering_tcp_addr = "194.164.87.66:9010"
+
+# mainnet-node-2
+[[trusted_peers]]
+gossip = "157.180.51.67:9009"
+api = "157.180.51.67:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "157.180.51.67:9010"
+
+...
+```
+
+These are Irys-operated nodes that you can rely on to discover healthy peers and bootstrap your node onto the network.
+
+Do not add random nodes to the trusted peers list. You generally shouldn’t remove the existing entries either, though the node can run without them if necessary.
+
+Next is the section for configuring networking:
 ```toml
  [gossip]
  public_ip = "127.0.0.1"
@@ -96,8 +120,8 @@ The main things to configure in this section of the template are `mining_key`, `
 The Irys node exposes three web services, each on its own port:
 * `[http]` for user transactions and node discovery
 * `[gossip]` for peer handshakes and p2p communication
-* `[reth.network]` for standard EVM RPC
-They can share the same IP, but each must run on a unique port to avoid conflicts.
+* `[reth.network]` for Reth peering (EVM P2P)
+They should share the same IP, but each must run on a unique port to avoid conflicts.
 
 **Note:** Reverse proxies are not currently supported, they will cause your node to have difficulty joining the network.
 

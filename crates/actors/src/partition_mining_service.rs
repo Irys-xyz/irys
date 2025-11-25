@@ -335,13 +335,24 @@ impl PartitionMiningServiceInner {
                     response: response_tx,
                 };
                 if let Err(err) = self.service_senders.block_producer.send(cmd) {
-                    error!("Error submitting solution to block producer {:?}", err);
+                    error!(
+                        "Error submitting solution to block producer for storage_module {} partition_hash {:?} step {}: {:?}",
+                        self.storage_module.id,
+                        self.storage_module.partition_hash(),
+                        msg.global_step,
+                        err
+                    );
                 }
             }
             Ok(None) => {
                 // No solution found this step.
             }
-            Err(err) => error!("Error in handling mining solution {:?}", err),
+            Err(err) => error!(
+                "Error in handling mining solution for storage_module {} partition_hash {:?}: {:?}",
+                self.storage_module.id,
+                self.storage_module.partition_hash(),
+                err
+            ),
         };
     }
 }
