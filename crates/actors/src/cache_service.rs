@@ -354,6 +354,7 @@ impl ChunkCacheService {
 
     /// Collects all cached data roots with their metadata for FIFO eviction
     /// Returns entries sorted by cached_at timestamp (oldest first)
+    #[allow(dead_code)]
     fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
         let tx = self.db.tx()?;
         let estimated_count = tx.entries::<CachedDataRoots>()?;
@@ -373,6 +374,7 @@ impl ChunkCacheService {
 
     /// Prunes cache entries older than max_age_seconds
     /// Uses FIFO eviction based on cached_at timestamp
+    #[allow(dead_code)]
     #[tracing::instrument(level = "trace", skip_all, fields(max_age_seconds))]
     fn prune_cache_by_time(&self, max_age_seconds: u64) -> eyre::Result<()> {
         let now = irys_types::UnixTimestamp::now()
@@ -432,6 +434,7 @@ impl ChunkCacheService {
 
     /// Prunes cache entries to bring cache size under configured limit
     /// Uses FIFO eviction based on cached_at timestamp (oldest first)
+    #[allow(dead_code)]
     #[tracing::instrument(level = "trace", skip_all, fields(max_cache_size_bytes))]
     fn prune_cache_by_size(
         &self,
