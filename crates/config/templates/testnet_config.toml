@@ -43,10 +43,8 @@ gpu_packing_batch_size = 1024
 
 [cache]
 cache_clean_lag = 2
-
-[cache.eviction_strategy]
-type = "size_based"
 max_cache_size_bytes = 10737418240  # 10 GB
+
 
 [[oracles]]
 type = "coingecko"
