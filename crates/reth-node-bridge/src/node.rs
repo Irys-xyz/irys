@@ -21,7 +21,8 @@ use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
-use tracing::warn;
+use std::future::IntoFuture;
+use tracing::{warn, Instrument as _};
 
 use crate::{unwind::unwind_to, IrysRethNodeAdapter};
 pub use reth_e2e_test_utils::node::NodeTestContext;
@@ -173,6 +174,8 @@ pub async fn run_node(
             shadow_tx_store: shadow_tx_store.clone(),
         })
         .launch_with_debug_capabilities()
+        .into_future()
+        .in_current_span()
         .await?;
 
     let context = IrysRethNodeAdapter::new(handle.node.clone(), shadow_tx_store).await?;
