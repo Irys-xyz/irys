@@ -536,6 +536,8 @@ impl ChunkCacheService {
         let local_addr = signer.address();
         let tx = self.db.tx()?;
         let mut cursor = tx.cursor_read::<IngressProofs>()?;
+        // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
+        // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
         let mut to_delete: Vec<DataRoot> = Vec::new();
         let mut to_reanchor: Vec<IngressProof> = Vec::new();
@@ -543,12 +545,17 @@ impl ChunkCacheService {
         let mut processed = 0_usize;
         let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
-        // Determine if cache is at capacity based on eviction strategy
-        let at_capacity = {
-            let (_, chunk_cache_size) =
-                get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
-            chunk_cache_size >= *max_cache_size_bytes
-        };
+        // Determine if cache is at capacity based on the CachedChunks table
+        let (chunk_count, chunk_cache_size) =
+            get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+        let at_capacity = chunk_cache_size >= *max_cache_size_bytes;
+        debug!(
+            "Cache is {} at capacity - capacity: {}B, size {}B ({} chunks)",
+            if at_capacity { "" } else { "not" },
+            &max_cache_size_bytes,
+            chunk_cache_size,
+            &chunk_count
+        );
 
         while let Some((data_root, compact)) = walker.next().transpose()? {
             if processed >= MAX_PROOF_CHECKS_PER_RUN {
@@ -575,6 +582,7 @@ impl ChunkCacheService {
                 if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
                     if tx_header.promoted_height.is_none() {
                         any_unpromoted = true;
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
                         break;
                     }
                 }
