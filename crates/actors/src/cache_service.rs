@@ -1,4 +1,6 @@
-use crate::ingress_proofs::{generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction};
+use crate::ingress_proofs::{
+    generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
+};
 use crate::mempool_service::Inner;
 use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
 use irys_database::{

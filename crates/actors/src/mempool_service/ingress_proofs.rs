@@ -259,7 +259,7 @@ pub struct ProofCheckResult {
     /// Whether the proof is expired/invalid and should be pruned
     pub expired_or_invalid: bool,
     /// Whether the proof should be reanchored after pruning if possible
-    pub regeneration_action: RegenAction
+    pub regeneration_action: RegenAction,
 }
 
 #[derive(Copy, Clone, Debug)]
