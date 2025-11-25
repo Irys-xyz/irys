@@ -605,7 +605,7 @@ impl ChunkCacheService {
                         debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
                     }
                     RegenAction::DoNotRegenerate => {
-                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but it does not meet reanchoring or regeneration criteria. This should not happen.");
+                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.", &data_root);
                     }
                 }
             } else {
