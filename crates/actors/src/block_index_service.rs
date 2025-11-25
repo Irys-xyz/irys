@@ -255,8 +255,9 @@ impl BlockIndexService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
+                            let msg_type = format!("{:?}", msg);
                             if let Err(e) = self.inner.handle_message(msg) {
-                                error!("Error handling BlockIndex message: {:?}", e);
+                                error!("Error handling BlockIndex message {}: {:?}", msg_type, e);
                                 break;
                             }
                         }

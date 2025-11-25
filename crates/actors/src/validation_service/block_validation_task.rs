@@ -348,6 +348,8 @@ impl BlockValidationTask {
         tracing::info!("Using parent epoch snapshot for PoA validation");
 
         // POA validation
+        let block_hash_for_error_log = self.block.block_hash;
+        let block_height_for_error_log = self.block.height;
         let poa_task = {
             let consensus_config = self.service_inner.config.consensus.clone();
             let block_index_guard = self.service_inner.block_index_guard.clone();
@@ -366,6 +368,8 @@ impl BlockValidationTask {
                     &miner_address,
                 )
                 .inspect_err(|err| tracing::error!(
+                    block.hash = %block_hash,
+                    block.height = %block_height,
                     custom.error = ?err,
                     "poa validation failed"
                 ))
@@ -383,11 +387,18 @@ impl BlockValidationTask {
 
             match res {
                 Ok(res) => res.unwrap_or_else(|e| {
-                    tracing::error!(custom.error = ?e, "PoA validation failed");
+                    tracing::error!(
+                        block.hash = %block_hash_for_error_log,
+                        block.height = %block_height_for_error_log,
+                        custom.error = ?e,
+                        "PoA validation failed"
+                    );
                     ValidationResult::Invalid(ValidationError::PreValidation(e))
                 }),
                 Err(err) => {
                     tracing::error!(
+                        block.hash = %block_hash_for_error_log,
+                        block.height = %block_height_for_error_log,
                         custom.error = ?err,
                         "poa task panicked"
                     );
