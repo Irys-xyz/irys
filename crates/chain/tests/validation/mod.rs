@@ -7,7 +7,6 @@ mod unpledge_partition;
 mod unstake_edge_cases;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,

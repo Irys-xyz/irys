@@ -30,7 +30,7 @@ use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
 // External crate imports - Revm
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
-use revm::context::{BlockEnv, Cfg as _, CfgEnv, ContextTr as _};
+use revm::context::{BlockEnv, CfgEnv, ContextTr as _};
 use revm::handler::EthFrame;
 use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};

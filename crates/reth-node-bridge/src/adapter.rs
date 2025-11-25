@@ -12,7 +12,9 @@ use irys_reth::{IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttri
 use irys_types::Address;
 use reth::transaction_pool::EthPooledTransaction;
 use reth_e2e_test_utils::node::NodeTestContext;
-use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadBuilderAttributes, PayloadTypes};
+use reth_node_api::{
+    EngineApiMessageVersion, NodeTypes, PayloadBuilderAttributes as _, PayloadTypes,
+};
 use reth_payload_builder::PayloadKind;
 use reth_provider::BlockReaderIdExt as _;
 

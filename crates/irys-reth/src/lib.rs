@@ -17,7 +17,7 @@ use std::{sync::Arc, time::SystemTime};
 use alloy_consensus::TxEip1559;
 use alloy_eips::{
     eip2930::AccessList, eip4895::Withdrawal, eip7840::BlobParams, merge::EPOCH_SLOTS,
-    Encodable2718,
+    Encodable2718 as _,
 };
 use alloy_primitives::{TxKind, B256, U256};
 use alloy_rpc_types::Withdrawals;
@@ -33,10 +33,7 @@ use reth::{
     },
     payload::{EthBuiltPayload, EthPayloadBuilderAttributes},
     primitives::{InvalidTransactionError, SealedBlock},
-    providers::{
-        providers::ProviderFactoryBuilder, EthStorage,
-        StateProviderFactory,
-    },
+    providers::{providers::ProviderFactoryBuilder, EthStorage, StateProviderFactory},
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
     transaction_pool::TransactionValidationTaskExecutor,
 };
@@ -68,13 +65,12 @@ use reth_primitives_traits::RecoveredBlock;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
 use reth_transaction_pool::{
-    blobstore::DiskFileBlobStore,
-    EthPoolTransaction, EthPooledTransaction, EthTransactionValidator, Pool, TransactionOrigin,
-    TransactionValidator,
+    blobstore::DiskFileBlobStore, EthPoolTransaction, EthPooledTransaction,
+    EthTransactionValidator, Pool, TransactionOrigin, TransactionValidator,
 };
 use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use revm_primitives::Address;
-use sha2::{Digest, Sha256};
+use sha2::{Digest as _, Sha256};
 use shadow_tx::ShadowTransaction;
 use tracing::{debug, info};
 
@@ -734,7 +730,6 @@ mod tests {
         sign_tx, stake, storage_fees, unpledge, unstake, DEFAULT_PRIORITY_FEE,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
-    use alloy_eips::Encodable2718 as _;
     use alloy_network::{EthereumWallet, TxSigner};
     use alloy_primitives::Bytes;
     use alloy_primitives::Signature;

@@ -502,10 +502,6 @@ pub fn split_interval(
     let start = interval.start();
     let end = interval.end();
 
-    #[expect(
-        clippy::comparison_chain,
-        reason = "Proposed match chain is less readable"
-    )]
     if start > end {
         return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
     } else if start == end {

@@ -4,7 +4,6 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 
 use irys_types::Address;
-use rayon::iter::ParallelIterator as _;
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
 use reth_node_api::{BlockTy, FullNodeComponents, NodeTypes};
@@ -12,6 +11,7 @@ use reth_provider::{BlockReader, StateProviderBox};
 use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, SpawnBlocking, TraceExt};
 use tracing::warn;
 
+#[async_trait]
 pub trait IrysRethLoadStateExt: LoadState {
     /// Get the account balance.
     async fn balance(
@@ -21,6 +21,7 @@ pub trait IrysRethLoadStateExt: LoadState {
     ) -> Result<U256, Self::Error>;
 }
 
+#[async_trait]
 impl<T> IrysRethLoadStateExt for T
 where
     T: LoadState + SpawnBlocking,

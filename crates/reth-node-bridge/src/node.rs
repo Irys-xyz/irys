@@ -18,7 +18,7 @@ use reth_node_builder::{
 };
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
-use std::future::IntoFuture;
+use std::future::IntoFuture as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
 use tracing::{warn, Instrument as _};
@@ -53,7 +53,7 @@ pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddOns>;
 
 pub fn eth_payload_attributes(timestamp: u64) -> IrysPayloadBuilderAttributes {
     use irys_reth::IrysPayloadAttributes;
-    use reth_node_api::PayloadBuilderAttributes;
+    use reth_node_api::PayloadBuilderAttributes as _;
 
     let rpc_attributes = IrysPayloadAttributes {
         inner: PayloadAttributes {

@@ -18,7 +18,7 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
-use futures::{FutureExt as _, TryFutureExt as _};
+use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{

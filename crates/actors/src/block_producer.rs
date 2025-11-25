@@ -45,7 +45,7 @@ use reth::{
     revm::primitives::B256,
     tasks::shutdown::Shutdown,
 };
-use reth_payload_primitives::{PayloadBuilderAttributes, PayloadBuilderError};
+use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
 use std::time::UNIX_EPOCH;
 use std::{
