@@ -351,6 +351,164 @@ impl ChunkCacheService {
 
         Ok(())
     }
+
+    /// Collects all cached data roots with their metadata for FIFO eviction
+    /// Returns entries sorted by cached_at timestamp (oldest first)
+    fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
+        let tx = self.db.tx()?;
+        let estimated_count = tx.entries::<CachedDataRoots>()?;
+        let mut entries = Vec::with_capacity(estimated_count);
+
+        let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+        let mut walker = cursor.walk(None)?;
+
+        while let Some((data_root, cached)) = walker.next().transpose()? {
+            entries.push((data_root, cached));
+        }
+
+        entries.sort_by_key(|(_, cached)| cached.cached_at);
+
+        Ok(entries)
+    }
+
+    /// Prunes cache entries older than max_age_seconds
+    /// Uses FIFO eviction based on cached_at timestamp
+    #[tracing::instrument(level = "trace", skip_all, fields(max_age_seconds))]
+    fn prune_cache_by_time(&self, max_age_seconds: u64) -> eyre::Result<()> {
+        let now = irys_types::UnixTimestamp::now()
+            .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
+
+        let expiry_threshold = now.saturating_sub_secs(max_age_seconds);
+
+        debug!(
+            custom.now = now.as_secs(),
+            custom.threshold = expiry_threshold.as_secs(),
+            custom.max_age_seconds = max_age_seconds,
+            "Time-based eviction: checking for expired entries"
+        );
+
+        let entries = self.collect_cache_entries_by_age()?;
+
+        let mut evicted_count = 0_u64;
+        let mut evicted_size = 0_u64;
+
+        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
+            if cached.cached_at >= expiry_threshold {
+                break;
+            }
+
+            let age_seconds = now.saturating_seconds_since(cached.cached_at);
+            debug!(
+                data_root.data_root = ?data_root,
+                data_root.cached_at = cached.cached_at.as_secs(),
+                data_root.age_seconds = age_seconds,
+                "Evicting expired cache entry"
+            );
+
+            let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
+            let approx_size = chunk_count * self.config.consensus.chunk_size;
+
+            // Each entry gets its own transaction for incremental progress.
+            // Batching would be faster but risks all-or-nothing failure on large evictions.
+            let write_tx = self.db.tx_mut()?;
+            write_tx.delete::<IngressProofs>(data_root, None)?;
+            let chunks_removed = delete_cached_chunks_by_data_root(&write_tx, data_root)?;
+            write_tx.delete::<CachedDataRoots>(data_root, None)?;
+            write_tx.commit()?;
+
+            evicted_count += chunks_removed;
+            evicted_size += approx_size;
+        }
+
+        info!(
+            custom.evicted_count = evicted_count,
+            custom.evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            custom.max_age_seconds = max_age_seconds,
+            "Time-based cache eviction complete"
+        );
+
+        Ok(())
+    }
+
+    /// Prunes cache entries to bring cache size under configured limit
+    /// Uses FIFO eviction based on cached_at timestamp (oldest first)
+    #[tracing::instrument(level = "trace", skip_all, fields(max_cache_size_bytes))]
+    fn prune_cache_by_size(
+        &self,
+        current_chunk_count: u64,
+        current_chunk_size: u64,
+        max_cache_size_bytes: u64,
+    ) -> eyre::Result<()> {
+        /// Eviction target to prevent thrashing near size limit boundary.
+        /// Evicts to 90% (9/10) of limit to provide a buffer before next eviction.
+        /// Example: 10GB limit evicts down to 9GB, providing 1GB buffer.
+        /// NB: moved here as otherwise rust flags them as unused
+        const SIZE_EVICTION_TARGET_NUMERATOR: u64 = 9;
+        const SIZE_EVICTION_TARGET_DENOMINATOR: u64 = 10;
+
+        let target_size_with_margin = max_cache_size_bytes
+            .saturating_div(SIZE_EVICTION_TARGET_DENOMINATOR)
+            .saturating_mul(SIZE_EVICTION_TARGET_NUMERATOR);
+
+        debug!(
+            custom.current_size_gb = (current_chunk_size / GIGABYTE as u64),
+            custom.target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
+            custom.target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
+            "Size-based eviction: cache limit exceeded"
+        );
+
+        let entries = self.collect_cache_entries_by_age()?;
+
+        let mut evicted_count = 0_u64;
+        let mut evicted_size = 0_u64;
+        let mut running_chunk_count = current_chunk_count;
+        let mut running_chunk_size = current_chunk_size;
+
+        let now = irys_types::UnixTimestamp::now()
+            .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
+
+        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
+            if running_chunk_size <= target_size_with_margin {
+                break;
+            }
+
+            let age_seconds = now.saturating_seconds_since(cached.cached_at);
+
+            debug!(
+                data_root.data_root = ?data_root,
+                data_root.cached_at = cached.cached_at.as_secs(),
+                data_root.age_seconds = age_seconds,
+                data_root.data_size = cached.data_size,
+                "Evicting oldest cache entry to free space"
+            );
+
+            let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
+            let approx_size = chunk_count * self.config.consensus.chunk_size;
+
+            // Each entry gets its own transaction for incremental progress.
+            // Batching would be faster but risks all-or-nothing failure on large evictions.
+            let write_tx = self.db.tx_mut()?;
+            write_tx.delete::<IngressProofs>(data_root, None)?;
+            let chunks_removed = delete_cached_chunks_by_data_root(&write_tx, data_root)?;
+            write_tx.delete::<CachedDataRoots>(data_root, None)?;
+            write_tx.commit()?;
+
+            evicted_count += chunks_removed;
+            evicted_size += approx_size;
+            running_chunk_count = running_chunk_count.saturating_sub(chunks_removed);
+            running_chunk_size = running_chunk_size.saturating_sub(approx_size);
+        }
+
+        info!(
+            custom.evicted_count = evicted_count,
+            custom.evicted_size_gb = (evicted_size / GIGABYTE as u64),
+            custom.remaining_count = running_chunk_count,
+            custom.remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
+            "Size-based cache eviction complete (FIFO)"
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
