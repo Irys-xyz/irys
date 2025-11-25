@@ -20,6 +20,24 @@ where
     }
 }
 
+/// Deserialize a u128 from either a string or a number
+fn deserialize_u128_from_string<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrNum {
+        String(String),
+        Number(u128),
+    }
+
+    match StringOrNum::deserialize(deserializer)? {
+        StringOrNum::String(s) => s.parse().map_err(serde::de::Error::custom),
+        StringOrNum::Number(n) => Ok(n),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     pub version: String,
@@ -64,6 +82,7 @@ pub struct ChainHeight {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct StorageIntervalsResponse {
     pub ledger: String,
     pub slot_index: usize,
@@ -135,15 +154,19 @@ pub struct MempoolStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MiningInfo {
     // Block info
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub block_height: u64,
     pub block_hash: String,
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub block_timestamp: u128,
 
     // Difficulty info
     pub current_difficulty: String,
     pub cumulative_difficulty: String,
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub last_diff_adjustment_timestamp: u128,
 
     // Mining rewards
@@ -210,23 +233,29 @@ impl NodeMetrics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockAtHeight {
     pub block_hash: String,
     pub cumulative_diff: String,
+    #[serde(deserialize_with = "deserialize_u128_from_string")]
     pub timestamp: u128,
     pub solution_hash: String,
     pub is_tip: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ForkInfo {
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub height: u64,
     pub block_count: usize,
     pub blocks: Vec<BlockAtHeight>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockTreeForksResponse {
+    #[serde(deserialize_with = "deserialize_number_from_string")]
     pub current_tip_height: u64,
     pub current_tip_hash: String,
     pub forks: Vec<ForkInfo>,

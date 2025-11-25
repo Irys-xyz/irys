@@ -1,11 +1,14 @@
 use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::web::{Data, Json, Path};
-use irys_types::{partition::PartitionAssignment, Address, DataLedger, H256};
+use irys_types::{
+    partition::PartitionAssignment, serialization::string_u64, Address, DataLedger, H256,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct LedgerSummary {
     miner_address: String,
     ledger_type: DataLedger,
@@ -13,15 +16,18 @@ pub struct LedgerSummary {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct PartitionAssignmentsResponse {
     miner_address: String,
     assignments: Vec<PartitionAssignment>,
+    #[serde(with = "string_u64")]
     epoch_height: u64,
     assignment_status: AssignmentStatus,
     hash_analysis: HashAnalysis,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub enum AssignmentStatus {
     FullyAssigned,
     PartiallyAssigned { assigned: usize, total: usize },
@@ -29,6 +35,7 @@ pub enum AssignmentStatus {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct HashAnalysis {
     total_hashes: usize,
     unique_hashes: usize,
@@ -242,8 +249,11 @@ pub async fn get_all_assignments(
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct EpochInfoResponse {
+    #[serde(with = "string_u64")]
     current_epoch: u64,
+    #[serde(with = "string_u64")]
     epoch_block_height: u64,
     total_active_partitions: usize,
     unassigned_partitions: usize,

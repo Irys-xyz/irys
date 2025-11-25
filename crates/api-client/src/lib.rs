@@ -190,7 +190,7 @@ impl ApiClient for IrysApiClient {
         peer: SocketAddr,
         transaction: CommitmentTransaction,
     ) -> Result<()> {
-        let path = "/commitment_tx";
+        let path = "/commitment-tx";
         let response = self
             .make_request::<(), _>(peer, Method::POST, path, Some(&transaction))
             .await;
@@ -285,7 +285,7 @@ impl ApiClient for IrysApiClient {
         block_index_query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>> {
         let path = format!(
-            "/block_index?height={}&limit={}",
+            "/block-index?height={}&limit={}",
             block_index_query.height, block_index_query.limit
         );
 

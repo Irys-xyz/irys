@@ -2123,7 +2123,7 @@ pub async fn data_txs_are_valid(
                         for api_addr in api_addrs.iter() {
                             // Build data_root/offset fetch URL using peer API address
                             let url = format!(
-                                "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                "http://{}/v1/chunk/data-root/{}/{}/{}",
                                 api_addr,
                                 publish_ledger.ledger_id,
                                 tx_header.data_root,
