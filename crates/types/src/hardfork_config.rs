@@ -14,7 +14,7 @@ pub struct IrysHardforkConfig {
 
     /// NextNameTBD hardfork - None means disabled
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_name_tbd: Option<ForkActivation>,
+    pub next_name_tbd: Option<NextNameTBD>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -33,7 +33,7 @@ pub struct FrontierParams {
 ///
 /// When this fork activates, the contained parameters take effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ForkActivation {
+pub struct NextNameTBD {
     /// Timestamp (seconds since epoch) at which this hardfork activates
     pub activation_timestamp: u64,
 
@@ -106,7 +106,7 @@ mod tests {
                 number_of_ingress_proofs_total: 10,
                 number_of_ingress_proofs_from_assignees: 0,
             },
-            next_name_tbd: Some(ForkActivation {
+            next_name_tbd: Some(NextNameTBD {
                 activation_timestamp: 1000,
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
@@ -135,7 +135,7 @@ mod tests {
                 number_of_ingress_proofs_total: 1,
                 number_of_ingress_proofs_from_assignees: 0,
             },
-            next_name_tbd: Some(ForkActivation {
+            next_name_tbd: Some(NextNameTBD {
                 activation_timestamp: 5000,
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
