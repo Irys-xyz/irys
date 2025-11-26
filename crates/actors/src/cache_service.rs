@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::ingress_proofs::{
     generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
 };
@@ -19,7 +20,7 @@ use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -43,137 +44,46 @@ pub enum CacheServiceAction {
     ),
 }
 
-pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
-
-#[derive(Debug)]
-pub struct ChunkCacheService {
-    pub config: Config,
-    pub block_index_guard: BlockIndexReadGuard,
-    pub block_tree_guard: BlockTreeReadGuard,
-    pub db: DatabaseProvider,
-    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
-    pub shutdown: Shutdown,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+/// Tracks data roots for which ingress proofs are currently being generated
+/// to prevent race conditions with chunk pruning
+#[derive(Clone, Debug)]
+pub struct IngressProofGenerationState {
+    inner: Arc<RwLock<HashSet<DataRoot>>>,
 }
 
-impl ChunkCacheService {
-    /// Spawns the chunk cache service on the provided runtime.
-    ///
-    /// The service manages cache eviction based on the configured strategy
-    /// (time-based or size-based) and responds to block migration and epoch
-    /// processing events.
-    ///
-    /// # Arguments
-    ///
-    /// * `block_index_guard` - Read guard for block index lookups
-    /// * `block_tree_guard` - Read guard for canonical chain access
-    /// * `db` - Database provider for cache storage
-    /// * `rx` - Channel receiver for cache service actions
-    /// * `config` - Node configuration including eviction strategy
-    /// * `runtime_handle` - Tokio runtime for spawning the service
-    ///
-    /// # Returns
-    ///
-    /// A `TokioServiceHandle` for managing the service lifecycle
-    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_cache")]
-    pub fn spawn_service(
-        block_index_guard: BlockIndexReadGuard,
-        block_tree_guard: BlockTreeReadGuard,
-        db: DatabaseProvider,
-        rx: UnboundedReceiver<CacheServiceAction>,
-        config: Config,
-        gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> TokioServiceHandle {
-        info!("Spawning chunk cache service");
-
-        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-
-        let handle = runtime_handle.spawn(async move {
-            let cache_service = Self {
-                shutdown: shutdown_rx,
-                block_index_guard,
-                block_tree_guard,
-                db,
-                config,
-                msg_rx: rx,
-                gossip_broadcast,
-            };
-            cache_service
-                .start()
-                .in_current_span()
-                .await
-                .expect("Chunk cache service encountered an irrecoverable error")
-        });
-
-        TokioServiceHandle {
-            name: "chunk_cache_service".to_string(),
-            handle,
-            shutdown_signal: shutdown_tx,
+impl IngressProofGenerationState {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn start(mut self) -> eyre::Result<()> {
-        info!("Starting chunk cache service");
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = &mut self.shutdown => {
-                    info!("Shutdown signal received for chunk cache service");
-                    break;
-                }
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            self.on_handle_message(msg);
-                        }
-                        None => {
-                            warn!("Message channel closed unexpectedly");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.on_handle_message(msg);
-        }
-
-        info!("shutting down chunk cache service gracefully");
-        Ok(())
+    pub async fn mark_generating(&self, data_root: DataRoot) -> bool {
+        self.inner.write().expect("expected to acquire a lock for an ingress proof generation state").insert(data_root)
     }
 
-    /// Dispatches incoming cache service messages to appropriate handlers.
-    ///
-    /// Handles two message types:
-    /// - `OnBlockMigrated`: Triggers cache pruning based on block height
-    /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn on_handle_message(&mut self, msg: CacheServiceAction) {
-        match msg {
-            CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
-                let res = self.prune_cache(migration_height);
-                let Some(sender) = sender else { return };
-                if let Err(error) = sender.send(res) {
-                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
-                }
-            }
-            CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
-                let res = self.on_epoch_processed(epoch_snapshot);
-                if let Some(sender) = sender {
-                    if let Err(e) = sender.send(res) {
-                        warn!(custom.error = ?e, "Unable to send response for OnEpochProcessed")
-                    }
-                }
-            }
-        }
+    pub async fn unmark_generating(&self, data_root: DataRoot) {
+        self.inner.write().expect("expected to acquire a lock for an ingress proof generation state").remove(&data_root);
     }
 
+    pub async fn is_generating(&self, data_root: DataRoot) -> bool {
+        self.inner.read().expect("expected to acquire a lock for an ingress proof generation state").contains(&data_root)
+    }
+}
+
+/// Context for cache pruning tasks. You can safely clone this struct to spawn pruning tasks on
+/// separate runtimes/threads.
+#[derive(Debug, Clone)]
+pub struct InnerCacheTask {
+    pub db: DatabaseProvider,
+    pub block_tree_guard: BlockTreeReadGuard,
+    pub block_index_guard: BlockIndexReadGuard,
+    pub config: Config,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+    pub ingress_proof_generation_state: IngressProofGenerationState,
+}
+
+impl InnerCacheTask {
     /// Processes epoch completion by pruning expired data roots.
     ///
     /// Determines the pruning horizon (one block before active submit ledger slots begin)
@@ -525,6 +435,151 @@ impl ChunkCacheService {
 
         Ok(())
     }
+
+    fn spawn_pruning_task(&self, migration_height: u64, response_sender: Option<oneshot::Sender<eyre::Result<()>>>) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let res = clone.prune_cache(migration_height);
+            let Some(sender) = response_sender else { return };
+            if let Err(error) = sender.send(res) {
+                warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+            }
+        });
+    }
+
+    fn spawn_epoch_processing(&self, epoch_snapshot: Arc<EpochSnapshot>, response_sender: Option<oneshot::Sender<eyre::Result<()>>>) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let res = clone.on_epoch_processed(epoch_snapshot);
+            if let Some(sender) = response_sender {
+                if let Err(e) = sender.send(res) {
+                    warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
+                }
+            }
+        });
+    }
+}
+
+pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
+
+#[derive(Debug)]
+pub struct ChunkCacheService {
+    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
+    pub shutdown: Shutdown,
+    pub cache_task: InnerCacheTask
+}
+
+impl ChunkCacheService {
+    /// Spawns the chunk cache service on the provided runtime.
+    ///
+    /// The service manages cache eviction based on the configured strategy
+    /// (time-based or size-based) and responds to block migration and epoch
+    /// processing events.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_index_guard` - Read guard for block index lookups
+    /// * `block_tree_guard` - Read guard for canonical chain access
+    /// * `db` - Database provider for cache storage
+    /// * `rx` - Channel receiver for cache service actions
+    /// * `config` - Node configuration including eviction strategy
+    /// * `runtime_handle` - Tokio runtime for spawning the service
+    ///
+    /// # Returns
+    ///
+    /// A `TokioServiceHandle` for managing the service lifecycle
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_cache")]
+    pub fn spawn_service(
+        block_index_guard: BlockIndexReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
+        db: DatabaseProvider,
+        rx: UnboundedReceiver<CacheServiceAction>,
+        config: Config,
+        gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning chunk cache service");
+
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(async move {
+            let cache_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                cache_task: InnerCacheTask {
+                    db,
+                    block_tree_guard,
+                    block_index_guard,
+                    config,
+                    gossip_broadcast,
+                    ingress_proof_generation_state: IngressProofGenerationState::new(),
+                }
+            };
+            cache_service
+                .start()
+                .in_current_span()
+                .await
+                .expect("Chunk cache service encountered an irrecoverable error")
+        });
+
+        TokioServiceHandle {
+            name: "chunk_cache_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("Starting chunk cache service");
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for chunk cache service");
+                    break;
+                }
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.on_handle_message(msg);
+                        }
+                        None => {
+                            warn!("Message channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.on_handle_message(msg);
+        }
+
+        info!("shutting down chunk cache service gracefully");
+        Ok(())
+    }
+
+    /// Dispatches incoming cache service messages to appropriate handlers.
+    ///
+    /// Handles two message types:
+    /// - `OnBlockMigrated`: Triggers cache pruning based on block height
+    /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn on_handle_message(&mut self, msg: CacheServiceAction) {
+        match msg {
+            CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
+                self.cache_task.spawn_pruning_task(migration_height, sender);
+            }
+            CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
+                self.cache_task.spawn_epoch_processing(epoch_snapshot, sender);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -597,17 +652,20 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
-            config: config.clone(),
-            block_index_guard,
-            block_tree_guard,
-            db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            cache_task: InnerCacheTask {
+                db: db.clone(),
+                block_tree_guard,
+                block_index_guard,
+                config: config.clone(),
+                gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+                ingress_proof_generation_state: IngressProofGenerationState::new(),
+            }
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
-        service.prune_data_root_cache(1)?;
+        service.cache_task.prune_data_root_cache(1)?;
 
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
@@ -672,17 +730,20 @@ mod tests {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
-            config: config.clone(),
-            block_index_guard,
-            block_tree_guard,
-            db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            cache_task: InnerCacheTask {
+                db: db.clone(),
+                block_tree_guard,
+                block_index_guard,
+                config: config.clone(),
+                gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+                ingress_proof_generation_state: IngressProofGenerationState::new(),
+            }
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
-        service.prune_data_root_cache(6)?;
+        service.cache_task.prune_data_root_cache(6)?;
 
         // Verify it was pruned
         db.view(|rtx| -> eyre::Result<()> {
