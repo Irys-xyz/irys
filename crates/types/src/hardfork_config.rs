@@ -150,11 +150,11 @@ mod tests {
     #[test]
     fn test_toml_deserialization_complete() {
         // Full config with all fields specified
-        let toml_str = r#"
+        let toml_str = "
             [frontier]
             number_of_ingress_proofs_total = 5
             number_of_ingress_proofs_from_assignees = 2
-        "#;
+        ";
         let config: IrysHardforkConfig = toml::from_str(toml_str).unwrap();
 
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);

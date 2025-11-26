@@ -1851,9 +1851,14 @@ pub async fn data_txs_are_valid(
             timestamp_secs,
         )
         .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-        let expected_perm_fee =
-            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config, timestamp_secs)
-                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+        let expected_perm_fee = calculate_perm_storage_total_fee(
+            tx.data_size,
+            expected_term_fee,
+            &block_ema,
+            config,
+            timestamp_secs,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
         // Validate perm_fee is at least the expected amount
         let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
@@ -1884,13 +1889,18 @@ pub async fn data_txs_are_valid(
             }
         })?;
 
-        let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
-        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus, number_of_ingress_proofs_total).map_err(
-            |e| PreValidationError::InvalidPermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            },
-        )?;
+        let number_of_ingress_proofs_total =
+            config.number_of_ingress_proofs_total_at(timestamp_secs);
+        PublishFeeCharges::new(
+            actual_perm_fee,
+            actual_term_fee,
+            &config.consensus,
+            number_of_ingress_proofs_total,
+        )
+        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        })?;
         Ok(())
     };
 
@@ -2033,10 +2043,8 @@ pub async fn data_txs_are_valid(
             let timestamp_secs = (block.timestamp / 1000) as u64;
             let number_of_ingress_proofs_total =
                 config.number_of_ingress_proofs_total_at(timestamp_secs);
-            let proofs_per_tx = std::cmp::min(
-                number_of_ingress_proofs_total as usize,
-                total_miners,
-            );
+            let proofs_per_tx =
+                std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
             publish_txs.len() * proofs_per_tx
         };
 

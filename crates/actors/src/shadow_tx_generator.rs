@@ -202,7 +202,11 @@ impl<'a> ShadowTxGenerator<'a> {
         // Initialize publish ledger iterator with aggregated ingress proof rewards
         // Use parent block's timestamp for hardfork params (convert millis to seconds)
         let parent_block_timestamp_secs = (parent_block.timestamp / 1000) as u64;
-        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(publish_ledger, config, parent_block_timestamp_secs)?;
+        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(
+            publish_ledger,
+            config,
+            parent_block_timestamp_secs,
+        )?;
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
             generator.create_publish_shadow_txs(aggregated_rewards)?
         } else {
@@ -311,8 +315,9 @@ impl<'a> ShadowTxGenerator<'a> {
         }
 
         // Get ingress proof params for this timestamp
-        let number_of_ingress_proofs_total =
-            config.hardforks.number_of_ingress_proofs_total_at(timestamp_secs);
+        let number_of_ingress_proofs_total = config
+            .hardforks
+            .number_of_ingress_proofs_total_at(timestamp_secs);
 
         // Process all transactions (MUST BE SORTED)
         for (index, tx) in publish_ledger.txs.iter().enumerate() {
@@ -322,8 +327,12 @@ impl<'a> ShadowTxGenerator<'a> {
                 .ok_or_else(|| eyre::eyre!("publish ledger tx missing perm_fee {}", tx.id))?;
 
             // Calculate fee distribution using PublishFeeCharges
-            let publish_charges =
-                PublishFeeCharges::new(perm_fee, tx.term_fee, config, number_of_ingress_proofs_total)?;
+            let publish_charges = PublishFeeCharges::new(
+                perm_fee,
+                tx.term_fee,
+                config,
+                number_of_ingress_proofs_total,
+            )?;
 
             // Get all the ingress proofs for the transaction
             let start_index = index * number_of_ingress_proofs_total as usize;
@@ -498,7 +507,12 @@ impl<'a> ShadowTxGenerator<'a> {
         let perm_charges = tx
             .perm_fee
             .map(|perm_fee| {
-                PublishFeeCharges::new(perm_fee, tx.term_fee, self.config, number_of_ingress_proofs_total)
+                PublishFeeCharges::new(
+                    perm_fee,
+                    tx.term_fee,
+                    self.config,
+                    number_of_ingress_proofs_total,
+                )
             })
             .transpose()?;
 
@@ -1175,8 +1189,13 @@ mod tests {
 
         // Since perm_fee was calculated with 4 proofs in mind
         let number_of_ingress_proofs_total = 4; // matches config.hardforks.frontier.number_of_ingress_proofs_total
-        let publish_charges =
-            PublishFeeCharges::new(perm_fee.into(), term_fee.into(), &config, number_of_ingress_proofs_total).unwrap();
+        let publish_charges = PublishFeeCharges::new(
+            perm_fee.into(),
+            term_fee.into(),
+            &config,
+            number_of_ingress_proofs_total,
+        )
+        .unwrap();
 
         // Calculate individual ingress rewards (4 proofs total)
         let base_reward_per_proof = publish_charges.ingress_proof_reward / U256::from(4);

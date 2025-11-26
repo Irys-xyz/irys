@@ -89,7 +89,14 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
             )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-            .replica_count(ctx.node_ctx.config.consensus.hardforks.frontier.number_of_ingress_proofs_total)?;
+            .replica_count(
+                ctx.node_ctx
+                    .config
+                    .consensus
+                    .hardforks
+                    .frontier
+                    .number_of_ingress_proofs_total,
+            )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
             // the original data_size_bytes is too small to fill up a whole chunk
@@ -194,7 +201,14 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
             )?);
         let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
             .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-            .replica_count(ctx.node_ctx.config.consensus.hardforks.frontier.number_of_ingress_proofs_total)?;
+            .replica_count(
+                ctx.node_ctx
+                    .config
+                    .consensus
+                    .hardforks
+                    .frontier
+                    .number_of_ingress_proofs_total,
+            )?;
 
         cost_per_chunk_duration_adjusted.base_network_fee(
             // round to the chunk size boundary

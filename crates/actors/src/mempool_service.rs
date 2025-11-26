@@ -864,8 +864,9 @@ impl Inner {
                         continue;
                     }
 
-                    let number_of_ingress_proofs_total =
-                        self.config.number_of_ingress_proofs_total_at(current_timestamp);
+                    let number_of_ingress_proofs_total = self
+                        .config
+                        .number_of_ingress_proofs_total_at(current_timestamp);
                     if PublishFeeCharges::new(
                         perm_fee,
                         tx.term_fee,
@@ -1148,12 +1149,11 @@ impl Inner {
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
-                let number_of_ingress_proofs_total =
-                    self.config.number_of_ingress_proofs_total_at(current_timestamp);
-                let proofs_per_tx = std::cmp::min(
-                    number_of_ingress_proofs_total as usize,
-                    total_miners,
-                );
+                let number_of_ingress_proofs_total = self
+                    .config
+                    .number_of_ingress_proofs_total_at(current_timestamp);
+                let proofs_per_tx =
+                    std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
 
                 if all_proofs.len() < proofs_per_tx {
                     info!(
@@ -1203,10 +1203,10 @@ impl Inner {
                 };
 
                 // Calculate expected assigned proofs, clamping to available miners
-                let number_of_ingress_proofs_from_assignees =
-                    self.config.number_of_ingress_proofs_from_assignees_at(current_timestamp);
-                let mut expected_assigned_proofs =
-                    number_of_ingress_proofs_from_assignees as usize;
+                let number_of_ingress_proofs_from_assignees = self
+                    .config
+                    .number_of_ingress_proofs_from_assignees_at(current_timestamp);
+                let mut expected_assigned_proofs = number_of_ingress_proofs_from_assignees as usize;
 
                 if assigned_miners < expected_assigned_proofs {
                     warn!(
@@ -1578,9 +1578,14 @@ impl Inner {
         timestamp_secs: u64,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
-        let total_perm_fee =
-            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config, timestamp_secs)
-                .map_err(TxIngressError::other_display)?;
+        let total_perm_fee = calculate_perm_storage_total_fee(
+            bytes_to_store,
+            term_fee,
+            ema,
+            &self.config,
+            timestamp_secs,
+        )
+        .map_err(TxIngressError::other_display)?;
 
         Ok(total_perm_fee)
     }
@@ -1603,7 +1608,8 @@ impl Inner {
         );
 
         // Calculate term fee using the storage pricing module
-        let number_of_ingress_proofs_total = self.config.number_of_ingress_proofs_total_at(timestamp);
+        let number_of_ingress_proofs_total =
+            self.config.number_of_ingress_proofs_total_at(timestamp);
         calculate_term_fee(
             bytes_to_store,
             epochs_for_storage,

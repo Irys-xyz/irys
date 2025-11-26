@@ -100,8 +100,9 @@ pub async fn get_price(
             };
 
             // Get hardfork params using the latest block's timestamp
-            let number_of_ingress_proofs_total =
-                state.config.number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
+            let number_of_ingress_proofs_total = state
+                .config
+                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
 
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(

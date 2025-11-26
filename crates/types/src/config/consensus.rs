@@ -259,7 +259,10 @@ fn default_gas_limit() -> u64 {
 
 impl IrysRethConfig {
     /// Extend the genesis allocations with additional accounts
-    pub fn extend_accounts(&mut self, accounts: impl IntoIterator<Item = (Address, GenesisAccount)>) {
+    pub fn extend_accounts(
+        &mut self,
+        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
+    ) {
         self.alloc.extend(accounts);
     }
 }

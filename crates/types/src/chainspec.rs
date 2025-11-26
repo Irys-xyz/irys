@@ -21,7 +21,10 @@ use crate::hardfork_config::IrysHardforkConfig;
 
 hardfork!(
     #[derive(serde::Serialize, serde::Deserialize)]
-    IrysHardfork { Frontier, NextNameTBD }
+    IrysHardfork {
+        Frontier,
+        NextNameTBD
+    }
 );
 
 /// Hardfork schedule wrapper used across Irys components.
