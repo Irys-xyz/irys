@@ -5,7 +5,7 @@ use actix_web::http::header::ContentType;
 use irys_api_server::routes::price::PriceInfo;
 use irys_types::{
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config},
-    DataLedger, HardforkParams, U256,
+    DataLedger, U256,
 };
 
 #[test_log::test(tokio::test)]
@@ -18,8 +18,8 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     );
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
 
-    // Calculate the expected term fee
-    let hardfork_params = HardforkParams::default();
+    // Calculate the expected term fee using hardfork params from config to match API behavior
+    let hardfork_params = ctx.node_ctx.config.hardfork_params_at(0);
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
@@ -100,8 +100,8 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
         )?
     };
 
-    // Calculate the expected term fee
-    let hardfork_params = HardforkParams::default();
+    // Calculate the expected term fee using hardfork params from config to match API behavior
+    let hardfork_params = ctx.node_ctx.config.hardfork_params_at(0);
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size, // small data rounds up to chunk_size
         &ctx.node_ctx.config.consensus,
@@ -112,7 +112,7 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         expected_term_fee,
-        ctx.node_ctx.config.consensus.hardforks.frontier.number_of_ingress_proofs_total,
+        hardfork_params.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus
@@ -205,8 +205,8 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
         )?
     };
 
-    // Calculate the expected term fee
-    let hardfork_params = HardforkParams::default();
+    // Calculate the expected term fee using hardfork params from config to match API behavior
+    let hardfork_params = ctx.node_ctx.config.hardfork_params_at(0);
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size * 2, // data rounds up to 2 chunks
         &ctx.node_ctx.config.consensus,
@@ -217,7 +217,7 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     // Calculate expected perm_fee using the same method as the API
     let expected_perm_fee = expected_base_fee.add_ingress_proof_rewards(
         expected_term_fee,
-        ctx.node_ctx.config.consensus.hardforks.frontier.number_of_ingress_proofs_total,
+        hardfork_params.number_of_ingress_proofs_total,
         ctx.node_ctx
             .config
             .consensus
@@ -458,7 +458,8 @@ async fn verify_pricing_uses_ema(
     block_description: &str,
 ) -> eyre::Result<()> {
     // Calculate expected fees using the provided EMA
-    let hardfork_params = HardforkParams::default();
+    // Use hardfork params from actual config to match API behavior
+    let hardfork_params = ctx.node_ctx.config.hardfork_params_at(0);
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,

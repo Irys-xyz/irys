@@ -468,26 +468,12 @@ mod tests {
         timestamp_millis = 0
 
         [reth]
-        chain = 1270
+        gas_limit = 30000000
 
-        [reth.genesis]
-        nonce = "0x0"
-        timestamp = "0x0"
-        extraData = "0x"
-        gasLimit = "0x1c9c380"
-        difficulty = "0x0"
-        mixHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-        coinbase = "0x0000000000000000000000000000000000000000"
-
-        [reth.genesis.config]
-        chainId = 1270
-        daoForkSupport = false
-        terminalTotalDifficultyPassed = true
-
-        [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+        [reth.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
         balance = "0x152cf4e72a974f1c0000"
 
-        [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+        [reth.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
         balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
@@ -522,6 +508,10 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
+
+        [hardforks.frontier]
+        number_of_ingress_proofs_total = 1
+        number_of_ingress_proofs_from_assignees = 0
         "#;
 
         // Create the expected config

@@ -441,7 +441,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let hardfork_params = HardforkParams::default();
+        let hardfork_params = config.hardforks.params_at(0);
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(10000_u64);
@@ -550,7 +550,7 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let hardfork_params = HardforkParams::default();
+        let hardfork_params = config.hardforks.params_at(0);
 
         let term_fee = BoundedFee::from(1003_u64); // Not evenly divisible
         let perm_fee = BoundedFee::from(10000_u64);

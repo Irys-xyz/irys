@@ -733,7 +733,7 @@ mod tests {
     use irys_types::ingress::IngressProofV1;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
-        HardforkParams, IrysBlockHeader, IrysSignature, Signature, H256,
+        IrysBlockHeader, IrysSignature, Signature, H256,
     };
     use irys_types::{BlockHash, CommitmentType};
     use itertools::Itertools as _;
@@ -770,7 +770,7 @@ mod tests {
         let actual_perm_fee = perm_fee.unwrap_or_else(|| {
             // If no perm_fee specified, calculate minimum required for ingress proofs
             let config = ConsensusConfig::testing();
-            let hardfork_params = HardforkParams::default();
+            let hardfork_params = config.hardforks.params_at(0);
             let ingress_reward_per_proof = (term_fee
                 * config.immediate_tx_inclusion_reward_percent.amount)
                 / U256::from(10000);
@@ -1106,12 +1106,10 @@ mod tests {
 
     #[test]
     fn test_one_publish_tx_with_aggregated_proofs() {
-        let config = ConsensusConfig::testing();
+        let mut config = ConsensusConfig::testing();
         // Use custom hardfork params with 4 proofs for this test
-        let test_hardfork_params = HardforkParams {
-            number_of_ingress_proofs_total: 4,
-            number_of_ingress_proofs_from_assignees: 0,
-        };
+        config.hardforks.frontier.number_of_ingress_proofs_total = 4;
+        let test_hardfork_params = config.hardforks.params_at(0);
         let parent_block = IrysBlockHeader::new_mock_header();
 
         // Calculate proper fees for publish transaction
