@@ -1099,8 +1099,7 @@ pub trait BlockProdStrategy {
                     required_proof_count: Some(
                         self.inner()
                             .config
-                            .hardfork_params_at((current_timestamp / 1000) as u64)
-                            .number_of_ingress_proofs_total
+                            .number_of_ingress_proofs_total_at((current_timestamp / 1000) as u64)
                             .try_into()?,
                     ),
                 },

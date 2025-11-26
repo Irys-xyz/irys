@@ -106,7 +106,6 @@ pub struct ConsensusConfig {
 
     /// Hardfork configuration with parameters for each fork.
     /// All hardfork parameters are configurable via TOML.
-    #[serde(default)]
     pub hardforks: IrysHardforkConfig,
 
     /// Enable full ingress proof verification against actual chunks during block validation.

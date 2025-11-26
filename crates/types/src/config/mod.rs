@@ -7,7 +7,6 @@ pub mod node;
 pub use consensus::*;
 pub use node::*;
 
-use crate::hardfork_config::HardforkParams;
 use crate::irys::IrysSigner;
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
@@ -34,9 +33,20 @@ impl Config {
         }
     }
 
-    /// Get hardfork parameters for a given timestamp (seconds since epoch).
-    pub fn hardfork_params_at(&self, timestamp: u64) -> HardforkParams {
-        self.0.consensus.hardforks.params_at(timestamp)
+    /// Get the number of ingress proofs required at a given timestamp (seconds since epoch).
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: u64) -> u64 {
+        self.0
+            .consensus
+            .hardforks
+            .number_of_ingress_proofs_total_at(timestamp)
+    }
+
+    /// Get the number of ingress proofs from assignees required at a given timestamp (seconds since epoch).
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: u64) -> u64 {
+        self.0
+            .consensus
+            .hardforks
+            .number_of_ingress_proofs_from_assignees_at(timestamp)
     }
 
     // validate configuration invariants

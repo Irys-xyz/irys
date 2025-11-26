@@ -320,12 +320,13 @@ impl Inner {
         );
 
         // Use latest block's timestamp for hardfork params
-        let hardfork_params = self.config.hardfork_params_at(latest_block_timestamp_secs);
+        let number_of_ingress_proofs_total =
+            self.config.number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
         let expected_term_fee = calculate_term_fee(
             tx.data_size,
             epochs_for_storage,
             &self.config.consensus,
-            &hardfork_params,
+            number_of_ingress_proofs_total,
             pricing_ema,
         )
         .map_err(|e| {
@@ -357,7 +358,7 @@ impl Inner {
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
-                &hardfork_params,
+                number_of_ingress_proofs_total,
                 pricing_ema,
                 expected_term_fee,
             )
@@ -497,12 +498,13 @@ impl Inner {
                 .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
             (last_block.timestamp / 1000) as u64
         };
-        let hardfork_params = self.config.hardfork_params_at(latest_block_timestamp_secs);
+        let number_of_ingress_proofs_total =
+            self.config.number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
         PublishFeeCharges::new(
             actual_perm_fee,
             actual_term_fee,
             &self.config.node_config.consensus_config(),
-            &hardfork_params,
+            number_of_ingress_proofs_total,
         )
         .map_err(|e| {
             TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))

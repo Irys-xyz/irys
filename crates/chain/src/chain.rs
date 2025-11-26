@@ -474,11 +474,12 @@ impl IrysNode {
         )?;
 
         // Get hardfork params for genesis block using its timestamp
-        let genesis_hardfork_params = self.config.hardfork_params_at(timestamp_secs);
+        let number_of_ingress_proofs_total =
+            self.config.number_of_ingress_proofs_total_at(timestamp_secs);
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
-            genesis_hardfork_params.number_of_ingress_proofs_total,
+            number_of_ingress_proofs_total,
         );
 
         // Generate genesis commitments from configuration

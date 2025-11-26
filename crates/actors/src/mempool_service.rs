@@ -864,12 +864,13 @@ impl Inner {
                         continue;
                     }
 
-                    let hardfork_params = self.config.hardfork_params_at(current_timestamp);
+                    let number_of_ingress_proofs_total =
+                        self.config.number_of_ingress_proofs_total_at(current_timestamp);
                     if PublishFeeCharges::new(
                         perm_fee,
                         tx.term_fee,
                         &self.config.node_config.consensus_config(),
-                        &hardfork_params,
+                        number_of_ingress_proofs_total,
                     )
                     .is_err()
                     {
@@ -1147,9 +1148,10 @@ impl Inner {
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
-                let hardfork_params = self.config.hardfork_params_at(current_timestamp);
+                let number_of_ingress_proofs_total =
+                    self.config.number_of_ingress_proofs_total_at(current_timestamp);
                 let proofs_per_tx = std::cmp::min(
-                    hardfork_params.number_of_ingress_proofs_total as usize,
+                    number_of_ingress_proofs_total as usize,
                     total_miners,
                 );
 
@@ -1201,8 +1203,10 @@ impl Inner {
                 };
 
                 // Calculate expected assigned proofs, clamping to available miners
+                let number_of_ingress_proofs_from_assignees =
+                    self.config.number_of_ingress_proofs_from_assignees_at(current_timestamp);
                 let mut expected_assigned_proofs =
-                    hardfork_params.number_of_ingress_proofs_from_assignees as usize;
+                    number_of_ingress_proofs_from_assignees as usize;
 
                 if assigned_miners < expected_assigned_proofs {
                     warn!(
@@ -1240,8 +1244,7 @@ impl Inner {
 
                 // First, add assigned proofs up to the total network limit
                 // Use all available assigned proofs, but don't exceed the network total
-                let total_network_limit =
-                    hardfork_params.number_of_ingress_proofs_total as usize;
+                let total_network_limit = number_of_ingress_proofs_total as usize;
                 let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
                 final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
 
@@ -1253,14 +1256,12 @@ impl Inner {
                 }
 
                 // Final check - do we have enough total proofs?
-                if final_proofs.len()
-                    < hardfork_params.number_of_ingress_proofs_total as usize
-                {
+                if final_proofs.len() < number_of_ingress_proofs_total as usize {
                     info!(
                             "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
                             &tx_header.id,
                             final_proofs.len(),
-                            hardfork_params.number_of_ingress_proofs_total
+                            number_of_ingress_proofs_total
                         );
                     continue;
                 }
@@ -1602,12 +1603,12 @@ impl Inner {
         );
 
         // Calculate term fee using the storage pricing module
-        let hardfork_params = self.config.hardfork_params_at(timestamp);
+        let number_of_ingress_proofs_total = self.config.number_of_ingress_proofs_total_at(timestamp);
         calculate_term_fee(
             bytes_to_store,
             epochs_for_storage,
             &self.config.consensus,
-            &hardfork_params,
+            number_of_ingress_proofs_total,
             ema.ema_for_public_pricing(),
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
