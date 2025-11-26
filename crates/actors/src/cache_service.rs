@@ -19,7 +19,7 @@ use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
@@ -42,6 +42,10 @@ pub enum CacheServiceAction {
         Arc<EpochSnapshot>,
         Option<oneshot::Sender<eyre::Result<()>>>,
     ),
+    /// Internal signal: pruning task completed
+    PruneCompleted(eyre::Result<()>),
+    /// Internal signal: epoch processing task completed
+    EpochProcessingCompleted(eyre::Result<()>),
     /// Marks the start of ingress proof generation for the specified data root. Chunks that are
     /// related to this data root should not be pruned if the ingress proof is still being generated.
     NotifyProofGenerationStarted(DataRoot),
@@ -462,11 +466,21 @@ impl InnerCacheTask {
         let clone = self.clone();
         std::thread::spawn(move || {
             let res = clone.prune_cache(migration_height);
-            let Some(sender) = response_sender else {
-                return;
+            let completion = match &res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(eyre::eyre!(e.to_string())),
             };
-            if let Err(error) = sender.send(res) {
-                warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+            if let Some(sender) = response_sender {
+                if let Err(error) = sender.send(res) {
+                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+                }
+            }
+            // Notify service that pruning finished (drive the queue)
+            if let Err(e) = clone
+                .cache_sender
+                .send(CacheServiceAction::PruneCompleted(completion))
+            {
+                warn!(custom.error = ?e, "Failed to notify PruneCompleted");
             }
         });
     }
@@ -479,10 +493,21 @@ impl InnerCacheTask {
         let clone = self.clone();
         std::thread::spawn(move || {
             let res = clone.on_epoch_processed(epoch_snapshot);
+            let completion = match &res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(eyre::eyre!(e.to_string())),
+            };
             if let Some(sender) = response_sender {
                 if let Err(e) = sender.send(res) {
                     warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
                 }
+            }
+            // Notify service that epoch processing finished (drive the queue)
+            if let Err(e) = clone
+                .cache_sender
+                .send(CacheServiceAction::EpochProcessingCompleted(completion))
+            {
+                warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
             }
         });
     }
@@ -495,6 +520,14 @@ pub struct ChunkCacheService {
     pub msg_rx: UnboundedReceiver<CacheServiceAction>,
     pub shutdown: Shutdown,
     pub cache_task: InnerCacheTask,
+    // Serialized execution for each task type
+    pruning_running: bool,
+    pruning_queue: VecDeque<(u64, Option<oneshot::Sender<eyre::Result<()>>>)>,
+    epoch_running: bool,
+    epoch_queue: VecDeque<(
+        Arc<EpochSnapshot>,
+        Option<oneshot::Sender<eyre::Result<()>>>,
+    )>,
 }
 
 impl ChunkCacheService {
@@ -544,6 +577,10 @@ impl ChunkCacheService {
                     ingress_proof_generation_state: IngressProofGenerationState::new(),
                     cache_sender,
                 },
+                pruning_running: false,
+                pruning_queue: VecDeque::new(),
+                epoch_running: false,
+                epoch_queue: VecDeque::new(),
             };
             cache_service
                 .start()
@@ -603,11 +640,40 @@ impl ChunkCacheService {
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
         match msg {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
-                self.cache_task.spawn_pruning_task(migration_height, sender);
+                // Enqueue pruning; start if idle
+                self.pruning_queue.push_back((migration_height, sender));
+                if !self.pruning_running {
+                    if let Some((h, s)) = self.pruning_queue.pop_front() {
+                        self.pruning_running = true;
+                        self.cache_task.spawn_pruning_task(h, s);
+                    }
+                }
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
-                self.cache_task
-                    .spawn_epoch_processing(epoch_snapshot, sender);
+                // Enqueue epoch processing; start if idle
+                self.epoch_queue.push_back((epoch_snapshot, sender));
+                if !self.epoch_running {
+                    if let Some((e, s)) = self.epoch_queue.pop_front() {
+                        self.epoch_running = true;
+                        self.cache_task.spawn_epoch_processing(e, s);
+                    }
+                }
+            }
+            CacheServiceAction::PruneCompleted(_res) => {
+                // Mark pruning idle and kick next if queued
+                self.pruning_running = false;
+                if let Some((h, s)) = self.pruning_queue.pop_front() {
+                    self.pruning_running = true;
+                    self.cache_task.spawn_pruning_task(h, s);
+                }
+            }
+            CacheServiceAction::EpochProcessingCompleted(_res) => {
+                // Mark epoch processing idle and kick next if queued
+                self.epoch_running = false;
+                if let Some((e, s)) = self.epoch_queue.pop_front() {
+                    self.epoch_running = true;
+                    self.cache_task.spawn_epoch_processing(e, s);
+                }
             }
             CacheServiceAction::NotifyProofGenerationStarted(data_root) => {
                 self.cache_task
@@ -704,6 +770,10 @@ mod tests {
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
             },
+            pruning_running: false,
+            pruning_queue: VecDeque::new(),
+            epoch_running: false,
+            epoch_queue: VecDeque::new(),
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
@@ -783,6 +853,10 @@ mod tests {
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
             },
+            pruning_running: false,
+            pruning_queue: VecDeque::new(),
+            epoch_running: false,
+            epoch_queue: VecDeque::new(),
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
