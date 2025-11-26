@@ -76,7 +76,7 @@ impl RemotePackingStrategy {
                 &mining_address,
             );
 
-            if range_start % short_writes_before_sync == 0 {
+            if range_start.is_multiple_of(short_writes_before_sync) {
                 debug!("triggering sync");
                 crate::packing_service::sync_with_warning(
                     storage_module,

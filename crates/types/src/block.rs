@@ -496,7 +496,7 @@ pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interv
     if height < (blocks_in_price_adjustment_interval * 2) {
         true
     } else {
-        (height.saturating_add(1)) % blocks_in_price_adjustment_interval == 0
+        (height.saturating_add(1)).is_multiple_of(blocks_in_price_adjustment_interval)
     }
 }
 
@@ -841,8 +841,10 @@ pub struct CombinedBlockHeader {
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
 )]
 #[repr(u32)]
+#[derive(Default)]
 pub enum DataLedger {
     /// The permanent publish ledger
+    #[default]
     Publish = 0,
     /// An expiring term ledger used for submitting to the publish ledger
     Submit = 1,
@@ -858,12 +860,6 @@ impl PartialEq<u32> for DataLedger {
 impl PartialEq<DataLedger> for u32 {
     fn eq(&self, other: &DataLedger) -> bool {
         *self == other.get_id()
-    }
-}
-
-impl Default for DataLedger {
-    fn default() -> Self {
-        Self::Publish
     }
 }
 

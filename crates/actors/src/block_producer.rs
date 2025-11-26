@@ -22,10 +22,8 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx,
-    payload::{DeterministicShadowTxKey, ShadowTxStore},
-    reth_node_ethereum::EthEngineTypes,
-    IrysEthereumNode,
+    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysEthereumNode, IrysPayloadAttributes,
+    IrysPayloadBuilderAttributes, IrysPayloadTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
@@ -41,13 +39,13 @@ use ledger_expiry::LedgerExpiryBalanceDelta;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-    api::{BeaconConsensusEngineHandle, NodeTypes, PayloadKind},
+    api::{ConsensusEngineHandle, NodeTypes, PayloadKind},
     core::primitives::SealedBlock,
-    payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
+    payload::{EthBuiltPayload, PayloadBuilderHandle},
     revm::primitives::B256,
     tasks::shutdown::Shutdown,
 };
-use reth_payload_primitives::PayloadBuilderError;
+use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
 use std::time::UNIX_EPOCH;
 use std::{
@@ -170,13 +168,11 @@ pub struct BlockProducerInner {
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
     /// Reth node payload builder
-    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
+    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes<IrysPayloadTypes>>,
     /// Reth blockchain provider
     pub reth_provider: NodeProvider,
-    /// Shadow tx store
-    pub shadow_tx_store: ShadowTxStore,
     /// Reth beacon engine handle
-    pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
+    pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
 }
@@ -494,6 +490,16 @@ pub trait BlockProdStrategy {
         )>,
         BlockProductionError,
     > {
+        if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
+            warn!(
+                "Skipping solution for old step number {}, previous block step number {} for block {}",
+                solution.vdf_step,
+                prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_header.block_hash
+            );
+            return Ok(None);
+        }
+
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
@@ -589,7 +595,7 @@ pub trait BlockProdStrategy {
             {
                 Ok(result) => {
                     if retry_count > 0 {
-                        info!(
+                        error!(
                             solution.hash = %solution.solution_hash,
                             solution.vdf_step = solution.vdf_step,
                             retry.count = retry_count,
@@ -849,35 +855,42 @@ pub trait BlockProdStrategy {
     ) -> Result<EthBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
-        // generate payload attributes
-        let attributes = PayloadAttributes {
-            timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
-            prev_randao: parent_mix_hash,
-            suggested_fee_recipient: self.inner().config.node_config.reward_address,
-            withdrawals: None, // these should ALWAYS be none
-            parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+        // generate payload attributes with shadow transactions
+        let rpc_attributes = IrysPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
+                prev_randao: parent_mix_hash,
+                suggested_fee_recipient: self.inner().config.node_config.reward_address,
+                withdrawals: None, // these should ALWAYS be none
+                parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+            },
+            shadow_txs,
         };
 
         debug!(
-            payload.timestamp_sec = attributes.timestamp,
-            payload.fee_recipient = %attributes.suggested_fee_recipient,
-            payload.parent_beacon_root = ?attributes.parent_beacon_block_root,
+            payload.timestamp_sec = rpc_attributes.inner.timestamp,
+            payload.fee_recipient = %rpc_attributes.inner.suggested_fee_recipient,
+            payload.parent_beacon_root = ?rpc_attributes.inner.parent_beacon_block_root,
+            payload.shadow_tx_count = rpc_attributes.shadow_txs.len(),
             "Payload attributes created"
         );
 
-        let attributes =
-            EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes);
+        // Convert to builder attributes - this computes the payload ID including shadow txs
+        let attributes = IrysPayloadBuilderAttributes::try_new(
+            prev_block_header.evm_block_hash,
+            rpc_attributes,
+            0, // version
+        )
+        .expect("IrysPayloadBuilderAttributes::try_new is infallible");
 
         let payload_builder = &self.inner().reth_payload_builder;
-        let beacon_engine_handle = &self.inner().beacon_engine_handle;
+        let consensus_engine_handle = &self.inner().consensus_engine_handle;
 
-        // store shadow txs
-        let key = DeterministicShadowTxKey::new(attributes.payload_id());
-        debug!(
+        tracing::debug!(
             payload.id = %attributes.payload_id(),
-            "Storing shadow transactions"
+            prev_height = prev_block_header.height,
+            "Built payload attributes with shadow transactions"
         );
-        self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
 
         // send & await the payload
         info!("Sending new payload to Reth");
@@ -902,7 +915,7 @@ pub trait BlockProdStrategy {
             .map_err(classify_payload_error)?;
 
         let evm_block_hash = built_payload.block().hash();
-        debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
+        tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
         let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
             panic!(
@@ -910,7 +923,7 @@ pub trait BlockProdStrategy {
                 evm_block_hash, e
             )
         });
-        let new_payload_result = beacon_engine_handle
+        let new_payload_result = consensus_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
                 sidecar,
@@ -950,16 +963,6 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
-
-        if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!(
-                "Skipping solution for old step number {}, previous block step number {} for block {}",
-                solution.vdf_step,
-                prev_block_header.vdf_limiter_info.global_step_number,
-                prev_block_hash
-            );
-            return Ok(None);
-        }
 
         // Publish Ledger Transactions
         let publish_chunks_added = calculate_chunks_added(
@@ -1352,7 +1355,7 @@ pub trait BlockProdStrategy {
     }
 
     fn is_epoch_block(&self, height: u64) -> bool {
-        height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
+        height.is_multiple_of(self.inner().config.consensus.epoch.num_blocks_in_epoch)
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

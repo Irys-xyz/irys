@@ -62,11 +62,11 @@ impl CoinMarketCapOracle {
         let body: CoinMarketCapResponse =
             resp.json().await.context("failed to parse CMC JSON body")?;
 
-        if let Some(status) = &body.status {
-            if status.error_code != 0 {
-                let msg = status.error_message.as_deref().unwrap_or("unknown error");
-                bail!("CoinMarketCap API error {}: {}", status.error_code, msg);
-            }
+        if let Some(status) = &body.status
+            && status.error_code != 0
+        {
+            let msg = status.error_message.as_deref().unwrap_or("unknown error");
+            bail!("CoinMarketCap API error {}: {}", status.error_code, msg);
         }
 
         let quote = extract_quote_from_cmc(&body, "USD", &self.id)

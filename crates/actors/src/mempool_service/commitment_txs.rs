@@ -200,7 +200,9 @@ impl Inner {
             &self.config.consensus,
             &commitment_tx,
             None,
-        ) {
+        )
+        .await
+        {
             self.mempool_state
                 .put_recent_invalid(commitment_tx.id)
                 .await;

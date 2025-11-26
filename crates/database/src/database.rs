@@ -97,8 +97,8 @@ pub fn block_header_by_hash<T: DbTx>(
     if include_chunk {
         if let Some(ref mut b) = block {
             b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
-            if b.poa.chunk.is_none() {
-                tracing::error!(block.hash = ?b.block_hash, target = "db::block_header", "poa chunk not present when reading the header");
+            if b.poa.chunk.is_none() && b.height != 0 {
+                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
             }
         }
     }
@@ -397,7 +397,7 @@ pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(
     tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
 }
 
-pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseError> {
+pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
     if let Some(bytes) = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)? {
         let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
             DatabaseError::Other(

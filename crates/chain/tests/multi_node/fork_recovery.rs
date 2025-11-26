@@ -952,10 +952,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     let genesis_block = node_a.get_block_by_height(0).await?;
 
     // get starting balances
-    let signer_b_genesis_balance: U256 =
-        node_a.get_balance(b_signer.address(), genesis_block.evm_block_hash);
-    let signer_c_genesis_balance: U256 =
-        node_a.get_balance(c_signer.address(), genesis_block.evm_block_hash);
+    let signer_b_genesis_balance: U256 = node_a
+        .get_balance(b_signer.address(), genesis_block.evm_block_hash)
+        .await;
+    let signer_c_genesis_balance: U256 = node_a
+        .get_balance(c_signer.address(), genesis_block.evm_block_hash)
+        .await;
 
     // check balances match genesis account balances i.e. they are not zero
     assert_ne!(U256::from(0), signer_b_genesis_balance);
@@ -998,27 +1000,39 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
 
     // check balances in block 1 are unchanged from genesis
     assert_eq!(
-        node_a.get_balance(b_signer.address(), a_block1.evm_block_hash),
+        node_a
+            .get_balance(b_signer.address(), a_block1.evm_block_hash)
+            .await,
         signer_b_genesis_balance
     );
     assert_eq!(
-        node_a.get_balance(c_signer.address(), a_block1.evm_block_hash),
+        node_a
+            .get_balance(c_signer.address(), a_block1.evm_block_hash)
+            .await,
         signer_c_genesis_balance
     );
     assert_eq!(
-        node_b.get_balance(b_signer.address(), b_block1.evm_block_hash),
+        node_b
+            .get_balance(b_signer.address(), b_block1.evm_block_hash)
+            .await,
         signer_b_genesis_balance
     );
     assert_eq!(
-        node_b.get_balance(c_signer.address(), b_block1.evm_block_hash),
+        node_b
+            .get_balance(c_signer.address(), b_block1.evm_block_hash)
+            .await,
         signer_c_genesis_balance
     );
     assert_eq!(
-        node_c.get_balance(b_signer.address(), c_block1.evm_block_hash),
+        node_c
+            .get_balance(b_signer.address(), c_block1.evm_block_hash)
+            .await,
         signer_b_genesis_balance
     );
     assert_eq!(
-        node_c.get_balance(c_signer.address(), c_block1.evm_block_hash),
+        node_c
+            .get_balance(c_signer.address(), c_block1.evm_block_hash)
+            .await,
         signer_c_genesis_balance
     );
 
@@ -1135,13 +1149,17 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
 
     // check balances in block a2
     assert_eq!(
-        node_a.get_balance(b_signer.address(), a_block2.evm_block_hash),
+        node_a
+            .get_balance(b_signer.address(), a_block2.evm_block_hash)
+            .await,
         signer_b_genesis_balance,
         "Address: {:?}",
         b_signer.address()
     );
     assert_eq!(
-        node_a.get_balance(c_signer.address(), a_block2.evm_block_hash),
+        node_a
+            .get_balance(c_signer.address(), a_block2.evm_block_hash)
+            .await,
         signer_c_genesis_balance,
         "Address: {:?}",
         c_signer.address()
@@ -1160,14 +1178,18 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         peer_b_b2_submit_tx.header.term_fee + peer_b_b2_submit_tx.header.perm_fee.unwrap();
 
     assert_eq!(
-        node_b.get_balance(b_signer.address(), b_block2.evm_block_hash),
+        node_b
+            .get_balance(b_signer.address(), b_block2.evm_block_hash)
+            .await,
         signer_b_genesis_balance + b_block2.reward_amount - peer_b_total_fee
             + block_producer_reward,
         "Address: {:?}",
         b_signer.address()
     );
     assert_eq!(
-        node_b.get_balance(c_signer.address(), b_block2.evm_block_hash),
+        node_b
+            .get_balance(c_signer.address(), b_block2.evm_block_hash)
+            .await,
         signer_c_genesis_balance,
         "Address: {:?}",
         c_signer.address()
@@ -1193,7 +1215,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     let publish_rewards = publish_charges.ingress_proof_reward;
 
     assert_eq!(
-        node_b.get_balance(b_signer.address(), b_block3.evm_block_hash),
+        node_b
+            .get_balance(b_signer.address(), b_block3.evm_block_hash)
+            .await,
         signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
             - peer_b_total_fee
             + block_producer_reward
@@ -1202,7 +1226,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         b_signer.address()
     );
     assert_eq!(
-        node_b.get_balance(c_signer.address(), b_block3.evm_block_hash),
+        node_b
+            .get_balance(c_signer.address(), b_block3.evm_block_hash)
+            .await,
         signer_c_genesis_balance,
         "Address: {:?}",
         c_signer.address()
@@ -1420,11 +1446,15 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
 
         // re-assert start balances
         assert_eq!(
-            node_a.get_balance(b_signer.address(), c_block1.evm_block_hash),
+            node_a
+                .get_balance(b_signer.address(), c_block1.evm_block_hash)
+                .await,
             signer_b_genesis_balance,
         );
         assert_eq!(
-            node_a.get_balance(c_signer.address(), c_block1.evm_block_hash),
+            node_a
+                .get_balance(c_signer.address(), c_block1.evm_block_hash)
+                .await,
             signer_c_genesis_balance,
         );
         // assert final balances
@@ -1449,14 +1479,18 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         let peer_c_block_producer_reward = peer_c_term_charges.block_producer_reward;
 
         assert_eq!(
-            node_a.get_balance(b_signer.address(), c_block4.evm_block_hash),
+            node_a
+                .get_balance(b_signer.address(), c_block4.evm_block_hash)
+                .await,
             signer_b_genesis_balance + b_block2.reward_amount + b_block3.reward_amount
                 - peer_b_total_fee
                 + block_producer_reward
                 + publish_rewards, // Include the publish rewards from b_block3
         );
         assert_eq!(
-            node_a.get_balance(c_signer.address(), c_block4.evm_block_hash),
+            node_a
+                .get_balance(c_signer.address(), c_block4.evm_block_hash)
+                .await,
             signer_c_genesis_balance + c_block4.reward_amount
                 - peer_c_b2_submit_tx.header.total_cost()
                 + peer_c_block_producer_reward

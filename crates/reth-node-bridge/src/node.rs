@@ -1,11 +1,10 @@
 use alloy_eips::BlockNumberOrTag;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
-use irys_reth::{payload::ShadowTxStore, IrysEthereumNode};
+use irys_reth::{IrysEngineValidatorBuilder, IrysEthereumNode, IrysPayloadBuilderAttributes};
 use irys_types::{Address, NetworkConfigWithDefaults as _};
 use reth::{
     args::DatabaseArgs,
-    payload::EthPayloadBuilderAttributes,
     prometheus_exporter::install_prometheus_recorder,
     revm::primitives::B256,
     rpc::builder::{RethRpcModule, RpcModuleSelection},
@@ -14,11 +13,12 @@ use reth::{
 use reth_chainspec::ChainSpec;
 use reth_db::init_db;
 use reth_node_builder::{
-    FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder, NodeComponentsBuilder,
-    NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
+    rpc::RpcAddOns, FullNode, FullNodeTypesAdapter, Node, NodeAdapter, NodeBuilder,
+    NodeComponentsBuilder, NodeConfig, NodeHandle, NodeTypesWithDBAdapter,
 };
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
+use std::future::IntoFuture as _;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
 use tracing::{warn, Instrument as _};
@@ -43,19 +43,31 @@ pub type NodeHelperType =
 
 pub type RethNodeHandle = NodeHandle<RethNodeAdapter, RethNodeAddOns>;
 
-pub type RethNodeAddOns = reth_node_ethereum::node::EthereumAddOns<RethNodeAdapter>;
+pub type RethNodeAddOns = RpcAddOns<
+    RethNodeAdapter,
+    reth_node_ethereum::node::EthereumEthApiBuilder,
+    IrysEngineValidatorBuilder,
+>;
 
 pub type RethNode = FullNode<RethNodeAdapter, RethNodeAddOns>;
 
-pub fn eth_payload_attributes(timestamp: u64) -> EthPayloadBuilderAttributes {
-    let attributes = PayloadAttributes {
-        timestamp,
-        prev_randao: B256::ZERO,
-        suggested_fee_recipient: Address::ZERO,
-        withdrawals: Some(vec![]),
-        parent_beacon_block_root: Some(B256::ZERO),
+pub fn eth_payload_attributes(timestamp: u64) -> IrysPayloadBuilderAttributes {
+    use irys_reth::IrysPayloadAttributes;
+    use reth_node_api::PayloadBuilderAttributes as _;
+
+    let rpc_attributes = IrysPayloadAttributes {
+        inner: PayloadAttributes {
+            timestamp,
+            prev_randao: B256::ZERO,
+            suggested_fee_recipient: Address::ZERO,
+            withdrawals: Some(vec![]),
+            parent_beacon_block_root: Some(B256::ZERO),
+        },
+        shadow_txs: vec![],
     };
-    EthPayloadBuilderAttributes::new(B256::ZERO, attributes)
+
+    IrysPayloadBuilderAttributes::try_new(B256::ZERO, rpc_attributes, 0)
+        .expect("IrysPayloadBuilderAttributes::try_new is infallible")
 }
 
 #[derive(Clone)]
@@ -87,7 +99,6 @@ pub async fn run_node(
     node_config: irys_types::NodeConfig,
     latest_block: u64,
     random_ports: bool,
-    shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<(RethNodeHandle, IrysRethNodeAdapter)> {
     let mut reth_config = NodeConfig::new(chainspec.clone());
 
@@ -136,6 +147,8 @@ pub async fn run_node(
 
     reth_config.txpool.queued_max_count = subpool_max_tx_count;
     reth_config.txpool.queued_max_size = subpool_max_size_mb;
+    // important: keep blobs disabled in our mempool
+    reth_config.txpool.disable_blobs_support = true;
 
     reth_config.txpool.additional_validation_tasks = 2;
 
@@ -163,14 +176,13 @@ pub async fn run_node(
         .with_launch_context(task_executor.clone());
 
     let handle = builder
-        .node(IrysEthereumNode {
-            shadow_tx_store: shadow_tx_store.clone(),
-        })
+        .node(IrysEthereumNode)
         .launch_with_debug_capabilities()
+        .into_future()
         .in_current_span()
         .await?;
 
-    let context = IrysRethNodeAdapter::new(handle.node.clone(), shadow_tx_store).await?;
+    let context = IrysRethNodeAdapter::new(handle.node.clone()).await?;
     // check that the latest height lines up with the expected latest height from irys
 
     let latest = context

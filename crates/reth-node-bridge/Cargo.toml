@@ -27,8 +27,10 @@ reth-payload-builder.workspace = true
 reth-cli-commands.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+alloy-consensus.workspace = true
 alloy-genesis.workspace = true
-rayon.workspace = true
+alloy-evm.workspace = true
+async-trait.workspace = true
 
 [lints]
 workspace = true

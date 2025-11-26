@@ -29,7 +29,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.91.1"
 homepage = "http://irys.xyz/"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/Irys-xyz/irys"
@@ -149,79 +149,80 @@ async-stream = "0.3"
 
 
 # Reth & Alloy deps
-# These should be kept in lockstep with the Reth dependencies - for compatability and built times
-revm = { version = "24.0.1", default-features = false }
+# These should be kept in lockstep with the Reth dependencies - for compatability and build times
+revm = { version = "33.1.0", default-features = false }
 
 alloy-dyn-abi = "1.1.0"
-alloy-evm = { version = "0.10", default-features = false }
-alloy-primitives = { version = "1.1.0", default-features = false, features = [
+alloy-evm = { version = "0.24.2", default-features = false }
+alloy-primitives = { version = "1.4.1", default-features = false, features = [
   "map-foldhash",
   "arbitrary",
   "rlp",
   "getrandom",
 ] }
-alloy-rlp = { version = "0.3.10", default-features = false, features = [
+alloy-rlp = { version = "0.3", default-features = false, features = [
   "core-net",
 ] }
-alloy-sol-macro = { version = "1.1.0", default-features = false }
-alloy-sol-types = { version = "1.1.0", default-features = false }
-alloy-consensus = { version = "1.0.9", default-features = false }
-alloy-contract = { version = "1.0.9", default-features = false }
-alloy-core = { version = "1.0.9", default-features = false }
-alloy-eips = { version = "1.0.9", default-features = false }
-alloy-genesis = { version = "1.0.9", default-features = false }
-revm-primitives = "19"
-revm-interpreter = "19"
-alloy-network = { version = "1.0.9", default-features = false }
-alloy-provider = { version = "1.0.9", default-features = false }
-alloy-rpc-types = { version = "1.0.9", features = [
+alloy-sol-macro = { version = "1", default-features = false }
+alloy-sol-types = { version = "1", default-features = false }
+alloy-consensus = { version = "1", default-features = false }
+alloy-contract = { version = "1", default-features = false }
+alloy-core = { version = "1", default-features = false }
+alloy-eips = { version = "1", default-features = false }
+alloy-genesis = { version = "1", default-features = false }
+revm-primitives = "21"
+revm-interpreter = "21"
+alloy-network = { version = "1", default-features = false }
+alloy-provider = { version = "1", default-features = false }
+alloy-rpc-types = { version = "1", features = [
   "eth",
 ], default-features = false }
-alloy-rpc-types-eth = { version = "1.0.9", default-features = false }
-alloy-rpc-types-engine = { version = "1.0.9", default-features = false }
-alloy-rpc-types-trace = { version = "1.0.9", default-features = false }
-alloy-signer = { version = "1.0.9", default-features = false }
-alloy-signer-local = { version = "1.0.9", default-features = false }
+alloy-rpc-types-eth = { version = "1", default-features = false }
+alloy-rpc-types-engine = { version = "1", default-features = false }
+alloy-rpc-types-trace = { version = "1", default-features = false }
+alloy-signer = { version = "1", default-features = false }
+alloy-signer-local = { version = "1", default-features = false }
 
 # Reth crates
 # These point to a fork of reth with Irys-specific changes (branch: irys-changes)
-reth = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-chainspec = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-e2e-test-utils = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-engine-local = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-ethereum-engine-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-ethereum-forks = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-evm-ethereum = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-node-ethereum = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-ethereum-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-evm = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-network = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-node-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-node-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-node-core = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-node-metrics = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-primitives-traits = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-rpc-eth-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-codecs = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-db-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-db = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-provider = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-tasks = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-tracing = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-transaction-pool = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-trie-db = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-cli-commands = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-storage-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-basic-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-payload-builder-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-payload-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-revm = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-chain-state = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-errors = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-ethereum-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
-reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "1e7fba8bee1afa708b0265c67f09b25c568799e0" }
+reth = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-chainspec = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-e2e-test-utils = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-engine-local = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-ethereum-engine-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-ethereum-forks = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-evm-ethereum = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-ethereum = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-ethereum-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-evm = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-network = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-core = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-metrics = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-node-types = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-primitives-traits = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-rpc-eth-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-codecs = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-db-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-db = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-provider = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-tasks = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-tracing = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-transaction-pool = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-trie-db = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-cli-commands = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-storage-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-basic-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-payload-builder-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-payload-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-revm = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-chain-state = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-errors = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-ethereum-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
+reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "6c892d38bfcd6689c618386bd7ccc6fde7fbb64e" }
 
 
 # just used (for local testing)
@@ -496,7 +497,6 @@ ref_binding_to_reference = "deny"
 return_and_then = "deny"
 unseparated_literal_suffix = "deny"
 single_char_pattern = "deny"
-string_to_string = "deny"
 suspicious_operation_groupings = "deny"
 trait_duplication_in_bounds = "deny"
 unchecked_duration_subtraction = "deny"

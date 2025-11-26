@@ -91,7 +91,7 @@ pub fn calculate_difficulty(
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval as u128;
 
     // Early return if no difficulty adjustment needed
-    if block_height as u128 % blocks_between_adjustments != 0 {
+    if !(block_height as u128).is_multiple_of(blocks_between_adjustments) {
         return (current_diff, None);
     }
 

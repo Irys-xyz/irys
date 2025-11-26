@@ -234,7 +234,10 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     debug!("P2 block {}", &blk.height);
 
     // ensure the ingress proof still exists
-    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
+    let ingress_proofs = db
+        .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
+        .unwrap()
+        .unwrap();
     assert_eq!(ingress_proofs.len(), 1);
 
     // same chunks as tx1

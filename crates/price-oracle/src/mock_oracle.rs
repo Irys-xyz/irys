@@ -53,10 +53,6 @@ impl MockOracle {
     ///
     /// If the underlying mutex gets poisoned.
     #[tracing::instrument(level = "trace", skip_all, err)]
-    #[expect(
-        clippy::unwrap_in_result,
-        reason = "lock poisoning is considered irrecoverable in the mock oracle context"
-    )]
     pub fn current_price(&self) -> Result<Amount<(IrysPrice, Usd)>> {
         let mut guard = self.context.lock().expect("irrecoverable lock poisoned");
 

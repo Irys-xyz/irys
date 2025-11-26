@@ -25,13 +25,13 @@ reth-chainspec.workspace = true
 reth.workspace = true
 reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
-reth-trie-db.workspace = true
 reth-ethereum-engine-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-transaction-pool.workspace = true
 reth-primitives-traits.workspace = true
 reth-e2e-test-utils = { workspace = true, optional = true }
-reth-engine-local = { workspace = true, optional = true }
+reth-engine-local.workspace = true
 serde_json.workspace = true
 revm.workspace = true
 reth-storage-api.workspace = true
@@ -39,6 +39,7 @@ revm-primitives.workspace = true
 reth-basic-payload-builder.workspace = true
 reth-node-api.workspace = true
 reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
 reth-chain-state.workspace = true
 reth-payload-builder-primitives.workspace = true
 reth-ethereum-payload-builder.workspace = true
@@ -49,12 +50,13 @@ reth-provider.workspace = true
 tokio.workspace = true
 eyre.workspace = true
 serde.workspace = true
-futures.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
-lru.workspace = true
 thiserror.workspace = true
+either = "1.15"
+sha2.workspace = true
+alloy-rlp.workspace = true
 
 [dev-dependencies]
 reth-e2e-test-utils = { workspace = true }
@@ -64,12 +66,11 @@ test-log.workspace = true
 rstest.workspace = true
 futures.workspace = true
 alloy-signer-local.workspace = true
-reth-engine-local = { workspace = true }
 reth-db = { workspace = true, features = ["test-utils"] }
 alloy-rpc-types-trace.workspace = true
 
 [features]
-test-utils = ["reth-e2e-test-utils", "reth-engine-local"]
+test-utils = ["reth-e2e-test-utils"]
 
 [lints]
 workspace = true

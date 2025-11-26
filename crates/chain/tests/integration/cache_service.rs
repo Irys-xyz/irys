@@ -153,7 +153,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         ingress_proofs = node
             .node_ctx
             .db
-            .view(walk_all::<IngressProofs, _>)
+            .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
             .unwrap()
             .unwrap();
         if ingress_proofs.len() == expected_proofs {
