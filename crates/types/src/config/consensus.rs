@@ -1,4 +1,3 @@
-use crate::chainspec::IrysHardforksInConfig;
 use crate::hardfork_config::{FrontierParams, IrysHardforkConfig};
 use crate::serde_utils;
 use crate::{
@@ -13,11 +12,9 @@ use crate::{
 };
 use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
-use alloy_genesis::{Genesis, GenesisAccount};
-use alloy_primitives::{Address, B256, U256};
+use alloy_genesis::GenesisAccount;
+use alloy_primitives::{Address, U256};
 use eyre::Result;
-use reth::rpc::types::serde_helpers::OtherFields;
-use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -31,11 +28,11 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
-    /// Unique identifier for the blockchain network
+    /// Unique identifier for the blockchain network (single source of truth)
     pub chain_id: u64,
 
-    /// Reth chain spec for the reth genesis
-    pub reth: RethChainSpec,
+    /// Reth-specific configuration (gas limit and allocations only)
+    pub reth: IrysRethConfig,
 
     /// Settings for the transaction memory pool
     pub mempool: MempoolConsensusConfig,
@@ -216,7 +213,7 @@ impl ConsensusOptions {
         accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
     ) {
         let config = self.get_mut();
-        config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
+        config.reth.extend_accounts(accounts);
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -241,13 +238,31 @@ pub struct BlockRewardConfig {
     pub half_life_secs: u64,
 }
 
+/// # Reth Configuration
+///
+/// Minimal configuration needed for reth integration.
+/// The full `alloy_genesis::Genesis` is constructed at runtime from these fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RethChainSpec {
-    /// The type of chain.
-    pub chain: Chain,
-    /// Genesis block.
-    pub genesis: Genesis,
+pub struct IrysRethConfig {
+    /// Gas limit for genesis block (defaults to Ethereum 30M)
+    #[serde(default = "default_gas_limit")]
+    pub gas_limit: u64,
+
+    /// Initial account allocations (address -> balance/code/storage)
+    #[serde(default)]
+    pub alloc: BTreeMap<Address, GenesisAccount>,
+}
+
+fn default_gas_limit() -> u64 {
+    ETHEREUM_BLOCK_GAS_LIMIT_30M
+}
+
+impl IrysRethConfig {
+    /// Extend the genesis allocations with additional accounts
+    pub fn extend_accounts(&mut self, accounts: impl IntoIterator<Item = (Address, GenesisAccount)>) {
+        self.alloc.extend(accounts);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,77 +477,25 @@ impl ConsensusConfig {
                 // The number of seconds in each emission half life, determines inflation curve
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
-            // Reths Chain spec config
-            reth: RethChainSpec {
-                chain: Chain::from_id(IRYS_MAINNET_CHAIN_ID),
-                genesis: Genesis {
-                    parent_hash: None,
-                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                    config: alloy_genesis::ChainConfig {
-                        chain_id: IRYS_MAINNET_CHAIN_ID,
-                        homestead_block: None,
-                        dao_fork_block: None,
-                        dao_fork_support: false,
-                        eip150_block: None,
-                        eip155_block: None,
-                        eip158_block: None,
-                        byzantium_block: None,
-                        constantinople_block: None,
-                        petersburg_block: None,
-                        istanbul_block: None,
-                        muir_glacier_block: None,
-                        berlin_block: None,
-                        london_block: None,
-                        arrow_glacier_block: None,
-                        gray_glacier_block: None,
-                        merge_netsplit_block: None,
-                        shanghai_time: None,
-                        cancun_time: None,
-                        prague_time: None,
-                        osaka_time: None,
-                        bpo1_time: None,
-                        bpo2_time: None,
-                        bpo3_time: None,
-                        bpo4_time: None,
-                        bpo5_time: None,
-                        terminal_total_difficulty: None,
-                        terminal_total_difficulty_passed: true,
-                        ethash: None,
-                        clique: None,
-                        parlia: None,
-                        extra_fields: OtherFields::new(IrysHardforksInConfig::default().into()),
-                        deposit_contract_address: None,
-                        blob_schedule: BTreeMap::new(),
-                    },
-                    alloc: {
-                        let mut map = BTreeMap::new();
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("3f0b21c8641c8cB28A9381fEa4F619B8d11dD35c")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                // 10 billion IRYS
-                                balance: alloy_primitives::U256::from(10 * 1_000_000_000_u128)
-                                    * alloy_primitives::U256::from(1_000_000_000_000_000_000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map
-                    },
-                    nonce: 0,
-                    timestamp: 1763675936,
-                    extra_data: Default::default(),
-                    difficulty: U256::ZERO,
-                    mix_hash: B256::ZERO,
-                    coinbase: Address::ZERO,
-
-                    // should always be None
-                    base_fee_per_gas: None,
-                    excess_blob_gas: None,
-                    blob_gas_used: None,
-                    number: None,
+            // Reth config - just gas limit and allocations
+            reth: IrysRethConfig {
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                alloc: {
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        Address::from_slice(
+                            hex::decode("3f0b21c8641c8cB28A9381fEa4F619B8d11dD35c")
+                                .unwrap()
+                                .as_slice(),
+                        ),
+                        GenesisAccount {
+                            // 10 billion IRYS
+                            balance: U256::from(10 * 1_000_000_000_u128)
+                                * U256::from(1_000_000_000_000_000_000_u128),
+                            ..Default::default()
+                        },
+                    );
+                    map
                 },
             },
             genesis: GenesisConfig {
@@ -665,7 +628,6 @@ impl ConsensusConfig {
 
     pub fn testnet() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 12;
-        const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
         // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
@@ -731,74 +693,33 @@ impl ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            reth: RethChainSpec {
-                chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
-                genesis: Genesis {
-                    parent_hash: None,
-                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                    config: alloy_genesis::ChainConfig {
-                        chain_id: IRYS_TESTNET_CHAIN_ID,
-                        homestead_block: None,
-                        dao_fork_block: None,
-                        dao_fork_support: false,
-                        eip150_block: None,
-                        eip155_block: None,
-                        eip158_block: None,
-                        byzantium_block: None,
-                        constantinople_block: None,
-                        petersburg_block: None,
-                        istanbul_block: None,
-                        muir_glacier_block: None,
-                        berlin_block: None,
-                        london_block: None,
-                        arrow_glacier_block: None,
-                        gray_glacier_block: None,
-                        merge_netsplit_block: None,
-                        shanghai_time: None,
-                        cancun_time: None,
-                        prague_time: None,
-                        osaka_time: None,
-                        bpo1_time: None,
-                        bpo2_time: None,
-                        bpo3_time: None,
-                        bpo4_time: None,
-                        bpo5_time: None,
-                        terminal_total_difficulty: None,
-                        terminal_total_difficulty_passed: true,
-                        ethash: None,
-                        clique: None,
-                        parlia: None,
-                        extra_fields: OtherFields::new(IrysHardforksInConfig::default().into()),
-                        deposit_contract_address: None,
-                        blob_schedule: BTreeMap::new(),
-                    },
-                    alloc: {
-                        let mut map = BTreeMap::new();
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map
-                    },
-                    ..Default::default()
+            reth: IrysRethConfig {
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                alloc: {
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        Address::from_slice(
+                            hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                                .unwrap()
+                                .as_slice(),
+                        ),
+                        GenesisAccount {
+                            balance: U256::from(99999000000000000000000_u128),
+                            ..Default::default()
+                        },
+                    );
+                    map.insert(
+                        Address::from_slice(
+                            hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                                .unwrap()
+                                .as_slice(),
+                        ),
+                        GenesisAccount {
+                            balance: U256::from(99999000000000000000000_u128),
+                            ..Default::default()
+                        },
+                    );
+                    map
                 },
             },
             block_reward_config: BlockRewardConfig {

@@ -54,16 +54,22 @@ pub async fn get_price(
             // Get the latest EMA for pricing calculations from the canonical chain
             let tree = state.block_tree.read();
             let (canonical, _) = tree.get_canonical_chain();
-            let last_block = canonical
+            let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| ErrorBadRequest("Empty canonical chain"))?;
             let ema = tree
-                .get_ema_snapshot(&last_block.block_hash)
+                .get_ema_snapshot(&last_block_entry.block_hash)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+            // Get the actual block to access its timestamp
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| ErrorBadRequest("Block not found"))?;
+            // Convert block timestamp from millis to seconds for hardfork params
+            let latest_block_timestamp_secs = (last_block.timestamp / 1000) as u64;
             drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height
-            let tip_height = last_block.height;
+            let tip_height = last_block_entry.height;
             let next_block_height = tip_height + 1;
 
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -93,8 +99,8 @@ pub async fn get_price(
                 ema.ema_for_public_pricing()
             };
 
-            // Get hardfork params for the next block height
-            let hardfork_params = state.config.hardfork_params_at(next_block_height);
+            // Get hardfork params using the latest block's timestamp
+            let hardfork_params = state.config.hardfork_params_at(latest_block_timestamp_secs);
 
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(

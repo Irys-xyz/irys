@@ -200,7 +200,9 @@ impl<'a> ShadowTxGenerator<'a> {
             .into_iter();
 
         // Initialize publish ledger iterator with aggregated ingress proof rewards
-        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(publish_ledger, config, *block_height)?;
+        // Use parent block's timestamp for hardfork params (convert millis to seconds)
+        let parent_block_timestamp_secs = (parent_block.timestamp / 1000) as u64;
+        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(publish_ledger, config, parent_block_timestamp_secs)?;
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
             generator.create_publish_shadow_txs(aggregated_rewards)?
         } else {
@@ -292,7 +294,7 @@ impl<'a> ShadowTxGenerator<'a> {
     fn accumulate_ingress_rewards_for_init(
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
-        block_height: u64,
+        timestamp_secs: u64,
     ) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
 
@@ -308,8 +310,8 @@ impl<'a> ShadowTxGenerator<'a> {
             return Ok(BTreeMap::new());
         }
 
-        // Get hardfork params for this block height
-        let hardfork_params = config.hardforks.params_at(block_height);
+        // Get hardfork params for this timestamp
+        let hardfork_params = config.hardforks.params_at(timestamp_secs);
 
         // Process all transactions (MUST BE SORTED)
         for (index, tx) in publish_ledger.txs.iter().enumerate() {
@@ -485,7 +487,9 @@ impl<'a> ShadowTxGenerator<'a> {
         let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
 
         // Construct perm fee charges if applicable
-        let hardfork_params = self.config.hardforks.params_at(*self.block_height);
+        // Use parent block's timestamp for hardfork params (convert millis to seconds)
+        let parent_block_timestamp_secs = (self.parent_block.timestamp / 1000) as u64;
+        let hardfork_params = self.config.hardforks.params_at(parent_block_timestamp_secs);
         let perm_charges = tx
             .perm_fee
             .map(|perm_fee| PublishFeeCharges::new(perm_fee, tx.term_fee, self.config, &hardfork_params))

@@ -34,9 +34,9 @@ impl Config {
         }
     }
 
-    /// Get hardfork parameters for a given block height.
-    pub fn hardfork_params_at(&self, block_number: u64) -> HardforkParams {
-        self.0.consensus.hardforks.params_at(block_number)
+    /// Get hardfork parameters for a given timestamp (seconds since epoch).
+    pub fn hardfork_params_at(&self, timestamp: u64) -> HardforkParams {
+        self.0.consensus.hardforks.params_at(timestamp)
     }
 
     // validate configuration invariants

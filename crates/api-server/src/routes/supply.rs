@@ -76,7 +76,6 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
 
     let genesis_supply: U256 = config
         .reth
-        .genesis
         .alloc
         .values()
         .fold(U256::zero(), |acc, account| {

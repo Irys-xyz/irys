@@ -2,54 +2,27 @@
 //!
 //! ## Adding new hardforks
 //! 1. Add an entry to the `hardfork!()` macro call. This creates an enum entry.
-//! 2. Add an entry to the `IrysHardforksInConfig` struct. This is used in the chainspec (part of consensus config toml file, inlined and visible to the users)
+//! 2. Add the hardfork parameters to `IrysHardforkConfig` in `hardfork_config.rs`
 //! 3. If this hardfork maps to any Ethereum hardforks, add a corresponding entry to `ethereum_hardfork_mapping()`
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use alloy_eips::BlobScheduleBlobParams;
-use alloy_genesis::Genesis;
-use alloy_primitives::U256;
+use alloy_genesis::{ChainConfig, Genesis};
+use alloy_primitives::{Address, B256, U256};
 use reth_chainspec::{
     hardfork, make_genesis_header, BaseFeeParams, BaseFeeParamsKind, Chain, ChainHardforks,
     ChainSpec, EthereumHardfork, ForkCondition,
 };
 use reth_primitives_traits::SealedHeader;
 
+use crate::config::consensus::IrysRethConfig;
+use crate::hardfork_config::IrysHardforkConfig;
+
 hardfork!(
     #[derive(serde::Serialize, serde::Deserialize)]
     IrysHardfork { Frontier, NextNameTBD }
 );
-
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Default)]
-pub struct IrysHardforksInConfig {
-    // Frontier hardfork is always enabled by default, just like in Ethereum.
-    //
-    // Add new hardforks like this:
-    // ```rust
-    // fork_name: Option<u64>  // Block number for activation, None = disabled
-    // ````
-
-    /// Block number at which NextNameTBD activates. None means never (disabled).
-    #[serde(default)]
-    pub next_name_tbd: Option<u64>,
-}
-
-impl From<IrysHardforksInConfig> for BTreeMap<String, serde_json::Value> {
-    fn from(val: IrysHardforksInConfig) -> Self {
-        let serialized = serde_json::to_value(val)
-            .expect("IrysHardforksInConfig must serialize to a JSON object");
-
-        match serialized {
-            serde_json::Value::Object(map) => map.into_iter().collect(),
-            _ => {
-                panic!(
-                    "IrysHardforksInConfig should serialize to a JSON object so it can be stored in OtherFields"
-                );
-            }
-        }
-    }
-}
 
 /// Hardfork schedule wrapper used across Irys components.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,16 +31,20 @@ pub struct IrysChainHardforks {
 }
 
 impl IrysChainHardforks {
-    pub fn new(config: IrysHardforksInConfig) -> Self {
+    /// Create a new hardfork schedule from the Irys hardfork configuration.
+    pub fn new(config: &IrysHardforkConfig) -> Self {
         let mut hardforks = ChainHardforks::default();
         let mut forks = vec![
-            // frontier always enabled
-            (IrysHardfork::Frontier, ForkCondition::ZERO_BLOCK),
+            // frontier always enabled from timestamp 0
+            (IrysHardfork::Frontier, ForkCondition::ZERO_TIMESTAMP),
         ];
 
         // Conditionally add NextNameTBD hardfork if configured
-        if let Some(block_number) = config.next_name_tbd {
-            forks.push((IrysHardfork::NextNameTBD, ForkCondition::Block(block_number)));
+        if let Some(ref fork) = config.next_name_tbd {
+            forks.push((
+                IrysHardfork::NextNameTBD,
+                ForkCondition::Timestamp(fork.activation_timestamp),
+            ));
         }
 
         for (fork, condition) in forks {
@@ -133,52 +110,61 @@ impl IrysHardfork {
     }
 }
 
-pub fn irys_chain_spec(chain: Chain, genesis: Genesis) -> eyre::Result<Arc<ChainSpec>> {
-    // ensure that the genesis config does not contain any evm hardforks embedded inside of it.
-    // we rely on our own hardforks for managing these
-    eyre::ensure!(genesis.config.homestead_block.is_none());
-    eyre::ensure!(genesis.config.dao_fork_block.is_none());
-    eyre::ensure!(genesis.config.eip150_block.is_none());
-    eyre::ensure!(genesis.config.eip155_block.is_none());
-    eyre::ensure!(genesis.config.byzantium_block.is_none());
-    eyre::ensure!(genesis.config.constantinople_block.is_none());
-    eyre::ensure!(genesis.config.petersburg_block.is_none());
-    eyre::ensure!(genesis.config.istanbul_block.is_none());
-    eyre::ensure!(genesis.config.muir_glacier_block.is_none());
-    eyre::ensure!(genesis.config.berlin_block.is_none());
-    eyre::ensure!(genesis.config.london_block.is_none());
-    eyre::ensure!(genesis.config.arrow_glacier_block.is_none());
-    eyre::ensure!(genesis.config.gray_glacier_block.is_none());
-    eyre::ensure!(genesis.config.terminal_total_difficulty.is_none());
-    eyre::ensure!(genesis.config.merge_netsplit_block.is_none());
-    eyre::ensure!(genesis.config.merge_netsplit_block.is_none());
-    eyre::ensure!(genesis.config.shanghai_time.is_none());
-    eyre::ensure!(genesis.config.cancun_time.is_none());
-    eyre::ensure!(genesis.config.prague_time.is_none());
-
-    // as per reth docs on the Genesis struct - these fields should remain as None
-    eyre::ensure!(genesis.base_fee_per_gas.is_none());
-    eyre::ensure!(genesis.excess_blob_gas.is_none());
-    eyre::ensure!(genesis.blob_gas_used.is_none());
-    eyre::ensure!(genesis.number.is_none());
-
-    /// prune delete limit (matches Ethereum mainnet)
+/// Build a reth `ChainSpec` from Irys configuration.
+///
+/// This function constructs the full `alloy_genesis::Genesis` internally from the
+/// simplified Irys configuration, eliminating the need to expose Ethereum hardfork
+/// fields in the configuration.
+///
+/// # Arguments
+/// * `chain_id` - The blockchain network identifier
+/// * `reth_config` - Reth-specific configuration (gas limit and allocations)
+/// * `hardforks` - Irys hardfork configuration
+/// * `timestamp` - Genesis block timestamp in seconds
+pub fn irys_chain_spec(
+    chain_id: u64,
+    reth_config: &IrysRethConfig,
+    hardforks: &IrysHardforkConfig,
+    timestamp: u64,
+) -> eyre::Result<Arc<ChainSpec>> {
+    /// Prune delete limit (matches Ethereum mainnet)
     const MAINNET_PRUNE_DELETE_LIMIT: usize = 20000;
 
-    let hardforks = {
-        let hardforks = genesis
-            .config
-            .extra_fields
-            .deserialize_as::<IrysHardforksInConfig>()?;
-        IrysChainHardforks::new(hardforks)
+    // Build hardfork schedule from Irys hardfork config
+    let chain_hardforks = IrysChainHardforks::new(hardforks);
+
+    // Construct Genesis internally with sensible defaults
+    // All Ethereum hardfork fields default to None (we manage hardforks separately)
+    let genesis = Genesis {
+        config: ChainConfig {
+            chain_id,
+            // All hardfork fields default to None - Irys manages hardforks via IrysChainHardforks
+            ..Default::default()
+        },
+        gas_limit: reth_config.gas_limit,
+        alloc: reth_config.alloc.clone(),
+        timestamp,
+        nonce: 0,
+        difficulty: U256::ZERO,
+        mix_hash: B256::ZERO,
+        coinbase: Address::ZERO,
+        extra_data: Default::default(),
+        // These fields should always be None for genesis
+        base_fee_per_gas: None,
+        excess_blob_gas: None,
+        blob_gas_used: None,
+        number: None,
+        parent_hash: None,
     };
-    let genesis_header = make_genesis_header(&genesis, &hardforks.inner);
+
+    let genesis_header = make_genesis_header(&genesis, &chain_hardforks.inner);
     let header_hash = genesis_header.hash_slow();
+
     let chainspec = ChainSpec {
-        chain,
+        chain: Chain::from_id(chain_id),
         genesis,
         paris_block_and_final_difficulty: Some((0, U256::from(0))),
-        hardforks: hardforks.inner,
+        hardforks: chain_hardforks.inner,
         deposit_contract: None,
         base_fee_params: BaseFeeParamsKind::Constant(BaseFeeParams::ethereum()),
         prune_delete_limit: MAINNET_PRUNE_DELETE_LIMIT,

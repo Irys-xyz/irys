@@ -1709,9 +1709,9 @@ pub fn calculate_perm_storage_total_fee(
     term_fee: U256,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-    block_height: u64,
+    timestamp_secs: u64,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
-    let hardfork_params = config.hardfork_params_at(block_height);
+    let hardfork_params = config.hardfork_params_at(timestamp_secs);
     calculate_perm_fee_from_config(
         bytes_to_store,
         &config.consensus,
@@ -1728,9 +1728,9 @@ pub fn calculate_term_storage_base_network_fee(
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
-    block_height: u64,
+    timestamp_secs: u64,
 ) -> eyre::Result<U256> {
-    let hardfork_params = config.hardfork_params_at(block_height);
+    let hardfork_params = config.hardfork_params_at(timestamp_secs);
     irys_types::storage_pricing::calculate_term_fee(
         bytes_to_store,
         epochs_for_storage,
@@ -1841,16 +1841,18 @@ pub async fn data_txs_are_valid(
             config.consensus.epoch.submit_ledger_epoch_length,
         );
 
+        // Convert block timestamp from millis to seconds for hardfork params
+        let timestamp_secs = (block.timestamp / 1000) as u64;
         let expected_term_fee = calculate_term_storage_base_network_fee(
             tx.data_size,
             epochs_for_storage,
             &block_ema,
             config,
-            block.height,
+            timestamp_secs,
         )
         .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
         let expected_perm_fee =
-            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config, block.height)
+            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config, timestamp_secs)
                 .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
         // Validate perm_fee is at least the expected amount
@@ -1882,7 +1884,7 @@ pub async fn data_txs_are_valid(
             }
         })?;
 
-        let hardfork_params = config.hardfork_params_at(block.height);
+        let hardfork_params = config.hardfork_params_at(timestamp_secs);
         PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus, &hardfork_params).map_err(
             |e| PreValidationError::InvalidPermFeeStructure {
                 tx_id: tx.id,
@@ -2028,7 +2030,8 @@ pub async fn data_txs_are_valid(
 
             // Take the smallest value, the configured proof count or the number
             // of staked miners that can produce a valid proof.
-            let hardfork_params = config.hardfork_params_at(block.height);
+            let timestamp_secs = (block.timestamp / 1000) as u64;
+            let hardfork_params = config.hardfork_params_at(timestamp_secs);
             let proofs_per_tx = std::cmp::min(
                 hardfork_params.number_of_ingress_proofs_total as usize,
                 total_miners,
@@ -2063,7 +2066,8 @@ pub async fn data_txs_are_valid(
             )
             .await?;
 
-            let hardfork_params = config.hardfork_params_at(block.height);
+            let timestamp_secs = (block.timestamp / 1000) as u64;
+            let hardfork_params = config.hardfork_params_at(timestamp_secs);
             let mut expected_assigned_proofs =
                 hardfork_params.number_of_ingress_proofs_from_assignees as usize;
 
@@ -2299,7 +2303,8 @@ pub async fn data_txs_are_valid(
                 }
             }
 
-            let hardfork_params = config.hardfork_params_at(block.height);
+            let timestamp_secs = (block.timestamp / 1000) as u64;
+            let hardfork_params = config.hardfork_params_at(timestamp_secs);
             if tx_proofs.len() != hardfork_params.number_of_ingress_proofs_total as usize {
                 return Err(PreValidationError::IngressProofCountMismatch {
                     expected: hardfork_params.number_of_ingress_proofs_total as usize,

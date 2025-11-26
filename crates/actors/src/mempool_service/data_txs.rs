@@ -290,15 +290,22 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        // Get the authoritative EMA pricing from canonical tip
-        let ema_snapshot = {
+        // Get the authoritative EMA pricing and latest block timestamp from canonical tip
+        let (ema_snapshot, latest_block_timestamp_secs) = {
             let tree = self.block_tree_read_guard.read();
             let (canonical, _) = tree.get_canonical_chain();
-            let last_block = canonical
+            let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
-            tree.get_ema_snapshot(&last_block.block_hash)
-                .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?
+            let ema = tree
+                .get_ema_snapshot(&last_block_entry.block_hash)
+                .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?;
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
+            // Convert block timestamp from millis to seconds
+            let timestamp_secs = (last_block.timestamp / 1000) as u64;
+            (ema, timestamp_secs)
         };
 
         let pricing_ema = ema_snapshot.ema_for_public_pricing();
@@ -312,7 +319,8 @@ impl Inner {
             self.config.consensus.epoch.submit_ledger_epoch_length,
         );
 
-        let hardfork_params = self.config.hardfork_params_at(next_block_height);
+        // Use latest block's timestamp for hardfork params
+        let hardfork_params = self.config.hardfork_params_at(latest_block_timestamp_secs);
         let expected_term_fee = calculate_term_fee(
             tx.data_size,
             epochs_for_storage,
@@ -477,9 +485,19 @@ impl Inner {
             |e| TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e)),
         )?;
 
-        // Use current height + 1 as the target block for fee structure validation
-        let next_block_height = self.get_latest_block_height().unwrap_or(0) + 1;
-        let hardfork_params = self.config.hardfork_params_at(next_block_height);
+        // Get latest block's timestamp for hardfork params
+        let latest_block_timestamp_secs = {
+            let tree = self.block_tree_read_guard.read();
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block_entry = canonical
+                .last()
+                .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
+            (last_block.timestamp / 1000) as u64
+        };
+        let hardfork_params = self.config.hardfork_params_at(latest_block_timestamp_secs);
         PublishFeeCharges::new(
             actual_perm_fee,
             actual_term_fee,

@@ -40,13 +40,13 @@ impl Default for HardforkParams {
 /// number_of_ingress_proofs_total = 10
 /// number_of_ingress_proofs_from_assignees = 0
 ///
-/// # Optional: Enable next hardfork at a specific block
+/// # Optional: Enable next hardfork at a specific timestamp (seconds since epoch)
 /// [consensus.hardforks.next_name_tbd]
-/// activation_block = 1000000
+/// activation_timestamp = 1735689600
 /// number_of_ingress_proofs_total = 4
 /// number_of_ingress_proofs_from_assignees = 2
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IrysHardforkConfig {
     /// Frontier parameters (always active from genesis)
     #[serde(default)]
@@ -55,15 +55,6 @@ pub struct IrysHardforkConfig {
     /// NextNameTBD hardfork - None means disabled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_name_tbd: Option<ForkActivation>,
-}
-
-impl Default for IrysHardforkConfig {
-    fn default() -> Self {
-        Self {
-            frontier: FrontierParams::default(),
-            next_name_tbd: None,
-        }
-    }
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -98,8 +89,8 @@ fn default_proofs_total() -> u64 {
 /// When this fork activates, the contained parameters take effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkActivation {
-    /// Block number at which this hardfork activates
-    pub activation_block: u64,
+    /// Timestamp (seconds since epoch) at which this hardfork activates
+    pub activation_timestamp: u64,
 
     /// Number of total ingress proofs required
     pub number_of_ingress_proofs_total: u64,
@@ -109,14 +100,14 @@ pub struct ForkActivation {
 }
 
 impl IrysHardforkConfig {
-    /// Get hardfork parameters at a specific block height.
+    /// Get hardfork parameters at a specific timestamp.
     ///
     /// This checks hardforks from newest to oldest, returning parameters
     /// for the most recent active hardfork.
-    pub fn params_at(&self, block_number: u64) -> HardforkParams {
+    pub fn params_at(&self, timestamp: u64) -> HardforkParams {
         // Check newest fork first
         if let Some(ref fork) = self.next_name_tbd {
-            if block_number >= fork.activation_block {
+            if timestamp >= fork.activation_timestamp {
                 return HardforkParams {
                     number_of_ingress_proofs_total: fork.number_of_ingress_proofs_total,
                     number_of_ingress_proofs_from_assignees: fork
@@ -134,16 +125,16 @@ impl IrysHardforkConfig {
         }
     }
 
-    /// Check if the NextNameTBD hardfork is active at a block.
-    pub fn is_next_name_tbd_active(&self, block_number: u64) -> bool {
+    /// Check if the NextNameTBD hardfork is active at a given timestamp.
+    pub fn is_next_name_tbd_active(&self, timestamp: u64) -> bool {
         self.next_name_tbd
             .as_ref()
-            .is_some_and(|f| block_number >= f.activation_block)
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
     }
 
-    /// Get the activation block for NextNameTBD hardfork, if configured.
-    pub fn next_name_tbd_activation_block(&self) -> Option<u64> {
-        self.next_name_tbd.as_ref().map(|f| f.activation_block)
+    /// Get the activation timestamp for NextNameTBD hardfork, if configured.
+    pub fn next_name_tbd_activation_timestamp(&self) -> Option<u64> {
+        self.next_name_tbd.as_ref().map(|f| f.activation_timestamp)
     }
 }
 
@@ -174,7 +165,7 @@ mod tests {
         assert_eq!(params.number_of_ingress_proofs_total, 5);
         assert_eq!(params.number_of_ingress_proofs_from_assignees, 2);
 
-        // Same params at any block since no next fork
+        // Same params at any timestamp since no next fork
         let params = config.params_at(1_000_000);
         assert_eq!(params.number_of_ingress_proofs_total, 5);
     }
@@ -187,25 +178,25 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 0,
             },
             next_name_tbd: Some(ForkActivation {
-                activation_block: 1000,
+                activation_timestamp: 1000,
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
         };
 
-        // Before activation
+        // Before activation timestamp
         let params = config.params_at(999);
         assert_eq!(params.number_of_ingress_proofs_total, 10);
         assert_eq!(params.number_of_ingress_proofs_from_assignees, 0);
         assert!(!config.is_next_name_tbd_active(999));
 
-        // At activation
+        // At activation timestamp
         let params = config.params_at(1000);
         assert_eq!(params.number_of_ingress_proofs_total, 4);
         assert_eq!(params.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.is_next_name_tbd_active(1000));
 
-        // After activation
+        // After activation timestamp
         let params = config.params_at(1001);
         assert_eq!(params.number_of_ingress_proofs_total, 4);
         assert_eq!(params.number_of_ingress_proofs_from_assignees, 2);
@@ -219,7 +210,7 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 0,
             },
             next_name_tbd: Some(ForkActivation {
-                activation_block: 5000,
+                activation_timestamp: 5000,
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),

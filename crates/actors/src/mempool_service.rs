@@ -539,6 +539,7 @@ impl Inner {
             commitment_snapshot,
             epoch_snapshot,
             ema_snapshot,
+            block_timestamp_secs,
         ) = {
             let tree = self.block_tree_read_guard.read();
 
@@ -560,6 +561,8 @@ impl Inner {
             // Extract only the data we need before the tree guard is dropped
             let block_height = block.height;
             let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
+            // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
+            let block_timestamp_secs = (block.timestamp / 1000) as u64;
 
             let ema_snapshot = tree
                 .get_ema_snapshot(&parent_block_hash)
@@ -584,11 +587,14 @@ impl Inner {
                 commitment_snapshot,
                 epoch_snapshot,
                 ema_snapshot,
+                block_timestamp_secs,
             )
         };
 
         let current_height = parent_block_height;
         let next_block_height = parent_block_height + 1;
+        // Use parent block's timestamp for hardfork params (seconds since epoch)
+        let current_timestamp = block_timestamp_secs;
         let min_anchor_height = current_height.saturating_sub(
             (self.config.consensus.mempool.tx_anchor_expiry_depth as u64)
                 .saturating_sub(self.config.consensus.block_migration_depth as u64),
@@ -790,6 +796,7 @@ impl Inner {
                         tx.data_size,
                         &ema_snapshot,
                         next_block_height,
+                        current_timestamp,
                     ) else {
                         debug!(
                             tx.id = ?tx.id,
@@ -803,7 +810,7 @@ impl Inner {
                         tx.data_size,
                         expected_term_fee,
                         &ema_snapshot,
-                        next_block_height,
+                        current_timestamp,
                     ) else {
                         debug!(
                             tx.id = ?tx.id,
@@ -857,7 +864,7 @@ impl Inner {
                         continue;
                     }
 
-                    let hardfork_params = self.config.hardfork_params_at(next_block_height);
+                    let hardfork_params = self.config.hardfork_params_at(current_timestamp);
                     if PublishFeeCharges::new(
                         perm_fee,
                         tx.term_fee,
@@ -938,7 +945,7 @@ impl Inner {
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
         let publish_txs_and_proofs = self
-            .get_publish_txs_and_proofs(&canonical, &submit_tx, current_height)
+            .get_publish_txs_and_proofs(&canonical, &submit_tx, current_height, current_timestamp)
             .await?;
 
         // Calculate total fees and log final summary
@@ -999,6 +1006,7 @@ impl Inner {
         canonical: &[BlockTreeEntry],
         submit_tx: &[DataTransactionHeader],
         current_height: u64,
+        current_timestamp: u64,
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
@@ -1139,7 +1147,7 @@ impl Inner {
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
-                let hardfork_params = self.config.hardfork_params_at(current_height);
+                let hardfork_params = self.config.hardfork_params_at(current_timestamp);
                 let proofs_per_tx = std::cmp::min(
                     hardfork_params.number_of_ingress_proofs_total as usize,
                     total_miners,
@@ -1566,11 +1574,11 @@ impl Inner {
         bytes_to_store: u64,
         term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
-        block_height: u64,
+        timestamp_secs: u64,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
         let total_perm_fee =
-            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config, block_height)
+            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config, timestamp_secs)
                 .map_err(TxIngressError::other_display)?;
 
         Ok(total_perm_fee)
@@ -1584,6 +1592,7 @@ impl Inner {
         bytes_to_store: u64,
         ema: &Arc<irys_domain::EmaSnapshot>,
         block_height: u64,
+        timestamp: u64,
     ) -> Result<U256, TxIngressError> {
         // Calculate expires for the specified block height using the shared utility
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -1593,7 +1602,7 @@ impl Inner {
         );
 
         // Calculate term fee using the storage pricing module
-        let hardfork_params = self.config.hardfork_params_at(block_height);
+        let hardfork_params = self.config.hardfork_params_at(timestamp);
         calculate_term_fee(
             bytes_to_store,
             epochs_for_storage,
