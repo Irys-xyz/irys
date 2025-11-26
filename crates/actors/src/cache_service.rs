@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use crate::ingress_proofs::{
     generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
 };
@@ -20,6 +19,7 @@ use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
+use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
@@ -65,15 +65,24 @@ impl IngressProofGenerationState {
     }
 
     pub fn mark_generating(&self, data_root: DataRoot) -> bool {
-        self.inner.write().expect("expected to acquire a lock for an ingress proof generation state").insert(data_root)
+        self.inner
+            .write()
+            .expect("expected to acquire a lock for an ingress proof generation state")
+            .insert(data_root)
     }
 
     pub fn unmark_generating(&self, data_root: DataRoot) {
-        self.inner.write().expect("expected to acquire a lock for an ingress proof generation state").remove(&data_root);
+        self.inner
+            .write()
+            .expect("expected to acquire a lock for an ingress proof generation state")
+            .remove(&data_root);
     }
 
     pub fn is_generating(&self, data_root: DataRoot) -> bool {
-        self.inner.read().expect("expected to acquire a lock for an ingress proof generation state").contains(&data_root)
+        self.inner
+            .read()
+            .expect("expected to acquire a lock for an ingress proof generation state")
+            .contains(&data_root)
     }
 }
 
@@ -87,6 +96,7 @@ pub struct InnerCacheTask {
     pub config: Config,
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub ingress_proof_generation_state: IngressProofGenerationState,
+    pub cache_sender: CacheServiceSender,
 }
 
 impl InnerCacheTask {
@@ -395,6 +405,7 @@ impl InnerCacheTask {
                     &signer,
                     proof,
                     &self.gossip_broadcast,
+                    &self.cache_sender,
                 ) {
                     warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
                 }
@@ -418,6 +429,7 @@ impl InnerCacheTask {
                     proof.data_root,
                     None,
                     &self.gossip_broadcast,
+                    &self.cache_sender,
                 ) {
                     warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
                 }
@@ -442,18 +454,28 @@ impl InnerCacheTask {
         Ok(())
     }
 
-    fn spawn_pruning_task(&self, migration_height: u64, response_sender: Option<oneshot::Sender<eyre::Result<()>>>) {
+    fn spawn_pruning_task(
+        &self,
+        migration_height: u64,
+        response_sender: Option<oneshot::Sender<eyre::Result<()>>>,
+    ) {
         let clone = self.clone();
         std::thread::spawn(move || {
             let res = clone.prune_cache(migration_height);
-            let Some(sender) = response_sender else { return };
+            let Some(sender) = response_sender else {
+                return;
+            };
             if let Err(error) = sender.send(res) {
                 warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
             }
         });
     }
 
-    fn spawn_epoch_processing(&self, epoch_snapshot: Arc<EpochSnapshot>, response_sender: Option<oneshot::Sender<eyre::Result<()>>>) {
+    fn spawn_epoch_processing(
+        &self,
+        epoch_snapshot: Arc<EpochSnapshot>,
+        response_sender: Option<oneshot::Sender<eyre::Result<()>>>,
+    ) {
         let clone = self.clone();
         std::thread::spawn(move || {
             let res = clone.on_epoch_processed(epoch_snapshot);
@@ -472,7 +494,7 @@ pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
 pub struct ChunkCacheService {
     pub msg_rx: UnboundedReceiver<CacheServiceAction>,
     pub shutdown: Shutdown,
-    pub cache_task: InnerCacheTask
+    pub cache_task: InnerCacheTask,
 }
 
 impl ChunkCacheService {
@@ -502,6 +524,7 @@ impl ChunkCacheService {
         rx: UnboundedReceiver<CacheServiceAction>,
         config: Config,
         gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+        cache_sender: CacheServiceSender,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning chunk cache service");
@@ -519,7 +542,8 @@ impl ChunkCacheService {
                     config,
                     gossip_broadcast,
                     ingress_proof_generation_state: IngressProofGenerationState::new(),
-                }
+                    cache_sender,
+                },
             };
             cache_service
                 .start()
@@ -582,13 +606,18 @@ impl ChunkCacheService {
                 self.cache_task.spawn_pruning_task(migration_height, sender);
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
-                self.cache_task.spawn_epoch_processing(epoch_snapshot, sender);
+                self.cache_task
+                    .spawn_epoch_processing(epoch_snapshot, sender);
             }
             CacheServiceAction::NotifyProofGenerationStarted(data_root) => {
-                self.cache_task.ingress_proof_generation_state.mark_generating(data_root);
+                self.cache_task
+                    .ingress_proof_generation_state
+                    .mark_generating(data_root);
             }
             CacheServiceAction::NotifyProofGenerationCompleted(data_root) => {
-                self.cache_task.ingress_proof_generation_state.unmark_generating(data_root);
+                self.cache_task
+                    .ingress_proof_generation_state
+                    .unmark_generating(data_root);
             }
         }
     }
@@ -661,7 +690,7 @@ mod tests {
             RwLock::new(block_index),
         ));
 
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
             msg_rx: rx,
@@ -673,7 +702,8 @@ mod tests {
                 config: config.clone(),
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
-            }
+                cache_sender: tx,
+            },
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
@@ -739,7 +769,7 @@ mod tests {
             RwLock::new(block_index),
         ));
 
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
             msg_rx: rx,
@@ -751,7 +781,8 @@ mod tests {
                 config: config.clone(),
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
-            }
+                cache_sender: tx,
+            },
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
