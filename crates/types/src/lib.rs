@@ -8,6 +8,8 @@ pub mod block;
 pub mod block_production;
 pub mod chainspec;
 pub mod chunk;
+pub mod hardfork_config;
+pub mod hardfork_params;
 pub mod chunked;
 pub mod commitment;
 pub mod config;
@@ -56,6 +58,7 @@ pub use transaction::*;
 pub use tx_source::*;
 
 pub use alloy_primitives::{Address, Signature};
+pub use hardfork_params::HardforkParams;
 pub use app_state::*;
 pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;

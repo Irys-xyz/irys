@@ -312,10 +312,12 @@ impl Inner {
             self.config.consensus.epoch.submit_ledger_epoch_length,
         );
 
+        let hardfork_params = self.config.hardfork_params_at(next_block_height);
         let expected_term_fee = calculate_term_fee(
             tx.data_size,
             epochs_for_storage,
             &self.config.consensus,
+            &hardfork_params,
             pricing_ema,
         )
         .map_err(|e| {
@@ -347,6 +349,7 @@ impl Inner {
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
+                &hardfork_params,
                 pricing_ema,
                 expected_term_fee,
             )
@@ -474,10 +477,14 @@ impl Inner {
             |e| TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e)),
         )?;
 
+        // Use current height + 1 as the target block for fee structure validation
+        let next_block_height = self.get_latest_block_height().unwrap_or(0) + 1;
+        let hardfork_params = self.config.hardfork_params_at(next_block_height);
         PublishFeeCharges::new(
             actual_perm_fee,
             actual_term_fee,
             &self.config.node_config.consensus_config(),
+            &hardfork_params,
         )
         .map_err(|e| {
             TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))

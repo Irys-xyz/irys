@@ -18,17 +18,21 @@ use reth_primitives_traits::SealedHeader;
 
 hardfork!(
     #[derive(serde::Serialize, serde::Deserialize)]
-    IrysHardfork { Frontier }
+    IrysHardfork { Frontier, NextNameTBD }
 );
 
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct IrysHardforksInConfig {
     // Frontier hardfork is always enabled by default, just like in Ethereum.
     //
     // Add new hardforks like this:
     // ```rust
-    // ForkName: ForkCondition
+    // fork_name: Option<u64>  // Block number for activation, None = disabled
     // ````
+
+    /// Block number at which NextNameTBD activates. None means never (disabled).
+    #[serde(default)]
+    pub next_name_tbd: Option<u64>,
 }
 
 impl From<IrysHardforksInConfig> for BTreeMap<String, serde_json::Value> {
@@ -54,15 +58,17 @@ pub struct IrysChainHardforks {
 }
 
 impl IrysChainHardforks {
-    pub fn new(_config: IrysHardforksInConfig) -> Self {
+    pub fn new(config: IrysHardforksInConfig) -> Self {
         let mut hardforks = ChainHardforks::default();
-        let forks = vec![
+        let mut forks = vec![
             // frontier always enabled
             (IrysHardfork::Frontier, ForkCondition::ZERO_BLOCK),
         ];
 
-        // todo: once we have new hardforks, add them conditionally by reading the `config: IrysHardforksInConfig` variable
-        // and append them to the vec of `forks`
+        // Conditionally add NextNameTBD hardfork if configured
+        if let Some(block_number) = config.next_name_tbd {
+            forks.push((IrysHardfork::NextNameTBD, ForkCondition::Block(block_number)));
+        }
 
         for (fork, condition) in forks {
             hardforks.insert(fork, condition);
@@ -121,6 +127,8 @@ impl IrysHardfork {
                 (EthereumHardfork::Cancun, ForkCondition::ZERO_TIMESTAMP),
                 (EthereumHardfork::Prague, ForkCondition::ZERO_TIMESTAMP),
             ],
+            // NextNameTBD doesn't add any new Ethereum hardforks
+            Self::NextNameTBD => &[],
         }
     }
 }

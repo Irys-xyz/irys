@@ -97,8 +97,6 @@ num_chunks_in_partition = 51872000
 num_chunks_in_recall_range = 800
 num_partitions_per_slot = 1
 entropy_packing_iterations = 1000
-number_of_ingress_proofs_total = 1
-number_of_ingress_proofs_from_assignees = 0
 # Target storage duration in years
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
@@ -170,3 +168,14 @@ submit_ledger_epoch_length = 5
 
 [consensus.Custom.ema]
 price_adjustment_interval = 10
+
+# Hardfork configuration - values for each hardfork
+[consensus.Custom.hardforks.frontier]
+number_of_ingress_proofs_total = 1
+number_of_ingress_proofs_from_assignees = 0
+
+# To enable the next hardfork at a specific block, uncomment:
+# [consensus.Custom.hardforks.next_name_tbd]
+# activation_block = 1000000
+# number_of_ingress_proofs_total = 4
+# number_of_ingress_proofs_from_assignees = 2

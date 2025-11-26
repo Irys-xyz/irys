@@ -93,11 +93,15 @@ pub async fn get_price(
                 ema.ema_for_public_pricing()
             };
 
+            // Get hardfork params for the next block height
+            let hardfork_params = state.config.hardfork_params_at(next_block_height);
+
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
                 &state.config.consensus,
+                &hardfork_params,
                 pricing_ema,
             )
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
@@ -107,13 +111,14 @@ pub async fn get_price(
                 bytes_to_store,
                 term_fee,
                 state.config.consensus.immediate_tx_inclusion_reward_percent.amount,
-                state.config.consensus.number_of_ingress_proofs_total
+                hardfork_params.number_of_ingress_proofs_total
             );
 
             // If the cost calculation fails, return 400 with the error text
             let total_perm_cost = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &state.config.consensus,
+                &hardfork_params,
                 pricing_ema,
                 term_fee,
             )

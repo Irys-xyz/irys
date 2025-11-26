@@ -20,15 +20,15 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
             consensus.chunk_size = 32;
             // Set the total number of proofs required to promote above the number of nodes (3)
             // to validate the clamping to 3 proofs to promote.
-            consensus.number_of_ingress_proofs_total = 5;
-            consensus.number_of_ingress_proofs_from_assignees = 2;
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 5;
+            consensus.hardforks.frontier.number_of_ingress_proofs_from_assignees = 2;
             consensus.num_partitions_per_slot = 3;
             consensus.epoch.num_blocks_in_epoch = 3;
             consensus.block_migration_depth = 1;
         })
         .with_genesis_peer_discovery_timeout(1000);
 
-    config.consensus.get_mut().number_of_ingress_proofs_total = 3;
+    config.consensus.get_mut().hardforks.frontier.number_of_ingress_proofs_total = 3;
     config.consensus.get_mut().chunk_size = 32;
 
     // Create a signer (keypair) for the peer and fund it

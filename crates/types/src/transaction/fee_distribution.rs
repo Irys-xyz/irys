@@ -163,6 +163,7 @@ impl PublishFeeCharges {
         perm_fee: BoundedFee,
         term_fee: BoundedFee,
         config: &ConsensusConfig,
+        hardfork_params: &crate::hardfork_params::HardforkParams,
     ) -> eyre::Result<Self> {
         // Extract U256 for calculations - BoundedFee ensures inputs are validated
         let perm_fee_amount = perm_fee.get();
@@ -176,8 +177,8 @@ impl PublishFeeCharges {
         )
         .unwrap_or(U256::from(0));
 
-        // Number of ingress proofs required from config
-        let num_ingress_proofs = config.number_of_ingress_proofs_total;
+        // Number of ingress proofs required from hardfork params
+        let num_ingress_proofs = hardfork_params.number_of_ingress_proofs_total;
 
         // Calculate total ingress rewards for all proofs
         let ingress_proof_reward =
@@ -280,6 +281,7 @@ impl PublishFeeCharges {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardfork_params::HardforkParams;
     use crate::storage_pricing::phantoms::Percentage;
     use crate::storage_pricing::Amount;
     use rust_decimal_macros::dec;
@@ -408,12 +410,15 @@ mod tests {
         // Set ingress proof fee to 5%
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        config.number_of_ingress_proofs_total = 3;
+        let hardfork_params = HardforkParams {
+            number_of_ingress_proofs_total: 3,
+            number_of_ingress_proofs_from_assignees: 0,
+        };
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(10000_u64);
 
-        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
+        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config, &hardfork_params).unwrap();
 
         // Total ingress reward should be 3 * (5% of term_fee) = 3 * 50 = 150
         assert_eq!(charges.ingress_proof_reward, U256::from(150));
@@ -436,10 +441,11 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        let hardfork_params = HardforkParams::default();
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(10000_u64);
-        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
+        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config, &hardfork_params).unwrap();
 
         // Create some test ingress proofs
         let signer1 = IrysSigner::random_signer(&config);
@@ -494,12 +500,15 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        config.number_of_ingress_proofs_total = 3;
+        let hardfork_params = HardforkParams {
+            number_of_ingress_proofs_total: 3,
+            number_of_ingress_proofs_from_assignees: 0,
+        };
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(100_u64); // Too small to cover ingress rewards (150)
 
-        let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
+        let result = PublishFeeCharges::new(perm_fee, term_fee, &config, &hardfork_params);
 
         // Should fail with insufficient fee error
         assert!(result.is_err());
@@ -514,13 +523,16 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        config.number_of_ingress_proofs_total = 3;
+        let hardfork_params = HardforkParams {
+            number_of_ingress_proofs_total: 3,
+            number_of_ingress_proofs_from_assignees: 0,
+        };
 
         let term_fee = BoundedFee::from(1000_u64);
         // Exactly equal to ingress rewards (150), no base storage cost
         let perm_fee = BoundedFee::from(150_u64);
 
-        let result = PublishFeeCharges::new(perm_fee, term_fee, &config);
+        let result = PublishFeeCharges::new(perm_fee, term_fee, &config, &hardfork_params);
 
         // Should fail because there's no base storage cost
         assert!(result.is_err());
@@ -538,10 +550,11 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
+        let hardfork_params = HardforkParams::default();
 
         let term_fee = BoundedFee::from(1003_u64); // Not evenly divisible
         let perm_fee = BoundedFee::from(10000_u64);
-        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
+        let charges = PublishFeeCharges::new(perm_fee, term_fee, &config, &hardfork_params).unwrap();
 
         // Create 3 test ingress proofs
         let signers: Vec<_> = (0..3).map(|_| IrysSigner::random_signer(&config)).collect();

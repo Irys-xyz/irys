@@ -466,10 +466,12 @@ impl IrysNode {
 
         let reth_chain_spec = irys_chain_spec(reth_consensus_config.chain, reth_genesis)?;
 
+        // Get hardfork params for genesis block (block 0)
+        let genesis_hardfork_params = self.config.hardfork_params_at(0);
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
-            self.config.consensus.number_of_ingress_proofs_total,
+            genesis_hardfork_params.number_of_ingress_proofs_total,
         );
 
         // Generate genesis commitments from configuration

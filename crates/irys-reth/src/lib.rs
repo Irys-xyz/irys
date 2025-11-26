@@ -58,7 +58,6 @@ use crate::{
     payload_service_builder::IyrsPayloadServiceBuilder,
 };
 
-pub mod chainspec;
 pub mod engine;
 pub mod evm;
 pub mod payload;
@@ -67,7 +66,7 @@ pub mod payload_service_builder;
 pub mod shadow_tx;
 pub mod validator;
 
-pub use chainspec::{IrysChainHardforks, IrysHardfork};
+pub use irys_types::chainspec::{IrysChainHardforks, IrysHardfork};
 pub use engine::{IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 pub use validator::{IrysEngineValidator, IrysEngineValidatorBuilder};

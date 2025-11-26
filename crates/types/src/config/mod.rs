@@ -7,6 +7,7 @@ pub mod node;
 pub use consensus::*;
 pub use node::*;
 
+use crate::hardfork_config::HardforkParams;
 use crate::irys::IrysSigner;
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
@@ -31,6 +32,11 @@ impl Config {
             chain_id: self.consensus.chain_id,
             chunk_size: self.consensus.chunk_size,
         }
+    }
+
+    /// Get hardfork parameters for a given block height.
+    pub fn hardfork_params_at(&self, block_number: u64) -> HardforkParams {
+        self.0.consensus.hardforks.params_at(block_number)
     }
 
     // validate configuration invariants
@@ -444,8 +450,6 @@ mod tests {
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
-        number_of_ingress_proofs_total = 1
-        number_of_ingress_proofs_from_assignees = 0
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
         pledge_base_value = 950.0

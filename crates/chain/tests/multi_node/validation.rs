@@ -398,7 +398,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
             consensus.block_migration_depth = 1;
             consensus.mempool.tx_anchor_expiry_depth = 3;
             consensus.mempool.ingress_proof_anchor_expiry_depth = 5;
-            consensus.number_of_ingress_proofs_total = 1;
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
         })
         .with_genesis_peer_discovery_timeout(1000);
 

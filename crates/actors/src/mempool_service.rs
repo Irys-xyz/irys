@@ -803,6 +803,7 @@ impl Inner {
                         tx.data_size,
                         expected_term_fee,
                         &ema_snapshot,
+                        next_block_height,
                     ) else {
                         debug!(
                             tx.id = ?tx.id,
@@ -856,10 +857,12 @@ impl Inner {
                         continue;
                     }
 
+                    let hardfork_params = self.config.hardfork_params_at(next_block_height);
                     if PublishFeeCharges::new(
                         perm_fee,
                         tx.term_fee,
                         &self.config.node_config.consensus_config(),
+                        &hardfork_params,
                     )
                     .is_err()
                     {
@@ -1136,8 +1139,9 @@ impl Inner {
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
+                let hardfork_params = self.config.hardfork_params_at(current_height);
                 let proofs_per_tx = std::cmp::min(
-                    self.config.consensus.number_of_ingress_proofs_total as usize,
+                    hardfork_params.number_of_ingress_proofs_total as usize,
                     total_miners,
                 );
 
@@ -1190,9 +1194,7 @@ impl Inner {
 
                 // Calculate expected assigned proofs, clamping to available miners
                 let mut expected_assigned_proofs =
-                    self.config
-                        .consensus
-                        .number_of_ingress_proofs_from_assignees as usize;
+                    hardfork_params.number_of_ingress_proofs_from_assignees as usize;
 
                 if assigned_miners < expected_assigned_proofs {
                     warn!(
@@ -1231,7 +1233,7 @@ impl Inner {
                 // First, add assigned proofs up to the total network limit
                 // Use all available assigned proofs, but don't exceed the network total
                 let total_network_limit =
-                    self.config.consensus.number_of_ingress_proofs_total as usize;
+                    hardfork_params.number_of_ingress_proofs_total as usize;
                 let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
                 final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
 
@@ -1244,13 +1246,13 @@ impl Inner {
 
                 // Final check - do we have enough total proofs?
                 if final_proofs.len()
-                    < self.config.consensus.number_of_ingress_proofs_total as usize
+                    < hardfork_params.number_of_ingress_proofs_total as usize
                 {
                     info!(
                             "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
                             &tx_header.id,
                             final_proofs.len(),
-                            self.config.consensus.number_of_ingress_proofs_total
+                            hardfork_params.number_of_ingress_proofs_total
                         );
                     continue;
                 }
@@ -1564,10 +1566,11 @@ impl Inner {
         bytes_to_store: u64,
         term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
+        block_height: u64,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
         let total_perm_fee =
-            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config)
+            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config, block_height)
                 .map_err(TxIngressError::other_display)?;
 
         Ok(total_perm_fee)
@@ -1590,10 +1593,12 @@ impl Inner {
         );
 
         // Calculate term fee using the storage pricing module
+        let hardfork_params = self.config.hardfork_params_at(block_height);
         calculate_term_fee(
             bytes_to_store,
             epochs_for_storage,
             &self.config.consensus,
+            &hardfork_params,
             ema.ema_for_public_pricing(),
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
