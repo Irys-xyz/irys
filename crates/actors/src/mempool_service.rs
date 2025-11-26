@@ -1113,21 +1113,17 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = self.irys_db.view_eyre(|read_tx| {
-                    ingress_proofs_by_data_root(read_tx, tx_header.data_root)
-                })?.into_iter().filter(|(root, cached_proof)| {
-                    match self.is_ingress_proof_expired(&cached_proof.proof) {
-                        Ok(removed) => !removed,
-                        Err(e) => {
-                            warn!(
-                                "Failed to validate ingress proof anchor for data root {:?} of tx {}: {}",
-                                root, &tx_header.id, e
-                            );
-                            // Errored when removing the proof, filtering out
-                            false
-                        }
-                    }
-                }).collect::<Vec<_>>();
+                let all_proofs = self
+                    .irys_db
+                    .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
+                    .into_iter()
+                    .filter(|(_root, cached_proof)| {
+                        let expired = self
+                            .is_ingress_proof_expired(&cached_proof.proof)
+                            .expired_or_invalid;
+                        !expired
+                    })
+                    .collect::<Vec<_>>();
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1614,6 +1610,15 @@ impl Inner {
             .get_stake_and_pledge_whitelist_cloned()
             .await
     }
+}
+
+/// Promotion readiness evaluation outcomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionStatus {
+    AlreadyPromoted,
+    MissingSubmitInclusion,
+    InsufficientProofs,
+    Ready,
 }
 
 /// Mempool state. All methods on this structure are quick utility methods. No function acquires

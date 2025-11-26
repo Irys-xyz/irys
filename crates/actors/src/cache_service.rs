@@ -1,11 +1,18 @@
+use crate::ingress_proofs::{
+    generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
+};
+use crate::mempool_service::Inner;
+use irys_database::{cached_data_root_by_data_root, tx_header_by_txid};
 use irys_database::{
     db::IrysDatabaseExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
+use irys_types::ingress::CachedIngressProof;
 use irys_types::{
-    Config, DataLedger, DatabaseProvider, LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
+    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
@@ -17,11 +24,15 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, info, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _};
+
+pub const REGENERATE_PROOFS: bool = true;
 
 /// Maximum evictions per invocation to prevent blocking the service.
 /// If this limit is reached, eviction will continue in the next cycle.
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
+/// Maximum ingress proofs to scan per pruning invocation.
+const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -42,6 +53,7 @@ pub struct ChunkCacheService {
     pub db: DatabaseProvider,
     pub msg_rx: UnboundedReceiver<CacheServiceAction>,
     pub shutdown: Shutdown,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
 }
 
 impl ChunkCacheService {
@@ -70,6 +82,7 @@ impl ChunkCacheService {
         db: DatabaseProvider,
         rx: UnboundedReceiver<CacheServiceAction>,
         config: Config,
+        gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning chunk cache service");
@@ -84,6 +97,7 @@ impl ChunkCacheService {
                 db,
                 config,
                 msg_rx: rx,
+                gossip_broadcast,
             };
             cache_service
                 .start()
@@ -277,6 +291,8 @@ impl ChunkCacheService {
             debug!("Cache within size limits, no eviction needed");
         }
 
+        // Proof expiry/regeneration (single authority)
+        self.prune_ingress_proofs()?;
         Ok(())
     }
 
@@ -347,6 +363,165 @@ impl ChunkCacheService {
         }
         debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
         write_tx.commit()?;
+
+        Ok(())
+    }
+
+    /// Scans ingress proofs with capacity-aware deletion and regeneration:
+    /// - (a) Promoted + expired: delete
+    /// - (b) Unpromoted + expired + at capacity: delete
+    /// - (c) Unpromoted + expired + under capacity + local author: regenerate
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn prune_ingress_proofs(&self) -> eyre::Result<()> {
+        let signer = self.config.irys_signer();
+        let local_addr = signer.address();
+        let tx = self.db.tx()?;
+        let mut cursor = tx.cursor_read::<IngressProofs>()?;
+        // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
+        // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
+        let mut walker = cursor.walk(None)?;
+        let mut to_delete: Vec<DataRoot> = Vec::new();
+        let mut to_reanchor: Vec<IngressProof> = Vec::new();
+        let mut to_regen: Vec<IngressProof> = Vec::new();
+        let mut processed = 0_usize;
+        let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
+
+        // Determine if cache is at capacity based on the CachedChunks table
+        let (chunk_count, chunk_cache_size) =
+            get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+        let at_capacity = chunk_cache_size >= *max_cache_size_bytes;
+        debug!(
+            "Cache is {} at capacity - capacity: {}B, size {}B ({} chunks)",
+            if at_capacity { "" } else { "not" },
+            &max_cache_size_bytes,
+            chunk_cache_size,
+            &chunk_count
+        );
+
+        while let Some((data_root, compact)) = walker.next().transpose()? {
+            if processed >= MAX_PROOF_CHECKS_PER_RUN {
+                break;
+            }
+            processed += 1;
+            let CachedIngressProof { address, proof } = compact.0;
+            let check_result = Inner::is_ingress_proof_expired_static(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                &proof,
+            );
+            if !check_result.expired_or_invalid {
+                continue;
+            }
+            // Associated txids
+            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
+                debug!(ingress_proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
+                continue;
+            };
+            let mut any_unpromoted = false;
+            for txid in cached_data_root.txid_set.iter() {
+                if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
+                    if tx_header.promoted_height.is_none() {
+                        any_unpromoted = true;
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                        break;
+                    }
+                }
+            }
+
+            let is_locally_produced = address == local_addr;
+
+            if at_capacity {
+                // Unpromoted + expired + at capacity: delete
+                to_delete.push(data_root);
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+            } else if is_locally_produced && any_unpromoted {
+                match check_result.regeneration_action {
+                    RegenAction::Reanchor => {
+                        to_reanchor.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for reanchoring");
+                    }
+                    RegenAction::Regenerate => {
+                        to_regen.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
+                    }
+                    RegenAction::DoNotRegenerate => {
+                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.", &data_root);
+                    }
+                }
+            } else {
+                // Not local + expired: delete
+                to_delete.push(data_root);
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (promoted)");
+            }
+        }
+
+        // Delete expired proofs using a proper removal function
+        if !to_delete.is_empty() {
+            for root in to_delete.iter() {
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
+                    warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+                }
+            }
+            info!(
+                proofs.deleted = to_delete.len(),
+                "Deleted expired ingress proofs"
+            );
+        }
+
+        // Regenerate local expired proofs (only when under capacity)
+        for proof in to_reanchor.iter() {
+            if REGENERATE_PROOFS {
+                if let Err(e) = reanchor_and_store_ingress_proof(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    &signer,
+                    proof,
+                    &self.gossip_broadcast,
+                ) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                }
+            } else {
+                debug!(
+                    ingress_proof.data_root = ?proof.data_root,
+                    "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
+                );
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
+                }
+            }
+        }
+
+        for proof in to_regen.iter() {
+            if REGENERATE_PROOFS {
+                if let Err(report) = generate_and_store_ingress_proof(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    proof.data_root,
+                    None,
+                    &self.gossip_broadcast,
+                ) {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
+                }
+            } else {
+                debug!(
+                    ingress_proof.data_root = ?proof.data_root,
+                    "Regeneration disabled, removing ingress proof for data root"
+                );
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+                }
+            }
+        }
+
+        if !to_reanchor.is_empty() {
+            info!(
+                proofs.regenerated = to_reanchor.len(),
+                "Reanchored expired local ingress proofs (under capacity)"
+            );
+        }
 
         Ok(())
     }
@@ -428,6 +603,7 @@ mod tests {
             db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
@@ -502,6 +678,7 @@ mod tests {
             db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
@@ -518,11 +695,93 @@ mod tests {
     }
 
     // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    async fn setup_test_service_with_size(size: u64) -> eyre::Result<ChunkCacheService> {
+        let mut node_config = NodeConfig::testing();
+        node_config.cache.max_cache_size_bytes = size;
+        let config = Config::new(node_config);
+
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config)
+            .await
+            .wrap_err("failed to build BlockIndex for test")?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        Ok(ChunkCacheService {
+            config: config.clone(),
+            block_index_guard,
+            block_tree_guard,
+            db: db.clone(),
+            msg_rx: rx,
+            shutdown: shutdown_rx,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+        })
+    }
+
+    fn insert_entry_with_timestamp(
+        service: &ChunkCacheService,
+        timestamp: irys_types::UnixTimestamp,
+    ) -> eyre::Result<DataRoot> {
+        use rand::Rng as _;
+
+        let mut rng = rand::thread_rng();
+        let random_bytes: [u8; 32] = rng.gen();
+        let data_root = DataRoot::from(random_bytes);
+
+        service.db.update(|wtx| {
+            let cached = irys_database::db_cache::CachedDataRoot {
+                data_size: 1024, // 1 KB
+                data_size_confirmed: true,
+                txid_set: vec![],
+                block_set: vec![],
+                expiry_height: None,
+                cached_at: timestamp,
+            };
+            wtx.put::<CachedDataRoots>(data_root, cached)?;
+            eyre::Ok(())
+        })??;
+
+        Ok(data_root)
+    }
+
+    #[expect(dead_code)]
+    fn get_cache_entry_count(service: &ChunkCacheService) -> eyre::Result<usize> {
+        service
+            .db
+            .view_eyre(|tx| Ok(tx.entries::<CachedDataRoots>()?))
+    }
+
+    #[expect(dead_code)]
+    fn cache_contains(service: &ChunkCacheService, root: DataRoot) -> eyre::Result<bool> {
+        service
+            .db
+            .view_eyre(|tx| Ok(tx.get::<CachedDataRoots>(root)?.is_some()))
+    }
+
+    // ========================================================================
     // FIFO Ordering Property Tests
     // ========================================================================
 
     #[cfg(test)]
     mod fifo_properties {
+        use super::*;
         use irys_types::UnixTimestamp;
         use proptest::prelude::*;
 
