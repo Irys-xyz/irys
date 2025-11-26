@@ -2580,8 +2580,8 @@ pub mod test_utils {
     use alloy_primitives::{FixedBytes, Signature, B256};
     use alloy_primitives::{TxKind, U256};
     use alloy_rpc_types::engine::PayloadAttributes;
-    use reth_payload_primitives::PayloadBuilderAttributes as _;
     use reth::providers::CanonStateSubscriptions;
+    use reth_payload_primitives::PayloadBuilderAttributes as _;
 
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;

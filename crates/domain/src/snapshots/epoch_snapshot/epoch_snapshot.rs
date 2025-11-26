@@ -1593,7 +1593,7 @@ mod tests {
             let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
 
             // First application succeeds
-            snapshot.apply_unpledges(&[tx.clone()]).unwrap();
+            snapshot.apply_unpledges(std::slice::from_ref(&tx)).unwrap();
 
             // Second application errors (target not found anymore)
             let res = snapshot.apply_unpledges(&[tx]);

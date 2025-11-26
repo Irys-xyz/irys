@@ -182,7 +182,8 @@ mod tests {
 
         // fake the tx_path
         // Create a tx_root (and paths) from the tx
-        let (_tx_root, proofs) = DataTransactionLedger::merklize_tx_root(&[tx.header.clone()]);
+        let (_tx_root, proofs) =
+            DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
 
         let tx_path = &proofs[0].proof;
 
