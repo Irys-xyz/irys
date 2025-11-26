@@ -1,5 +1,5 @@
 //! A basic Ethereum payload builder implementation.
-//! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/payload/src/lib.rs#L53
+//! Original impl: https://github.com/Irys-xyz/reth-irys/blob/6c892d38bfcd6689c618386bd7ccc6fde7fbb64e/crates/ethereum/payload/src/lib.rs?plain=1#L1
 
 use crate::IrysPayloadBuilderAttributes;
 use alloy_consensus::Transaction as _;

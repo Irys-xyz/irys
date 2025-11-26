@@ -562,7 +562,6 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         - (current_height % num_blocks_in_epoch_u64))
         % num_blocks_in_epoch_u64;
     if blocks_until_boundary > 0 {
-        tracing::error!(?blocks_until_boundary, "mining new blocks");
         genesis_node
             .mine_blocks(blocks_until_boundary as usize)
             .await?;

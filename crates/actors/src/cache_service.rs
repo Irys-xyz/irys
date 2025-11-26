@@ -695,93 +695,12 @@ mod tests {
     }
 
     // ========================================================================
-    // Test Helpers
-    // ========================================================================
-
-    async fn setup_test_service_with_size(size: u64) -> eyre::Result<ChunkCacheService> {
-        let mut node_config = NodeConfig::testing();
-        node_config.cache.max_cache_size_bytes = size;
-        let config = Config::new(node_config);
-
-        let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
-            IrysTables::ALL,
-            None,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
-
-        let genesis_block = IrysBlockHeader::new_mock_header();
-        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
-        let block_tree_guard =
-            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config)
-            .await
-            .wrap_err("failed to build BlockIndex for test")?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
-
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-
-        Ok(ChunkCacheService {
-            config: config.clone(),
-            block_index_guard,
-            block_tree_guard,
-            db: db.clone(),
-            msg_rx: rx,
-            shutdown: shutdown_rx,
-            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
-        })
-    }
-
-    fn insert_entry_with_timestamp(
-        service: &ChunkCacheService,
-        timestamp: irys_types::UnixTimestamp,
-    ) -> eyre::Result<DataRoot> {
-        use rand::Rng as _;
-
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 32] = rng.gen();
-        let data_root = DataRoot::from(random_bytes);
-
-        service.db.update(|wtx| {
-            let cached = irys_database::db_cache::CachedDataRoot {
-                data_size: 1024, // 1 KB
-                data_size_confirmed: true,
-                txid_set: vec![],
-                block_set: vec![],
-                expiry_height: None,
-                cached_at: timestamp,
-            };
-            wtx.put::<CachedDataRoots>(data_root, cached)?;
-            eyre::Ok(())
-        })??;
-
-        Ok(data_root)
-    }
-
-    #[expect(dead_code)]
-    fn get_cache_entry_count(service: &ChunkCacheService) -> eyre::Result<usize> {
-        service
-            .db
-            .view_eyre(|tx| Ok(tx.entries::<CachedDataRoots>()?))
-    }
-
-    #[expect(dead_code)]
-    fn cache_contains(service: &ChunkCacheService, root: DataRoot) -> eyre::Result<bool> {
-        service
-            .db
-            .view_eyre(|tx| Ok(tx.get::<CachedDataRoots>(root)?.is_some()))
-    }
-
-    // ========================================================================
     // FIFO Ordering Property Tests
     // ========================================================================
 
     #[cfg(test)]
     mod fifo_properties {
-        use super::*;
+
         use irys_types::UnixTimestamp;
         use proptest::prelude::*;
 
