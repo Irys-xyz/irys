@@ -42,6 +42,12 @@ pub enum CacheServiceAction {
         Arc<EpochSnapshot>,
         Option<oneshot::Sender<eyre::Result<()>>>,
     ),
+    /// Marks the start of ingress proof generation for the specified data root. Chunks that are
+    /// related to this data root should not be pruned if the ingress proof is still being generated.
+    NotifyProofGenerationStarted(DataRoot),
+    /// Send this when ingress proof generation is completed and the proof has been persisted to the
+    /// db. Chunks related to this data root can now be pruned if needed.
+    NotifyProofGenerationCompleted(DataRoot),
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
@@ -58,15 +64,15 @@ impl IngressProofGenerationState {
         }
     }
 
-    pub async fn mark_generating(&self, data_root: DataRoot) -> bool {
+    pub fn mark_generating(&self, data_root: DataRoot) -> bool {
         self.inner.write().expect("expected to acquire a lock for an ingress proof generation state").insert(data_root)
     }
 
-    pub async fn unmark_generating(&self, data_root: DataRoot) {
+    pub fn unmark_generating(&self, data_root: DataRoot) {
         self.inner.write().expect("expected to acquire a lock for an ingress proof generation state").remove(&data_root);
     }
 
-    pub async fn is_generating(&self, data_root: DataRoot) -> bool {
+    pub fn is_generating(&self, data_root: DataRoot) -> bool {
         self.inner.read().expect("expected to acquire a lock for an ingress proof generation state").contains(&data_root)
     }
 }
@@ -577,6 +583,12 @@ impl ChunkCacheService {
             }
             CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
                 self.cache_task.spawn_epoch_processing(epoch_snapshot, sender);
+            }
+            CacheServiceAction::NotifyProofGenerationStarted(data_root) => {
+                self.cache_task.ingress_proof_generation_state.mark_generating(data_root);
+            }
+            CacheServiceAction::NotifyProofGenerationCompleted(data_root) => {
+                self.cache_task.ingress_proof_generation_state.unmark_generating(data_root);
             }
         }
     }
