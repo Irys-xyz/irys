@@ -1,8 +1,4 @@
 //! Configurable hardfork parameters.
-//!
-//! This module defines hardfork parameters that are fully configurable via TOML.
-//! Each network (mainnet, testnet, devnet) can define its own parameter values
-//! without requiring code changes.
 
 use serde::{Deserialize, Serialize};
 

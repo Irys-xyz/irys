@@ -28,10 +28,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
-    /// Unique identifier for the blockchain network (single source of truth)
+    /// Unique identifier for the blockchain network
     pub chain_id: u64,
 
-    /// Reth-specific configuration (gas limit and allocations only)
+    /// Reth-specific configuration
     pub reth: IrysRethConfig,
 
     /// Settings for the transaction memory pool
@@ -105,7 +105,6 @@ pub struct ConsensusConfig {
     pub ema: EmaConfig,
 
     /// Hardfork configuration with parameters for each fork.
-    /// All hardfork parameters are configurable via TOML.
     pub hardforks: IrysHardforkConfig,
 
     /// Enable full ingress proof verification against actual chunks during block validation.
@@ -479,7 +478,7 @@ impl ConsensusConfig {
                 // The number of seconds in each emission half life, determines inflation curve
                 half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
-            // Reth config - just gas limit and allocations
+            // Reth config
             reth: IrysRethConfig {
                 gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
                 alloc: {

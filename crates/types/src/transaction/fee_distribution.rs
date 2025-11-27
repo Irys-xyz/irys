@@ -163,7 +163,7 @@ impl PublishFeeCharges {
         perm_fee: BoundedFee,
         term_fee: BoundedFee,
         config: &ConsensusConfig,
-        number_of_ingress_proofs_total: u64,
+        num_ingress_proofs: u64,
     ) -> eyre::Result<Self> {
         // Extract U256 for calculations - BoundedFee ensures inputs are validated
         let perm_fee_amount = perm_fee.get();
@@ -174,11 +174,7 @@ impl PublishFeeCharges {
             term_fee_amount,
             config.immediate_tx_inclusion_reward_percent.amount,
             PRECISION_SCALE,
-        )
-        .unwrap_or(U256::from(0));
-
-        // Number of ingress proofs required
-        let num_ingress_proofs = number_of_ingress_proofs_total;
+        )?;
 
         // Calculate total ingress rewards for all proofs
         let ingress_proof_reward =

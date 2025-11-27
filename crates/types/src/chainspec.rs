@@ -114,16 +114,6 @@ impl IrysHardfork {
 }
 
 /// Build a reth `ChainSpec` from Irys configuration.
-///
-/// This function constructs the full `alloy_genesis::Genesis` internally from the
-/// simplified Irys configuration, eliminating the need to expose Ethereum hardfork
-/// fields in the configuration.
-///
-/// # Arguments
-/// * `chain_id` - The blockchain network identifier
-/// * `reth_config` - Reth-specific configuration (gas limit and allocations)
-/// * `hardforks` - Irys hardfork configuration
-/// * `timestamp` - Genesis block timestamp in seconds
 pub fn irys_chain_spec(
     chain_id: u64,
     reth_config: &IrysRethConfig,

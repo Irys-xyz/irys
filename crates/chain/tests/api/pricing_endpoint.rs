@@ -624,7 +624,6 @@ async fn verify_pricing_uses_ema(
     block_description: &str,
 ) -> eyre::Result<()> {
     // Calculate expected fees using the provided EMA
-    // Use hardfork params from actual config to match API behavior
     let number_of_ingress_proofs_total = ctx.node_ctx.config.number_of_ingress_proofs_total_at(0);
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
