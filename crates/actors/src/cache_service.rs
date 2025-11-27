@@ -638,6 +638,13 @@ impl ChunkCacheService {
     /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
     #[tracing::instrument(level = "trace", skip_all)]
     fn on_handle_message(&mut self, msg: CacheServiceAction) {
+        debug!(
+            queue.pruning_running = ?self.pruning_running,
+            queue.pruning_queued = ?self.pruning_queue.len(),
+            queue.epoch_running = ?self.epoch_running,
+            queue.epoch_queued = ?self.epoch_queue.len(),
+            "CacheService received message: {:?}", msg
+        );
         match msg {
             CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
                 // Enqueue pruning; start if idle
