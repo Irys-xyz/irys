@@ -1,8 +1,7 @@
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,
-    IrysNodeTest,
+    assert_validation_error, gossip_data_tx_to_node, read_block_from_state, solution_context,
+    BlockValidationOutcome, IrysNodeTest,
 };
-use crate::validation::unpledge_partition::gossip_data_tx_to_node;
 use irys_actors::{
     async_trait,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
