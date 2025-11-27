@@ -1,5 +1,6 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_types::{NodeConfig, H256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -73,7 +74,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
-        ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
+        ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>, BlockTransactions)>>
+        {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,
@@ -119,7 +121,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         }
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -194,7 +196,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     let prod = ProductionStrategy {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
-    let (block, _adjustment_stats, _eth_payload) = prod
+    let (block, _adjustment_stats, _transactions, _eth_payload) = prod
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();

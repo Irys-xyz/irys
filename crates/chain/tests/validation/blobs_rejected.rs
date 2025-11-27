@@ -48,7 +48,7 @@ async fn produce_block(
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (block, _adjustment_stats, eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("no block produced"))?;

@@ -1353,6 +1353,7 @@ impl IrysNode {
             config.clone(),
             service_senders.clone(),
             chain_sync_tx.clone(),
+            mempool_guard.clone(),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)

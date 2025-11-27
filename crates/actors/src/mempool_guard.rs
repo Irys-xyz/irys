@@ -14,6 +14,17 @@ impl MempoolReadGuard {
         Self { mempool_state }
     }
 
+    /// Creates an empty `MempoolReadGuard` for testing purposes
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn stub() -> Self {
+        use crate::mempool_service::create_state;
+        use irys_types::MempoolConfig;
+
+        let config = MempoolConfig::testing();
+        let state = create_state(&config, &[]);
+        Self::new(AtomicMempoolState::new(state))
+    }
+
     /// Get specific commitment transactions by their IDs from the mempool
     ///
     /// This searches both:

@@ -66,6 +66,18 @@ pub enum AnchorItemType {
     SystemTransaction { tx_id: H256 },
 }
 
+/// Transactions for a block, organized by ledger type.
+/// Used to pass pre-fetched transactions to block discovery.
+#[derive(Debug, Clone, Default)]
+pub struct BlockTransactions {
+    /// Submit ledger transactions
+    pub submit_txs: Vec<DataTransactionHeader>,
+    /// Publish ledger transactions
+    pub publish_txs: Vec<DataTransactionHeader>,
+    /// Commitment ledger transactions
+    pub commitment_txs: Vec<CommitmentTransaction>,
+}
+
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
     fn from(err: BlockDiscoveryInternalError) -> Self {
         Self::InternalError(err)
@@ -93,6 +105,7 @@ pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError>;
 }
@@ -113,15 +126,17 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(BlockDiscoveryMessage::BlockDiscovered(
+            .send(BlockDiscoveryMessage::BlockDiscovered {
                 block,
+                transactions,
                 skip_vdf,
-                Some(tx),
-            ))
+                response: Some(tx),
+            })
             .map_err(BlockDiscoveryInternalError::SenderError)?;
 
         rx.await.map_err(BlockDiscoveryInternalError::RecvError)?
@@ -225,15 +240,20 @@ impl BlockDiscoveryService {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
-            BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
-                let block_hash = irys_block_header.block_hash;
-                let block_height = irys_block_header.height;
+            BlockDiscoveryMessage::BlockDiscovered {
+                block,
+                transactions,
+                skip_vdf,
+                response,
+            } => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
                 let result = self
                     .inner
                     .clone()
-                    .block_discovered(irys_block_header, skip_vdf)
+                    .block_discovered(block, transactions, skip_vdf)
                     .await;
-                if let Some(sender) = sender {
+                if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
                         tracing::error!(
                             "Block discovery sender error for block {} (height {}): {:?}",
@@ -251,13 +271,13 @@ impl BlockDiscoveryService {
 }
 
 #[derive(Debug)]
-
 pub enum BlockDiscoveryMessage {
-    BlockDiscovered(
-        Arc<IrysBlockHeader>,
-        bool,
-        Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
-    ),
+    BlockDiscovered {
+        block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
+        skip_vdf: bool,
+        response: Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
+    },
 }
 
 impl BlockDiscoveryServiceInner {
@@ -265,6 +285,7 @@ impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -299,7 +320,7 @@ impl BlockDiscoveryServiceInner {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
-        let mempool = self.service_senders.mempool.clone();
+        let _mempool = self.service_senders.mempool.clone();
         let mempool_config = self.config.consensus.mempool.clone();
 
         let previous_block_header = {
@@ -347,24 +368,8 @@ impl BlockDiscoveryServiceInner {
 
         let submit_tx_ids_to_check = submit_ledger.tx_ids.0.clone();
 
-        let (tx, rx) = oneshot::channel();
-        mempool
-            .send(MempoolServiceMessage::GetDataTxs(submit_tx_ids_to_check.clone(), tx).into())
-            .map_err(|channel_error| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-            })?;
-
-        let submit_txs = rx
-            .await
-            .map_err(|e| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                    "Mempool response error: {}",
-                    e
-                ))
-            })?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
+        // Use provided submit transactions directly
+        let submit_txs = transactions.submit_txs;
 
         if submit_txs.len() != submit_tx_ids_to_check.len() {
             return Err(BlockDiscoveryError::MissingTransactions(
@@ -396,24 +401,8 @@ impl BlockDiscoveryServiceInner {
 
         let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
 
-        let (tx, rx) = oneshot::channel();
-        mempool
-            .send(MempoolServiceMessage::GetDataTxs(publish_tx_ids_to_check.clone(), tx).into())
-            .map_err(|channel_error| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-            })?;
-
-        let publish_txs = rx
-            .await
-            .map_err(|e| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                    "Mempool response error: {}",
-                    e
-                ))
-            })?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
+        // Use provided publish transactions directly
+        let publish_txs = transactions.publish_txs;
 
         if publish_txs.len() != publish_tx_ids_to_check.len() {
             let missing_txs = publish_tx_ids_to_check
@@ -453,40 +442,34 @@ impl BlockDiscoveryServiceInner {
             .iter()
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-        // Validate commitments transactions exist (if there are commitment txids in the block)
-        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-        if let Some(commitment_ledger) = commitment_ledger {
+        // Use provided commitment transactions directly
+        let commitments: Vec<CommitmentTransaction> = if let Some(commitment_ledger) =
+            commitment_ledger
+        {
             debug!(
                 "incoming block commitment txids, height {} hash {}\n{:#?}",
                 new_block_header.height, new_block_header.block_hash, commitment_ledger
             );
-            // TODO: we can't get these from the database
-            // if we can, something has gone wrong!
-            match get_commitment_tx_in_parallel(
-                &commitment_ledger.tx_ids.0,
-                &self.mempool_guard,
-                &db,
-            )
-            .await
-            {
-                Ok(tx) => {
-                    commitments = tx;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to collect commitment transactions for block {} (height {}): {:?}. Missing {} tx(s): {:?}",
-                        new_block_header.block_hash,
-                        new_block_header.height,
-                        e,
-                        commitment_ledger.tx_ids.0.len(),
-                        commitment_ledger.tx_ids.0
-                    );
-                    return Err(BlockDiscoveryError::MissingTransactions(
-                        commitment_ledger.tx_ids.0.clone(),
-                    ));
-                }
+
+            let expected_ids: std::collections::HashSet<_> =
+                commitment_ledger.tx_ids.0.iter().copied().collect();
+
+            if transactions.commitment_txs.len() != expected_ids.len() {
+                error!(
+                    "Missing commitment transactions for block {} (height {}): expected {}, got {}",
+                    new_block_header.block_hash,
+                    new_block_header.height,
+                    expected_ids.len(),
+                    transactions.commitment_txs.len()
+                );
+                return Err(BlockDiscoveryError::MissingTransactions(
+                    commitment_ledger.tx_ids.0.clone(),
+                ));
             }
-        }
+            transactions.commitment_txs
+        } else {
+            Vec::new()
+        };
 
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",

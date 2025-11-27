@@ -2,7 +2,10 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::block_discovery::{
+    get_commitment_tx_in_parallel, get_data_tx_in_parallel, BlockDiscoveryFacade, BlockTransactions,
+};
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, TxIngressError};
@@ -14,12 +17,12 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
-use crate::block_pool::FailureReason::FailedToSendCachedTransactionToMempool;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
+use irys_database::SystemLedger;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError,
+    BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, H256,
+    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -123,6 +126,8 @@ where
 
     config: Config,
     service_senders: ServiceSenders,
+    /// Read guard for mempool state, used to query commitment transactions.
+    mempool_guard: MempoolReadGuard,
 }
 
 #[derive(Clone, Debug)]
@@ -169,7 +174,6 @@ impl Display for BlockRemovalReason {
 pub(crate) enum FailureReason {
     ParentIsAPartOfAPrunedFork,
     WasNotAbleToFetchRethPayload,
-    FailedToSendCachedTransactionToMempool,
     BlockPrevalidationFailed,
     FailedToPull(GossipError),
 }
@@ -182,9 +186,6 @@ impl Display for FailureReason {
             }
             Self::WasNotAbleToFetchRethPayload => {
                 write!(f, "Was not able to fetch Reth execution payload")
-            }
-            Self::FailedToSendCachedTransactionToMempool => {
-                write!(f, "Failed to send cached transaction to mempool")
             }
             Self::BlockPrevalidationFailed => {
                 write!(f, "Block prevalidation failed")
@@ -387,6 +388,7 @@ where
         execution_payload_provider: ExecutionPayloadCache,
         config: Config,
         service_senders: ServiceSenders,
+        mempool_guard: MempoolReadGuard,
     ) -> Self {
         Self {
             db,
@@ -399,6 +401,7 @@ where
             execution_payload_provider,
             config,
             service_senders,
+            mempool_guard,
         }
     }
 
@@ -787,88 +790,72 @@ where
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
-        // Send cached transactions (if any) to the mempool before handling the block
+        // Take cached transactions for this block
         let cached_txs = self
             .blocks_cache
             .take_txs_for_block(&block_header.block_hash)
             .await;
-        if !cached_txs.is_empty() {
-            debug!(
-                "Block pool: Sending {} cached txs for block {:?} to mempool",
-                cached_txs.len(),
-                current_block_hash
-            );
-        } else {
-            debug!(
-                "Block pool: No cached txs for block {:?} to send to mempool",
-                current_block_hash
-            );
-        }
 
-        for tx in cached_txs {
-            match tx {
-                IrysTransactionResponse::Commitment(commitment_tx) => {
-                    let id = commitment_tx.id;
-                    if let Err(err) = self
-                        .mempool
-                        .handle_commitment_transaction_ingress_gossip(commitment_tx)
-                        .await
-                    {
-                        if !matches!(err, TxIngressError::Skipped) {
-                            warn!(
-                                "Block pool: Failed to send commitment tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
-                                &id, &current_block_hash, err
-                            );
-                            self.blocks_cache
-                                .remove_block(
-                                    &block_header.block_hash,
-                                    BlockRemovalReason::FailedToProcess(
-                                        FailureReason::FailedToSendCachedTransactionToMempool,
-                                    ),
-                                )
-                                .await;
-                            return Err(CriticalBlockPoolError::TransactionValidationFailed(
-                                current_block_hash,
-                                err,
-                            )
-                            .into());
-                        }
-                    }
+        // Build BlockTransactions from cached transactions and query mempool+DB for missing
+        let block_transactions = self
+            .build_block_transactions(&block_header, cached_txs)
+            .await
+            .map_err(|e| {
+                BlockPoolError::Critical(CriticalBlockPoolError::MempoolError(e.to_string()))
+            })?;
+
+        debug!(
+            "Block pool: Built BlockTransactions for block {:?} with {} submit, {} publish, {} commitment txs",
+            current_block_hash,
+            block_transactions.submit_txs.len(),
+            block_transactions.publish_txs.len(),
+            block_transactions.commitment_txs.len()
+        );
+
+        // Insert transactions into mempool so validation service can find them later.
+        // This is critical because validation service fetches transactions from mempool/DB.
+        for commitment_tx in &block_transactions.commitment_txs {
+            if let Err(err) = self
+                .mempool
+                .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
+                .await
+            {
+                // Only warn on non-skip errors (skip means tx already exists)
+                if !matches!(err, TxIngressError::Skipped) {
+                    warn!(
+                        "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
+                        commitment_tx.id, current_block_hash, err
+                    );
                 }
-                IrysTransactionResponse::Storage(storage_tx) => {
-                    let id = storage_tx.id;
-                    if let Err(err) = self
-                        .mempool
-                        .handle_data_transaction_ingress_gossip(storage_tx)
-                        .await
-                    {
-                        if !matches!(err, TxIngressError::Skipped) {
-                            warn!(
-                                "Block pool: Failed to send storage tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
-                                &id, current_block_hash, err
-                            );
-                            self.blocks_cache
-                                .remove_block(
-                                    &block_header.block_hash,
-                                    BlockRemovalReason::FailedToProcess(
-                                        FailedToSendCachedTransactionToMempool,
-                                    ),
-                                )
-                                .await;
-                            return Err(CriticalBlockPoolError::TransactionValidationFailed(
-                                current_block_hash,
-                                err,
-                            )
-                            .into());
-                        }
-                    }
+            }
+        }
+        for data_tx in block_transactions
+            .submit_txs
+            .iter()
+            .chain(block_transactions.publish_txs.iter())
+        {
+            if let Err(err) = self
+                .mempool
+                .handle_data_transaction_ingress_gossip(data_tx.clone())
+                .await
+            {
+                // Only warn on non-skip errors (skip means tx already exists)
+                if !matches!(err, TxIngressError::Skipped) {
+                    warn!(
+                        "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
+                        data_tx.id, current_block_hash, err
+                    );
                 }
             }
         }
 
         if let Err(block_discovery_error) = self
             .block_discovery
-            .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+            .handle_block(
+                Arc::clone(&block_header),
+                block_transactions,
+                skip_validation_for_fast_track,
+            )
             .await
         {
             error!(
@@ -1193,6 +1180,129 @@ where
         tx: IrysTransactionResponse,
     ) {
         self.blocks_cache.add_tx_for_block(block_hash, tx).await;
+    }
+
+    /// Build BlockTransactions from cached transactions and query mempool+DB for missing ones.
+    /// Separates transactions into submit, publish, and commitment based on block header ledgers.
+    /// IMPORTANT: Transactions are returned in the exact order specified in the block header,
+    /// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+    async fn build_block_transactions(
+        &self,
+        block: &IrysBlockHeader,
+        cached_txs: Vec<IrysTransactionResponse>,
+    ) -> eyre::Result<BlockTransactions> {
+        use std::collections::HashMap;
+
+        // Extract required IDs from block header (preserving order)
+        let submit_ids: Vec<H256> = block
+            .data_ledgers
+            .get(DataLedger::Submit as usize)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        let publish_ids: Vec<H256> = block
+            .data_ledgers
+            .get(DataLedger::Publish as usize)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        let commitment_ids: Vec<H256> = block
+            .system_ledgers
+            .iter()
+            .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        // Create sets for quick lookup
+        let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
+        let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
+
+        // Collect cached transactions into maps by ID
+        let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
+        let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
+        let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
+
+        for tx in cached_txs {
+            match tx {
+                IrysTransactionResponse::Storage(data_tx) => {
+                    if submit_ids_set.contains(&data_tx.id) {
+                        submit_txs_map.insert(data_tx.id, data_tx);
+                    } else if publish_ids_set.contains(&data_tx.id) {
+                        publish_txs_map.insert(data_tx.id, data_tx);
+                    }
+                }
+                IrysTransactionResponse::Commitment(commitment_tx) => {
+                    commitment_txs_map.insert(commitment_tx.id, commitment_tx);
+                }
+            }
+        }
+
+        // Query missing data transactions (submit + publish)
+        let missing_data_ids: Vec<H256> = submit_ids
+            .iter()
+            .chain(publish_ids.iter())
+            .filter(|id| !submit_txs_map.contains_key(id) && !publish_txs_map.contains_key(id))
+            .copied()
+            .collect();
+
+        if !missing_data_ids.is_empty() {
+            let fetched = get_data_tx_in_parallel(
+                missing_data_ids,
+                &self.service_senders.mempool,
+                &self.db,
+            )
+            .await?;
+
+            for tx in fetched {
+                if submit_ids_set.contains(&tx.id) {
+                    submit_txs_map.insert(tx.id, tx);
+                } else if publish_ids_set.contains(&tx.id) {
+                    publish_txs_map.insert(tx.id, tx);
+                }
+            }
+        }
+
+        // Query missing commitment transactions
+        let missing_commitment_ids: Vec<H256> = commitment_ids
+            .iter()
+            .filter(|id| !commitment_txs_map.contains_key(id))
+            .copied()
+            .collect();
+
+        if !missing_commitment_ids.is_empty() {
+            let fetched = get_commitment_tx_in_parallel(
+                &missing_commitment_ids,
+                &self.mempool_guard,
+                &self.db,
+            )
+            .await?;
+
+            for tx in fetched {
+                commitment_txs_map.insert(tx.id, tx);
+            }
+        }
+
+        // Build final vectors in the exact order specified by block header
+        let submit_txs: Vec<_> = submit_ids
+            .iter()
+            .filter_map(|id| submit_txs_map.remove(id))
+            .collect();
+
+        let publish_txs: Vec<_> = publish_ids
+            .iter()
+            .filter_map(|id| publish_txs_map.remove(id))
+            .collect();
+
+        let commitment_txs: Vec<_> = commitment_ids
+            .iter()
+            .filter_map(|id| commitment_txs_map.remove(id))
+            .collect();
+
+        Ok(BlockTransactions {
+            submit_txs,
+            publish_txs,
+            commitment_txs,
+        })
     }
 }
 

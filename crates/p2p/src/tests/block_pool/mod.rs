@@ -8,6 +8,7 @@ use crate::tests::util::{
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
 use futures::{future, FutureExt as _};
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -250,6 +251,7 @@ async fn should_process_block() {
         execution_payload_provider.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
@@ -370,6 +372,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         execution_payload_provider.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     ));
 
     let data_handler = data_handler_stub(
@@ -550,6 +553,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         execution_payload_provider.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     ));
 
     let data_handler = data_handler_with_stubbed_pool(
@@ -681,6 +685,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         execution_payload_provider,
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
@@ -786,6 +791,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         execution_payload_provider.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     ));
 
     let api_client_stub = MockApiClient {
@@ -941,6 +947,7 @@ async fn should_not_fast_track_block_already_in_index() {
         execution_payload_provider.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     );
 
     let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);

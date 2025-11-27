@@ -530,7 +530,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, _) = block_prod_strategy
+    let (block, _, transactions, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -539,7 +539,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
     // dbg!(&preval_res);
@@ -563,7 +563,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, _) = block_prod_strategy
+    let (block, _, transactions, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -572,7 +572,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
     // dbg!(&preval_res);
@@ -599,7 +599,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, _) = block_prod_strategy
+    let (block, _, transactions, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -608,7 +608,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
     // dbg!(&preval_res);
