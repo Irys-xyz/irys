@@ -8,13 +8,11 @@ use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    mempool_service::MempoolServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
+    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta, shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_types::CommitmentType;
-use irys_types::{CommitmentTransaction, DataTransactionHeader, NodeConfig, U256};
-use tokio::sync::oneshot;
+use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
 async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {

@@ -2451,42 +2451,8 @@ async fn commitment_tx_valid_higher_fee_test(
     Ok(())
 }
 
-/// Test mempool validates pledge transaction fees and values correctly
 #[rstest::rstest]
-// #[case::invalid_fee_less_than_required(
-//     0_u64, // pledge count
-//     |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
-//         tx.fee = required_fee / 2; // 50 instead of 100
-//     },
-// )]
-// #[case::invalid_fee_zero(
-//     0_u64, // pledge count
-//     |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
-//         tx.fee = 0;
-//     },
-// )]
-// #[case::invalid_value_too_low(
-//     0_u64, // pledge count
-//     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
-//         let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
-//         tx.value = expected / irys_types::U256::from(2); // Half the expected value
-//     },
-// )]
-// #[case::invalid_value_too_high(
-//     1_u64, // pledge count
-//     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
-//         let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
-//         tx.value = expected * irys_types::U256::from(2); // Double the expected value
-//     },
-// )]
-// #[case::invalid_value_wrong_count(
-//     2_u64, // pledge count
-//     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
-//         // Set value that would be correct for pledge count 0, but we're using count 2
-//         tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
-//     },
-// )]
-#[case::stake_enough_balance(irys_types::U256::from(20000000000000000000100_u128), 1, 0)]
+#[case::stake_enough_balance(irys_types::U256::from(20000000000000000000100_u128 /* stake cost */), 1, 0)]
 #[case::stake_not_enough_balance(irys_types::U256::from(0), 0, 0)]
 #[case::pledge_15_enough_balance_for_1(
     irys_types::U256::from(20000000000000000000100_u128 /*stake cost*/ + 950000000000000000100_u128 /* pledge 1 */  ),
@@ -2516,7 +2482,6 @@ async fn commitment_tx_cumulative_fee_validation_test(
     let signer = genesis_config.new_random_signer();
     let rich_signer = genesis_config.new_random_signer();
 
-    // genesis_config.fund_genesis_accounts(vec![&signer]);
     genesis_config.consensus.extend_genesis_accounts([
         (
             signer.address(),
@@ -2673,11 +2638,6 @@ async fn commitment_tx_cumulative_fee_validation_test(
         .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
         .map(|ledger| HashSet::from_iter(ledger.tx_ids.0.iter().copied()))
         .unwrap_or_else(HashSet::new);
-
-    info!(
-        "JESSEDEBUG {:?} {:?} {:?} {:?} {:?}",
-        &diff1, &block_tx_ids, &first_block_commitments, &block3_tx_ids, &third_block_commitments
-    );
 
     assert!(block3_tx_ids
         .difference(&third_block_commitments)
