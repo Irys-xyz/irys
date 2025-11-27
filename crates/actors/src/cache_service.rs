@@ -181,6 +181,9 @@ impl InnerCacheTask {
 
     #[tracing::instrument(level = "trace", skip_all, fields(migration_height))]
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
+        // First, prune ingress proofs to figure out what data roots are still in use
+        self.prune_ingress_proofs()?;
+
         let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         debug!(
@@ -221,8 +224,6 @@ impl InnerCacheTask {
             debug!("Cache within size limits, no eviction needed");
         }
 
-        // Proof expiry/regeneration (single authority)
-        self.prune_ingress_proofs()?;
         Ok(())
     }
 
