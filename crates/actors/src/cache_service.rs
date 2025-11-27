@@ -213,7 +213,7 @@ impl InnerCacheTask {
         );
 
         // Then, prune chunks that no longer have active ingress proofs
-        self.prune_chunks_without_active_ingress_proofs()?;
+        // self.prune_chunks_without_active_ingress_proofs()?;
 
         Ok(())
     }
@@ -768,7 +768,7 @@ mod tests {
     use eyre::WrapErr as _;
     use irys_database::{
         database, open_or_create_db,
-        tables::{CachedDataRoots, IrysTables},
+        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
@@ -963,5 +963,158 @@ mod tests {
                 UnixTimestamp::from_secs(secs)
             }
         }
+    }
+
+    // Chunks should remain when there is an active ingress proof present for the data_root.
+    #[tokio::test]
+    async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create tx header + data root + chunk
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+        let chunk = UnpackedChunk {
+            data_root: tx_header.data_root,
+            data_size: tx_header.data_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![1_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            eyre::Ok(())
+        })??;
+
+        // Insert a (non-expired) ingress proof entry for the data root so pruning treats it as active
+        db.update(|wtx| {
+            let proof = CachedIngressProof { address: irys_types::Address::random(), ..Default::default() };
+            wtx.put::<IngressProofs>(tx_header.data_root, proof.into())?;
+            eyre::Ok(())
+        })??;
+
+        // Setup minimal service context
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard = irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Execute chunk-only pruning (proofs present so should skip deletion)
+        service_task.prune_chunks_without_active_ingress_proofs()?;
+
+        // Verify chunk still exists
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let has_index = walk.next().transpose()?.is_some();
+            eyre::ensure!(has_index, "CachedChunksIndex entry missing after prune but proof was active");
+            // Attempt to resolve chunk from index metadata
+            if let Some((_, idx_entry)) = rtx.cursor_dup_read::<CachedChunksIndex>()?.seek_exact(tx_header.data_root)? {
+                let meta: irys_database::db_cache::CachedChunkIndexMetadata = idx_entry.into();
+                let chunk_entry = rtx.get::<CachedChunks>(meta.chunk_path_hash)?;
+                eyre::ensure!(chunk_entry.is_some(), "CachedChunks value missing after prune but proof was active");
+            }
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    // Chunks should be pruned when there is no ingress proof for the data_root.
+    #[tokio::test]
+    async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 { data_size: 64, ..Default::default() });
+        db.update(|wtx| { database::cache_data_root(wtx, &tx_header, None)?; eyre::Ok(()) })??;
+        let chunk = UnpackedChunk { data_root: tx_header.data_root, data_size: tx_header.data_size, data_path: Base64(vec![]), bytes: Base64(vec![2_u8; 8]), tx_offset: TxChunkOffset::from(0_u32) };
+        db.update(|wtx| { database::cache_chunk(wtx, &chunk)?; eyre::Ok(()) })??;
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard = irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask { db: db.clone(), block_tree_guard, block_index_guard, config: config.clone(), gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0, ingress_proof_generation_state: IngressProofGenerationState::new(), cache_sender: tx };
+
+        // Execute chunk pruning (no proofs -> should delete)
+        service_task.prune_chunks_without_active_ingress_proofs()?;
+
+        // Verify chunk removed
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let index_entry = walk.next().transpose()?;
+            eyre::ensure!(index_entry.is_none(), "CachedChunksIndex entry still present but should have been pruned");
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    // Chunks should not be pruned when proof generation state marks the data_root active, even with no ingress proof yet.
+    #[tokio::test]
+    async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 { data_size: 64, ..Default::default() });
+        db.update(|wtx| { database::cache_data_root(wtx, &tx_header, None)?; eyre::Ok(()) })??;
+        let chunk = UnpackedChunk { data_root: tx_header.data_root, data_size: tx_header.data_size, data_path: Base64(vec![]), bytes: Base64(vec![3_u8; 8]), tx_offset: TxChunkOffset::from(0_u32) };
+        db.update(|wtx| { database::cache_chunk(wtx, &chunk)?; eyre::Ok(()) })??;
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard = irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let generation_state = IngressProofGenerationState::new();
+        generation_state.mark_generating(tx_header.data_root);
+        let service_task = InnerCacheTask { db: db.clone(), block_tree_guard, block_index_guard, config: config.clone(), gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0, ingress_proof_generation_state: generation_state, cache_sender: tx };
+
+        service_task.prune_chunks_without_active_ingress_proofs()?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let still_present = walk.next().transpose()?.is_some();
+            eyre::ensure!(still_present, "CachedChunksIndex entry wrongly pruned during active generation state");
+            Ok(())
+        })??;
+        Ok(())
     }
 }
