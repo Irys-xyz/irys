@@ -61,6 +61,12 @@ pub struct IngressProofGenerationState {
     inner: Arc<RwLock<HashSet<DataRoot>>>,
 }
 
+impl Default for IngressProofGenerationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IngressProofGenerationState {
     pub fn new() -> Self {
         Self {
@@ -206,24 +212,83 @@ impl InnerCacheTask {
             ingress_proof_count
         );
 
-        let max_cache_size_bytes = self.config.node_config.cache.max_cache_size_bytes;
-        let size_limit_exceeded = chunk_cache_size > max_cache_size_bytes;
+        // Then, prune chunks that no longer have active ingress proofs
+        self.prune_chunks_without_active_ingress_proofs()?;
 
-        if size_limit_exceeded {
-            info!(
-                custom.size_exceeded = size_limit_exceeded,
-                custom.current_size_gb = (chunk_cache_size / GIGABYTE as u64),
-                custom.max_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
-                custom.current_count = chunk_cache_count,
-                "Cache limit exceeded"
-            );
+        Ok(())
+    }
 
-            // DISABLED. cache pruning logic NEEDS to respect the lifecycle rules for cached data roots and their associated chunks.
-            // self.prune_cache_by_size(chunk_cache_count, chunk_cache_size, *max_cache_size_bytes)?;
-        } else {
-            debug!("Cache within size limits, no eviction needed");
+    /// Prunes cached chunks for data roots that have no ingress proofs.
+    /// Since `prune_ingress_proofs()` runs immediately before this and removes
+    /// expired/invalid proofs, any remaining proof entry is treated as active.
+    /// Data roots currently undergoing proof generation are skipped to avoid races.
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn prune_chunks_without_active_ingress_proofs(&self) -> eyre::Result<()> {
+        let tx = self.db.tx()?;
+
+        // Collect candidate data roots from CachedDataRoots
+        let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
+        let mut cdr_walk = cdr_cursor.walk(None)?;
+
+        // Limit total evictions to avoid long pauses
+        let mut evictions_performed: usize = 0;
+
+        // We'll do deletions in a write tx per batch to keep lock times short
+        let mut pending_roots: Vec<DataRoot> = Vec::new();
+
+        while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
+            if evictions_performed >= MAX_EVICTIONS_PER_RUN {
+                warn!(
+                    evictions_performed,
+                    "Hit max eviction limit in prune_chunks_without_active_ingress_proofs, will continue next cycle"
+                );
+                break;
+            }
+
+            // Skip if an ingress proof is actively being generated for this root
+            if self.ingress_proof_generation_state.is_generating(data_root) {
+                debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
+                continue;
+            }
+
+            // Presence of at least one proof indicates the data root is active
+            let mut proofs_cursor = tx.cursor_read::<IngressProofs>()?;
+            let has_any_proof = proofs_cursor.seek_exact(data_root)?.is_some();
+            if !has_any_proof {
+                pending_roots.push(data_root);
+            }
+
+            // Commit a small batch to avoid large transactions
+            if pending_roots.len() >= 256 {
+                let write_tx = self.db.tx_mut()?;
+                for root in pending_roots.drain(..) {
+                    let pruned = delete_cached_chunks_by_data_root(&write_tx, root)?;
+                    if pruned > 0 {
+                        evictions_performed = evictions_performed.saturating_add(1);
+                        debug!(data_root.data_root = ?root, pruned.chunks = pruned, "Pruned chunks for data root without active proofs");
+                    }
+                }
+                write_tx.commit()?;
+            }
         }
 
+        // Flush any remaining pending deletions
+        if !pending_roots.is_empty() {
+            let write_tx = self.db.tx_mut()?;
+            for root in pending_roots.drain(..) {
+                let pruned = delete_cached_chunks_by_data_root(&write_tx, root)?;
+                if pruned > 0 {
+                    evictions_performed = evictions_performed.saturating_add(1);
+                    debug!(data_root.data_root = ?root, pruned.chunks = pruned, "Pruned chunks for data root without active proofs");
+                }
+            }
+            write_tx.commit()?;
+        }
+
+        info!(
+            chunks.eviction_batches = evictions_performed,
+            "Completed chunk pruning pass"
+        );
         Ok(())
     }
 

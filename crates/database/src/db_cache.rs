@@ -106,6 +106,7 @@ pub struct CachedChunk {
     // optional as the chunk's data can be in a partition
     pub chunk: Option<Base64>,
     pub data_path: Base64,
+    pub data_root: H256,
 }
 
 impl From<UnpackedChunk> for CachedChunk {
@@ -113,6 +114,7 @@ impl From<UnpackedChunk> for CachedChunk {
         Self {
             chunk: Some(value.bytes),
             data_path: value.data_path,
+            data_root: value.data_root,
         }
     }
 }
@@ -124,6 +126,7 @@ impl From<&UnpackedChunk> for CachedChunk {
         Self {
             chunk: Some(value.bytes.clone()),
             data_path: value.data_path.clone(),
+            data_root: value.data_root,
         }
     }
 }
