@@ -268,11 +268,24 @@ impl BlockCacheGuard {
     }
 
     async fn add_tx_for_block(&self, block_hash: BlockHash, tx: IrysTransactionResponse) {
+        let tx_id = match &tx {
+            IrysTransactionResponse::Commitment(c) => c.id,
+            IrysTransactionResponse::Storage(s) => s.id,
+        };
+        warn!(
+            "\n\n=== CACHE DEBUG: add_tx_for_block ===\n  block_hash: {:?}\n  tx_id: {:?}\n",
+            block_hash, tx_id
+        );
         self.inner.write().await.add_tx_for_block(block_hash, tx);
     }
 
     async fn take_txs_for_block(&self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
-        self.inner.write().await.take_txs_for_block(block_hash)
+        let txs = self.inner.write().await.take_txs_for_block(block_hash);
+        warn!(
+            "\n\n=== CACHE DEBUG: take_txs_for_block ===\n  block_hash: {:?}\n  txs_count: {}\n",
+            block_hash, txs.len()
+        );
+        txs
     }
 }
 
@@ -1225,9 +1238,17 @@ where
         for tx in cached_txs {
             match tx {
                 IrysTransactionResponse::Storage(data_tx) => {
-                    if submit_ids_set.contains(&data_tx.id) {
+                    // Note: A tx can be in both submit and publish ledgers (published after submission)
+                    // so we check both independently and clone if needed for both
+                    let in_submit = submit_ids_set.contains(&data_tx.id);
+                    let in_publish = publish_ids_set.contains(&data_tx.id);
+
+                    if in_submit && in_publish {
+                        submit_txs_map.insert(data_tx.id, data_tx.clone());
+                        publish_txs_map.insert(data_tx.id, data_tx);
+                    } else if in_submit {
                         submit_txs_map.insert(data_tx.id, data_tx);
-                    } else if publish_ids_set.contains(&data_tx.id) {
+                    } else if in_publish {
                         publish_txs_map.insert(data_tx.id, data_tx);
                     }
                 }
@@ -1254,9 +1275,17 @@ where
             .await?;
 
             for tx in fetched {
-                if submit_ids_set.contains(&tx.id) {
+                // Note: A tx can be in both submit and publish ledgers (published after submission)
+                // so we check both independently and clone if needed for both
+                let in_submit = submit_ids_set.contains(&tx.id);
+                let in_publish = publish_ids_set.contains(&tx.id);
+
+                if in_submit && in_publish {
+                    submit_txs_map.insert(tx.id, tx.clone());
+                    publish_txs_map.insert(tx.id, tx);
+                } else if in_submit {
                     submit_txs_map.insert(tx.id, tx);
-                } else if publish_ids_set.contains(&tx.id) {
+                } else if in_publish {
                     publish_txs_map.insert(tx.id, tx);
                 }
             }
