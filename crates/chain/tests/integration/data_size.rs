@@ -82,14 +82,15 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
         .wait_for_migrated_txs(vec![wrong_data_size_header], seconds_to_wait)
         .await?;
 
-    // Post the last 3 chunks and validate they are not accepted
+    // Post the last 3 chunks - they should be parked (not rejected) since the
+    // cached data_size is unconfirmed.
     for i in 3..6 {
-        let (status, body) = genesis_node
+        let (status, _body) = genesis_node
             .post_chunk_32b_with_status(&valid_tx, i, &chunks)
             .await;
         info!("{:#?}", status);
-        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
-        assert!(body.contains("InvalidDataSize"));
+        // Chunks are parked when cached data_size is unconfirmed and chunk claims larger size
+        assert_eq!(status, reqwest::StatusCode::OK);
     }
 
     // Post the valid tx to adjust the data_size for the data_root
@@ -99,7 +100,8 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
         .wait_for_mempool(valid_tx.header.id, seconds_to_wait)
         .await?;
 
-    // Now attempt to post the last 3 chunks and verify they succeed.
+    // The parked chunks should now be processed since the cache was upgraded.
+    // Re-posting should still succeed.
     for i in 3..6 {
         let (status, _body) = genesis_node
             .post_chunk_32b_with_status(&valid_tx, i, &chunks)
