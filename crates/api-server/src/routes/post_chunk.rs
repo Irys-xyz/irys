@@ -68,6 +68,10 @@ pub async fn post_chunk(
                     Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
                         .body(format!("Invalid data_size field : {err:?}")))
                 }
+                CriticalChunkIngressError::InvalidOffset(ref msg) => {
+                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
+                        .body(format!("Invalid tx_offset: {msg}")))
+                }
 
                 CriticalChunkIngressError::ServiceUninitialized => {
                     Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
@@ -94,6 +98,10 @@ pub async fn post_chunk(
                 AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
                     Ok(HttpResponse::build(StatusCode::OK)
                         .body(format!("Pre-header chunk tx_offset exceeds cap: {err:?}")))
+                }
+                AdvisoryChunkIngressError::PreHeaderInvalidOffset(ref msg) => {
+                    Ok(HttpResponse::build(StatusCode::OK)
+                        .body(format!("Pre-header chunk invalid tx_offset: {msg}")))
                 }
                 AdvisoryChunkIngressError::Other(err) => Ok(
                     HttpResponse::build(StatusCode::OK).body(format!("Internal error: {err:?}"))

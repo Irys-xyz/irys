@@ -159,6 +159,8 @@ pub enum InvalidDataError {
     ChunkInvalidChunkSize,
     #[error("Invalid chunk data size")]
     ChunkInvalidDataSize,
+    #[error("Invalid chunk tx_offset: {0}")]
+    ChunkInvalidOffset(String),
     #[error("Invalid block: {0}")]
     InvalidBlock(String),
     #[error("Invalid block signature")]
