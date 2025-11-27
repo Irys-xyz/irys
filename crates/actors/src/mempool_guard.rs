@@ -1,5 +1,5 @@
 use crate::mempool_service::AtomicMempoolState;
-use irys_types::{CommitmentTransaction, IrysTransactionId};
+use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysTransactionId};
 use std::collections::HashMap;
 
 /// Wraps the internal `Arc<RwLock<_>>` to provide readonly access to mempool state
@@ -43,5 +43,20 @@ impl MempoolReadGuard {
         self.mempool_state
             .get_commitment_txs(commitment_tx_ids)
             .await
+    }
+
+    /// Get specific data transactions by their IDs from the mempool
+    ///
+    /// This searches `valid_submit_ledger_tx` for the requested transactions.
+    ///
+    /// Returns a HashMap containing only the requested transactions that were found.
+    ///
+    /// Complexity: O(n) where n is the number of requested IDs.
+    #[must_use]
+    pub async fn get_data_txs(
+        &self,
+        data_tx_ids: &[IrysTransactionId],
+    ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
+        self.mempool_state.get_data_txs(data_tx_ids).await
     }
 }

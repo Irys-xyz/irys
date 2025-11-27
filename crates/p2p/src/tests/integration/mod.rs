@@ -243,17 +243,16 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture1.add_peer(&fixture2);
     fixture2.add_peer(&fixture1);
 
-    // Create a test block with transactions
+    // Create a test block with transactions in the Submit ledger (index 1)
     let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: BlockHash::random(),
         ..IrysBlockHeaderV1::new_mock_header()
     });
-    let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
-    ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
-    debug!("Added transactions to ledger: {:?}", ledger.tx_ids);
-    block.data_ledgers.push(ledger);
+    // Modify the existing Submit ledger (index 1) instead of pushing a new ledger
+    block.data_ledgers[1].tx_ids = H256List(vec![tx1.id, tx2.id]);
+    debug!("Added transactions to Submit ledger: {:?}", block.data_ledgers[1].tx_ids);
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
     signer
         .sign_block_header(&mut block)

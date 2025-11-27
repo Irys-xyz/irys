@@ -500,66 +500,93 @@ where
             self.gossip_client.mining_address, block_header.block_hash, block_header.height
         );
 
-        debug!(
-            "Collecting missing/invalid data transactions for block {} height {}",
-            block_hash, block_header.height
-        );
-        let mut missing_invalid_tx_ids = Vec::new();
-
-        for tx_id in block_header
+        // === Optimized batch mempool query using MempoolReadGuard (no actor messages!) ===
+        // Collect all required tx IDs from block header
+        let data_tx_ids: Vec<H256> = block_header
             .data_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
-        {
-            if !self.is_known_valid_present_data_tx(tx_id).await? {
-                missing_invalid_tx_ids.push(tx_id);
-            }
-        }
-        debug!(
-            "Collected missing data tx ids for block {} height {}: {:?}",
-            block_hash, block_header.height, missing_invalid_tx_ids
-        );
-
-        for system_tx_id in block_header
+            .collect();
+        let commitment_tx_ids: Vec<H256> = block_header
             .system_ledgers
             .iter()
             .flat_map(|ledger| ledger.tx_ids.0.clone())
-        {
-            if !self
-                .is_known_valid_present_commitment_tx(system_tx_id)
-                .await?
-            {
-                missing_invalid_tx_ids.push(system_tx_id);
-            }
-        }
+            .collect();
+
         debug!(
-            "Collected missing commitment tx ids for block {} height {}: {:?}",
-            block_hash, block_header.height, missing_invalid_tx_ids
+            "Batch querying mempool for {} data txs and {} commitment txs for block {} height {}",
+            data_tx_ids.len(),
+            commitment_tx_ids.len(),
+            block_hash,
+            block_header.height
         );
 
-        if !missing_invalid_tx_ids.is_empty() {
+        // Direct mempool access via MempoolReadGuard (bypasses actor messaging)
+        let mempool_guard = &self.block_pool.mempool_guard;
+        let found_data_txs = mempool_guard.get_data_txs(&data_tx_ids).await;
+        let found_commitment_txs = mempool_guard.get_commitment_txs(&commitment_tx_ids).await;
+
+        debug!(
+            "Found {} data txs and {} commitment txs in mempool for block {} height {}",
+            found_data_txs.len(),
+            found_commitment_txs.len(),
+            block_hash,
+            block_header.height
+        );
+
+        // Determine missing tx IDs (not found in mempool)
+        let missing_data_ids: Vec<H256> = data_tx_ids
+            .iter()
+            .filter(|id| !found_data_txs.contains_key(id))
+            .copied()
+            .collect();
+        let missing_commitment_ids: Vec<H256> = commitment_tx_ids
+            .iter()
+            .filter(|id| !found_commitment_txs.contains_key(id))
+            .copied()
+            .collect();
+
+        // Combine missing IDs for network fetch
+        let missing_tx_ids: Vec<H256> = missing_data_ids
+            .iter()
+            .chain(missing_commitment_ids.iter())
+            .copied()
+            .collect();
+
+        if !missing_tx_ids.is_empty() {
             debug!(
-                "Missing/invalid transactions to fetch for block {} height {}: {:?}",
-                block_hash, block_header.height, missing_invalid_tx_ids
+                "Missing transactions to fetch for block {} height {}: {} data, {} commitment",
+                block_hash,
+                block_header.height,
+                missing_data_ids.len(),
+                missing_commitment_ids.len()
             );
+
+            // Remove them from the mempool's blacklist
+            self.mempool
+                .remove_from_blacklist(missing_tx_ids.clone())
+                .await
+                .map_err(|error| {
+                    error!("Failed to remove txs from the mempool blacklist");
+                    GossipError::unknown(&error)
+                })?;
         }
 
-        // remove them from the mempool's blacklist
-        self.mempool
-            .remove_from_blacklist(missing_invalid_tx_ids.clone())
-            .await
-            .map_err(|error| {
-                error!("Failed to remove txs from the mempool blacklist");
-                GossipError::unknown(&error)
-            })?;
-
         debug!(
-            "Fetching missing transactions from the network for block {} height {}",
-            block_hash, block_header.height
+            "Fetching {} missing transactions from the network for block {} height {}",
+            missing_tx_ids.len(),
+            block_hash,
+            block_header.height
         );
+
+        // Collect fetched transactions from network
+        let mut fetched_data_txs: Vec<DataTransactionHeader> =
+            found_data_txs.into_values().collect();
+        let mut fetched_commitment_txs: Vec<CommitmentTransaction> =
+            found_commitment_txs.into_values().collect();
 
         // Fetch missing transactions in parallel with a concurrency limit of 10
-        let fetch_results: Vec<_> = stream::iter(missing_invalid_tx_ids)
+        let fetch_results: Vec<_> = stream::iter(missing_tx_ids)
             .map(|tx_id_to_fetch| async move {
                 // Try source peer first
                 let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
@@ -634,23 +661,23 @@ where
             .collect()
             .await;
 
-        // Process results and store fetched transactions
+        // Process network fetch results and collect transactions
         for result in fetch_results {
             match result {
                 Ok((tx_response, from_miner_addr)) => {
-                    // Store the fetched transaction in the BlockPool's per-block cache
                     let tx_id = match &tx_response {
-                        IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
-                        IrysTransactionResponse::Storage(tx) => tx.id,
+                        IrysTransactionResponse::Commitment(commitment_tx) => {
+                            fetched_commitment_txs.push(commitment_tx.clone());
+                            commitment_tx.id
+                        }
+                        IrysTransactionResponse::Storage(tx) => {
+                            fetched_data_txs.push(tx.clone());
+                            tx.id
+                        }
                     };
 
-                    self.block_pool
-                        .add_tx_for_block(block_hash, tx_response)
-                        .await;
-
-                    // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
                     debug!(
-                        "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
+                        "Fetched transaction {:?} (unverified) for block {:?} from network",
                         tx_id, block_hash
                     );
                     // Record that we have seen this transaction from the peer that served it
@@ -665,9 +692,28 @@ where
         }
 
         debug!(
-            "Got all missing transactions for block {} height {}, sending to processing",
-            block_hash, block_header.height
+            "Got all transactions for block {} height {}: {} data, {} commitment. Building BlockTransactions.",
+            block_hash,
+            block_header.height,
+            fetched_data_txs.len(),
+            fetched_commitment_txs.len()
         );
+
+        // Build BlockTransactions using the shared helper
+        let block_transactions = self
+            .block_pool
+            .build_block_transactions_from_fetched(
+                &block_header,
+                fetched_data_txs,
+                fetched_commitment_txs,
+            )
+            .await
+            .map_err(|e| {
+                GossipError::Internal(InternalGossipError::Unknown(format!(
+                    "Failed to build BlockTransactions: {:?}",
+                    e
+                )))
+            })?;
 
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
         let is_in_the_trusted_sync_range = self
@@ -681,7 +727,11 @@ where
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
-            .process_block::<A>(Arc::new(block_header), skip_block_validation)
+            .process_block_with_txs::<A>(
+                Arc::new(block_header),
+                block_transactions,
+                skip_block_validation,
+            )
             .await?;
         Ok(())
     }
@@ -787,32 +837,6 @@ where
         );
 
         Ok(())
-    }
-
-    async fn is_known_valid_present_data_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        self.mempool
-            .is_known_data_transaction(tx_id)
-            .await
-            .map_err(|e| {
-                GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "is_known_valid_data_tx() errored: {:?}",
-                    e
-                )))
-            })
-            .map(|s| s.is_known_valid_and_present())
-    }
-
-    async fn is_known_valid_present_commitment_tx(&self, tx_id: H256) -> Result<bool, GossipError> {
-        self.mempool
-            .is_known_commitment_transaction(tx_id)
-            .await
-            .map_err(|e| {
-                GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "is_known_valid_commitment_tx() errored: {:?}",
-                    e
-                )))
-            })
-            .map(|s| s.is_known_valid_and_present())
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

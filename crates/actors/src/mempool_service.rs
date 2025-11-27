@@ -1704,6 +1704,28 @@ impl AtomicMempoolState {
             .collect()
     }
 
+    /// Get specific data transactions by their IDs from the mempool
+    ///
+    /// This searches `valid_submit_ledger_tx` for the requested transactions.
+    ///
+    /// Returns a HashMap containing only the requested transactions that were found.
+    ///
+    /// Complexity: O(n) where n is the number of requested IDs.
+    #[must_use]
+    pub async fn get_data_txs(
+        &self,
+        data_tx_ids: &[IrysTransactionId],
+    ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
+        let mempool_state_guard = self.read().await;
+        let mut results = HashMap::with_capacity(data_tx_ids.len());
+        for tx_id in data_tx_ids {
+            if let Some(tx) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
+                results.insert(*tx_id, tx.clone());
+            }
+        }
+        results
+    }
+
     // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
     // right now this only wipes `recent_invalid_tx`
     pub async fn wipe_blacklists(&self) {
