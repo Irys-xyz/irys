@@ -43,11 +43,10 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
-        let data_size = self
+        let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
-                    .map(|opt| opt.map(|cdr| cdr.data_size))
             })
             .map_err(|e| {
                 error!(
@@ -55,8 +54,12 @@ impl Inner {
                     chunk.data_root, chunk.tx_offset, e
                 );
                 CriticalChunkIngressError::DatabaseError
-            })?
-            .or_else(|| {
+            })?;
+
+        // Extract data_size, falling back to storage modules if not in cache
+        let (data_size, data_size_confirmed) = match cached_data_root {
+            Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
+            None => {
                 debug!(
                     chunk.data_root = ?chunk.data_root,
                     chunk.tx_offset = ?chunk.tx_offset,
@@ -66,7 +69,7 @@ impl Inner {
                 let storage_modules = self.storage_modules_guard.read().clone();
 
                 // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
-                storage_modules
+                let sm_data_size = storage_modules
                     .iter()
                     .filter_map(|sm| {
                         sm.collect_data_root_infos(chunk.data_root)
@@ -74,8 +77,10 @@ impl Inner {
                             .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
                     })
                     .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
-                    .max()
-            });
+                    .max();
+                (sm_data_size, true)
+            }
+        };
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -134,13 +139,28 @@ impl Inner {
         // Validate that the data_size for this chunk is less than or equal to
         // the largest data_size paid for by a data tx with this data_root
         if chunk.data_size > data_size {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                CriticalChunkIngressError::InvalidDataSize,
-                data_size,
-                chunk.data_size
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
+            if data_size_confirmed {
+                // Confirmed size is authoritative - reject mismatched chunks
+                error!(
+                    "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
+                    CriticalChunkIngressError::InvalidDataSize,
+                    data_size,
+                    chunk.data_size
+                );
+                return Err(CriticalChunkIngressError::InvalidDataSize.into());
+            } else {
+                // Unconfirmed: chunk claims larger size than cached.
+                // This may be legitimate (tx with larger size not yet processed).
+                // Park the chunk for the time being.
+                debug!(
+                    "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
+                    chunk.data_size, data_size, chunk.data_root
+                );
+                self.mempool_state
+                    .put_chunk(chunk.clone(), max_chunks_per_item)
+                    .await;
+                return Ok(());
+            }
         }
 
         // Validate the data_path/proof for the chunk, linking
