@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
+    IrysNodeTest,
 };
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
@@ -14,33 +15,6 @@ use irys_actors::{
 use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, DataTransactionHeader, NodeConfig, U256};
 use tokio::sync::oneshot;
-
-pub(super) async fn gossip_commitment_to_node(
-    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-    commitment: &CommitmentTransaction,
-) -> eyre::Result<()> {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx).into(),
-    )?;
-
-    resp_rx.await??;
-    Ok(())
-}
-
-pub(super) async fn gossip_data_tx_to_node(
-    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-    tx: &DataTransactionHeader,
-) -> eyre::Result<()> {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(tx.clone(), resp_tx).into())?;
-
-    resp_rx.await??;
-    Ok(())
-}
 
 #[test_log::test(tokio::test)]
 async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
