@@ -34,6 +34,7 @@ pub const REGENERATE_PROOFS: bool = true;
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
 /// Maximum ingress proofs to scan per pruning invocation.
 const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
+const CHUNK_CACHE_TARGET_CAPACITY: f64 = 0.8;
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -212,8 +213,11 @@ impl InnerCacheTask {
             ingress_proof_count
         );
 
-        // Then, prune chunks that no longer have active ingress proofs
-        self.prune_chunks_without_active_ingress_proofs()?;
+        // Attempt pruning cache only if we're above 80% of max capacity
+        if chunk_cache_size as f64 > self.config.node_config.cache.max_cache_size_bytes as f64 * CHUNK_CACHE_TARGET_CAPACITY {
+            // Then, prune chunks that no longer have active ingress proofs
+            self.prune_chunks_without_active_ingress_proofs()?;
+        }
 
         Ok(())
     }
@@ -224,6 +228,9 @@ impl InnerCacheTask {
     /// Data roots currently undergoing proof generation are skipped to avoid races.
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_chunks_without_active_ingress_proofs(&self) -> eyre::Result<()> {
+        let min_chunk_age = self.config.consensus.block_migration_depth.saturating_add(
+            self.config.node_config.cache.cache_clean_lag as u32
+        );
         let tx = self.db.tx()?;
 
         // Collect candidate data roots from CachedDataRoots
@@ -239,7 +246,7 @@ impl InnerCacheTask {
         while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
             if evictions_performed >= MAX_EVICTIONS_PER_RUN {
                 warn!(
-                    evictions_performed,
+                    chunk.evictions_performed = evictions_performed,
                     "Hit max eviction limit in prune_chunks_without_active_ingress_proofs, will continue next cycle"
                 );
                 break;
@@ -262,10 +269,14 @@ impl InnerCacheTask {
             if pending_roots.len() >= 256 {
                 let write_tx = self.db.tx_mut()?;
                 for root in pending_roots.drain(..) {
+                    debug!(
+                        chunk.data_root = ?root,
+                        "Pruning chunks for data root without active proofs"
+                    );
                     let pruned = delete_cached_chunks_by_data_root(&write_tx, root)?;
                     if pruned > 0 {
                         evictions_performed = evictions_performed.saturating_add(1);
-                        debug!(data_root.data_root = ?root, pruned.chunks = pruned, "Pruned chunks for data root without active proofs");
+                        debug!(chunk.data_root = ?root, chunk.pruined_chunks = pruned, "Pruned chunks for data root without active proofs");
                     }
                 }
                 write_tx.commit()?;
@@ -279,14 +290,14 @@ impl InnerCacheTask {
                 let pruned = delete_cached_chunks_by_data_root(&write_tx, root)?;
                 if pruned > 0 {
                     evictions_performed = evictions_performed.saturating_add(1);
-                    debug!(data_root.data_root = ?root, pruned.chunks = pruned, "Pruned chunks for data root without active proofs");
+                    debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
                 }
             }
             write_tx.commit()?;
         }
 
         info!(
-            chunks.eviction_batches = evictions_performed,
+            chunk.eviction_batches = evictions_performed,
             "Completed chunk pruning pass"
         );
         Ok(())
