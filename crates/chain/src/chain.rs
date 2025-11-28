@@ -1638,13 +1638,12 @@ impl IrysNode {
             .is_some_and(|p| p.ends_with(".tmp"));
         let is_test_based_on_cfg_flag = cfg!(test);
         if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            error!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing")
+            panic!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
         }
         let span = tracing::Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = config.vdf.clone();
-
             move || {
                 let _span = span.enter();
 
@@ -2087,6 +2086,8 @@ async fn stake_and_pledge(
     let has_pending_stake =
         pending_commitments.is_some_and(|commitments| commitments.stake.is_some());
 
+    let mut total_cost = U256::zero();
+
     // if we have a historic or pending stake, don't send another
     let is_staked = is_historically_staked || has_pending_stake;
     if !is_staked {
@@ -2098,6 +2099,8 @@ async fn stake_and_pledge(
         // post a stake tx
         let mut stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         signer.sign_commitment(&mut stake_tx)?;
+
+        total_cost += stake_tx.total_cost();
 
         post_commitment_tx(&stake_tx).await.unwrap();
         debug!(
@@ -2139,6 +2142,8 @@ async fn stake_and_pledge(
         signer.sign_commitment(&mut pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
+        total_cost += pledge_tx.total_cost();
+
         debug!(
             "Posted pledge tx {}/{} {:?} (value: {}, fee {})",
             idx + 1,
@@ -2148,7 +2153,10 @@ async fn stake_and_pledge(
             &pledge_tx.fee
         );
     }
-    debug!("Stake & Pledge check complete");
+    debug!(
+        "Stake & Pledge check complete - total cost: {}",
+        &total_cost
+    );
 
     Ok(())
 }

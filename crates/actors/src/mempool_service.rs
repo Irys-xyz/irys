@@ -621,6 +621,15 @@ impl Inner {
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
 
+        balances.extend(
+            fetch_balances_for_transactions(
+                &self.reth_node_adapter,
+                parent_evm_block_id,
+                &sorted_commitments,
+            )
+            .await,
+        );
+
         // Process sorted commitments
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
         let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
@@ -700,6 +709,37 @@ impl Inner {
                 }
             }
 
+            trace!(
+                tx.id = ?tx.id,
+                tx.signer = ?tx.signer(),
+                tx.fee = ?tx.total_cost(),
+                "Checking funding for commitment transaction"
+            );
+            if check_funding(
+                tx,
+                &balances,
+                &mut unfunded_address,
+                &mut fees_spent_per_address,
+            ) {
+                trace!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.selected_count = commitment_tx.len() + 1,
+                    tx.max_commitments = max_commitments,
+                    "Commitment transaction passed funding check"
+                );
+            } else {
+                trace!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.validation_failed_reason = "insufficient_funds",
+                    "Data transaction failed funding check"
+                );
+                continue;
+            }
+
             debug!(
                 tx.id = ?tx.id,
                 tx.commitment_type = ?tx.commitment_type,
@@ -709,6 +749,7 @@ impl Inner {
                 tx.max_commitments = max_commitments,
                 "Adding commitment transaction to block"
             );
+
             commitment_tx.push(tx.clone());
 
             // if we have reached the maximum allowed number of commitment txs per block

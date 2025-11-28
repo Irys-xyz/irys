@@ -50,12 +50,13 @@ pub fn tmp_base_dir() -> PathBuf {
             || custom_tmp.starts_with('/')
             || custom_tmp.starts_with("./")
         {
-            return path;
+            // note: we add `.tmp` here as that's the pattern the core pinning logic uses to determine if integration tests are actually tests
+            return path.join(".tmp");
         }
 
         // if it doesn't look like a path, try to use it as an env var key
         if let Ok(env_value) = std::env::var(custom_tmp) {
-            return PathBuf::from(env_value);
+            return PathBuf::from(env_value).join(".tmp");
         }
 
         // If both failed, print error and fall back
