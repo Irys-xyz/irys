@@ -501,7 +501,7 @@ impl ConsensusConfig {
             },
             genesis: GenesisConfig {
                 // The timestamp in milliseconds used for the genesis block
-                timestamp_millis: 1763675936389,
+                timestamp_millis: 1763749823171,
                 // Address that signs the genesis block
                 miner_address: Address::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
                     .unwrap(), // todo()
@@ -583,7 +583,7 @@ impl ConsensusConfig {
             max_future_timestamp_drift_millis: 15_000,
             // Expected genesis block hash (when joining existing networks)
             expected_genesis_hash: Some(H256::from_base58(
-                "51H6fjQmLqpQeFSYtvpA54pvfpgPt92waKezutvBbcwo",
+                "2Pgf5vJvvFifTnyJy9gTg31Yba2HFh2hC6imqsmJqdF7",
             )),
             // Hardfork configuration - mainnet values
             hardforks: IrysHardforkConfig {

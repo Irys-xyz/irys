@@ -9,10 +9,9 @@ mod unstake_edge_cases;
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,
-    IrysNodeTest,
+    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
+    BlockValidationOutcome, IrysNodeTest,
 };
-use crate::validation::unpledge_partition::gossip_commitment_to_node;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{

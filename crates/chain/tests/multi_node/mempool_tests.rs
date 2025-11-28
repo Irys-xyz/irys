@@ -29,7 +29,7 @@ use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::oneshot, time::sleep};
-use tracing::debug;
+use tracing::{debug, info};
 
 #[tokio::test]
 async fn heavy_pending_chunks_test() -> eyre::Result<()> {
@@ -2446,6 +2446,208 @@ async fn commitment_tx_valid_higher_fee_test(
     genesis_node
         .wait_for_mempool_commitment_txs(vec![commitment_tx.id], 10)
         .await?;
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+#[rstest::rstest]
+#[case::stake_enough_balance(irys_types::U256::from(20000000000000000000100_u128 /* stake cost */), 1, 0)]
+#[case::stake_not_enough_balance(irys_types::U256::from(0), 0, 0)]
+#[case::pledge_15_enough_balance_for_1(
+    irys_types::U256::from(20000000000000000000100_u128 /*stake cost*/ + 950000000000000000100_u128 /* pledge 1 */  ),
+    2, // stake & 1 pledge
+    15
+)]
+#[case::pledge_15_enough_balance_for_4(
+    irys_types::U256::from(20000000000000000000100 /*stake cost*/ + 950000000000000000100_u128 /* pledge 1 */ + 509092394704739255819_u128 /* pledge 2 */ + 353439005113955754102_u128 /* pledge 3 */ + 272815859311795815354_u128 /* pledge 4 */  ),
+    5, // stake & 4 pledges
+    15
+)]
+#[test_log::test(tokio::test)]
+/// Create a stake and some pledges
+/// Determine the total cost
+/// produce a block
+/// see what txs get included (assert its count is equal to `initial_commitments` + 1)
+/// transfer the user enough funds to afford the remaining commitments
+/// produce another block, make sure it includes the rest
+async fn commitment_tx_cumulative_fee_validation_test(
+    #[case] starting_balance: irys_types::U256,
+    #[case] initial_commitments: u64,
+    #[case] total_pledge_count: u64,
+) -> eyre::Result<()> {
+    use std::collections::HashSet;
+
+    let mut genesis_config = NodeConfig::testing();
+    let signer = genesis_config.new_random_signer();
+    let rich_signer = genesis_config.new_random_signer();
+
+    genesis_config.consensus.extend_genesis_accounts([
+        (
+            signer.address(),
+            GenesisAccount {
+                balance: starting_balance.into(),
+                ..Default::default()
+            },
+        ),
+        (
+            rich_signer.address(),
+            GenesisAccount {
+                balance: U256::MAX,
+                ..Default::default()
+            },
+        ),
+    ]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start()
+        .await;
+
+    let config = &genesis_config.consensus_config();
+
+    // create the stake & pledges
+    // compute the fee total
+    let mut stake = CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?);
+    signer.sign_commitment(&mut stake)?;
+
+    let mut fee_total = stake.total_cost();
+    info!(
+        "stake cost: {}, starting balance: {}",
+        &fee_total, &starting_balance
+    );
+    let can_afford_stake = starting_balance >= stake.total_cost();
+
+    let mut first_block_commitments = HashSet::new();
+    let mut third_block_commitments = HashSet::new();
+
+    if can_afford_stake {
+        first_block_commitments.insert(stake.id);
+    } else {
+        third_block_commitments.insert(stake.id);
+    }
+
+    let mut commitments = vec![stake];
+
+    for i in 0..total_pledge_count {
+        let mut pledge_tx = CommitmentTransaction::new_pledge(
+            config,
+            genesis_node.get_anchor().await?,
+            &i,
+            signer.address(),
+        )
+        .await;
+
+        signer.sign_commitment(&mut pledge_tx)?;
+        fee_total += pledge_tx.total_cost();
+        info!(
+            "needed for stake & {} pledges: {} (pledge: {})",
+            &i + 1,
+            &fee_total,
+            &pledge_tx.total_cost()
+        );
+        if fee_total <= starting_balance {
+            first_block_commitments.insert(pledge_tx.id);
+        } else {
+            third_block_commitments.insert(pledge_tx.id);
+        }
+        commitments.push(pledge_tx);
+    }
+
+    assert_eq!(first_block_commitments.len(), initial_commitments as usize);
+
+    for commitment in commitments.iter() {
+        //ingest as gossip so we bypass the initial fund checks
+        genesis_node.gossip_commitment_to_node(commitment).await?
+    }
+
+    // mine a block
+    // the commitments we know we can afford should be in this block
+    let block = genesis_node.mine_block().await?;
+
+    // check that the correct commitments were included
+    let block_tx_ids: HashSet<H256> = block
+        .system_ledgers
+        .iter()
+        .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
+        .map(|ledger| HashSet::from_iter(ledger.tx_ids.0.iter().copied()))
+        .unwrap_or_else(HashSet::new);
+
+    let diff1 = block_tx_ids
+        .difference(&first_block_commitments)
+        .collect::<Vec<_>>();
+    assert!(diff1.is_empty());
+
+    // mine a new block with a fund transfer tx
+
+    let remaining_fees = fee_total.saturating_sub(starting_balance);
+
+    let reth_context = genesis_node.node_ctx.reth_node_adapter.clone();
+
+    let evm_tx_req = TransactionRequest {
+        to: Some(TxKind::Call(signer.address())),
+        max_fee_per_gas: Some(20_000_000_000), //20 gwei
+        max_priority_fee_per_gas: Some(20_000_000_000),
+        gas: Some(21_000),
+        value: Some(remaining_fees.into()),
+        nonce: Some(0),
+        chain_id: Some(config.chain_id),
+        ..Default::default()
+    };
+    let tx_env = TransactionTestContext::sign_tx(rich_signer.clone().into(), evm_tx_req).await;
+
+    let _evm_tx_hash = reth_context
+        .rpc
+        .inject_tx(tx_env.encoded_2718().into())
+        .await
+        .expect("tx should be accepted");
+
+    // check that the users's balance has increased
+    let old_balance: irys_types::U256 = reth_context
+        .rpc
+        .get_balance(signer.address(), None)
+        .await?
+        .into();
+
+    let block2 = genesis_node.mine_block().await?;
+
+    let new_balance: irys_types::U256 = reth_context
+        .rpc
+        .get_balance(signer.address(), None)
+        .await?
+        .into();
+
+    assert!(new_balance == old_balance + remaining_fees);
+
+    // ensure that the rest of the commitments are in the next block
+    let block2_tx_ids: HashSet<H256> = block2
+        .system_ledgers
+        .iter()
+        .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
+        .map(|ledger| HashSet::from_iter(ledger.tx_ids.0.iter().copied()))
+        .unwrap_or_else(HashSet::new);
+
+    assert!(block2_tx_ids.is_empty());
+
+    // now we have sufficient funds
+    let block3 = genesis_node.mine_block().await?;
+
+    // ensure that the rest of the commitments are in this block
+    let block3_tx_ids: HashSet<H256> = block3
+        .system_ledgers
+        .iter()
+        .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
+        .map(|ledger| HashSet::from_iter(ledger.tx_ids.0.iter().copied()))
+        .unwrap_or_else(HashSet::new);
+
+    assert!(block3_tx_ids
+        .difference(&third_block_commitments)
+        .collect::<Vec<_>>()
+        .is_empty());
+
+    assert_eq!(
+        first_block_commitments.len() + third_block_commitments.len(),
+        (total_pledge_count + 1) as usize
+    ); // +1 for stake
 
     genesis_node.stop().await;
     Ok(())
