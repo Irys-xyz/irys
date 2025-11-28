@@ -727,7 +727,7 @@ where
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
-            .process_block_with_txs::<A>(
+            .process_block::<A>(
                 Arc::new(block_header),
                 block_transactions,
                 skip_block_validation,

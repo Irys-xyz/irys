@@ -326,8 +326,19 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 let header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
                 futures.push(async move {
+                    // Build BlockTransactions from cached txs
+                    let block_transactions = block_pool
+                        .take_and_build_cached_txs_for_block(&header)
+                        .await
+                        .map_err(|e| {
+                            ChainSyncError::Internal(format!(
+                                "Failed to build block transactions: {:?}",
+                                e
+                            ))
+                        })?;
+
                     block_pool
-                        .process_block::<A>(header, is_fast_tracking)
+                        .process_block::<A>(header, block_transactions, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))

@@ -1,4 +1,5 @@
 use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
+use irys_actors::block_discovery::BlockTransactions;
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
@@ -267,7 +268,7 @@ async fn should_process_block() {
     let test_header = Arc::new(test_header.clone());
 
     service
-        .process_block::<ApiClientStub>(Arc::clone(&test_header), false)
+        .process_block::<ApiClientStub>(Arc::clone(&test_header), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -414,7 +415,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                pool.process_block::<ApiClientStub>(Arc::new(block.clone()), false)
+                pool.process_block::<ApiClientStub>(Arc::new(block.clone()), BlockTransactions::default(), false)
                     .await
                     .expect("to process block");
             });
@@ -431,7 +432,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     // Process block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block3), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block3), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -609,7 +610,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     // Process block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block3), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block3), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -629,7 +630,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
     // Process block4 to trigger reprocessing of block2 and then block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block4), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block4), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -722,7 +723,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     );
 
     let res = block_pool
-        .process_block::<ApiClientStub>(Arc::new(header_building_on_very_old_block.clone()), false)
+        .process_block::<ApiClientStub>(Arc::new(header_building_on_very_old_block.clone()), BlockTransactions::default(), false)
         .await;
 
     assert!(res.is_err());
@@ -879,7 +880,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
                 let res = pool
-                    .process_block::<ApiClientStub>(Arc::new(block.clone()), false)
+                    .process_block::<ApiClientStub>(Arc::new(block.clone()), BlockTransactions::default(), false)
                     .await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
@@ -904,7 +905,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool
-        .process_block::<ApiClientStub>(Arc::new(bogus_block), false)
+        .process_block::<ApiClientStub>(Arc::new(bogus_block), BlockTransactions::default(), false)
         .await;
 
     sync_service_handle.shutdown_signal.fire();
@@ -962,7 +963,7 @@ async fn should_not_fast_track_block_already_in_index() {
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let err = service
-        .process_block::<ApiClientStub>(Arc::new(test_header.clone()), true)
+        .process_block::<ApiClientStub>(Arc::new(test_header.clone()), BlockTransactions::default(), true)
         .await
         .expect_err("to have an error");
 

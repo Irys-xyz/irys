@@ -593,359 +593,16 @@ where
         Ok(())
     }
 
-    #[instrument(
-        skip_all,
-        target = "BlockPool",
-        fields(block.hash = ?block_header.block_hash, block.height = block_header.height),
-    )]
-    pub(crate) async fn process_block<A: ApiClient>(
-        &self,
-        block_header: Arc<IrysBlockHeader>,
-        skip_validation_for_fast_track: bool,
-    ) -> Result<ProcessBlockResult, BlockPoolError> {
-        check_block_status(
-            &self.block_status_provider,
-            block_header.block_hash,
-            block_header.height,
-        )?;
-
-        let is_processing = self
-            .blocks_cache
-            .is_block_processing(&block_header.block_hash)
-            .await;
-        if is_processing {
-            warn!(
-                "Block pool: Block {:?} is already being processed or fast-tracked, skipping",
-                block_header.block_hash
-            );
-            return Err(BlockPoolError::Advisory(
-                AdvisoryBlockPoolError::AlreadyProcessed(block_header.block_hash),
-            ));
-        }
-
-        let maybe_evicted_or_updated = self
-            .blocks_cache
-            .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
-            .await;
-
-        if let Some((evicted_hash, _)) = maybe_evicted_or_updated {
-            // Otherwise it's updated, not evicted
-            let is_evicted = evicted_hash != block_header.block_hash;
-            if is_evicted {
-                warn!("Block {evicted_hash:?} has been evicted from BlockPool cache");
-            }
-        }
-
-        debug!(
-            "Block pool: Processing block {:?} (height {})",
-            block_header.block_hash, block_header.height,
-        );
-
-        let current_block_height = block_header.height;
-        let prev_block_hash = block_header.previous_block_hash;
-        let current_block_hash = block_header.block_hash;
-
-        let previous_block_status = self
-            .block_status_provider
-            .block_status(block_header.height.saturating_sub(1), &prev_block_hash);
-
-        debug!(
-            "Previous block status for the parent block of the block {:?}: {:?}: {:?}",
-            current_block_hash, prev_block_hash, previous_block_status
-        );
-
-        if previous_block_status.is_a_part_of_pruned_fork() {
-            error!(
-                "Block pool: Parent block ({:?}) for block {:?} is a part of a pruned fork, removing block from the pool",
-                prev_block_hash, current_block_hash
-            );
-            self.blocks_cache
-                .remove_block(
-                    &block_header.block_hash,
-                    BlockRemovalReason::FailedToProcess(FailureReason::ParentIsAPartOfAPrunedFork),
-                )
-                .await;
-            return Err(CriticalBlockPoolError::ForkedBlock(block_header.block_hash).into());
-        }
-
-        if !previous_block_status.is_processed() {
-            self.blocks_cache
-                .change_block_processing_status(block_header.block_hash, false)
-                .await;
-            debug!(
-                "Parent block for block {:?} is not found in the db",
-                current_block_hash
-            );
-
-            let is_already_in_cache = self.blocks_cache.contains_block(&prev_block_hash).await;
-
-            if is_already_in_cache {
-                let is_parent_processing = self
-                    .blocks_cache
-                    .is_block_processing(&prev_block_hash)
-                    .await;
-                if is_parent_processing {
-                    debug!(
-                        "Parent block {:?} is already processing, skipping the request",
-                        prev_block_hash
-                    );
-                } else {
-                    debug!(
-                        "Parent block {:?} is already in the cache and not processing, triggering its processing",
-                        prev_block_hash
-                    );
-                    if let Err(err) = self.sync_service_sender.send(
-                        SyncChainServiceMessage::AttemptReprocessingBlock(prev_block_hash),
-                    ) {
-                        error!(
-                            "BlockPool: Failed to send AttemptReprocessingBlock message: {:?}",
-                            err
-                        );
-                    }
-                }
-                return Ok(ProcessBlockResult::ParentAlreadyInCache);
-            } else {
-                debug!(
-                    "Parent block for block {:?} is not in the cache either",
-                    current_block_hash
-                );
-            }
-
-            let canonical_height = self.block_status_provider.canonical_height();
-
-            if current_block_height > canonical_height + BACKFILL_DEPTH {
-                // IMPORTANT! If the node is just processing blocks slower than the network, the sync service should catch it up eventually.
-                warn!(
-                    "Block pool: The block {:?} (height {}) is too far ahead of the latest canonical block (height {}). This might indicate a potential issue.",
-                    current_block_hash, current_block_height, canonical_height
-                );
-
-                return Ok(ProcessBlockResult::ParentTooFarAhead);
-            }
-
-            debug!(
-                "Requesting parent block {:?} for block {:?} from the network",
-                prev_block_hash, current_block_hash
-            );
-            // Use the sync service to request parent block (fire and forget)
-            if let Err(send_err) =
-                self.sync_service_sender
-                    .send(SyncChainServiceMessage::RequestBlockFromTheNetwork {
-                        block_hash: prev_block_hash,
-                        response: None,
-                    })
-            {
-                error!(
-                    "BlockPool: Failed to send RequestBlockFromTheNetwork message: {:?}",
-                    send_err
-                );
-                return Ok(ProcessBlockResult::ParentRequestFailed);
-            } else {
-                debug!(
-                    "Block pool: Requested parent block {:?} for block {:?} from the network",
-                    prev_block_hash, current_block_hash
-                );
-                return Ok(ProcessBlockResult::ParentRequested);
-            }
-        }
-
-        if skip_validation_for_fast_track {
-            // Preemptively handle reth payload for the trusted sync path
-            if let Err(err) = Self::pull_and_seal_execution_payload::<A>(
-                &self.execution_payload_provider,
-                &self.sync_service_sender,
-                block_header.evm_block_hash,
-                skip_validation_for_fast_track,
-                None,
-            )
-            .await
-            {
-                error!(
-                    "Block pool: Reth payload fetching error for block {:?}: {:?}. Removing block from the pool",
-                    block_header.block_hash, err
-                );
-                self.blocks_cache
-                    .remove_block(
-                        &block_header.block_hash,
-                        BlockRemovalReason::FailedToProcess(
-                            FailureReason::WasNotAbleToFetchRethPayload,
-                        ),
-                    )
-                    .await;
-                return Err(CriticalBlockPoolError::BlockError(format!("{:?}", err)).into());
-            }
-        }
-
-        info!(
-            "Found parent block for block {:?}, checking if tree has enough capacity",
-            current_block_hash
-        );
-
-        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
-
-        self.block_status_provider
-            .wait_for_block_tree_can_process_height(block_header.height)
-            .await;
-
-        // First, check if we have cached transactions for this block (from when it was an orphan)
-        let cached_txs = self
-            .blocks_cache
-            .take_txs_for_block(&current_block_hash)
-            .await;
-
-        // Separate cached transactions by type
-        let (cached_data_txs, cached_commitment_txs): (Vec<_>, Vec<_>) = cached_txs
-            .into_iter()
-            .partition(|tx| matches!(tx, IrysTransactionResponse::Storage(_)));
-
-        let fetched_data_txs: Vec<_> = cached_data_txs
-            .into_iter()
-            .filter_map(|tx| match tx {
-                IrysTransactionResponse::Storage(header) => Some(header),
-                _ => None,
-            })
-            .collect();
-
-        let fetched_commitment_txs: Vec<_> = cached_commitment_txs
-            .into_iter()
-            .filter_map(|tx| match tx {
-                IrysTransactionResponse::Commitment(tx) => Some(tx),
-                _ => None,
-            })
-            .collect();
-
-        // Build BlockTransactions using cached txs + querying mempool+DB for any missing
-        let block_transactions = self
-            .build_block_transactions_from_fetched(&block_header, fetched_data_txs, fetched_commitment_txs)
-            .await
-            .map_err(|e| {
-                BlockPoolError::Critical(CriticalBlockPoolError::MempoolError(e.to_string()))
-            })?;
-
-        debug!(
-            "Block pool: Built BlockTransactions for block {:?} with {} submit, {} publish, {} commitment txs",
-            current_block_hash,
-            block_transactions.submit_txs.len(),
-            block_transactions.publish_txs.len(),
-            block_transactions.commitment_txs.len()
-        );
-
-        // Insert transactions into mempool so validation service can find them later.
-        // This is critical because validation service fetches transactions from mempool/DB.
-        for commitment_tx in &block_transactions.commitment_txs {
-            if let Err(err) = self
-                .mempool
-                .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
-                .await
-            {
-                // Only warn on non-skip errors (skip means tx already exists)
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
-                        commitment_tx.id, current_block_hash, err
-                    );
-                }
-            }
-        }
-        for data_tx in block_transactions
-            .submit_txs
-            .iter()
-            .chain(block_transactions.publish_txs.iter())
-        {
-            if let Err(err) = self
-                .mempool
-                .handle_data_transaction_ingress_gossip(data_tx.clone())
-                .await
-            {
-                // Only warn on non-skip errors (skip means tx already exists)
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
-                        data_tx.id, current_block_hash, err
-                    );
-                }
-            }
-        }
-
-        if let Err(block_discovery_error) = self
-            .block_discovery
-            .handle_block(
-                Arc::clone(&block_header),
-                block_transactions,
-                skip_validation_for_fast_track,
-            )
-            .await
-        {
-            error!(
-                "Block pool: Block validation error for block {:?}: {:?}. Removing block from the pool",
-                block_header.block_hash, block_discovery_error
-            );
-            self.blocks_cache
-                .remove_block(
-                    &block_header.block_hash,
-                    BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
-                )
-                .await;
-            return Err(
-                CriticalBlockPoolError::BlockError(format!("{:?}", block_discovery_error)).into(),
-            );
-        }
-
-        info!(
-            "Block pool: Block {:?} has been processed",
-            current_block_hash
-        );
-
-        if !skip_validation_for_fast_track {
-            // If skip validation is true, we handle it preemptively above, if it isn't, it's a
-            //  good idea to request it here
-            self.pull_and_seal_execution_payload_in_background::<A>(
-                block_header.evm_block_hash,
-                skip_validation_for_fast_track,
-            );
-        }
-
-        debug!(
-            "Block pool: Marking block {:?} as processed",
-            current_block_hash
-        );
-        self.sync_state
-            .mark_processed(current_block_height as usize);
-        self.blocks_cache
-            .remove_block(
-                &block_header.block_hash,
-                BlockRemovalReason::SuccessfullyProcessed,
-            )
-            .await;
-
-        debug!(
-            "Block pool: Notifying sync service to process orphaned ancestors of block {:?}",
-            current_block_hash
-        );
-        if let Err(send_err) =
-            self.sync_service_sender
-                .send(SyncChainServiceMessage::BlockProcessedByThePool {
-                    block_hash: current_block_hash,
-                    response: None,
-                })
-        {
-            error!(
-                "Block pool: Failed to send BlockProcessedByThePool message: {:?}",
-                send_err
-            );
-        }
-
-        Ok(ProcessBlockResult::Processed)
-    }
-
-    /// Process a block with pre-built BlockTransactions.
-    /// This is the core processing logic used by both:
-    /// - `process_block` (for cached txs path)
-    /// - `handle_block_header` in GossipDataHandler (for direct MempoolReadGuard path)
+    /// Process a block with provided BlockTransactions.
+    ///
+    /// Callers provide BlockTransactions:
+    /// - `handle_block_header` builds txs from MempoolReadGuard + network fetch
+    /// - `reprocess_block` and `process_orphaned_ancestors` use cached txs via `take_and_build_cached_txs_for_block`
+    /// - Tests pass `BlockTransactions::default()`
     ///
     /// This method handles:
     /// - Block status validation
-    /// - Parent block resolution
+    /// - Parent block resolution (caches txs if block becomes orphan)
     /// - Mempool synchronization (inserting txs for validation service)
     /// - Block discovery processing
     /// - Cleanup and notifications
@@ -954,7 +611,7 @@ where
         target = "BlockPool",
         fields(block.hash = ?block_header.block_hash, block.height = block_header.height),
     )]
-    pub(crate) async fn process_block_with_txs<A: ApiClient>(
+    pub(crate) async fn process_block<A: ApiClient>(
         &self,
         block_header: Arc<IrysBlockHeader>,
         block_transactions: BlockTransactions,
@@ -1485,8 +1142,20 @@ where
         debug!("Triggering reprocessing for block {:?}", block_hash);
         let block = self.blocks_cache.get_block_header_cloned(&block_hash).await;
         if let Some(cached_block) = block {
-            self.process_block::<A>(cached_block.header, cached_block.is_fast_tracking)
+            // Build BlockTransactions from cached txs
+            let block_transactions = self
+                .take_and_build_cached_txs_for_block(&cached_block.header)
                 .await
+                .map_err(|e| {
+                    BlockPoolError::Critical(CriticalBlockPoolError::MempoolError(e.to_string()))
+                })?;
+
+            self.process_block::<A>(
+                cached_block.header,
+                block_transactions,
+                cached_block.is_fast_tracking,
+            )
+            .await
         } else {
             // This shouldn't happen because we check for block existence before calling this method
             error!(
@@ -1525,6 +1194,44 @@ where
         self.blocks_cache.remove_block(block_hash, reason).await;
         // Remove associated transactions as well
         self.blocks_cache.take_txs_for_block(block_hash).await;
+    }
+
+    /// Take cached transactions for a block and build BlockTransactions.
+    /// Used by callers (orphan processing, reprocess) to get cached txs before calling process_block.
+    pub(crate) async fn take_and_build_cached_txs_for_block(
+        &self,
+        block: &IrysBlockHeader,
+    ) -> eyre::Result<BlockTransactions> {
+        // Take cached transactions
+        let cached_txs = self
+            .blocks_cache
+            .take_txs_for_block(&block.block_hash)
+            .await;
+
+        // Separate by type
+        let (data_txs, commitment_txs): (Vec<_>, Vec<_>) = cached_txs
+            .into_iter()
+            .partition(|tx| matches!(tx, IrysTransactionResponse::Storage(_)));
+
+        let fetched_data_txs: Vec<_> = data_txs
+            .into_iter()
+            .filter_map(|tx| match tx {
+                IrysTransactionResponse::Storage(header) => Some(header),
+                _ => None,
+            })
+            .collect();
+
+        let fetched_commitment_txs: Vec<_> = commitment_txs
+            .into_iter()
+            .filter_map(|tx| match tx {
+                IrysTransactionResponse::Commitment(tx) => Some(tx),
+                _ => None,
+            })
+            .collect();
+
+        // Build BlockTransactions using the shared helper
+        self.build_block_transactions_from_fetched(block, fetched_data_txs, fetched_commitment_txs)
+            .await
     }
 
     /// Build BlockTransactions from pre-fetched transactions, querying mempool+DB for any missing.
