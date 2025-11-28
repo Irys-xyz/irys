@@ -602,6 +602,38 @@ mod unix_timestamp_ms_tests {
         // Numbers should be rejected
         assert!(serde_json::from_str::<UnixTimestampMs>("12345").is_err());
     }
+
+    #[test]
+    fn test_to_secs_truncates_millis() {
+        use std::time::Duration;
+
+        // Test that to_secs() truncates milliseconds (rounds down), matching Duration behavior
+
+        // 1500ms should become 1 second (not 2)
+        let ts = UnixTimestampMs::from_millis(1500);
+        assert_eq!(ts.to_secs().as_secs(), 1);
+        assert_eq!(Duration::from_millis(1500).as_secs(), 1);
+
+        // 999ms should become 0 seconds
+        let ts = UnixTimestampMs::from_millis(999);
+        assert_eq!(ts.to_secs().as_secs(), 0);
+        assert_eq!(Duration::from_millis(999).as_secs(), 0);
+
+        // 1000ms should become exactly 1 second
+        let ts = UnixTimestampMs::from_millis(1000);
+        assert_eq!(ts.to_secs().as_secs(), 1);
+        assert_eq!(Duration::from_millis(1000).as_secs(), 1);
+
+        // 2999ms should become 2 seconds
+        let ts = UnixTimestampMs::from_millis(2999);
+        assert_eq!(ts.to_secs().as_secs(), 2);
+        assert_eq!(Duration::from_millis(2999).as_secs(), 2);
+
+        // Realistic timestamp: verify truncation for actual timestamp values
+        // 1609459200500 ms = 1609459200.5 seconds -> should truncate to 1609459200
+        let ts = UnixTimestampMs::from_millis(1609459200500);
+        assert_eq!(ts.to_secs().as_secs(), 1609459200);
+    }
 }
 
 #[cfg(test)]
