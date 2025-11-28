@@ -19,7 +19,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle, H256,
+    IrysTransactionCommon, IrysTransactionId, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -57,6 +57,13 @@ pub enum BlockDiscoveryError {
         item_type: AnchorItemType,
         anchor: BlockHash,
     },
+    #[error("Invalid signature for transaction {0}")]
+    InvalidSignature(IrysTransactionId),
+    #[error("Transaction ID mismatch: expected {expected}, got {actual}")]
+    TransactionIdMismatch {
+        expected: IrysTransactionId,
+        actual: IrysTransactionId,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -76,6 +83,40 @@ pub struct BlockTransactions {
     pub publish_txs: Vec<DataTransactionHeader>,
     /// Commitment ledger transactions
     pub commitment_txs: Vec<CommitmentTransaction>,
+}
+
+/// Validate transactions against expected IDs from the block header.
+/// Checks: count matches, IDs match in order, signatures are valid.
+fn validate_transactions<T: IrysTransactionCommon>(
+    txs: &[T],
+    expected_ids: &[IrysTransactionId],
+) -> Result<(), BlockDiscoveryError> {
+    // Check count matches
+    if txs.len() != expected_ids.len() {
+        let provided_ids: std::collections::HashSet<_> = txs.iter().map(irys_types::IrysTransactionCommon::id).collect();
+        let missing: Vec<_> = expected_ids
+            .iter()
+            .filter(|id| !provided_ids.contains(id))
+            .copied()
+            .collect();
+        return Err(BlockDiscoveryError::MissingTransactions(missing));
+    }
+
+    // Check IDs match in order and signatures are valid
+    for (tx, expected_id) in txs.iter().zip(expected_ids.iter()) {
+        let actual_id = tx.id();
+        if actual_id != *expected_id {
+            return Err(BlockDiscoveryError::TransactionIdMismatch {
+                expected: *expected_id,
+                actual: actual_id,
+            });
+        }
+        if !tx.is_signature_valid() {
+            return Err(BlockDiscoveryError::InvalidSignature(actual_id));
+        }
+    }
+
+    Ok(())
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -366,19 +407,9 @@ impl BlockDiscoveryServiceInner {
                 )
             })?;
 
-        let submit_tx_ids_to_check = submit_ledger.tx_ids.0.clone();
-
-        // Use provided submit transactions directly
+        // Validate submit transactions: count, IDs, and signatures
         let submit_txs = transactions.submit_txs;
-
-        if submit_txs.len() != submit_tx_ids_to_check.len() {
-            return Err(BlockDiscoveryError::MissingTransactions(
-                submit_tx_ids_to_check
-                    .into_iter()
-                    .filter(|id| !submit_txs.iter().any(|tx| tx.id == *id))
-                    .collect(),
-            ));
-        }
+        validate_transactions(&submit_txs, &submit_ledger.tx_ids.0)?;
 
         //====================================
         // Publish ledger TX Validation
@@ -399,37 +430,21 @@ impl BlockDiscoveryServiceInner {
                 )
             })?;
 
-        let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
-
-        // Use provided publish transactions directly
+        // Validate publish transactions: count, IDs, and signatures
         let publish_txs = transactions.publish_txs;
+        validate_transactions(&publish_txs, &publish_ledger.tx_ids.0)?;
 
-        if publish_txs.len() != publish_tx_ids_to_check.len() {
-            let missing_txs = publish_tx_ids_to_check
-                .into_iter()
-                .filter(|id| !publish_txs.iter().any(|tx| tx.id == *id))
-                .collect();
-            return Err(BlockDiscoveryError::MissingTransactions(missing_txs));
-        }
-
-        if !publish_txs.is_empty() {
-            // Pre-Validate the ingress-proofs for each published transaction
-            for tx_header in publish_txs.iter() {
-                // Get the ingress proofs for the transaction
-                let tx_proofs =
-                    get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
-                        BlockDiscoveryError::BlockValidationError(
-                            PreValidationError::IngressProofsMissing,
-                        )
-                    })?;
-                // Validate the signatures and data_roots
-                for proof in tx_proofs.iter() {
-                    proof.pre_validate(&tx_header.data_root).map_err(|e| {
-                        BlockDiscoveryError::BlockValidationError(
-                            PreValidationError::IngressProofSignatureInvalid(e.to_string()),
-                        )
-                    })?;
-                }
+        // Also validate ingress proofs for published transactions
+        for tx_header in publish_txs.iter() {
+            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
+                BlockDiscoveryError::BlockValidationError(PreValidationError::IngressProofsMissing)
+            })?;
+            for proof in tx_proofs.iter() {
+                proof.pre_validate(&tx_header.data_root).map_err(|e| {
+                    BlockDiscoveryError::BlockValidationError(
+                        PreValidationError::IngressProofSignatureInvalid(e.to_string()),
+                    )
+                })?;
             }
         }
 
@@ -442,33 +457,18 @@ impl BlockDiscoveryServiceInner {
             .iter()
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
-        // Use provided commitment transactions directly
-        let commitments: Vec<CommitmentTransaction> =
-            if let Some(commitment_ledger) = commitment_ledger {
-                debug!(
-                    "incoming block commitment txids, height {} hash {}\n{:#?}",
-                    new_block_header.height, new_block_header.block_hash, commitment_ledger
-                );
-
-                let expected_ids: std::collections::HashSet<_> =
-                    commitment_ledger.tx_ids.0.iter().copied().collect();
-
-                if transactions.commitment_txs.len() != expected_ids.len() {
-                    error!(
-                    "Missing commitment transactions for block {} (height {}): expected {}, got {}",
-                    new_block_header.block_hash,
-                    new_block_header.height,
-                    expected_ids.len(),
-                    transactions.commitment_txs.len()
-                );
-                    return Err(BlockDiscoveryError::MissingTransactions(
-                        commitment_ledger.tx_ids.0.clone(),
-                    ));
-                }
-                transactions.commitment_txs
-            } else {
-                Vec::new()
-            };
+        // Validate commitment transactions: count, IDs, and signatures
+        let commitments = transactions.commitment_txs;
+        if let Some(commitment_ledger) = commitment_ledger {
+            debug!(
+                "incoming block commitment txids, height {} hash {}\n{:#?}",
+                new_block_header.height, new_block_header.block_hash, commitment_ledger
+            );
+            validate_transactions(&commitments, &commitment_ledger.tx_ids.0)?;
+        } else if !commitments.is_empty() {
+            // No commitment ledger in header but we received commitments - this is an error
+            return Err(BlockDiscoveryError::MissingTransactions(vec![]));
+        }
 
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
