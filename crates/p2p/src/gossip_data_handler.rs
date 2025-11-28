@@ -1008,7 +1008,6 @@ where
         // Fetch missing transactions in parallel with a concurrency limit of 10
         let fetch_results: Vec<_> = stream::iter(missing_tx_ids)
             .map(|tx_id_to_fetch| {
-                let source_peer = source_peer;
                 async move {
                     let mut fetched: Option<(IrysTransactionResponse, Address)> = None;
                     let mut last_err: Option<String> = None;

@@ -77,12 +77,30 @@ pub enum AnchorItemType {
 /// Used to pass pre-fetched transactions to block discovery.
 #[derive(Debug, Clone, Default)]
 pub struct BlockTransactions {
-    /// Submit ledger transactions
-    pub submit_txs: Vec<DataTransactionHeader>,
-    /// Publish ledger transactions
-    pub publish_txs: Vec<DataTransactionHeader>,
     /// Commitment ledger transactions
     pub commitment_txs: Vec<CommitmentTransaction>,
+    /// Data transactions organized by ledger type
+    pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
+}
+
+impl BlockTransactions {
+    /// Get transactions for a specific data ledger
+    pub fn get_ledger_txs(&self, ledger: DataLedger) -> &[DataTransactionHeader] {
+        self.data_txs
+            .get(&ledger)
+            .map(std::vec::Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Get owned transactions for a specific data ledger
+    pub fn take_ledger_txs(&mut self, ledger: DataLedger) -> Vec<DataTransactionHeader> {
+        self.data_txs.remove(&ledger).unwrap_or_default()
+    }
+
+    /// Iterate over all data transactions across all ledgers
+    pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
+        self.data_txs.values().flatten()
+    }
 }
 
 /// Validate transactions against expected IDs from the block header.
@@ -329,7 +347,7 @@ impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        mut transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -411,7 +429,7 @@ impl BlockDiscoveryServiceInner {
             })?;
 
         // Validate submit transactions: count, IDs, and signatures
-        let submit_txs = transactions.submit_txs;
+        let submit_txs = transactions.take_ledger_txs(DataLedger::Submit);
         validate_transactions(&submit_txs, &submit_ledger.tx_ids.0)?;
 
         //====================================
@@ -434,7 +452,7 @@ impl BlockDiscoveryServiceInner {
             })?;
 
         // Validate publish transactions: count, IDs, and signatures
-        let publish_txs = transactions.publish_txs;
+        let publish_txs = transactions.take_ledger_txs(DataLedger::Publish);
         validate_transactions(&publish_txs, &publish_ledger.tx_ids.0)?;
 
         // Also validate ingress proofs for published transactions
@@ -681,10 +699,6 @@ impl BlockDiscoveryServiceInner {
 
         match validation_result {
             Ok(()) => {
-                // all txs
-                let mut all_txs = submit_txs;
-                all_txs.extend_from_slice(&publish_txs);
-
                 // Check if we've reached the end of an epoch and should finalize commitments
 
                 let arc_commitment_txs = Arc::new(commitments);

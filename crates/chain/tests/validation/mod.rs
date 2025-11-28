@@ -27,7 +27,7 @@ use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, IrysTransactionCommon, NodeConfig, SystemTransactionLedger, H256,
+    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation

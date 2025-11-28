@@ -1996,9 +1996,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         }
 
         let block_transactions = BlockTransactions {
-            submit_txs,
-            publish_txs,
             commitment_txs,
+            data_txs: std::collections::HashMap::from([
+                (DataLedger::Submit, submit_txs),
+                (DataLedger::Publish, publish_txs),
+            ]),
         };
 
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
@@ -2201,9 +2203,11 @@ impl IrysNodeTest<IrysNodeCtx> {
         // Build BlockTransactions from the collected transactions
         use irys_actors::block_discovery::BlockTransactions;
         let block_transactions = BlockTransactions {
-            submit_txs,
-            publish_txs,
             commitment_txs,
+            data_txs: std::collections::HashMap::from([
+                (DataLedger::Submit, submit_txs),
+                (DataLedger::Publish, publish_txs),
+            ]),
         };
 
         // Deliver block header (this triggers validation)

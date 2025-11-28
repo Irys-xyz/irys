@@ -681,9 +681,7 @@ where
 
             // Cache transactions for this orphan block so they're available when reprocessed
             let txs_to_cache: Vec<IrysTransactionResponse> = block_transactions
-                .submit_txs
-                .iter()
-                .chain(block_transactions.publish_txs.iter())
+                .all_data_txs()
                 .map(|tx| IrysTransactionResponse::Storage(tx.clone()))
                 .chain(
                     block_transactions
@@ -816,8 +814,8 @@ where
         debug!(
             "Block pool: Processing block {:?} with {} submit, {} publish, {} commitment txs",
             current_block_hash,
-            block_transactions.submit_txs.len(),
-            block_transactions.publish_txs.len(),
+            block_transactions.get_ledger_txs(DataLedger::Submit).len(),
+            block_transactions.get_ledger_txs(DataLedger::Publish).len(),
             block_transactions.commitment_txs.len()
         );
 
@@ -836,11 +834,7 @@ where
                 }
             }
         }
-        for data_tx in block_transactions
-            .submit_txs
-            .iter()
-            .chain(block_transactions.publish_txs.iter())
-        {
+        for data_tx in block_transactions.all_data_txs() {
             if let Err(err) = self
                 .mempool
                 .handle_data_transaction_ingress_gossip(data_tx.clone())
@@ -1252,9 +1246,11 @@ pub(crate) fn order_transactions_for_block(
         .collect();
 
     BlockTransactions {
-        submit_txs,
-        publish_txs,
         commitment_txs,
+        data_txs: HashMap::from([
+            (DataLedger::Submit, submit_txs),
+            (DataLedger::Publish, publish_txs),
+        ]),
     }
 }
 

@@ -50,6 +50,7 @@ use reth::{
 };
 use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
+use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
 use std::{
     sync::Arc,
@@ -1160,9 +1161,11 @@ pub trait BlockProdStrategy {
 
         // Build BlockTransactions from the mempool bundle
         let block_transactions = BlockTransactions {
-            submit_txs: mempool_bundle.submit_txs,
-            publish_txs: mempool_bundle.publish_txs.txs,
             commitment_txs: mempool_bundle.commitment_txs,
+            data_txs: HashMap::from([
+                (DataLedger::Submit, mempool_bundle.submit_txs),
+                (DataLedger::Publish, mempool_bundle.publish_txs.txs),
+            ]),
         };
 
         Ok(Some((block, stats, block_transactions)))
