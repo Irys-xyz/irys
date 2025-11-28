@@ -8,6 +8,7 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
+use crate::UnixTimestamp;
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -33,16 +34,16 @@ impl Config {
         }
     }
 
-    /// Get the number of ingress proofs required at a given timestamp (seconds since epoch).
-    pub fn number_of_ingress_proofs_total_at(&self, timestamp: u64) -> u64 {
+    /// Get the number of ingress proofs required at a given timestamp (in seconds).
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
         self.0
             .consensus
             .hardforks
             .number_of_ingress_proofs_total_at(timestamp)
     }
 
-    /// Get the number of ingress proofs from assignees required at a given timestamp (seconds since epoch).
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: u64) -> u64 {
+    /// Get the number of ingress proofs from assignees required at a given timestamp (in seconds).
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
         self.0
             .consensus
             .hardforks

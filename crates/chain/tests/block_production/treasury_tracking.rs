@@ -3,7 +3,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    CommitmentTransaction, NodeConfig,
+    CommitmentTransaction, NodeConfig, UnixTimestamp,
 };
 use tracing::info;
 
@@ -123,7 +123,10 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     );
 
     // Block 3: Previous treasury + data tx fees
-    let number_of_ingress_proofs_total = node.node_ctx.config.number_of_ingress_proofs_total_at(0);
+    let number_of_ingress_proofs_total = node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let data_tx1_fees = {
         let term_charges = TermFeeCharges::new(data_tx1.header.term_fee, &consensus_config)?;
         let publish_charges = PublishFeeCharges::new(

@@ -304,7 +304,7 @@ impl Inner {
                 .get_block(&last_block_entry.block_hash)
                 .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
             // Convert block timestamp from millis to seconds
-            let timestamp_secs = (last_block.timestamp / 1000) as u64;
+            let timestamp_secs = last_block.timestamp_secs();
             (ema, timestamp_secs)
         };
 
@@ -497,7 +497,7 @@ impl Inner {
             let last_block = tree
                 .get_block(&last_block_entry.block_hash)
                 .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
-            (last_block.timestamp / 1000) as u64
+            last_block.timestamp_secs()
         };
         let number_of_ingress_proofs_total = self
             .config

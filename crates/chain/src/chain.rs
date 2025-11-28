@@ -58,7 +58,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
-    TokioServiceHandle, H256, U256,
+    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
@@ -365,7 +365,7 @@ impl IrysNode {
         if has_existing_data {
             // CASE 1: Load existing genesis block and commitments from database
             let (block, commitments) = self.load_existing_genesis(irys_db, block_index);
-            let timestamp_secs = Duration::from_millis(block.timestamp.try_into()?).as_secs();
+            let timestamp_secs = block.timestamp_secs().as_secs();
             return Ok((
                 block,
                 commitments,
@@ -394,7 +394,7 @@ impl IrysNode {
                 let (block, commitments) = self
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)
                     .await;
-                let timestamp_secs = Duration::from_millis(block.timestamp.try_into()?).as_secs();
+                let timestamp_secs = block.timestamp_secs().as_secs();
 
                 Ok((
                     block,
@@ -476,7 +476,7 @@ impl IrysNode {
         // Get hardfork params for genesis block using its timestamp
         let number_of_ingress_proofs_total = self
             .config
-            .number_of_ingress_proofs_total_at(timestamp_secs);
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
@@ -497,8 +497,8 @@ impl IrysNode {
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
             genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
         }
-        genesis_block.timestamp = timestamp_millis;
-        genesis_block.last_diff_timestamp = timestamp_millis;
+        genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
+        genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
         // Add commitment transactions to genesis block and get initial treasury
         let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;

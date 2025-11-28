@@ -34,7 +34,7 @@ use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, H256, U256,
+    IrysTransactionId, NodeConfig, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -562,7 +562,7 @@ impl Inner {
             let block_height = block.height;
             let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
             // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
-            let block_timestamp_secs = (block.timestamp / 1000) as u64;
+            let block_timestamp_secs = block.timestamp_secs();
 
             let ema_snapshot = tree
                 .get_ema_snapshot(&parent_block_hash)
@@ -1008,7 +1008,7 @@ impl Inner {
         canonical: &[BlockTreeEntry],
         submit_tx: &[DataTransactionHeader],
         current_height: u64,
-        current_timestamp: u64,
+        current_timestamp: UnixTimestamp,
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
@@ -1575,7 +1575,7 @@ impl Inner {
         bytes_to_store: u64,
         term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
-        timestamp_secs: u64,
+        timestamp_secs: UnixTimestamp,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
         let total_perm_fee = calculate_perm_storage_total_fee(
@@ -1598,7 +1598,7 @@ impl Inner {
         bytes_to_store: u64,
         ema: &Arc<irys_domain::EmaSnapshot>,
         block_height: u64,
-        timestamp: u64,
+        timestamp: UnixTimestamp,
     ) -> Result<U256, TxIngressError> {
         // Calculate expires for the specified block height using the shared utility
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(

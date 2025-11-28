@@ -15,7 +15,7 @@ use crate::{
     partition::PartitionHash,
     resolve_proofs,
     serialization::{optional_string_u64, string_u64},
-    string_u128,
+    time::UnixTimestampMs,
     transaction::DataTransactionHeader,
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
@@ -296,8 +296,13 @@ impl IrysBlockHeader {
     }
 
     /// Get the timestamp (convenience method)
-    pub fn timestamp(&self) -> u128 {
+    pub fn timestamp(&self) -> UnixTimestampMs {
         self.timestamp
+    }
+
+    /// Get the timestamp as seconds (convenience for hardfork comparisons)
+    pub fn timestamp_secs(&self) -> crate::UnixTimestamp {
+        self.timestamp.to_secs()
     }
 }
 
@@ -354,8 +359,7 @@ pub struct IrysBlockHeaderV1 {
     pub solution_hash: H256,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
-    #[serde(with = "string_u128")]
-    pub last_diff_timestamp: u128,
+    pub last_diff_timestamp: UnixTimestampMs,
 
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
@@ -388,8 +392,7 @@ pub struct IrysBlockHeaderV1 {
     pub miner_address: Address,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
-    #[serde(with = "string_u128")]
-    pub timestamp: u128,
+    pub timestamp: UnixTimestampMs,
 
     /// A list of system transaction ledgers
     pub system_ledgers: Vec<SystemTransactionLedger>,
@@ -764,7 +767,7 @@ impl IrysBlockHeaderV1 {
         Self {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
-            last_diff_timestamp: 1622543200,
+            last_diff_timestamp: UnixTimestampMs::from_millis(1622543200),
             solution_hash: default_solution_hash,
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
@@ -784,7 +787,7 @@ impl IrysBlockHeaderV1 {
             },
             reward_address: Address::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
-            timestamp: now.as_millis(),
+            timestamp: UnixTimestampMs::from_millis(now.as_millis()),
             system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
             data_ledgers: vec![
                 // Permanent Publish Ledger

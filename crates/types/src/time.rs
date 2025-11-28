@@ -1,10 +1,12 @@
+use alloy_rlp::{Decodable, Encodable};
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use reth_db::table::{Decode, Encode};
 use reth_db::DatabaseError;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::str::FromStr as _;
 use std::time::SystemTime;
 
 /// Zero-cost newtype wrapper for Unix timestamps in seconds
@@ -161,6 +163,170 @@ impl Compact for UnixTimestamp {
     fn from_compact(mut buf: &[u8], _len: usize) -> (Self, &[u8]) {
         let val = buf.get_u64();
         (Self(val), buf)
+    }
+}
+
+/// Zero-cost newtype wrapper for Unix timestamps in milliseconds
+///
+/// Represents milliseconds since the Unix epoch (1970-01-01 00:00:00 UTC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Arbitrary)]
+#[repr(transparent)]
+pub struct UnixTimestampMs(u128);
+
+impl UnixTimestampMs {
+    /// Creates a UnixTimestampMs from the current system time
+    #[inline]
+    pub fn now() -> Result<Self, std::time::SystemTimeError> {
+        Ok(Self(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_millis(),
+        ))
+    }
+
+    /// Creates a UnixTimestampMs from milliseconds since Unix epoch
+    #[inline]
+    pub const fn from_millis(millis: u128) -> Self {
+        Self(millis)
+    }
+
+    /// Returns the number of milliseconds since Unix epoch
+    #[inline]
+    pub const fn as_millis(self) -> u128 {
+        self.0
+    }
+
+    /// Converts to seconds (lossy - truncates sub-second precision)
+    #[inline]
+    pub const fn to_secs(self) -> UnixTimestamp {
+        UnixTimestamp::from_secs((self.0 / 1000) as u64)
+    }
+
+    /// Creates from a UnixTimestamp (lossless - extends with zero milliseconds)
+    #[inline]
+    pub const fn from_timestamp(ts: UnixTimestamp) -> Self {
+        Self(ts.as_secs() as u128 * 1000)
+    }
+
+    /// Saturating subtraction of duration in milliseconds
+    #[inline]
+    pub const fn saturating_sub_millis(self, millis: u128) -> Self {
+        Self(self.0.saturating_sub(millis))
+    }
+
+    /// Saturating addition of duration in milliseconds
+    #[inline]
+    pub const fn saturating_add_millis(self, millis: u128) -> Self {
+        Self(self.0.saturating_add(millis))
+    }
+
+    /// Returns the saturated number of milliseconds between two timestamps
+    #[inline]
+    pub const fn saturating_millis_since(self, other: Self) -> u128 {
+        self.0.saturating_sub(other.0)
+    }
+
+    /// Returns a mutable reference to the underlying bytes (for testing purposes)
+    #[inline]
+    pub fn as_mut_bytes(&mut self) -> &mut [u8] {
+        bytemuck::bytes_of_mut(&mut self.0)
+    }
+}
+
+impl fmt::Display for UnixTimestampMs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u128> for UnixTimestampMs {
+    #[inline]
+    fn from(millis: u128) -> Self {
+        Self(millis)
+    }
+}
+
+impl From<UnixTimestampMs> for u128 {
+    #[inline]
+    fn from(ts: UnixTimestampMs) -> Self {
+        ts.0
+    }
+}
+
+// Custom serde: always use string format (matches existing block header JSON format)
+impl Serialize for UnixTimestampMs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for UnixTimestampMs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        u128::from_str(&s)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Encode for UnixTimestampMs {
+    type Encoded = [u8; 16];
+
+    #[inline]
+    fn encode(self) -> Self::Encoded {
+        self.0.to_be_bytes()
+    }
+}
+
+impl Decode for UnixTimestampMs {
+    #[inline]
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        if value.len() != 16 {
+            return Err(DatabaseError::Decode);
+        }
+        let bytes: [u8; 16] = value.try_into().map_err(|_| DatabaseError::Decode)?;
+        Ok(Self(u128::from_be_bytes(bytes)))
+    }
+}
+
+impl Compact for UnixTimestampMs {
+    #[inline]
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.0.to_compact(buf)
+    }
+
+    #[inline]
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (val, remaining) = u128::from_compact(buf, len);
+        (Self(val), remaining)
+    }
+}
+
+impl Encodable for UnixTimestampMs {
+    #[inline]
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        Encodable::encode(&self.0, out);
+    }
+
+    #[inline]
+    fn length(&self) -> usize {
+        Encodable::length(&self.0)
+    }
+}
+
+impl Decodable for UnixTimestampMs {
+    #[inline]
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        <u128 as Decodable>::decode(buf).map(Self)
     }
 }
 
@@ -375,6 +541,136 @@ mod property_tests {
             let ts_b = UnixTimestamp::from_secs(b);
 
             prop_assert_eq!(ts_a.saturating_seconds_since(ts_b), a.saturating_sub(b));
+        }
+    }
+}
+
+#[cfg(test)]
+mod unix_timestamp_ms_tests {
+    use super::*;
+    use bytes::BytesMut;
+
+    #[test]
+    fn test_compact_variable_length() {
+        // Zero should encode to 0 bytes
+        let zero = UnixTimestampMs::from_millis(0);
+        let mut buf = BytesMut::with_capacity(16);
+        let len = zero.to_compact(&mut buf);
+        assert_eq!(len, 0);
+        let (decoded, _) = UnixTimestampMs::from_compact(&buf[..], len);
+        assert_eq!(decoded, zero);
+
+        // Small value should use fewer bytes
+        let small = UnixTimestampMs::from_millis(255); // fits in 1 byte
+        buf.clear();
+        let len = small.to_compact(&mut buf);
+        assert_eq!(len, 1);
+        let (decoded, _) = UnixTimestampMs::from_compact(&buf[..], len);
+        assert_eq!(decoded, small);
+
+        // Max value should use all 16 bytes
+        let max = UnixTimestampMs::from_millis(u128::MAX);
+        buf.clear();
+        let len = max.to_compact(&mut buf);
+        assert_eq!(len, 16);
+        let (decoded, _) = UnixTimestampMs::from_compact(&buf[..], len);
+        assert_eq!(decoded, max);
+    }
+
+    #[test]
+    fn test_u128_conversions() {
+        let ts = UnixTimestampMs::from_millis(12345);
+
+        let from_u128: UnixTimestampMs = 12345_u128.into();
+        assert_eq!(ts, from_u128);
+
+        let to_u128: u128 = ts.into();
+        assert_eq!(to_u128, 12345);
+    }
+
+    #[test]
+    fn test_serde_json_string_format() {
+        // Verify JSON serializes as string (matches string_u128 format)
+        let ts = UnixTimestampMs::from_millis(1609459200000);
+        let json = serde_json::to_string(&ts).unwrap();
+        assert_eq!(json, "\"1609459200000\"");
+
+        // Deserialize from string
+        let from_str: UnixTimestampMs = serde_json::from_str("\"1609459200000\"").unwrap();
+        assert_eq!(from_str, ts);
+
+        // Numbers should be rejected
+        assert!(serde_json::from_str::<UnixTimestampMs>("12345").is_err());
+    }
+}
+
+#[cfg(test)]
+mod unix_timestamp_ms_property_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn compact_roundtrip_ms(millis in any::<u128>()) {
+            use bytes::BytesMut;
+
+            let original = UnixTimestampMs::from_millis(millis);
+            let mut buf = BytesMut::with_capacity(16);
+            let len = original.to_compact(&mut buf);
+
+            let (decoded, remaining) = UnixTimestampMs::from_compact(&buf[..], len);
+            prop_assert_eq!(original, decoded);
+            prop_assert_eq!(remaining.len(), 0);
+            // Variable-length: len depends on value (0-16 bytes)
+            prop_assert!(len <= 16);
+        }
+
+        #[test]
+        fn serde_json_roundtrip_ms(millis in any::<u128>()) {
+            let original = UnixTimestampMs::from_millis(millis);
+
+            let json = serde_json::to_string(&original).unwrap();
+            let from_json: UnixTimestampMs = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(original, from_json);
+        }
+
+        #[test]
+        fn to_secs_consistent_with_division(millis in any::<u128>()) {
+            let ts = UnixTimestampMs::from_millis(millis);
+            let expected_secs = (millis / 1000) as u64;
+            prop_assert_eq!(ts.to_secs().as_secs(), expected_secs);
+        }
+
+        #[test]
+        fn from_timestamp_to_secs_roundtrip(secs in any::<u64>()) {
+            let original = UnixTimestamp::from_secs(secs);
+            let ms = UnixTimestampMs::from_timestamp(original);
+            prop_assert_eq!(ms.to_secs(), original);
+        }
+
+        /// Property: Our Compact impl produces identical output to native u128
+        #[test]
+        fn compact_matches_native_u128(millis in any::<u128>()) {
+            use bytes::BytesMut;
+
+            let ts = UnixTimestampMs::from_millis(millis);
+
+            // Our impl
+            let mut our_buf = BytesMut::with_capacity(16);
+            let our_len = ts.to_compact(&mut our_buf);
+
+            // Native u128 impl
+            let mut native_buf = BytesMut::with_capacity(16);
+            let native_len = millis.to_compact(&mut native_buf);
+
+            // Must produce identical bytes and length
+            prop_assert_eq!(our_len, native_len);
+            prop_assert_eq!(&our_buf[..], &native_buf[..]);
+
+            // Both must decode to same value
+            let (our_decoded, _) = UnixTimestampMs::from_compact(&our_buf[..], our_len);
+            let (native_decoded, _) = u128::from_compact(&native_buf[..], native_len);
+            prop_assert_eq!(our_decoded.as_millis(), native_decoded);
         }
     }
 }

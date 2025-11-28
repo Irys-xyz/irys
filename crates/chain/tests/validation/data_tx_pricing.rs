@@ -21,7 +21,7 @@ use irys_types::storage_pricing::{
 use irys_types::IngressProofsList;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    OracleConfig, U256,
+    OracleConfig, UnixTimestamp, U256,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
@@ -391,7 +391,7 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
     let number_of_ingress_proofs_total = genesis_node
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(0);
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
@@ -517,7 +517,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
     let number_of_ingress_proofs_total = genesis_node
         .node_ctx
         .config
-        .number_of_ingress_proofs_total_at(0);
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,

@@ -1,5 +1,6 @@
 //! Configurable hardfork parameters.
 
+use crate::UnixTimestamp;
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
@@ -41,11 +42,11 @@ pub struct NextNameTBD {
 }
 
 impl IrysHardforkConfig {
-    /// Check if the NextNameTBD hardfork is active at a given timestamp.
-    pub fn is_next_name_tbd_active(&self, timestamp: u64) -> bool {
+    /// Check if the NextNameTBD hardfork is active at a given timestamp (in seconds).
+    pub fn is_next_name_tbd_active(&self, timestamp: UnixTimestamp) -> bool {
         self.next_name_tbd
             .as_ref()
-            .is_some_and(|f| timestamp >= f.activation_timestamp)
+            .is_some_and(|f| timestamp.as_secs() >= f.activation_timestamp)
     }
 
     /// Get the activation timestamp for NextNameTBD hardfork, if configured.
@@ -53,20 +54,20 @@ impl IrysHardforkConfig {
         self.next_name_tbd.as_ref().map(|f| f.activation_timestamp)
     }
 
-    /// Get the number of ingress proofs required at a specific timestamp.
-    pub fn number_of_ingress_proofs_total_at(&self, timestamp: u64) -> u64 {
+    /// Get the number of ingress proofs required at a specific timestamp (in seconds).
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
         if let Some(ref fork) = self.next_name_tbd {
-            if timestamp >= fork.activation_timestamp {
+            if timestamp.as_secs() >= fork.activation_timestamp {
                 return fork.number_of_ingress_proofs_total;
             }
         }
         self.frontier.number_of_ingress_proofs_total
     }
 
-    /// Get the number of ingress proofs from assignees required at a specific timestamp.
-    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: u64) -> u64 {
+    /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
         if let Some(ref fork) = self.next_name_tbd {
-            if timestamp >= fork.activation_timestamp {
+            if timestamp.as_secs() >= fork.activation_timestamp {
                 return fork.number_of_ingress_proofs_from_assignees;
             }
         }
@@ -88,11 +89,20 @@ mod tests {
             next_name_tbd: None,
         };
 
-        assert_eq!(config.number_of_ingress_proofs_total_at(0), 5);
-        assert_eq!(config.number_of_ingress_proofs_from_assignees_at(0), 2);
+        assert_eq!(
+            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0)),
+            5
+        );
+        assert_eq!(
+            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(0)),
+            2
+        );
 
         // Same params at any timestamp since no next fork
-        assert_eq!(config.number_of_ingress_proofs_total_at(1_000_000), 5);
+        assert_eq!(
+            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1_000_000)),
+            5
+        );
     }
 
     #[test]
@@ -110,18 +120,36 @@ mod tests {
         };
 
         // Before activation timestamp
-        assert_eq!(config.number_of_ingress_proofs_total_at(999), 10);
-        assert_eq!(config.number_of_ingress_proofs_from_assignees_at(999), 0);
-        assert!(!config.is_next_name_tbd_active(999));
+        assert_eq!(
+            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(999)),
+            10
+        );
+        assert_eq!(
+            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(999)),
+            0
+        );
+        assert!(!config.is_next_name_tbd_active(UnixTimestamp::from_secs(999)));
 
         // At activation timestamp
-        assert_eq!(config.number_of_ingress_proofs_total_at(1000), 4);
-        assert_eq!(config.number_of_ingress_proofs_from_assignees_at(1000), 2);
-        assert!(config.is_next_name_tbd_active(1000));
+        assert_eq!(
+            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1000)),
+            4
+        );
+        assert_eq!(
+            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(1000)),
+            2
+        );
+        assert!(config.is_next_name_tbd_active(UnixTimestamp::from_secs(1000)));
 
         // After activation timestamp
-        assert_eq!(config.number_of_ingress_proofs_total_at(1001), 4);
-        assert_eq!(config.number_of_ingress_proofs_from_assignees_at(1001), 2);
+        assert_eq!(
+            config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1001)),
+            4
+        );
+        assert_eq!(
+            config.number_of_ingress_proofs_from_assignees_at(UnixTimestamp::from_secs(1001)),
+            2
+        );
     }
 
     #[test]

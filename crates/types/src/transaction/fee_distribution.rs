@@ -279,6 +279,7 @@ mod tests {
     use super::*;
     use crate::storage_pricing::phantoms::Percentage;
     use crate::storage_pricing::Amount;
+    use crate::UnixTimestamp;
     use rust_decimal_macros::dec;
 
     #[test]
@@ -435,7 +436,9 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = config.hardforks.number_of_ingress_proofs_total_at(0);
+        let number_of_ingress_proofs_total = config
+            .hardforks
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
         let term_fee = BoundedFee::from(1000_u64);
         let perm_fee = BoundedFee::from(10000_u64);
@@ -542,7 +545,9 @@ mod tests {
         let mut config = ConsensusConfig::testing();
         config.immediate_tx_inclusion_reward_percent =
             Amount::<Percentage>::percentage(dec!(0.05)).unwrap();
-        let number_of_ingress_proofs_total = config.hardforks.number_of_ingress_proofs_total_at(0);
+        let number_of_ingress_proofs_total = config
+            .hardforks
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
         let term_fee = BoundedFee::from(1003_u64); // Not evenly divisible
         let perm_fee = BoundedFee::from(10000_u64);

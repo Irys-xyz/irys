@@ -13,7 +13,8 @@ use irys_actors::{
 };
 use irys_types::{
     ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
-    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, H256, U256,
+    DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, UnixTimestampMs, H256,
+    U256,
 };
 use reth::payload::EthBuiltPayload;
 
@@ -38,7 +39,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
@@ -195,7 +196,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
@@ -286,7 +287,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {

@@ -56,7 +56,7 @@ pub async fn get_block_tree_forks(state: web::Data<ApiState>) -> HttpResponse {
                         blocks_info.push(BlockAtHeight {
                             block_hash: block_hash.to_string(),
                             cumulative_diff: block.cumulative_diff.to_string(),
-                            timestamp: block.timestamp,
+                            timestamp: block.timestamp.as_millis(),
                             solution_hash: block.solution_hash.to_string(),
                             is_tip: *block_hash == tip_hash,
                         });

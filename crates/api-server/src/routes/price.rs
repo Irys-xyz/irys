@@ -65,7 +65,7 @@ pub async fn get_price(
                 .get_block(&last_block_entry.block_hash)
                 .ok_or_else(|| ErrorBadRequest("Block not found"))?;
             // Convert block timestamp from millis to seconds for hardfork params
-            let latest_block_timestamp_secs = (last_block.timestamp / 1000) as u64;
+            let latest_block_timestamp_secs = last_block.timestamp_secs();
             drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height

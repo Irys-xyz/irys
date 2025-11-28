@@ -6,7 +6,7 @@ use irys_reth::shadow_tx::{
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     Address, BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader,
-    IngressProofsList, IrysBlockHeader, H256, U256,
+    IngressProofsList, IrysBlockHeader, UnixTimestamp, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -201,7 +201,7 @@ impl<'a> ShadowTxGenerator<'a> {
 
         // Initialize publish ledger iterator with aggregated ingress proof rewards
         // Use parent block's timestamp for hardfork params (convert millis to seconds)
-        let parent_block_timestamp_secs = (parent_block.timestamp / 1000) as u64;
+        let parent_block_timestamp_secs = parent_block.timestamp_secs();
         let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(
             publish_ledger,
             config,
@@ -298,7 +298,7 @@ impl<'a> ShadowTxGenerator<'a> {
     fn accumulate_ingress_rewards_for_init(
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
-        timestamp_secs: u64,
+        timestamp_secs: UnixTimestamp,
     ) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
 
@@ -499,7 +499,7 @@ impl<'a> ShadowTxGenerator<'a> {
 
         // Construct perm fee charges if applicable
         // Use parent block's timestamp for hardfork params (convert millis to seconds)
-        let parent_block_timestamp_secs = (self.parent_block.timestamp / 1000) as u64;
+        let parent_block_timestamp_secs = self.parent_block.timestamp_secs();
         let number_of_ingress_proofs_total = self
             .config
             .hardforks
@@ -791,8 +791,9 @@ mod tests {
         let actual_perm_fee = perm_fee.unwrap_or_else(|| {
             // If no perm_fee specified, calculate minimum required for ingress proofs
             let config = ConsensusConfig::testing();
-            let number_of_ingress_proofs_total =
-                config.hardforks.number_of_ingress_proofs_total_at(0);
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let ingress_reward_per_proof = (term_fee
                 * config.immediate_tx_inclusion_reward_percent.amount)
                 / U256::from(10000);

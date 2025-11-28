@@ -5,7 +5,7 @@ use actix_web::http::header::ContentType;
 use irys_api_server::routes::price::PriceInfo;
 use irys_types::{
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee_from_config},
-    DataLedger, U256,
+    DataLedger, UnixTimestamp, U256,
 };
 
 #[test_log::test(tokio::test)]
@@ -19,7 +19,10 @@ async fn heavy_pricing_endpoint_a_lot_of_data() -> eyre::Result<()> {
     let data_size_bytes = ctx.node_ctx.config.consensus.chunk_size * 5;
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx.node_ctx.config.number_of_ingress_proofs_total_at(0);
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
@@ -108,7 +111,10 @@ async fn heavy_pricing_endpoint_small_data() -> eyre::Result<()> {
     };
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx.node_ctx.config.number_of_ingress_proofs_total_at(0);
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size, // small data rounds up to chunk_size
         &ctx.node_ctx.config.consensus,
@@ -220,7 +226,10 @@ async fn heavy_pricing_endpoint_round_data_chunk_up() -> eyre::Result<()> {
     };
 
     // Calculate the expected term fee using hardfork params from config to match API behavior
-    let number_of_ingress_proofs_total = ctx.node_ctx.config.number_of_ingress_proofs_total_at(0);
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         ctx.node_ctx.config.consensus.chunk_size * 2, // data rounds up to 2 chunks
         &ctx.node_ctx.config.consensus,
@@ -410,11 +419,11 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
 
     // Verify hardfork is NOT active at genesis
     let genesis_block = ctx.get_block_by_height(0).await?;
-    let genesis_timestamp_secs = (genesis_block.timestamp / 1000) as u64;
+    let genesis_timestamp_secs = genesis_block.timestamp_secs();
     assert!(
-        genesis_timestamp_secs < hardfork_activation,
+        genesis_timestamp_secs.as_secs() < hardfork_activation,
         "Genesis timestamp ({}) should be before hardfork activation ({})",
-        genesis_timestamp_secs,
+        genesis_timestamp_secs.as_secs(),
         hardfork_activation
     );
     let proofs_at_genesis = ctx
@@ -457,18 +466,18 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
     // In testing config, block_time is 1 second, so we need ~5+ blocks
     let post_hardfork_block = loop {
         let block = ctx.mine_block().await?;
-        let block_timestamp_secs = (block.timestamp / 1000) as u64;
+        let block_timestamp_secs = block.timestamp_secs().as_secs();
         if block_timestamp_secs >= hardfork_activation {
             break block;
         }
     };
 
     // Verify hardfork is now active using the block we just mined
-    let latest_timestamp_secs = (post_hardfork_block.timestamp / 1000) as u64;
+    let latest_timestamp_secs = post_hardfork_block.timestamp_secs();
     assert!(
-        latest_timestamp_secs >= hardfork_activation,
+        latest_timestamp_secs.as_secs() >= hardfork_activation,
         "Latest block timestamp ({}) should be >= hardfork activation ({})",
-        latest_timestamp_secs,
+        latest_timestamp_secs.as_secs(),
         hardfork_activation
     );
     let proofs_after_hardfork = ctx
@@ -624,7 +633,10 @@ async fn verify_pricing_uses_ema(
     block_description: &str,
 ) -> eyre::Result<()> {
     // Calculate expected fees using the provided EMA
-    let number_of_ingress_proofs_total = ctx.node_ctx.config.number_of_ingress_proofs_total_at(0);
+    let number_of_ingress_proofs_total = ctx
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size_bytes,
         &ctx.node_ctx.config.consensus,
