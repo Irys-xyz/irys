@@ -332,6 +332,9 @@ pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
     let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
     let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
     while let Some((_k, c)) = walker.next().transpose()? {
+        if c.meta.updated_at >= older_than {
+            continue;
+        }
         // delete them
         tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
         chunks_pruned += 1;
