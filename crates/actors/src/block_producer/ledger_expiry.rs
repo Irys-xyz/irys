@@ -247,7 +247,10 @@ pub async fn calculate_expired_ledger_fees(
 
 /// Fetches a block header from database
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
-async fn get_block_by_hash(block_hash: H256, db: &DatabaseProvider) -> eyre::Result<IrysBlockHeader> {
+async fn get_block_by_hash(
+    block_hash: H256,
+    db: &DatabaseProvider,
+) -> eyre::Result<IrysBlockHeader> {
     db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
         .ok_or_eyre("block not found in db")
 }

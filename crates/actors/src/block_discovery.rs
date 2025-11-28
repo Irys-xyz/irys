@@ -93,7 +93,10 @@ fn validate_transactions<T: IrysTransactionCommon>(
 ) -> Result<(), BlockDiscoveryError> {
     // Check count matches
     if txs.len() != expected_ids.len() {
-        let provided_ids: std::collections::HashSet<_> = txs.iter().map(irys_types::IrysTransactionCommon::id).collect();
+        let provided_ids: std::collections::HashSet<_> = txs
+            .iter()
+            .map(irys_types::IrysTransactionCommon::id)
+            .collect();
         let missing: Vec<_> = expected_ids
             .iter()
             .filter(|id| !provided_ids.contains(id))
