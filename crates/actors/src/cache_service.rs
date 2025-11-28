@@ -806,6 +806,7 @@ mod tests {
         database, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
+    use reth_db::cursor::{DbDupCursorRO as _};
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
@@ -1121,6 +1122,16 @@ mod tests {
         };
         db.update(|wtx| {
             database::cache_chunk(wtx, &chunk)?;
+            // Mark the cached chunk as very old so it qualifies for age-based pruning
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                // Delete the current index entry and reinsert with an old timestamp
+                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
+            }
             eyre::Ok(())
         })??;
 
@@ -1157,6 +1168,231 @@ mod tests {
             );
             Ok(())
         })??;
+        Ok(())
+    }
+
+    // Chunks older than threshold should be deleted while newer ones should remain.
+    #[tokio::test]
+    async fn prunes_only_chunks_older_than_threshold() -> eyre::Result<()> {
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create two data roots: one "old" and one "new"
+        let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            data_root: DataRoot::random(),
+            ..Default::default()
+        });
+        let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            data_root: DataRoot::random(),
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header_old, None)?;
+            database::cache_data_root(wtx, &tx_header_new, None)?;
+            eyre::Ok(())
+        })??;
+
+        let mk_chunk = |data_root: irys_types::H256, offset: u32, byte: u8| UnpackedChunk {
+            data_root,
+            data_size: 64,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![byte; 8]),
+            tx_offset: TxChunkOffset::from(offset),
+        };
+
+        db.update(|wtx| {
+            // Manually insert index and chunk entries with controlled timestamps
+            let chunk_old = mk_chunk(tx_header_old.data_root, 0, 10);
+            let hash_old = chunk_old.chunk_path_hash();
+            let idx_old = irys_database::db_cache::CachedChunkIndexEntry {
+                index: chunk_old.tx_offset,
+                meta: irys_database::db_cache::CachedChunkIndexMetadata {
+                    chunk_path_hash: hash_old,
+                    updated_at: UnixTimestamp::from_secs(0),
+                },
+            };
+            wtx.put::<CachedChunksIndex>(tx_header_old.data_root, idx_old)?;
+            wtx.put::<CachedChunks>(hash_old, irys_database::db_cache::CachedChunk::from(&chunk_old))?;
+
+            let chunk_new = mk_chunk(tx_header_new.data_root, 0, 11);
+            let hash_new = chunk_new.chunk_path_hash();
+            let idx_new = irys_database::db_cache::CachedChunkIndexEntry {
+                index: chunk_new.tx_offset,
+                meta: irys_database::db_cache::CachedChunkIndexMetadata {
+                    chunk_path_hash: hash_new,
+                    updated_at: UnixTimestamp::from_secs(10),
+                },
+            };
+            wtx.put::<CachedChunksIndex>(tx_header_new.data_root, idx_new)?;
+            wtx.put::<CachedChunks>(hash_new, irys_database::db_cache::CachedChunk::from(&chunk_new))?;
+
+            eyre::Ok(())
+        })??;
+
+        // Directly exercise the DB helper with a controlled cutoff time.
+        // Use cutoff=5s so 0s is pruned and 10s is retained.
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
+            let mut eligible = 0;
+            while let Some((_k, entry)) = walk_old.next().transpose()? {
+                if entry.meta.updated_at < UnixTimestamp::from_secs(5) {
+                    eligible += 1;
+                }
+            }
+            eyre::ensure!(eligible == 1, "Expected exactly one eligible old entry, found {}", eligible);
+            Ok(())
+        })??;
+
+        db.update(|wtx| {
+            let pruned = delete_cached_chunks_by_data_root_older_than(
+                wtx,
+                tx_header_old.data_root,
+                UnixTimestamp::from_secs(5),
+            )?;
+            eyre::ensure!(pruned >= 1, "Expected old root chunk to be pruned");
+            eyre::Ok(())
+        })??;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Old root should have no entries
+            let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
+            eyre::ensure!(walk_old.next().transpose()?.is_none(), "Old root entries still present");
+
+            // New root should still have its entry
+            let mut cur_new = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let walk_new = cur_new.walk_dup(Some(tx_header_new.data_root), None)?;
+            let remaining_new: Vec<_> = walk_new.collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(remaining_new.len() == 1, "New root entry missing after prune");
+            let (_k, entry) = &remaining_new[0];
+            eyre::ensure!(entry.meta.updated_at.as_secs() >= 5, "New root entry should be newer than cutoff");
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // Ensure prune runs only when cache > 80% capacity.
+    #[tokio::test]
+    async fn runs_chunk_prune_only_above_capacity_threshold() -> eyre::Result<()> {
+        // Set a small max cache size so 2 chunks (32B each in testing config) reach threshold
+        let mut node_config = NodeConfig::testing();
+        // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
+        node_config.cache.max_cache_size_bytes = 96;
+        let config_below = Config::new(node_config.clone());
+
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create one data root with two chunks and mark them old to be eligible
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            let c0 = UnpackedChunk {
+                data_root: tx_header.data_root,
+                data_size: tx_header.data_size,
+                data_path: Base64(vec![]),
+                bytes: Base64(vec![7_u8; 8]),
+                tx_offset: TxChunkOffset::from(0_u32),
+            };
+            let c1 = UnpackedChunk {
+                data_root: tx_header.data_root,
+                data_size: tx_header.data_size,
+                data_path: Base64(vec![]),
+                bytes: Base64(vec![8_u8; 8]),
+                tx_offset: TxChunkOffset::from(1_u32),
+            };
+            database::cache_chunk(wtx, &c0)?;
+            database::cache_chunk(wtx, &c1)?;
+
+            // Mark both chunks as very old
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
+            }
+            eyre::Ok(())
+        })??;
+
+        // Minimal service context
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config_below.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config_below.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Below-capacity prune: should NOT remove chunks
+        let task_below = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard: block_tree_guard.clone(),
+            block_index_guard: block_index_guard.clone(),
+            config: config_below.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx.clone(),
+        };
+        task_below.prune_cache(0)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Expect both indices still present
+            let m0 = irys_database::cached_chunk_meta_by_offset(
+                rtx,
+                tx_header.data_root,
+                TxChunkOffset::from(0_u32),
+            )?;
+            let m1 = irys_database::cached_chunk_meta_by_offset(
+                rtx,
+                tx_header.data_root,
+                TxChunkOffset::from(1_u32),
+            )?;
+            eyre::ensure!(m0.is_some() && m1.is_some(), "Chunks pruned below capacity threshold");
+            Ok(())
+        })??;
+
+        // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
+        let mut node_config2 = node_config.clone();
+        node_config2.cache.max_cache_size_bytes = 64;
+        let config_above = Config::new(node_config2);
+        let task_above = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config_above,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+        task_above.prune_cache(0)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Expect indices pruned now that we're above capacity
+            let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = cur.walk(Some(tx_header.data_root))?;
+            eyre::ensure!(walk.next().transpose()?.is_none(), "Chunks not pruned above capacity threshold");
+            Ok(())
+        })??;
+
         Ok(())
     }
 
