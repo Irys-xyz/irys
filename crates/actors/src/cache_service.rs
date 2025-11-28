@@ -768,7 +768,7 @@ mod tests {
     use eyre::WrapErr as _;
     use irys_database::{
         database, open_or_create_db,
-        tables::{CachedDataRoots, IrysTables},
+        tables::{CachedDataRoots, IrysTables, CachedChunks, CachedChunksIndex},
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{

@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use irys_database::db::IrysDupCursorExt as _;
 use irys_database::db_cache::CachedChunk;
 use irys_database::{impl_compression_for_compact, open_or_create_db};
-use irys_types::{Base64, DataRoot};
+use irys_types::{Base64};
 use paste::paste;
 use reth_codecs::Compact;
 use reth_db::cursor::DbCursorRO as _;
@@ -84,7 +84,6 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::default(),
-            data_root: DataRoot::default(),
         },
     };
     let key = B256::random();
@@ -97,7 +96,6 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::default(),
-            data_root: DataRoot::default(),
         },
     };
     write_tx.put::<CachedChunks2>(key, chunk2.clone())?;
@@ -108,7 +106,6 @@ fn main() -> eyre::Result<()> {
         chunk: CachedChunk {
             chunk: None,
             data_path: Base64::from_utf8_str("hello, world!")?,
-            data_root: DataRoot::default(),
         },
     };
     write_tx.put::<CachedChunks2>(key, chunk3.clone())?;

@@ -156,7 +156,6 @@ mod tests {
         CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
         IrysDataTxHeaders,
     };
-    use alloy_primitives::U256;
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
     use irys_types::{
@@ -226,7 +225,6 @@ mod tests {
             let chunk = CachedChunk {
                 chunk: None,
                 data_path: Base64(vec![]),
-                data_root: U256::from(0),
             };
             write_tx.put::<CachedChunks>(chunk_path_hash, chunk)?;
 
