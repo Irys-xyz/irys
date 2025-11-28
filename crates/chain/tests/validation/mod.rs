@@ -27,7 +27,7 @@ use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
+    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
@@ -144,7 +144,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -252,7 +252,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -362,7 +362,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         },
     };
 
-    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (mut block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -468,7 +468,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         },
     };
 
-    let (block, _adj_stats, _eth_payload) = block_prod_strategy
+    let (block, _adj_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -523,7 +523,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (mut block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -541,7 +541,9 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .block_discovery
             .clone(),
     );
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), transactions, false)
+        .await;
     assert!(
         matches!(
             result,
@@ -571,7 +573,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (block_after_epoch, _adjustment_stats2, _eth_payload2) = block_prod_strategy
+    let (block_after_epoch, _adjustment_stats2, transactions, _eth_payload2) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -603,7 +605,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .clone(),
     );
     let result = block_discovery
-        .handle_block(block_after_epoch.clone(), false)
+        .handle_block(block_after_epoch.clone(), transactions, false)
         .await;
     assert!(
         matches!(
@@ -719,9 +721,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let root = irys_types::generate_data_root(leaves)?;
     let data_root = H256(root.id);
 
-    // Create data transaction header
+    // Create data transaction header and sign it
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::random(),
+        id: H256::zero(), // Will be set by sign()
         anchor,
         signer: test_signer.address(),
         data_root,
@@ -734,7 +736,8 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         chain_id: 1,
         promoted_height: Some(1),
         signature: Default::default(),
-    });
+    })
+    .sign(&test_signer)?;
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
     let chain_id = 1_u64;
@@ -801,7 +804,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -816,7 +819,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     );
 
     // This should fail during prevalidation due to duplicate signers
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), transactions, false)
+        .await;
 
     // Assert that the block was rejected due to duplicate ingress proof signers
     assert!(
@@ -901,7 +906,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();

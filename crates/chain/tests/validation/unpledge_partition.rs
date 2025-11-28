@@ -110,7 +110,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         },
     };
 
-    let (block, _stats, _payload) = block_prod_strategy
+    let (block, _stats, _transactions, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
@@ -261,7 +261,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         },
     };
 
-    let (block, _stats, _payload) = block_prod_strategy
+    let (block, _stats, _transactions, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
@@ -369,7 +369,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
         },
     };
 
-    let (block, _stats, _payload) = block_prod_strategy
+    let (block, _stats, _transactions, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
@@ -487,7 +487,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
         },
     };
 
-    let (block, _stats, _payload) = block_prod_strategy
+    let (block, _stats, _transactions, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;

@@ -323,11 +323,23 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                     orphaned_block.header.block_hash
                 );
                 let block_pool = self.block_pool.clone();
+                let gossip_data_handler = self.gossip_data_handler.clone();
                 let header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
                 futures.push(async move {
+                    // Fetch transactions using unified method (cache + mempool + network)
+                    let block_transactions = gossip_data_handler
+                        .fetch_and_build_block_transactions(&header, None)
+                        .await
+                        .map_err(|e| {
+                            ChainSyncError::Internal(format!(
+                                "Failed to fetch block transactions: {:?}",
+                                e
+                            ))
+                        })?;
+
                     block_pool
-                        .process_block::<A>(header, is_fast_tracking)
+                        .process_block::<A>(header, block_transactions, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
@@ -609,14 +621,39 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                 );
                 let inner = self.inner.clone();
                 tokio::spawn(async move {
-                    if let Err(block_pool_error) =
-                        inner.block_pool.reprocess_block::<T>(block_hash).await
+                    // Get cached block header from block_pool
+                    if let Some(cached_block) = inner.block_pool.get_cached_block(&block_hash).await
                     {
-                        // Just log the error - no need to send it back anywhere, block pool will
-                        //  handle cache cleanup internally
+                        // Use GossipDataHandler for network-enabled tx fetching
+                        match inner
+                            .gossip_data_handler
+                            .fetch_and_build_block_transactions(&cached_block.header, None)
+                            .await
+                        {
+                            Ok(block_transactions) => {
+                                if let Err(e) = inner
+                                    .block_pool
+                                    .process_block::<T>(
+                                        cached_block.header,
+                                        block_transactions,
+                                        cached_block.is_fast_tracking,
+                                    )
+                                    .await
+                                {
+                                    error!("Failed to reprocess block {:?}: {:?}", block_hash, e);
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Failed to fetch transactions for reprocessing block {:?}: {:?}",
+                                    block_hash, e
+                                );
+                            }
+                        }
+                    } else {
                         error!(
-                            "Failed to reprocess block {:?}: {:?}",
-                            block_hash, block_pool_error
+                            "Cannot reprocess block {:?} - not found in cache",
+                            block_hash
                         );
                     }
                 });

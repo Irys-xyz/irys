@@ -170,7 +170,7 @@ pub async fn get_transaction(
     };
 
     if let Ok(mut result) =
-        get_data_tx_in_parallel(vec.clone(), &state.mempool_service, &state.db).await
+        get_data_tx_in_parallel(vec.clone(), &state.mempool_guard, &state.db).await
     {
         if let Some(tx) = result.pop() {
             return Ok(IrysTransactionResponse::Storage(tx));
