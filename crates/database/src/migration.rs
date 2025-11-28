@@ -217,7 +217,10 @@ mod tests {
             // CachedChunksIndex (dupsort with subkey = u32 encoded inside value)
             let index_entry = CachedChunkIndexEntry {
                 index: TxChunkOffset::from(0),
-                meta: CachedChunkIndexMetadata { chunk_path_hash },
+                meta: CachedChunkIndexMetadata {
+                    chunk_path_hash,
+                    updated_at: UnixTimestamp::now()?,
+                },
             };
             write_tx.put::<CachedChunksIndex>(data_root, index_entry)?;
 
