@@ -337,10 +337,16 @@ pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
         }
         // delete them
         tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
+        // delete the specific index entry instead of nuking the whole key
+        tx.delete::<CachedChunksIndex>(data_root, Some(c))?;
         chunks_pruned += 1;
     }
-    // delete the key (and all subkeys) from the index
-    tx.delete::<CachedChunksIndex>(data_root, None)?;
+    // If we removed all subkeys, remove the empty key bucket
+    let mut check_cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut remaining = check_cursor.walk_dup(Some(data_root), None)?;
+    if remaining.next().transpose()?.is_none() {
+        tx.delete::<CachedChunksIndex>(data_root, None)?;
+    }
     Ok(chunks_pruned)
 }
 
