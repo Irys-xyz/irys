@@ -127,9 +127,7 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state
-                    .put_chunk(chunk.clone(), preheader_chunks_per_item)
-                    .await;
+                self.mempool_state.put_chunk(chunk.clone()).await;
                 return Ok(());
             }
         };
