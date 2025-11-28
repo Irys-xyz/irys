@@ -91,6 +91,10 @@ pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
 }
 
 pub fn setup_panic_hook() -> eyre::Result<()> {
+    setup_panic_hook_with_sigint(true)
+}
+
+pub fn setup_panic_hook_with_sigint(trigger_sigint: bool) -> eyre::Result<()> {
     color_eyre::install()?;
 
     let original_hook = panic::take_hook();
@@ -146,10 +150,12 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
 
         eprintln!("\x1b[1;31mPanic occurred, Aborting process\x1b[0m");
 
-        // Trigger SIGINT for orderly shutdown
-        let pid = unsafe { libc::getpid() };
-        unsafe {
-            libc::kill(pid, libc::SIGINT);
+        if trigger_sigint {
+            // Trigger SIGINT for orderly shutdown
+            let pid = unsafe { libc::getpid() };
+            unsafe {
+                libc::kill(pid, libc::SIGINT);
+            }
         }
 
         // Spawn watchdog thread to force exit if graceful shutdown hangs
