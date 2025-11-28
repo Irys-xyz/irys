@@ -2,7 +2,9 @@ use crate::ingress_proofs::{
     generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
 };
 use crate::mempool_service::Inner;
-use irys_database::{cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid};
+use irys_database::{
+    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
+};
 use irys_database::{
     db::IrysDatabaseExt as _,
     delete_cached_chunks_by_data_root, get_cache_size,
@@ -10,7 +12,10 @@ use irys_database::{
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, LedgerChunkOffset, TokioServiceHandle, UnixTimestamp, GIGABYTE};
+use irys_types::{
+    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    LedgerChunkOffset, TokioServiceHandle, UnixTimestamp, GIGABYTE,
+};
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
@@ -237,8 +242,11 @@ impl InnerCacheTask {
             self.config.consensus.difficulty_adjustment.block_time;
         let min_chunk_age_secs =
             u64::from(min_chunk_age_in_blocks).saturating_mul(target_time_between_blocks_secs);
-        let now = UnixTimestamp::now().expect("unable to get current unix timestamp").as_secs();
-        let delete_chunks_older_than = UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
+        let now = UnixTimestamp::now()
+            .expect("unable to get current unix timestamp")
+            .as_secs();
+        let delete_chunks_older_than =
+            UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
 
         let tx = self.db.tx()?;
 
@@ -282,7 +290,11 @@ impl InnerCacheTask {
                         chunk.data_root = ?root,
                         "Pruning chunks for data root without active proofs"
                     );
-                    let pruned = delete_cached_chunks_by_data_root_older_than(&write_tx, root, delete_chunks_older_than)?;
+                    let pruned = delete_cached_chunks_by_data_root_older_than(
+                        &write_tx,
+                        root,
+                        delete_chunks_older_than,
+                    )?;
                     if pruned > 0 {
                         evictions_performed = evictions_performed.saturating_add(1);
                         debug!(chunk.data_root = ?root, chunk.pruined_chunks = pruned, "Pruned chunks for data root without active proofs");
@@ -296,7 +308,11 @@ impl InnerCacheTask {
         if !pending_roots.is_empty() {
             let write_tx = self.db.tx_mut()?;
             for root in pending_roots.drain(..) {
-                let pruned = delete_cached_chunks_by_data_root_older_than(&write_tx, root, delete_chunks_older_than)?;
+                let pruned = delete_cached_chunks_by_data_root_older_than(
+                    &write_tx,
+                    root,
+                    delete_chunks_older_than,
+                )?;
                 if pruned > 0 {
                     evictions_performed = evictions_performed.saturating_add(1);
                     debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
