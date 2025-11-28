@@ -94,7 +94,6 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
-        .route("/genesis", web::get().to(index::genesis_route))
         .route("/network/config", web::get().to(config::get_config))
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route(
