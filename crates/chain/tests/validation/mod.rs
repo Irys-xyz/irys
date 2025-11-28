@@ -27,7 +27,7 @@ use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
+    IrysBlockHeader, IrysTransactionCommon, NodeConfig, SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
@@ -721,9 +721,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let root = irys_types::generate_data_root(leaves)?;
     let data_root = H256(root.id);
 
-    // Create data transaction header
+    // Create data transaction header and sign it
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::random(),
+        id: H256::zero(), // Will be set by sign()
         anchor,
         signer: test_signer.address(),
         data_root,
@@ -736,7 +736,8 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         chain_id: 1,
         promoted_height: Some(1),
         signature: Default::default(),
-    });
+    })
+    .sign(&test_signer)?;
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
     let chain_id = 1_u64;

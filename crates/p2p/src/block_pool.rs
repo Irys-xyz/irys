@@ -2,9 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use irys_actors::block_discovery::{
-    get_commitment_tx_in_parallel, get_data_tx_in_parallel, BlockDiscoveryFacade, BlockTransactions,
-};
+use irys_actors::block_discovery::{BlockDiscoveryFacade, BlockTransactions};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -91,7 +89,7 @@ impl From<PeerNetworkError> for BlockPoolError {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum ProcessBlockResult {
+pub(crate) enum ProcessBlockResult {
     /// Block has been processed successfully
     Processed,
     /// Block has been added to the pool, waiting for the parent block
@@ -594,11 +592,6 @@ where
     }
 
     /// Process a block with provided BlockTransactions.
-    ///
-    /// Callers provide BlockTransactions:
-    /// - `handle_block_header` builds txs from MempoolReadGuard + network fetch
-    /// - `reprocess_block` and `process_orphaned_ancestors` use cached txs via `take_and_build_cached_txs_for_block`
-    /// - Tests pass `BlockTransactions::default()`
     ///
     /// This method handles:
     /// - Block status validation
@@ -1134,38 +1127,6 @@ where
         }
     }
 
-    #[instrument(skip(self, block_hash), fields(block.hash = ?block_hash))]
-    pub async fn reprocess_block<A: ApiClient>(
-        &self,
-        block_hash: BlockHash,
-    ) -> Result<ProcessBlockResult, BlockPoolError> {
-        debug!("Triggering reprocessing for block {:?}", block_hash);
-        let block = self.blocks_cache.get_block_header_cloned(&block_hash).await;
-        if let Some(cached_block) = block {
-            // Build BlockTransactions from cached txs
-            let block_transactions = self
-                .take_and_build_cached_txs_for_block(&cached_block.header)
-                .await
-                .map_err(|e| {
-                    BlockPoolError::Critical(CriticalBlockPoolError::MempoolError(e.to_string()))
-                })?;
-
-            self.process_block::<A>(
-                cached_block.header,
-                block_transactions,
-                cached_block.is_fast_tracking,
-            )
-            .await
-        } else {
-            // This shouldn't happen because we check for block existence before calling this method
-            error!(
-                "Cannot reprocess block {:?} as it is not found in the cache",
-                block_hash
-            );
-            Err(CriticalBlockPoolError::TryingToReprocessBlockThatIsNotInPool(block_hash).into())
-        }
-    }
-
     /// Check if parent hash exists in block cache - for orphan block processing
     pub async fn contains_block(&self, block_hash: &BlockHash) -> bool {
         self.blocks_cache.contains_block(block_hash).await
@@ -1196,184 +1157,104 @@ where
         self.blocks_cache.take_txs_for_block(block_hash).await;
     }
 
-    /// Take cached transactions for a block and build BlockTransactions.
-    /// Used by callers (orphan processing, reprocess) to get cached txs before calling process_block.
-    pub(crate) async fn take_and_build_cached_txs_for_block(
+    /// Take cached transactions for a block (removes them from cache).
+    /// Used by GossipDataHandler for network-enabled tx fetching.
+    pub async fn take_cached_txs_for_block(
         &self,
-        block: &IrysBlockHeader,
-    ) -> eyre::Result<BlockTransactions> {
-        // Take cached transactions
-        let cached_txs = self
-            .blocks_cache
-            .take_txs_for_block(&block.block_hash)
-            .await;
-
-        // Separate by type
-        let (data_txs, commitment_txs): (Vec<_>, Vec<_>) = cached_txs
-            .into_iter()
-            .partition(|tx| matches!(tx, IrysTransactionResponse::Storage(_)));
-
-        let fetched_data_txs: Vec<_> = data_txs
-            .into_iter()
-            .filter_map(|tx| match tx {
-                IrysTransactionResponse::Storage(header) => Some(header),
-                _ => None,
-            })
-            .collect();
-
-        let fetched_commitment_txs: Vec<_> = commitment_txs
-            .into_iter()
-            .filter_map(|tx| match tx {
-                IrysTransactionResponse::Commitment(tx) => Some(tx),
-                _ => None,
-            })
-            .collect();
-
-        // Build BlockTransactions using the shared helper
-        self.build_block_transactions_from_fetched(block, fetched_data_txs, fetched_commitment_txs)
-            .await
+        block_hash: &BlockHash,
+    ) -> Vec<IrysTransactionResponse> {
+        self.blocks_cache.take_txs_for_block(block_hash).await
     }
 
-    /// Build BlockTransactions from pre-fetched transactions, querying mempool+DB for any missing.
-    /// This is the shared helper used by all block processing paths:
-    /// - `handle_block_header` in GossipDataHandler (using MempoolReadGuard + network fetch)
-    /// - `reprocess_block` (using cached transactions)
-    /// - `process_orphaned_ancestors` (using cached transactions)
-    ///
-    /// Transactions are returned in the exact order specified in the block header,
-    /// which is critical for commitment transaction validation (e.g., stake must come before pledge).
-    ///
-    /// # Arguments
-    /// * `block` - The block header containing ledger tx IDs
-    /// * `fetched_data_txs` - Data transactions already fetched from mempool or network
-    /// * `fetched_commitment_txs` - Commitment transactions already fetched from mempool or network
-    pub async fn build_block_transactions_from_fetched(
-        &self,
-        block: &IrysBlockHeader,
-        fetched_data_txs: Vec<irys_types::DataTransactionHeader>,
-        fetched_commitment_txs: Vec<irys_types::CommitmentTransaction>,
-    ) -> eyre::Result<BlockTransactions> {
-        use std::collections::HashMap;
+    /// Get a cached block header by hash.
+    /// Used by GossipDataHandler for network-enabled tx fetching.
+    pub(crate) async fn get_cached_block(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
+        self.blocks_cache.get_block_header_cloned(block_hash).await
+    }
+}
 
-        // Extract required IDs from block header (preserving order)
-        let submit_ids: Vec<H256> = block
-            .data_ledgers
-            .get(DataLedger::Submit as usize)
-            .map(|l| l.tx_ids.0.clone())
-            .unwrap_or_default();
+/// Order pre-fetched transactions into BlockTransactions structure.
+///
+/// Caller is responsible for providing ALL required transactions.
+/// This function only handles ordering them correctly per ledger.
+/// Transactions are returned in the exact order specified in the block header,
+/// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+pub(crate) fn order_transactions_for_block(
+    block: &IrysBlockHeader,
+    data_txs: Vec<irys_types::DataTransactionHeader>,
+    commitment_txs: Vec<irys_types::CommitmentTransaction>,
+) -> BlockTransactions {
+    use std::collections::HashMap;
 
-        let publish_ids: Vec<H256> = block
-            .data_ledgers
-            .get(DataLedger::Publish as usize)
-            .map(|l| l.tx_ids.0.clone())
-            .unwrap_or_default();
+    // Extract required IDs from block header (preserving order)
+    let submit_ids: Vec<H256> = block
+        .data_ledgers
+        .get(DataLedger::Submit as usize)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
 
-        let commitment_ids: Vec<H256> = block
-            .system_ledgers
-            .iter()
-            .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
-            .map(|l| l.tx_ids.0.clone())
-            .unwrap_or_default();
+    let publish_ids: Vec<H256> = block
+        .data_ledgers
+        .get(DataLedger::Publish as usize)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
 
-        // Create sets for quick lookup
-        let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
-        let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
+    let commitment_ids: Vec<H256> = block
+        .system_ledgers
+        .iter()
+        .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
 
-        // Collect fetched transactions into maps by ID
-        let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
-        let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
-        let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
+    // Create sets for quick lookup
+    let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
+    let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
 
-        for data_tx in fetched_data_txs {
-            // Note: A tx can be in both submit and publish ledgers (published after submission)
-            // so we check both independently and clone if needed for both
-            let in_submit = submit_ids_set.contains(&data_tx.id);
-            let in_publish = publish_ids_set.contains(&data_tx.id);
+    // Collect transactions into maps by ID
+    let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
+    let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
+    let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
 
-            if in_submit && in_publish {
-                submit_txs_map.insert(data_tx.id, data_tx.clone());
-                publish_txs_map.insert(data_tx.id, data_tx);
-            } else if in_submit {
-                submit_txs_map.insert(data_tx.id, data_tx);
-            } else if in_publish {
-                publish_txs_map.insert(data_tx.id, data_tx);
-            }
+    for data_tx in data_txs {
+        // Note: A tx can be in both submit and publish ledgers (published after submission)
+        // so we check both independently and clone if needed for both
+        let in_submit = submit_ids_set.contains(&data_tx.id);
+        let in_publish = publish_ids_set.contains(&data_tx.id);
+
+        if in_submit && in_publish {
+            submit_txs_map.insert(data_tx.id, data_tx.clone());
+            publish_txs_map.insert(data_tx.id, data_tx);
+        } else if in_submit {
+            submit_txs_map.insert(data_tx.id, data_tx);
+        } else if in_publish {
+            publish_txs_map.insert(data_tx.id, data_tx);
         }
+    }
 
-        for commitment_tx in fetched_commitment_txs {
-            commitment_txs_map.insert(commitment_tx.id, commitment_tx);
-        }
+    for commitment_tx in commitment_txs {
+        commitment_txs_map.insert(commitment_tx.id, commitment_tx);
+    }
 
-        // Query missing data transactions (submit + publish)
-        let missing_data_ids: Vec<H256> = submit_ids
-            .iter()
-            .chain(publish_ids.iter())
-            .filter(|id| !submit_txs_map.contains_key(id) && !publish_txs_map.contains_key(id))
-            .copied()
-            .collect();
+    // Build final vectors in the exact order specified by block header
+    let submit_txs: Vec<_> = submit_ids
+        .iter()
+        .filter_map(|id| submit_txs_map.remove(id))
+        .collect();
 
-        if !missing_data_ids.is_empty() {
-            let fetched =
-                get_data_tx_in_parallel(missing_data_ids, &self.mempool_guard, &self.db).await?;
+    let publish_txs: Vec<_> = publish_ids
+        .iter()
+        .filter_map(|id| publish_txs_map.remove(id))
+        .collect();
 
-            for tx in fetched {
-                // Note: A tx can be in both submit and publish ledgers (published after submission)
-                // so we check both independently and clone if needed for both
-                let in_submit = submit_ids_set.contains(&tx.id);
-                let in_publish = publish_ids_set.contains(&tx.id);
+    let commitment_txs: Vec<_> = commitment_ids
+        .iter()
+        .filter_map(|id| commitment_txs_map.remove(id))
+        .collect();
 
-                if in_submit && in_publish {
-                    submit_txs_map.insert(tx.id, tx.clone());
-                    publish_txs_map.insert(tx.id, tx);
-                } else if in_submit {
-                    submit_txs_map.insert(tx.id, tx);
-                } else if in_publish {
-                    publish_txs_map.insert(tx.id, tx);
-                }
-            }
-        }
-
-        // Query missing commitment transactions
-        let missing_commitment_ids: Vec<H256> = commitment_ids
-            .iter()
-            .filter(|id| !commitment_txs_map.contains_key(id))
-            .copied()
-            .collect();
-
-        if !missing_commitment_ids.is_empty() {
-            let fetched = get_commitment_tx_in_parallel(
-                &missing_commitment_ids,
-                &self.mempool_guard,
-                &self.db,
-            )
-            .await?;
-
-            for tx in fetched {
-                commitment_txs_map.insert(tx.id, tx);
-            }
-        }
-
-        // Build final vectors in the exact order specified by block header
-        let submit_txs: Vec<_> = submit_ids
-            .iter()
-            .filter_map(|id| submit_txs_map.remove(id))
-            .collect();
-
-        let publish_txs: Vec<_> = publish_ids
-            .iter()
-            .filter_map(|id| publish_txs_map.remove(id))
-            .collect();
-
-        let commitment_txs: Vec<_> = commitment_ids
-            .iter()
-            .filter_map(|id| commitment_txs_map.remove(id))
-            .collect();
-
-        Ok(BlockTransactions {
-            submit_txs,
-            publish_txs,
-            commitment_txs,
-        })
+    BlockTransactions {
+        submit_txs,
+        publish_txs,
+        commitment_txs,
     }
 }
 
