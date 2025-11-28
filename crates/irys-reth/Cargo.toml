@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+irys-types.workspace = true
 alloy-dyn-abi.workspace = true
 alloy-evm.workspace = true
 alloy-primitives.workspace = true

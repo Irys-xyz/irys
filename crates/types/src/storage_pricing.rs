@@ -505,6 +505,7 @@ pub fn calculate_term_fee(
     bytes_to_store: u64,
     epochs_for_storage: u64,
     config: &ConsensusConfig,
+    number_of_ingress_proofs_total: u64,
     ema_price: Amount<(IrysPrice, Usd)>,
 ) -> Result<U256> {
     let cost_per_chunk_per_epoch = config.cost_per_chunk_per_epoch()?;
@@ -516,7 +517,7 @@ pub fn calculate_term_fee(
 
     // Apply same replica count as perm storage
     let cost_with_replicas =
-        cost_per_chunk_duration.replica_count(config.number_of_ingress_proofs_total)?;
+        cost_per_chunk_duration.replica_count(number_of_ingress_proofs_total)?;
 
     // Calculate base network fee using current EMA price
     let base_fee = cost_with_replicas.base_network_fee(
@@ -545,12 +546,14 @@ pub fn calculate_term_fee(
 pub fn calculate_term_fee_from_config(
     bytes_to_store: u64,
     config: &ConsensusConfig,
+    number_of_ingress_proofs_total: u64,
     ema_price: Amount<(IrysPrice, Usd)>,
 ) -> Result<U256> {
     calculate_term_fee(
         bytes_to_store,
         config.epoch.submit_ledger_epoch_length,
         config,
+        number_of_ingress_proofs_total,
         ema_price,
     )
 }
@@ -559,6 +562,7 @@ pub fn calculate_term_fee_from_config(
 pub fn calculate_perm_fee_from_config(
     bytes_to_store: u64,
     config: &ConsensusConfig,
+    number_of_ingress_proofs_total: u64,
     ema_price: Amount<(IrysPrice, Usd)>,
     term_fee: U256,
 ) -> Result<Amount<(NetworkFee, Irys)>> {
@@ -576,7 +580,7 @@ pub fn calculate_perm_fee_from_config(
     // Apply decay over storage duration
     let cost_per_chunk_duration_adjusted = cost_per_chunk_per_epoch
         .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-        .replica_count(config.number_of_ingress_proofs_total)?;
+        .replica_count(number_of_ingress_proofs_total)?;
 
     // Calculate base network fee
     let base_network_fee = cost_per_chunk_duration_adjusted.base_network_fee(
@@ -588,7 +592,7 @@ pub fn calculate_perm_fee_from_config(
     // Add ingress proof rewards to the base network fee
     let total_perm_fee = base_network_fee.add_ingress_proof_rewards(
         term_fee,
-        config.number_of_ingress_proofs_total,
+        number_of_ingress_proofs_total,
         config.immediate_tx_inclusion_reward_percent,
     )?;
 
@@ -746,6 +750,7 @@ pub fn exp_neg_fp18(x: U256) -> Result<U256> {
 #[expect(clippy::panic_in_result_fn, reason = "used in tests")]
 mod tests {
     use super::*;
+    use crate::UnixTimestamp;
     use eyre::Result;
     use rust_decimal_macros::dec;
 
@@ -1300,13 +1305,22 @@ mod tests {
         #[test]
         fn test_term_fee_single_chunk() -> Result<()> {
             // Setup: Use testnet config as baseline
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let chunk_size = config.chunk_size; // 256 KB
             let bytes_to_store = chunk_size; // Single chunk
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // Calculate term fee
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
 
             // Convert to decimal for verification
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
@@ -1329,13 +1343,21 @@ mod tests {
         fn test_term_fee_16tb() -> Result<()> {
             // Setup: 16TB = 16 * 1024^4 bytes
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes; // 16TB
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // Calculate term fee
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
 
             // Convert to decimal for verification
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
@@ -1370,13 +1392,22 @@ mod tests {
         fn test_term_fee_below_minimum() -> Result<()> {
             // Setup: Create a config with very low cost to trigger minimum fee
             let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             config.annual_cost_per_gb = Amount::token(dec!(0.0000001))?; // Very low cost
 
             let bytes_to_store = 1; // Just 1 byte
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // Calculate term fee
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
 
             // Convert to decimal
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
@@ -1394,7 +1425,11 @@ mod tests {
 
         #[test]
         fn test_term_fee_with_different_prices() -> Result<()> {
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = config.chunk_size; // 1 chunk
 
             // Test with different IRYS prices
@@ -1406,7 +1441,12 @@ mod tests {
 
             for (price_usd, expected_min_irys) in prices {
                 let irys_price = Amount::token(price_usd)?;
-                let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+                let term_fee = calculate_term_fee_from_config(
+                    bytes_to_store,
+                    &config,
+                    number_of_ingress_proofs_total,
+                    irys_price,
+                )?;
                 let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
                 // Minimum fee is $0.01 USD, so in IRYS tokens = 0.01 / price_usd
@@ -1426,13 +1466,21 @@ mod tests {
         fn test_term_fee_1tb() -> Result<()> {
             // Setup: 1TB - common user scenario that's above minimum fee
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let tb_in_bytes = 1024_u64.pow(4); // 1TB = 1,099,511,627,776 bytes
             let bytes_to_store = tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // Calculate term fee
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
             // Golden data: 1TB = 4,194,304 chunks
@@ -1458,13 +1506,21 @@ mod tests {
         fn test_term_fee_1pb_extreme() -> Result<()> {
             // Setup: 1PB - extreme case to test large numbers
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let pb_in_bytes = 1024_u64.pow(5); // 1PB = 1,125,899,906,842,624 bytes
             let bytes_to_store = pb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // Calculate term fee
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
             // Golden data: 1PB = 4,294,967,296 chunks
@@ -1493,20 +1549,32 @@ mod tests {
         #[test]
         fn test_term_fee_chunk_boundaries() -> Result<()> {
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let chunk_size = config.chunk_size;
             let irys_price = Amount::token(dec!(1.0))?;
 
             // Use 10 million chunks to be well above minimum fee ($0.01)
             // 10 million chunks = ~2.5TB, cost ~$0.046
             let bytes_10m_chunks = 10_000_000 * chunk_size;
-            let fee_10m = calculate_term_fee_from_config(bytes_10m_chunks, &config, irys_price)?;
+            let fee_10m = calculate_term_fee_from_config(
+                bytes_10m_chunks,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let fee_10m_dec = Amount::<Irys>::new(fee_10m).token_to_decimal()?;
 
             // Test 10 million chunks + 1 byte (should round up to 10,000,001 chunks)
             let bytes_10m_plus_1 = (10_000_000 * chunk_size) + 1;
-            let fee_10m_plus =
-                calculate_term_fee_from_config(bytes_10m_plus_1, &config, irys_price)?;
+            let fee_10m_plus = calculate_term_fee_from_config(
+                bytes_10m_plus_1,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let fee_10m_plus_dec = Amount::<Irys>::new(fee_10m_plus).token_to_decimal()?;
 
             // The difference should be exactly the cost of 1 chunk
@@ -1533,18 +1601,31 @@ mod tests {
 
         #[test]
         fn test_extreme_token_prices() -> Result<()> {
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = 100 * config.chunk_size; // 100 chunks
 
             // Test with very cheap IRYS ($0.001)
             let cheap_price = Amount::token(dec!(0.001))?;
-            let cheap_fee = calculate_term_fee_from_config(bytes_to_store, &config, cheap_price)?;
+            let cheap_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                cheap_price,
+            )?;
             let cheap_fee_dec = Amount::<Irys>::new(cheap_fee).token_to_decimal()?;
 
             // Test with very expensive IRYS ($1000)
             let expensive_price = Amount::token(dec!(1000))?;
-            let expensive_fee =
-                calculate_term_fee_from_config(bytes_to_store, &config, expensive_price)?;
+            let expensive_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                expensive_price,
+            )?;
             let expensive_fee_dec = Amount::<Irys>::new(expensive_fee).token_to_decimal()?;
 
             // The fees in IRYS should be inversely proportional to price
@@ -1591,13 +1672,16 @@ mod tests {
 
             // Create custom config matching spreadsheet economics
             let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
             // Calculate the required annual_cost_per_gb to achieve $0.0753/TB/epoch
             // With testnet config: 26280 epochs/year
             // $0.00753 per TB per epoch per replica = $197.9064 per TB per year per replica
             // $197.9064 per TB per year = $0.193245 per GB per year
             config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
-            config.number_of_ingress_proofs_total = 10; // Spreadsheet assumes 10 replicas
 
             // Term storage: 1 epoch (not 5), 10 replicas, 0% decay
             let tb_in_bytes = 1024_u64.pow(4); // 1TB
@@ -1611,7 +1695,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(config.number_of_ingress_proofs_total)?;
+                .replica_count(number_of_ingress_proofs_total)?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -1644,10 +1728,13 @@ mod tests {
 
             // Create custom config matching spreadsheet economics
             let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
             // Use the same annual cost that achieves $0.0753/TB/epoch
             config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
-            config.number_of_ingress_proofs_total = 10; // Spreadsheet assumes 10 replicas
 
             // Term storage: 5 epochs, 10 replicas, 0% decay
             let tb_in_bytes = 1024_u64.pow(4); // 1TB
@@ -1655,7 +1742,12 @@ mod tests {
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // Use the standard term fee calculation (5 epochs)
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
             // Expected from spreadsheet: $0.3767 for 1TB @ 5 epochs
@@ -1681,13 +1773,16 @@ mod tests {
 
             // Create custom config matching spreadsheet economics
             let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
             // Use annual cost that gives us the target per-GB price
             // $0.00007358 per GB per epoch with 10 replicas
             // = $0.000007358 per GB per epoch per replica
             // With 26280 epochs/year: $0.193368 per GB per year
             config.annual_cost_per_gb = Amount::token(dec!(0.193368))?;
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
 
             let gb_in_bytes = 1024_u64.pow(3); // 1GB
             let bytes_to_store = gb_in_bytes;
@@ -1700,7 +1795,7 @@ mod tests {
 
             let cost_per_chunk_adjusted = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate)?
-                .replica_count(config.number_of_ingress_proofs_total)?;
+                .replica_count(number_of_ingress_proofs_total)?;
 
             let term_fee = cost_per_chunk_adjusted.base_network_fee(
                 U256::from(bytes_to_store),
@@ -1789,7 +1884,11 @@ mod tests {
         #[test]
         fn test_dynamic_epoch_count() -> Result<()> {
             // Test that the new calculate_term_fee function correctly uses different epoch counts
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = 1024_u64.pow(4) * 100; // 100TB - large enough to avoid minimum fee
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
@@ -1804,7 +1903,13 @@ mod tests {
 
             let mut previous_fee = U256::zero();
             for (epochs, description) in test_cases {
-                let fee = calculate_term_fee(bytes_to_store, epochs, &config, irys_price)?;
+                let fee = calculate_term_fee(
+                    bytes_to_store,
+                    epochs,
+                    &config,
+                    number_of_ingress_proofs_total,
+                    irys_price,
+                )?;
 
                 // Fee should increase with more epochs
                 assert!(
@@ -1818,9 +1923,20 @@ mod tests {
                 // Verify the fee is proportional to epochs (no decay for term storage)
                 if epochs == 1 {
                     let fee_1_epoch = fee;
-                    let fee_5_epochs = calculate_term_fee(bytes_to_store, 5, &config, irys_price)?;
-                    let fee_10_epochs =
-                        calculate_term_fee(bytes_to_store, 10, &config, irys_price)?;
+                    let fee_5_epochs = calculate_term_fee(
+                        bytes_to_store,
+                        5,
+                        &config,
+                        number_of_ingress_proofs_total,
+                        irys_price,
+                    )?;
+                    let fee_10_epochs = calculate_term_fee(
+                        bytes_to_store,
+                        10,
+                        &config,
+                        number_of_ingress_proofs_total,
+                        irys_price,
+                    )?;
 
                     // With no decay, 5 epochs should cost ~5x one epoch
                     let ratio_5 = fee_5_epochs / fee_1_epoch;
@@ -1848,19 +1964,28 @@ mod tests {
         #[test]
         fn test_dynamic_epoch_vs_config() -> Result<()> {
             // Verify that calculate_term_fee with config epochs matches calculate_term_fee_from_config
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = 1024_u64.pow(3) * 500; // 500GB
             let irys_price = Amount::token(dec!(2.5))?; // $2.50 per IRYS token
 
             // Calculate using the old function
-            let fee_from_config =
-                calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let fee_from_config = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
 
             // Calculate using the new function with same epoch count
             let fee_dynamic = calculate_term_fee(
                 bytes_to_store,
                 config.epoch.submit_ledger_epoch_length,
                 &config,
+                number_of_ingress_proofs_total,
                 irys_price,
             )?;
 
@@ -1876,11 +2001,21 @@ mod tests {
         #[test]
         fn test_zero_epochs() -> Result<()> {
             // Test edge case: 0 epochs should still charge minimum fee
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = config.chunk_size; // 1 chunk
             let irys_price = Amount::token(dec!(1.0))?;
 
-            let fee = calculate_term_fee(bytes_to_store, 0, &config, irys_price)?;
+            let fee = calculate_term_fee(
+                bytes_to_store,
+                0,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
 
             // Should be exactly the minimum fee ($0.01 with IRYS at $1)
@@ -1897,13 +2032,22 @@ mod tests {
         fn test_very_large_epoch_count() -> Result<()> {
             // Test that large epoch counts don't cause overflow
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = 1024_u64.pow(3); // 1GB
             let irys_price = Amount::token(dec!(1.0))?;
 
             // Test with a year's worth of epochs (~26280 epochs)
             let epochs_per_year = config.epochs_per_year();
-            let fee = calculate_term_fee(bytes_to_store, epochs_per_year, &config, irys_price)?;
+            let fee = calculate_term_fee(
+                bytes_to_store,
+                epochs_per_year,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
             let fee_dec = Amount::<Irys>::new(fee).token_to_decimal()?;
 
             // Should be reasonable (not astronomical due to overflow)
@@ -1933,17 +2077,30 @@ mod tests {
         fn test_perm_fee_16tb() -> Result<()> {
             // Setup: 16TB - same as term test for comparison
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
             // First calculate term fee (needed for perm fee calculation)
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
 
             // Calculate permanent fee
-            let perm_fee =
-                calculate_perm_fee_from_config(bytes_to_store, &config, irys_price, term_fee)?;
+            let perm_fee = calculate_perm_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+                term_fee,
+            )?;
             let perm_fee_dec = perm_fee.token_to_decimal()?;
 
             // Golden data: 16TB = 67,108,864 chunks
@@ -1977,17 +2134,30 @@ mod tests {
         fn test_perm_fee_1tb() -> Result<()> {
             // Setup: 1TB - reasonable size for permanent storage
             let mut config = ConsensusConfig::testnet();
-            config.number_of_ingress_proofs_total = 10; // Test expects 10 replicas
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?;
 
             // Calculate term fee first
-            let term_fee = calculate_term_fee_from_config(bytes_to_store, &config, irys_price)?;
+            let term_fee = calculate_term_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+            )?;
 
             // Calculate permanent fee
-            let perm_fee =
-                calculate_perm_fee_from_config(bytes_to_store, &config, irys_price, term_fee)?;
+            let perm_fee = calculate_perm_fee_from_config(
+                bytes_to_store,
+                &config,
+                number_of_ingress_proofs_total,
+                irys_price,
+                term_fee,
+            )?;
             let perm_fee_dec = perm_fee.token_to_decimal()?;
 
             // Golden data: 1TB = 4,194,304 chunks
@@ -2014,7 +2184,11 @@ mod tests {
         #[test]
         fn test_perm_fee_decay_calculation() -> Result<()> {
             // Test the decay formula explicitly
-            let config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testnet();
+            config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
             // Use a large size to avoid minimum fee effects
             let bytes_to_store = 10000 * config.chunk_size; // 10000 chunks
@@ -2030,7 +2204,7 @@ mod tests {
                 Amount::new(safe_div(config.decay_rate.amount, epochs_per_year)?);
             let cost_with_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, decay_rate_per_epoch)?
-                .replica_count(config.number_of_ingress_proofs_total)?;
+                .replica_count(number_of_ingress_proofs_total)?;
             let base_fee_with_decay = cost_with_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,
@@ -2040,7 +2214,7 @@ mod tests {
             // Calculate without decay (decay_rate_per_year =  0)
             let cost_no_decay = cost_per_chunk_per_epoch
                 .cost_per_replica(epochs_for_storage, Amount::percentage(dec!(0))?)?
-                .replica_count(config.number_of_ingress_proofs_total)?;
+                .replica_count(number_of_ingress_proofs_total)?;
             let base_fee_no_decay = cost_no_decay.base_network_fee(
                 U256::from(bytes_to_store),
                 config.chunk_size,

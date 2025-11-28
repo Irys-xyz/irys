@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
-use irys_types::{DataLedger, DataTransaction, NodeConfig, H256, U256};
+use irys_types::{DataLedger, DataTransaction, NodeConfig, UnixTimestamp, H256, U256};
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
 use tracing::debug;
@@ -1205,10 +1205,15 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Calculate publish fee rewards if the transaction has perm_fee
     let perm_fee = peer_b_b2_submit_tx.header.perm_fee.unwrap();
     // Calculate publish fee charges for ingress proof rewards
+    let number_of_ingress_proofs_total = node_b
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let publish_charges = irys_types::transaction::fee_distribution::PublishFeeCharges::new(
         perm_fee,
         peer_b_b2_submit_tx.header.term_fee,
         &node_b.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
     )?;
     // b_signer gets the ingress proof reward as they posted the chunk
     // The total ingress proof reward is distributed among proof providers
@@ -1462,11 +1467,16 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
 
         // Calculate publish fee rewards for peer C's transaction if it has perm_fee
         let perm_fee = peer_c_b2_submit_tx.header.perm_fee.unwrap();
+        let number_of_ingress_proofs_total = node_c
+            .node_ctx
+            .config
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
         let peer_c_publish_charges =
             irys_types::transaction::fee_distribution::PublishFeeCharges::new(
                 perm_fee,
                 peer_c_b2_submit_tx.header.term_fee,
                 &node_c.node_ctx.config.consensus,
+                number_of_ingress_proofs_total,
             )?;
         // c_signer gets the ingress proof reward as they posted the chunk
         let peer_c_publish_rewards = peer_c_publish_charges.ingress_proof_reward;

@@ -101,9 +101,15 @@ async fn main() -> eyre::Result<()> {
         Commands::InitState { state_path } => {
             let node_config: NodeConfig = load_config()?;
             let config = Config::new(node_config.clone());
+            // Convert timestamp from millis to seconds for reth
+            let timestamp_secs =
+                std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
+                    .as_secs();
             let chain_spec = irys_chain_spec(
-                config.consensus.reth.chain,
-                config.consensus.reth.genesis.clone(),
+                config.consensus.chain_id,
+                &config.consensus.reth,
+                &config.consensus.hardforks,
+                timestamp_secs,
             )?;
             init_state(node_config, chain_spec, state_path).await
         }
@@ -294,9 +300,15 @@ pub fn cli_init_reth_provider() -> eyre::Result<(
     )?);
 
     // Create chain spec for the provider factory
+    // Convert timestamp from millis to seconds for reth
+    let timestamp_secs =
+        std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
+            .as_secs();
     let chain_spec = irys_chain_spec(
-        config.consensus.reth.chain,
-        config.consensus.reth.genesis.clone(),
+        config.consensus.chain_id,
+        &config.consensus.reth,
+        &config.consensus.hardforks,
+        timestamp_secs,
     )?;
 
     // Create static file provider for reading headers
