@@ -2,6 +2,7 @@ use crate::{
     block_discovery::{
         BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl, BlockTransactions,
     },
+    mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     services::ServiceSenders,
@@ -177,6 +178,8 @@ pub struct BlockProducerInner {
     pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    /// Read guard for mempool state
+    pub mempool_guard: MempoolReadGuard,
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
@@ -1525,8 +1528,8 @@ pub trait BlockProdStrategy {
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
             Arc::clone(&self.inner().block_index),
-            self.inner().service_senders.mempool.clone(),
-            self.inner().db.clone(),
+            &self.inner().mempool_guard,
+            &self.inner().db,
             true, // we expect the txs to be promoted otherwise return perm fee
         )
         .in_current_span()

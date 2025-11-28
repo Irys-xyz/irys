@@ -469,6 +469,7 @@ impl BlockValidationTask {
             data_txs_are_valid(
                 config,
                 service_senders,
+                &self.service_inner.mempool_guard,
                 block,
                 &self.service_inner.db,
                 &self.block_tree_guard,

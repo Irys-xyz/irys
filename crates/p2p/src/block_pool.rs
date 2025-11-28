@@ -1314,8 +1314,7 @@ where
 
         if !missing_data_ids.is_empty() {
             let fetched =
-                get_data_tx_in_parallel(missing_data_ids, &self.service_senders.mempool, &self.db)
-                    .await?;
+                get_data_tx_in_parallel(missing_data_ids, &self.mempool_guard, &self.db).await?;
 
             for tx in fetched {
                 // Note: A tx can be in both submit and publish ledgers (published after submission)

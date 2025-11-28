@@ -1286,11 +1286,10 @@ async fn generate_expected_shadow_transactions_from_db(
     let commitment_txs = extract_commitment_txs(config, mempool_guard, block, db).await?;
 
     // Lookup data txs
-    let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
+    let data_txs = extract_submit_ledger_txs(mempool_guard, block, db).await?;
 
     // Lookup publish ledger for term fee rewards
-    let publish_ledger_with_txs =
-        extract_publish_ledger_with_txs(service_senders, block, db).await?;
+    let publish_ledger_with_txs = extract_publish_ledger_with_txs(mempool_guard, block, db).await?;
 
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
@@ -1306,8 +1305,8 @@ async fn generate_expected_shadow_transactions_from_db(
             DataLedger::Submit, // Currently only Submit ledgers expire
             config,
             block_index,
-            service_senders.mempool.clone(),
-            db.clone(),
+            mempool_guard,
+            db,
             true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally
         )
         .in_current_span()
@@ -1407,32 +1406,26 @@ async fn extract_commitment_txs(
 }
 
 async fn extract_submit_ledger_txs(
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
     let (_publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
     // we only access the submit ledger data. Publish ledger does not require billing the user extra
-    let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-        .await?;
+    let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), mempool_guard, db).await?;
     Ok(txs)
 }
 
 /// Extracts publish ledger with transactions and ingress proofs for term fee reward distribution
 async fn extract_publish_ledger_with_txs(
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<PublishLedgerWithTxs, eyre::Error> {
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
 
     // Fetch the actual transactions for the publish ledger
-    let txs = get_data_tx_in_parallel(
-        publish_ledger.tx_ids.0.clone(),
-        &service_senders.mempool,
-        db,
-    )
-    .await?;
+    let txs = get_data_tx_in_parallel(publish_ledger.tx_ids.0.clone(), mempool_guard, db).await?;
     Ok(PublishLedgerWithTxs {
         txs,
         proofs: publish_ledger.proofs.clone(),
@@ -1746,6 +1739,7 @@ pub fn calculate_term_storage_base_network_fee(
 pub async fn data_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
@@ -1763,18 +1757,13 @@ pub async fn data_txs_are_valid(
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
 
     // Get transactions from both ledgers
-    let publish_txs = get_data_tx_in_parallel(
-        publish_ledger.tx_ids.0.clone(),
-        &service_senders.mempool,
-        db,
-    )
-    .await
-    .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
+    let publish_txs = get_data_tx_in_parallel(publish_ledger.tx_ids.0.clone(), mempool_guard, db)
+        .await
+        .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
 
-    let submit_txs =
-        get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-            .await
-            .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
+    let submit_txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), mempool_guard, db)
+        .await
+        .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
 
     // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
     let submit_ids: HashSet<H256> = submit_txs.iter().map(|tx| tx.id).collect();

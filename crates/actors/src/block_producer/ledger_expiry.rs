@@ -58,9 +58,8 @@
 //! 6. **Calculate Fees**: Distribute fees proportionally among miners who stored the data
 
 use crate::block_discovery::get_data_tx_in_parallel;
-use crate::mempool_service::MempoolServiceMessage;
+use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
-use crate::MempoolServiceMessageWithSpan;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
@@ -72,7 +71,6 @@ use irys_types::{
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc::UnboundedSender, oneshot};
 
 /// Calculates the aggregated fees owed to miners when data ledgers expire.
 ///
@@ -92,8 +90,8 @@ pub async fn calculate_expired_ledger_fees(
     ledger_type: DataLedger,
     config: &Config,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
-    db: DatabaseProvider,
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     // Step 1: Collect expired partitions
@@ -149,8 +147,8 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             config,
             &block_index,
-            &mempool_sender,
-            &db,
+            mempool_guard,
+            db,
         )
         .await?;
 
@@ -166,8 +164,8 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             config,
             &block_index,
-            &mempool_sender,
-            &db,
+            mempool_guard,
+            db,
         )
         .await?;
 
@@ -179,8 +177,8 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             config,
             &block_index,
-            &mempool_sender,
-            &db,
+            mempool_guard,
+            db,
         )
         .await?;
 
@@ -190,7 +188,7 @@ pub async fn calculate_expired_ledger_fees(
 
     // Step 4: Process middle blocks
     let middle_miners =
-        process_middle_blocks(block_range.middle_blocks, ledger_type, &mempool_sender, &db).await?;
+        process_middle_blocks(block_range.middle_blocks, ledger_type, mempool_guard, db).await?;
 
     // Step 5: Combine all transactions
     let mut all_tx_ids = Vec::new();
@@ -212,7 +210,7 @@ pub async fn calculate_expired_ledger_fees(
     tx_to_miners.extend(middle_miners);
 
     // Step 6: Fetch transactions
-    let mut transactions = get_data_tx_in_parallel(all_tx_ids, &mempool_sender, &db).await?;
+    let mut transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
     transactions.sort();
 
     // Step 7: Calculate fees
@@ -247,22 +245,11 @@ pub async fn calculate_expired_ledger_fees(
     Ok(fees)
 }
 
-/// Fetches a block header from mempool or database
+/// Fetches a block header from database
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
-async fn get_block_by_hash(
-    block_hash: H256,
-    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
-    db: &DatabaseProvider,
-) -> eyre::Result<IrysBlockHeader> {
-    let (tx, rx) = oneshot::channel();
-    mempool_sender.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx).into())?;
-
-    match rx.await? {
-        Some(header) => Ok(header),
-        None => db
-            .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-            .ok_or_eyre("block not found in db"),
-    }
+async fn get_block_by_hash(block_hash: H256, db: &DatabaseProvider) -> eyre::Result<IrysBlockHeader> {
+    db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
+        .ok_or_eyre("block not found in db")
 }
 
 /// Collects all expired partitions for the specified ledger type and their miners
@@ -466,11 +453,11 @@ async fn process_boundary_block(
     ledger_type: DataLedger,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     // Get the block and its transactions
-    let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
+    let block = get_block_by_hash(block_hash, db).await?;
     let ledger_tx_ids = block
         .get_data_ledger_tx_ids_ordered(ledger_type)
         .ok_or_eyre(format!(
@@ -481,7 +468,7 @@ async fn process_boundary_block(
     // Fetch the actual transactions
     // Note: get_data_tx_in_parallel preserves the order of input IDs
     let ledger_data_txs =
-        get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_sender, db).await?;
+        get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_guard, db).await?;
 
     // Get the previous block's max offset
     let block_index_read = block_index
@@ -593,13 +580,13 @@ fn filter_transactions_by_chunk_range(
 async fn process_middle_blocks(
     middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
     ledger_type: DataLedger,
-    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
+    _mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     let mut tx_to_miners = BTreeMap::new();
 
     for (block_hash, miners) in middle_blocks {
-        let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
+        let block = get_block_by_hash(block_hash, db).await?;
         let ledger_tx_ids = block
             .get_data_ledger_tx_ids_ordered(ledger_type)
             .ok_or_eyre(format!("{:?} ledger is required", ledger_type))?;

@@ -1,13 +1,13 @@
 use crate::{
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{prevalidate_block, PreValidationError},
+    mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
-    MempoolServiceMessage, MempoolServiceMessageWithSpan,
+    MempoolServiceMessage,
 };
 
-use crate::mempool_guard::MempoolReadGuard;
 use async_trait::async_trait;
-use futures::{future::BoxFuture, FutureExt as _};
+use futures::future::BoxFuture;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
     SystemLedger,
@@ -26,7 +26,7 @@ use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
-    mpsc::{self, error::SendError, UnboundedSender},
+    mpsc::{self, error::SendError},
     oneshot::{self, error::RecvError},
 };
 use tracing::{debug, error, info, trace, warn, Instrument as _};
@@ -927,26 +927,73 @@ pub async fn get_commitment_tx_in_parallel(
     merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
 }
 
-/// Get all data transactions from the mempool and database
+/// Get all data transactions from the mempool and database using direct read guard access.
 pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<DataTransactionHeader>> {
-    get_data_tx_in_parallel_inner(
-        data_tx_ids,
-        |tx_ids| {
-            let sender = mempool_sender.clone();
-            async move {
-                let (tx, rx) = oneshot::channel();
-                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx).into())?;
-                Ok(rx.await?)
+    let mempool_future = {
+        let guard = mempool_guard.clone();
+        let tx_ids = data_tx_ids.clone();
+        async move {
+            let mempool_map = guard.get_data_txs(&tx_ids).await;
+            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(mempool_map)
+        }
+    };
+
+    let db_future = {
+        let tx_ids = data_tx_ids.clone();
+        let db_ref = db.clone();
+        async move {
+            let db_tx = db_ref.tx()?;
+            let mut results = HashMap::new();
+            for tx_id in &tx_ids {
+                if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
+                    results.insert(*tx_id, header);
+                }
             }
-            .boxed()
-        },
-        db,
-    )
-    .await
+            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
+        }
+    };
+
+    let (mempool_result, db_result) = tokio::join!(mempool_future, db_future);
+
+    let mempool_map = mempool_result?;
+    let db_map = db_result?;
+
+    debug!(
+        mempool_count = mempool_map.len(),
+        db_count = db_map.len(),
+        "Query results retrieved"
+    );
+    trace!(
+        mempool_keys = ?mempool_map.keys().collect::<Vec<_>>(),
+        db_keys = ?db_map.keys().collect::<Vec<_>>(),
+        "Detailed query results"
+    );
+
+    // Combine results, preferring mempool
+    // this is because unmigrated promoted txs get their promoted_height updated in the mempool ONLY
+    // so we need to prefer it.
+    let mut headers = Vec::with_capacity(data_tx_ids.len());
+    let mut missing = Vec::new();
+
+    for tx_id in data_tx_ids {
+        if let Some(header) = mempool_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else if let Some(header) = db_map.get(&tx_id) {
+            headers.push(header.clone());
+        } else {
+            missing.push(tx_id);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(headers)
+    } else {
+        Err(eyre::eyre!("Missing transactions: {:?}", missing))
+    }
 }
 
 /// Get all data transactions from the mempool and database
