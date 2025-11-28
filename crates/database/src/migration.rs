@@ -77,13 +77,13 @@ pub fn check_db_version_and_run_migrations_if_needed(
                 v, CURRENT_DB_VERSION
             );
             // For now, we only support migrating from v1 to v2 in-place using old_db as source
-            if v == 1 {
-                // In-place migration: only touch new_db; old_db ignored for sequential upgrade.
-                new_db.update_eyre(|tx_new| {
-                    v1_to_v2::migrate_in_place(tx_new)?;
-                    Ok(())
-                })?;
-            }
+            // if v == 1 {
+            //     // In-place migration: only touch new_db; old_db ignored for sequential upgrade.
+            //     new_db.update_eyre(|tx_new| {
+            //         // v1_to_v2::migrate_in_place(tx_new)?;
+            //         Ok(())
+            //     })?;
+            // }
         }
     } else {
         debug!("No DB schema version information found in the new database. Applying initial migration from v0 to v1.");
@@ -98,54 +98,54 @@ pub fn check_db_version_and_run_migrations_if_needed(
     Ok(())
 }
 
-mod v1_to_v2 {
-    use super::*;
-    use crate::db_cache::{CachedChunk, CachedChunkIndexMetadata};
-    use crate::tables::{CachedChunks, CachedChunksIndex};
-    use reth_db::cursor::DbCursorRO as _;
-
-    /// In-place v1 -> v2 migration.
-    /// Adds `data_root` to existing `CachedChunks` values by walking `CachedChunksIndex` within the SAME database.
-    /// Only rewrites `CachedChunks`; all other tables remain untouched.
-    pub(crate) fn migrate_in_place<TX>(tx: &TX) -> Result<(), DatabaseError>
-    where
-        TX: DbTxMut + DbTx + Debug,
-    {
-        debug!("In-place migrating from v1 to v2 (embed data_root in CachedChunks)");
-
-        let mut idx_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-        let mut idx_walk = idx_cursor.walk(None)?;
-        let mut rewritten: u64 = 0;
-
-        while let Some((data_root, index_entry)) = idx_walk.next().transpose()? {
-            let meta: CachedChunkIndexMetadata = index_entry.into();
-            if let Some(old_chunk) = tx.get::<CachedChunks>(meta.chunk_path_hash)? {
-                // Detect if already migrated (heuristic: if existing chunk already has matching data_root encoded).
-                // Since older format lacks data_root entirely, we always rewrite.
-                let new_chunk = CachedChunk {
-                    chunk: old_chunk.chunk.clone(),
-                    data_path: old_chunk.data_path.clone(),
-                    data_root,
-                };
-                tx.put::<CachedChunks>(meta.chunk_path_hash, new_chunk)?;
-                rewritten += 1;
-                if rewritten.is_multiple_of(100_000) {
-                    debug!(chunks.rewritten = rewritten, "Progress: chunk migration");
-                }
-            }
-        }
-
-        debug!(
-            chunks.total_rewritten = rewritten,
-            "Completed in-place chunk migration"
-        );
-        crate::set_database_schema_version(tx, 2)?;
-        Ok(())
-    }
-}
+// mod v1_to_v2 {
+//     use super::*;
+//     use crate::db_cache::{CachedChunk, CachedChunkIndexMetadata};
+//     use crate::tables::{CachedChunks, CachedChunksIndex};
+//     use reth_db::cursor::DbCursorRO as _;
+//
+//     /// In-place v1 -> v2 migration.
+//     /// Adds `data_root` to existing `CachedChunks` values by walking `CachedChunksIndex` within the SAME database.
+//     /// Only rewrites `CachedChunks`; all other tables remain untouched.
+//     pub(crate) fn migrate_in_place<TX>(tx: &TX) -> Result<(), DatabaseError>
+//     where
+//         TX: DbTxMut + DbTx + Debug,
+//     {
+//         debug!("In-place migrating from v1 to v2 (embed data_root in CachedChunks)");
+//
+//         let mut idx_cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+//         let mut idx_walk = idx_cursor.walk(None)?;
+//         let mut rewritten: u64 = 0;
+//
+//         while let Some((data_root, index_entry)) = idx_walk.next().transpose()? {
+//             let meta: CachedChunkIndexMetadata = index_entry.into();
+//             if let Some(old_chunk) = tx.get::<CachedChunks>(meta.chunk_path_hash)? {
+//                 // Detect if already migrated (heuristic: if existing chunk already has matching data_root encoded).
+//                 // Since older format lacks data_root entirely, we always rewrite.
+//                 let new_chunk = CachedChunk {
+//                     chunk: old_chunk.chunk.clone(),
+//                     data_path: old_chunk.data_path.clone(),
+//                 };
+//                 tx.put::<CachedChunks>(meta.chunk_path_hash, new_chunk)?;
+//                 rewritten += 1;
+//                 if rewritten.is_multiple_of(100_000) {
+//                     debug!(chunks.rewritten = rewritten, "Progress: chunk migration");
+//                 }
+//             }
+//         }
+//
+//         debug!(
+//             chunks.total_rewritten = rewritten,
+//             "Completed in-place chunk migration"
+//         );
+//         crate::set_database_schema_version(tx, 2)?;
+//         Ok(())
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::U256;
     use crate::db::RethDbWrapper;
     use crate::db_cache::{
         CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
@@ -226,7 +226,7 @@ mod tests {
             let chunk = CachedChunk {
                 chunk: None,
                 data_path: Base64(vec![]),
-                data_root,
+                data_root: U256::from(0),
             };
             write_tx.put::<CachedChunks>(chunk_path_hash, chunk)?;
 

@@ -213,7 +213,7 @@ impl InnerCacheTask {
         );
 
         // Then, prune chunks that no longer have active ingress proofs
-        // self.prune_chunks_without_active_ingress_proofs()?;
+        self.prune_chunks_without_active_ingress_proofs()?;
 
         Ok(())
     }
@@ -768,7 +768,7 @@ mod tests {
     use eyre::WrapErr as _;
     use irys_database::{
         database, open_or_create_db,
-        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysTables},
+        tables::{CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
