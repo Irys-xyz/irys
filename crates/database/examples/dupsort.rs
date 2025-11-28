@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use irys_database::db::IrysDupCursorExt as _;
 use irys_database::db_cache::CachedChunk;
 use irys_database::{impl_compression_for_compact, open_or_create_db};
-use irys_types::{Base64};
+use irys_types::Base64;
 use paste::paste;
 use reth_codecs::Compact;
 use reth_db::cursor::DbCursorRO as _;
