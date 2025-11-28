@@ -145,7 +145,6 @@ pub fn check_db_version_and_run_migrations_if_needed(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::U256;
     use crate::db::RethDbWrapper;
     use crate::db_cache::{
         CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
@@ -157,6 +156,7 @@ mod tests {
         CachedChunks, CachedChunksIndex, CachedDataRoots, IngressProofs, IrysBlockHeaders,
         IrysDataTxHeaders,
     };
+    use alloy_primitives::U256;
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
     use irys_types::{
