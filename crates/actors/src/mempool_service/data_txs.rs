@@ -290,15 +290,22 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        // Get the authoritative EMA pricing from canonical tip
-        let ema_snapshot = {
+        // Get the authoritative EMA pricing and latest block timestamp from canonical tip
+        let (ema_snapshot, latest_block_timestamp_secs) = {
             let tree = self.block_tree_read_guard.read();
             let (canonical, _) = tree.get_canonical_chain();
-            let last_block = canonical
+            let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
-            tree.get_ema_snapshot(&last_block.block_hash)
-                .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?
+            let ema = tree
+                .get_ema_snapshot(&last_block_entry.block_hash)
+                .ok_or_else(|| TxIngressError::Other("EMA snapshot not found".to_string()))?;
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
+            // Convert block timestamp from millis to seconds
+            let timestamp_secs = last_block.timestamp_secs();
+            (ema, timestamp_secs)
         };
 
         let pricing_ema = ema_snapshot.ema_for_public_pricing();
@@ -312,10 +319,15 @@ impl Inner {
             self.config.consensus.epoch.submit_ledger_epoch_length,
         );
 
+        // Use latest block's timestamp for hardfork params
+        let number_of_ingress_proofs_total = self
+            .config
+            .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
         let expected_term_fee = calculate_term_fee(
             tx.data_size,
             epochs_for_storage,
             &self.config.consensus,
+            number_of_ingress_proofs_total,
             pricing_ema,
         )
         .map_err(|e| {
@@ -347,6 +359,7 @@ impl Inner {
             let expected_perm_fee = calculate_perm_fee_from_config(
                 tx.data_size,
                 &self.config.consensus,
+                number_of_ingress_proofs_total,
                 pricing_ema,
                 expected_term_fee,
             )
@@ -474,10 +487,26 @@ impl Inner {
             |e| TxIngressError::FundMisalignment(format!("Invalid term fee structure: {}", e)),
         )?;
 
+        // Get latest block's timestamp for hardfork params
+        let latest_block_timestamp_secs = {
+            let tree = self.block_tree_read_guard.read();
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block_entry = canonical
+                .last()
+                .ok_or_else(|| TxIngressError::Other("Empty canonical chain".to_string()))?;
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| TxIngressError::Other("Block not found".to_string()))?;
+            last_block.timestamp_secs()
+        };
+        let number_of_ingress_proofs_total = self
+            .config
+            .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
         PublishFeeCharges::new(
             actual_perm_fee,
             actual_term_fee,
             &self.config.node_config.consensus_config(),
+            number_of_ingress_proofs_total,
         )
         .map_err(|e| {
             TxIngressError::FundMisalignment(format!("Invalid perm fee structure: {}", e))

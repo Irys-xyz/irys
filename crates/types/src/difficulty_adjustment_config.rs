@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::{ConsensusConfig, DifficultyAdjustmentConfig, U256};
+use crate::{ConsensusConfig, DifficultyAdjustmentConfig, UnixTimestampMs, U256};
 use rust_decimal_macros::dec;
 
 pub fn calculate_initial_difficulty(
@@ -83,8 +83,8 @@ pub struct AdjustmentStats {
 }
 pub fn calculate_difficulty(
     block_height: u64,
-    last_diff_timestamp: u128,
-    current_timestamp: u128,
+    last_diff_timestamp: UnixTimestampMs,
+    current_timestamp: UnixTimestampMs,
     current_diff: U256,
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> (U256, Option<AdjustmentStats>) {
@@ -98,7 +98,7 @@ pub fn calculate_difficulty(
     // Calculate times
     let target_block_time_ms = (difficulty_config.block_time * 1000) as u128;
     let target_time_ms = target_block_time_ms * blocks_between_adjustments;
-    let actual_time_ms = current_timestamp - last_diff_timestamp;
+    let actual_time_ms = current_timestamp.as_millis() - last_diff_timestamp.as_millis();
 
     let actual_block_time =
         Duration::from_millis((actual_time_ms / blocks_between_adjustments) as u64);
@@ -466,7 +466,7 @@ mod tests {
         let difficulty_config = default_difficulty_config;
         let block_height = 100; // Adjustment block
         let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = 0_u128;
+        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
 
         let blocks = difficulty_config.difficulty_adjustment_interval as u128;
         let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
@@ -474,7 +474,8 @@ mod tests {
         // Convert multiplier to percent as an integer to avoid float arithmetic
         let multiplier_percent = (time_multiplier * 100.0).round() as u128;
         let actual_time = target_time * multiplier_percent / 100;
-        let current_timestamp = last_diff_timestamp + actual_time;
+        let current_timestamp =
+            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
 
         let (new_diff, stats) = calculate_difficulty(
             block_height,
@@ -534,14 +535,15 @@ mod tests {
         let difficulty_config = default_difficulty_config;
         let block_height = 100; // Adjustment block
         let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = 0_u128;
+        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
 
         let blocks = difficulty_config.difficulty_adjustment_interval as u128;
         let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
 
         // Create scenario where percent_diff exactly equals min_threshold (25%)
         let actual_time = target_time + (target_time / 4); // 125% of target = 25% diff
-        let current_timestamp = last_diff_timestamp + actual_time;
+        let current_timestamp =
+            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
 
         let (new_diff, stats) = calculate_difficulty(
             block_height,
@@ -580,14 +582,15 @@ mod tests {
         let difficulty_config = default_difficulty_config;
         let block_height = 100;
         let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = 0_u128;
+        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
 
         let blocks = difficulty_config.difficulty_adjustment_interval as u128;
         let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
 
         // Create scenario just below threshold (24% diff)
         let actual_time = target_time + (target_time * 24 / 100); // 124% of target = 24% diff
-        let current_timestamp = last_diff_timestamp + actual_time;
+        let current_timestamp =
+            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
 
         let (new_diff, stats) = calculate_difficulty(
             block_height,
@@ -614,14 +617,15 @@ mod tests {
         let difficulty_config = default_difficulty_config;
         let block_height = 100;
         let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = 0_u128;
+        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
 
         let blocks = difficulty_config.difficulty_adjustment_interval as u128;
         let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
 
         // Create scenario just above threshold (26% diff)
         let actual_time = target_time + (target_time * 26 / 100); // 126% of target = 26% diff
-        let current_timestamp = last_diff_timestamp + actual_time;
+        let current_timestamp =
+            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
 
         let (new_diff, stats) = calculate_difficulty(
             block_height,
@@ -655,14 +659,15 @@ mod tests {
         let difficulty_config = default_difficulty_config;
         let block_height = 100;
         let current_diff = U256::from(1000000_u64);
-        let last_diff_timestamp = 0_u128;
+        let last_diff_timestamp = UnixTimestampMs::from_millis(0);
 
         let blocks = difficulty_config.difficulty_adjustment_interval as u128;
         let target_time = difficulty_config.block_time as u128 * 1000 * blocks;
 
         // Fast blocks: actual_time < target_time
         let actual_time = (target_time as f64 * time_fraction) as u128;
-        let current_timestamp = last_diff_timestamp + actual_time;
+        let current_timestamp =
+            UnixTimestampMs::from_millis(last_diff_timestamp.as_millis() + actual_time);
 
         let (new_diff, stats) = calculate_difficulty(
             block_height,

@@ -2,7 +2,7 @@ use eyre::eyre;
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
 use irys_types::{
     BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
-    TokioServiceHandle, H256, U256,
+    TokioServiceHandle, UnixTimestampMs, H256, U256,
 };
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
@@ -44,7 +44,7 @@ struct BlockLogEntry {
     #[expect(dead_code)]
     pub height: u64,
     #[expect(dead_code)]
-    pub timestamp: u128,
+    pub timestamp: UnixTimestampMs,
     #[expect(dead_code)]
     pub difficulty: U256,
 }

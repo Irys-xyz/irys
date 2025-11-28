@@ -697,6 +697,8 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     genesis_config
         .consensus
         .get_mut()
+        .hardforks
+        .frontier
         .number_of_ingress_proofs_total = 2;
 
     let test_signer = genesis_config.new_random_signer();

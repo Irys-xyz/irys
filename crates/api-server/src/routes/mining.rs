@@ -47,10 +47,10 @@ pub async fn get_mining_info(app_state: Data<ApiState>) -> Result<Json<MiningInf
     Ok(Json(MiningInfo {
         block_height: header.height,
         block_hash: format!("{:?}", header.block_hash),
-        block_timestamp: header.timestamp,
+        block_timestamp: header.timestamp.as_millis(),
         current_difficulty: header.diff.to_string(),
         cumulative_difficulty: header.cumulative_diff.to_string(),
-        last_diff_adjustment_timestamp: header.last_diff_timestamp,
+        last_diff_adjustment_timestamp: header.last_diff_timestamp.as_millis(),
         miner_address: format!("{:?}", header.miner_address),
         reward_address: format!("{:?}", header.reward_address),
         reward_amount: header.reward_amount.to_string(),

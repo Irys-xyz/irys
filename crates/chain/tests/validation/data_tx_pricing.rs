@@ -20,7 +20,7 @@ use irys_types::storage_pricing::{
 use irys_types::IngressProofsList;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    OracleConfig, U256,
+    OracleConfig, UnixTimestamp, U256,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
@@ -386,16 +386,22 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
 
     let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
 
-    // Calculate expected fees using the provided EMA
+    // Calculate expected fees using hardfork params from config to match validation behavior
+    let number_of_ingress_proofs_total = genesis_node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
     )?;
 
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
     )?;
@@ -506,10 +512,15 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
 
     let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
 
-    // Calculate expected fees using the provided EMA
+    // Calculate expected fees using hardfork params from config to match validation behavior
+    let number_of_ingress_proofs_total = genesis_node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
     )?
     .checked_div(U256::from(2))
@@ -518,6 +529,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
     )?;
