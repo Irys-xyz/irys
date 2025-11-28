@@ -112,6 +112,25 @@ impl Inner {
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath.into());
                 }
+                // Validate tx_offset is consistent with claimed data_size
+                let chunk_size = self.config.consensus.chunk_size;
+                if !chunk.is_valid_offset(chunk_size) {
+                    let max_offset = chunk.max_valid_offset(chunk_size);
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds max valid offset {:?} for data_size {}",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        *chunk.tx_offset,
+                        max_offset,
+                        chunk.data_size
+                    );
+                    return Err(AdvisoryChunkIngressError::PreHeaderInvalidOffset(format!(
+                        "tx_offset {} exceeds max valid offset {:?} for data_size {}",
+                        *chunk.tx_offset, max_offset, chunk.data_size
+                    ))
+                    .into());
+                }
+
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
                 if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
@@ -159,8 +178,38 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
 
+        // Validate tx_offset is within valid bounds for confirmed data_size
+        let chunk_size = self.config.consensus.chunk_size;
+        let num_chunks = data_size.div_ceil(chunk_size);
+        let max_valid_offset = num_chunks.saturating_sub(1);
+        let offset_u64 = u64::from(*chunk.tx_offset);
+
+        if offset_u64 > max_valid_offset {
+            error!(
+                "Invalid tx_offset: {} exceeds max valid offset {} for data_size {} (num_chunks: {})",
+                offset_u64, max_valid_offset, data_size, num_chunks
+            );
+            return Err(CriticalChunkIngressError::InvalidOffset(format!(
+                "tx_offset {} exceeds max valid offset {} for data_size {}",
+                offset_u64, max_valid_offset, data_size
+            ))
+            .into());
+        }
+
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
+        let target_offset = match chunk.end_byte_offset_checked(chunk_size) {
+            Some(offset) => u128::from(offset),
+            None => {
+                error!(
+                    "Byte offset calculation failed for tx_offset {} with data_size {}",
+                    *chunk.tx_offset, chunk.data_size
+                );
+                return Err(CriticalChunkIngressError::InvalidOffset(
+                    "Byte offset calculation overflow or invalid offset".to_string(),
+                )
+                .into());
+            }
+        };
         let path_buff = &chunk.data_path;
 
         info!(
@@ -207,39 +256,26 @@ impl Inner {
         // data_path is valid but the chunk size doesn't mach the protocols
         // consensus size, then the data_root is actually invalid and no future
         // chunks from that data_root should be ingressed.
-        let chunk_size = self.config.consensus.chunk_size;
 
-        // Validate that we will have chunks in the tx
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size);
-        if num_chunks_in_tx == 0 {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: {:?}",
-                CriticalChunkIngressError::InvalidDataSize,
-                chunk.data_root,
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        }
-        // Is this chunk index any of the chunks before the last in the tx?
-        let last_index = num_chunks_in_tx - 1;
-        if u64::from(*chunk.tx_offset) < last_index {
-            // Ensure prefix chunks are all exactly chunk_size
-            if chunk_len != chunk_size {
+        // Note: num_chunks, chunk_size, offset_u64, and max_valid_offset already
+        // computed in offset validation above
+        let is_last_chunk = offset_u64 == max_valid_offset;
+
+        if is_last_chunk {
+            // Last chunk can be <= chunk_size
+            if chunk_len > chunk_size {
                 error!(
-                    "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
-                    CriticalChunkIngressError::InvalidChunkSize,
-                    chunk.tx_offset,
-                    chunk_len
+                    "Last chunk exceeds max size: tx_offset {} chunk_len {} max {}",
+                    chunk.tx_offset, chunk_len, chunk_size
                 );
                 return Ok(());
             }
         } else {
-            // Ensure the last chunk is no larger than chunk_size
-            if chunk_len > chunk_size {
+            // Non-last chunk must be exactly chunk_size
+            if chunk_len != chunk_size {
                 error!(
-                    "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                    CriticalChunkIngressError::InvalidChunkSize,
-                    chunk.tx_offset,
-                    chunk_len
+                    "Non-last chunk has wrong size: tx_offset {} chunk_len {} expected {}",
+                    chunk.tx_offset, chunk_len, chunk_size
                 );
                 return Ok(());
             }
@@ -441,6 +477,8 @@ pub enum CriticalChunkIngressError {
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
+    /// The tx_offset exceeds valid bounds for the data_size
+    InvalidOffset(String),
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
@@ -458,6 +496,8 @@ pub enum AdvisoryChunkIngressError {
     PreHeaderOversizedDataPath,
     /// tx_offset exceeds pre-header capacity bound
     PreHeaderOffsetExceedsCap,
+    /// tx_offset exceeds valid bounds for claimed data_size (pre-header)
+    PreHeaderInvalidOffset(String),
     /// Catch-all variant for other errors.
     Other(String),
 }
