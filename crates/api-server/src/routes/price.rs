@@ -54,16 +54,22 @@ pub async fn get_price(
             // Get the latest EMA for pricing calculations from the canonical chain
             let tree = state.block_tree.read();
             let (canonical, _) = tree.get_canonical_chain();
-            let last_block = canonical
+            let last_block_entry = canonical
                 .last()
                 .ok_or_else(|| ErrorBadRequest("Empty canonical chain"))?;
             let ema = tree
-                .get_ema_snapshot(&last_block.block_hash)
+                .get_ema_snapshot(&last_block_entry.block_hash)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+            // Get the actual block to access its timestamp
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| ErrorBadRequest("Block not found"))?;
+            // Convert block timestamp from millis to seconds for hardfork params
+            let latest_block_timestamp_secs = last_block.timestamp_secs();
             drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height
-            let tip_height = last_block.height;
+            let tip_height = last_block_entry.height;
             let next_block_height = tip_height + 1;
 
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -93,11 +99,17 @@ pub async fn get_price(
                 ema.ema_for_public_pricing()
             };
 
+            // Get hardfork params using the latest block's timestamp
+            let number_of_ingress_proofs_total = state
+                .config
+                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
+
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
                 &state.config.consensus,
+                number_of_ingress_proofs_total,
                 pricing_ema,
             )
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
@@ -107,13 +119,14 @@ pub async fn get_price(
                 bytes_to_store,
                 term_fee,
                 state.config.consensus.immediate_tx_inclusion_reward_percent.amount,
-                state.config.consensus.number_of_ingress_proofs_total
+                number_of_ingress_proofs_total
             );
 
             // If the cost calculation fails, return 400 with the error text
             let total_perm_cost = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &state.config.consensus,
+                number_of_ingress_proofs_total,
                 pricing_ema,
                 term_fee,
             )

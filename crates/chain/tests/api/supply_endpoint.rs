@@ -70,7 +70,6 @@ fn validate_supply_invariants(
         .config
         .consensus
         .reth
-        .genesis
         .alloc
         .values()
         .fold(U256::zero(), |acc, account| {

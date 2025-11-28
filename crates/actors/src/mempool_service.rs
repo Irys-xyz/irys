@@ -34,7 +34,7 @@ use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, H256, U256,
+    IrysTransactionId, NodeConfig, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -539,6 +539,7 @@ impl Inner {
             commitment_snapshot,
             epoch_snapshot,
             ema_snapshot,
+            block_timestamp_secs,
         ) = {
             let tree = self.block_tree_read_guard.read();
 
@@ -560,6 +561,8 @@ impl Inner {
             // Extract only the data we need before the tree guard is dropped
             let block_height = block.height;
             let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
+            // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
+            let block_timestamp_secs = block.timestamp_secs();
 
             let ema_snapshot = tree
                 .get_ema_snapshot(&parent_block_hash)
@@ -584,11 +587,14 @@ impl Inner {
                 commitment_snapshot,
                 epoch_snapshot,
                 ema_snapshot,
+                block_timestamp_secs,
             )
         };
 
         let current_height = parent_block_height;
         let next_block_height = parent_block_height + 1;
+        // Use parent block's timestamp for hardfork params (seconds since epoch)
+        let current_timestamp = block_timestamp_secs;
         let min_anchor_height = current_height.saturating_sub(
             (self.config.consensus.mempool.tx_anchor_expiry_depth as u64)
                 .saturating_sub(self.config.consensus.block_migration_depth as u64),
@@ -831,6 +837,7 @@ impl Inner {
                         tx.data_size,
                         &ema_snapshot,
                         next_block_height,
+                        current_timestamp,
                     ) else {
                         debug!(
                             tx.id = ?tx.id,
@@ -844,6 +851,7 @@ impl Inner {
                         tx.data_size,
                         expected_term_fee,
                         &ema_snapshot,
+                        current_timestamp,
                     ) else {
                         debug!(
                             tx.id = ?tx.id,
@@ -897,10 +905,14 @@ impl Inner {
                         continue;
                     }
 
+                    let number_of_ingress_proofs_total = self
+                        .config
+                        .number_of_ingress_proofs_total_at(current_timestamp);
                     if PublishFeeCharges::new(
                         perm_fee,
                         tx.term_fee,
                         &self.config.node_config.consensus_config(),
+                        number_of_ingress_proofs_total,
                     )
                     .is_err()
                     {
@@ -976,7 +988,7 @@ impl Inner {
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
         let publish_txs_and_proofs = self
-            .get_publish_txs_and_proofs(&canonical, &submit_tx, current_height)
+            .get_publish_txs_and_proofs(&canonical, &submit_tx, current_height, current_timestamp)
             .await?;
 
         // Calculate total fees and log final summary
@@ -1037,6 +1049,7 @@ impl Inner {
         canonical: &[BlockTreeEntry],
         submit_tx: &[DataTransactionHeader],
         current_height: u64,
+        current_timestamp: UnixTimestamp,
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
@@ -1177,10 +1190,11 @@ impl Inner {
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
-                let proofs_per_tx = std::cmp::min(
-                    self.config.consensus.number_of_ingress_proofs_total as usize,
-                    total_miners,
-                );
+                let number_of_ingress_proofs_total = self
+                    .config
+                    .number_of_ingress_proofs_total_at(current_timestamp);
+                let proofs_per_tx =
+                    std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
 
                 if all_proofs.len() < proofs_per_tx {
                     info!(
@@ -1230,10 +1244,10 @@ impl Inner {
                 };
 
                 // Calculate expected assigned proofs, clamping to available miners
-                let mut expected_assigned_proofs =
-                    self.config
-                        .consensus
-                        .number_of_ingress_proofs_from_assignees as usize;
+                let number_of_ingress_proofs_from_assignees = self
+                    .config
+                    .number_of_ingress_proofs_from_assignees_at(current_timestamp);
+                let mut expected_assigned_proofs = number_of_ingress_proofs_from_assignees as usize;
 
                 if assigned_miners < expected_assigned_proofs {
                     warn!(
@@ -1271,8 +1285,7 @@ impl Inner {
 
                 // First, add assigned proofs up to the total network limit
                 // Use all available assigned proofs, but don't exceed the network total
-                let total_network_limit =
-                    self.config.consensus.number_of_ingress_proofs_total as usize;
+                let total_network_limit = number_of_ingress_proofs_total as usize;
                 let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
                 final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
 
@@ -1284,14 +1297,12 @@ impl Inner {
                 }
 
                 // Final check - do we have enough total proofs?
-                if final_proofs.len()
-                    < self.config.consensus.number_of_ingress_proofs_total as usize
-                {
+                if final_proofs.len() < number_of_ingress_proofs_total as usize {
                     info!(
                             "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
                             &tx_header.id,
                             final_proofs.len(),
-                            self.config.consensus.number_of_ingress_proofs_total
+                            number_of_ingress_proofs_total
                         );
                     continue;
                 }
@@ -1605,11 +1616,17 @@ impl Inner {
         bytes_to_store: u64,
         term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
+        timestamp_secs: UnixTimestamp,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
-        let total_perm_fee =
-            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config)
-                .map_err(TxIngressError::other_display)?;
+        let total_perm_fee = calculate_perm_storage_total_fee(
+            bytes_to_store,
+            term_fee,
+            ema,
+            &self.config,
+            timestamp_secs,
+        )
+        .map_err(TxIngressError::other_display)?;
 
         Ok(total_perm_fee)
     }
@@ -1622,6 +1639,7 @@ impl Inner {
         bytes_to_store: u64,
         ema: &Arc<irys_domain::EmaSnapshot>,
         block_height: u64,
+        timestamp: UnixTimestamp,
     ) -> Result<U256, TxIngressError> {
         // Calculate expires for the specified block height using the shared utility
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -1631,10 +1649,13 @@ impl Inner {
         );
 
         // Calculate term fee using the storage pricing module
+        let number_of_ingress_proofs_total =
+            self.config.number_of_ingress_proofs_total_at(timestamp);
         calculate_term_fee(
             bytes_to_store,
             epochs_for_storage,
             &self.config.consensus,
+            number_of_ingress_proofs_total,
             ema.ema_for_public_pricing(),
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))

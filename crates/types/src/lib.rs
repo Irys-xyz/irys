@@ -14,6 +14,7 @@ pub mod config;
 pub mod conversions;
 pub mod difficulty_adjustment_config;
 pub mod gossip;
+pub mod hardfork_config;
 pub mod ingress;
 pub mod irys;
 pub mod ledger_expiry;

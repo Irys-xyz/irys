@@ -58,9 +58,9 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
-    TokioServiceHandle, H256, U256,
+    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
-use irys_types::{NetworkConfigWithDefaults as _, RethChainSpec, ShutdownReason};
+use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -351,7 +351,6 @@ impl IrysNode {
     async fn get_or_create_genesis_info(
         &self,
         node_mode: &NodeMode,
-        reth_consensus_config: RethChainSpec,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
@@ -366,12 +365,16 @@ impl IrysNode {
         if has_existing_data {
             // CASE 1: Load existing genesis block and commitments from database
             let (block, commitments) = self.load_existing_genesis(irys_db, block_index);
-            let mut reth_genesis = reth_consensus_config.genesis.clone();
-            reth_genesis.timestamp = Duration::from_millis(block.timestamp.try_into()?).as_secs();
+            let timestamp_secs = block.timestamp_secs().as_secs();
             return Ok((
                 block,
                 commitments,
-                irys_chain_spec(reth_consensus_config.chain, reth_genesis)?,
+                irys_chain_spec(
+                    self.config.consensus.chain_id,
+                    &self.config.consensus.reth,
+                    &self.config.consensus.hardforks,
+                    timestamp_secs,
+                )?,
             ));
         }
 
@@ -379,7 +382,7 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                self.create_new_genesis_block(reth_consensus_config).await
+                self.create_new_genesis_block().await
             }
             NodeMode::Peer => {
                 let expected_genesis_hash = self
@@ -391,15 +394,17 @@ impl IrysNode {
                 let (block, commitments) = self
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)
                     .await;
-                let mut reth_genesis = reth_consensus_config.genesis.clone();
-
-                reth_genesis.timestamp =
-                    Duration::from_millis(block.timestamp.try_into()?).as_secs();
+                let timestamp_secs = block.timestamp_secs().as_secs();
 
                 Ok((
                     block,
                     commitments,
-                    irys_chain_spec(reth_consensus_config.chain, reth_genesis)?,
+                    irys_chain_spec(
+                        self.config.consensus.chain_id,
+                        &self.config.consensus.reth,
+                        &self.config.consensus.hardforks,
+                        timestamp_secs,
+                    )?,
                 ))
             }
         }
@@ -446,11 +451,10 @@ impl IrysNode {
 
     async fn create_new_genesis_block(
         &self,
-        reth_consensus_config: RethChainSpec,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
         // Create timestamp for genesis block (prefer configured value if provided)
         let configured_ts = self.config.consensus.genesis.timestamp_millis;
-        let timestamp = if configured_ts != 0 {
+        let timestamp_millis = if configured_ts != 0 {
             configured_ts
         } else {
             SystemTime::now()
@@ -459,17 +463,24 @@ impl IrysNode {
                 .as_millis()
         };
 
-        let mut reth_genesis = reth_consensus_config.genesis.clone();
+        // Convert to seconds for reth
+        let timestamp_secs = Duration::from_millis(timestamp_millis.try_into()?).as_secs();
 
-        // convert to seconds for reth
-        reth_genesis.timestamp = Duration::from_millis(timestamp.try_into()?).as_secs();
+        let reth_chain_spec = irys_chain_spec(
+            self.config.consensus.chain_id,
+            &self.config.consensus.reth,
+            &self.config.consensus.hardforks,
+            timestamp_secs,
+        )?;
 
-        let reth_chain_spec = irys_chain_spec(reth_consensus_config.chain, reth_genesis)?;
-
+        // Get hardfork params for genesis block using its timestamp
+        let number_of_ingress_proofs_total = self
+            .config
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
-            self.config.consensus.number_of_ingress_proofs_total,
+            number_of_ingress_proofs_total,
         );
 
         // Generate genesis commitments from configuration
@@ -486,8 +497,8 @@ impl IrysNode {
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
             genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
         }
-        genesis_block.timestamp = timestamp;
-        genesis_block.last_diff_timestamp = timestamp;
+        genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
+        genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
         // Add commitment transactions to genesis block and get initial treasury
         let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
@@ -637,12 +648,7 @@ impl IrysNode {
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments, reth_chainspec) = self
-            .get_or_create_genesis_info(
-                node_mode,
-                config.consensus.reth.clone(),
-                &irys_db,
-                &block_index,
-            )
+            .get_or_create_genesis_info(node_mode, &irys_db, &block_index)
             .await?;
 
         // Capture the genesis hash for network consensus

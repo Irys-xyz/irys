@@ -19,7 +19,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    H256,
+    UnixTimestampMs, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -1073,7 +1073,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
         ) -> Result<
             (EthBuiltPayload, irys_types::U256),
@@ -1487,7 +1487,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
         ) -> Result<
             (EthBuiltPayload, irys_types::U256),

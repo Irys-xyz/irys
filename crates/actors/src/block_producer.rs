@@ -35,7 +35,7 @@ use irys_types::{
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    SystemTransactionLedger, TokioServiceHandle, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -790,7 +790,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-        timestamp_ms: u128,
+        timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
@@ -851,13 +851,13 @@ pub trait BlockProdStrategy {
 
     #[tracing::instrument(level = "trace", skip_all, fields(
         payload.parent_evm_hash = %prev_block_header.evm_block_hash,
-        payload.timestamp_sec = timestamp_ms / 1000,
+        payload.timestamp_sec = timestamp_ms.to_secs().as_secs(),
         payload.shadow_tx_count = shadow_txs.len()
     ))]
     async fn build_and_submit_reth_payload(
         &self,
         prev_block_header: &IrysBlockHeader,
-        timestamp_ms: u128,
+        timestamp_ms: UnixTimestampMs,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
     ) -> Result<EthBuiltPayload, BlockProductionError> {
@@ -866,7 +866,7 @@ pub trait BlockProdStrategy {
         // generate payload attributes with shadow transactions
         let rpc_attributes = IrysPayloadAttributes {
             inner: PayloadAttributes {
-                timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
+                timestamp: timestamp_ms.to_secs().as_secs(), // **THIS HAS TO BE SECONDS**
                 prev_randao: parent_mix_hash,
                 suggested_fee_recipient: self.inner().config.node_config.reward_address,
                 withdrawals: None, // these should ALWAYS be none
@@ -962,7 +962,7 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
         mempool_bundle: MempoolTxsBundle,
-        current_timestamp: u128,
+        current_timestamp: UnixTimestampMs,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
@@ -1113,8 +1113,7 @@ pub trait BlockProdStrategy {
                     required_proof_count: Some(
                         self.inner()
                             .config
-                            .consensus
-                            .number_of_ingress_proofs_total
+                            .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
                             .try_into()?,
                     ),
                 },
@@ -1546,19 +1545,19 @@ fn millis_since_epoch(time: SystemTime) -> u128 {
 #[inline]
 #[tracing::instrument(level = "trace", skip_all)]
 fn choose_oracle_price(
-    parent_ts_ms: u128,
+    parent_ts_ms: UnixTimestampMs,
     parent_price: IrysTokenPrice,
     oracle_price: IrysTokenPrice,
     oracle_updated_ms: u128,
 ) -> IrysTokenPrice {
-    let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
+    let (chosen, source) = if parent_ts_ms.as_millis() > oracle_updated_ms {
         (parent_price, "parent_fallback")
     } else {
         (oracle_price, "oracle_fresh")
     };
 
     tracing::debug!(
-        parent_ts_ms,
+        parent_ts_ms = parent_ts_ms.as_millis(),
         oracle_updated_ms,
         parent_price = %parent_price,
         oracle_price = %oracle_price,
@@ -1581,26 +1580,25 @@ impl BlockProdStrategy for ProductionStrategy {
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> UnixTimestampMs {
+    let now_ms = UnixTimestampMs::now().unwrap();
+    let prev_secs = prev_block_header.timestamp.to_secs();
 
-    // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
-    // This can happen due to EVM blocks using second-precision time, instead of our millisecond precision
-    // this just waits until the next second (timers (afaict) never undersleep, so we don't need an extra buffer here)
-    // *dev configs can easily trigger this behaviour
-    // as_secs does not take into account/round the underlying nanos at all
-    let now =
-        if now.as_secs() == Duration::from_millis(prev_block_header.timestamp as u64).as_secs() {
-            let nanos_into_sec = now.subsec_nanos();
-            let nano_to_next_sec = 1_000_000_000 - nanos_into_sec;
-            let time_to_wait = Duration::from_nanos(nano_to_next_sec as u64);
-            info!("Waiting {:.2?} to prevent timestamp overlap", &time_to_wait);
-            tokio::time::sleep(time_to_wait).await;
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
-        } else {
-            now
-        };
-    now.as_millis()
+    // If we're in the same second as the previous block, wait until the next second.
+    // This prevents EVM timestamp collisions (EVM uses second-precision).
+    // Dev configs can easily trigger this behaviour due to fast block times.
+    if now_ms.to_secs() == prev_secs {
+        let ms_into_sec = (now_ms.as_millis() % 1000) as u64;
+        let wait_duration = Duration::from_millis(1000 - ms_into_sec);
+        info!(
+            "Waiting {:.2?} to prevent timestamp overlap",
+            &wait_duration
+        );
+        tokio::time::sleep(wait_duration).await;
+        return UnixTimestampMs::now().unwrap();
+    }
+
+    now_ms
 }
 
 /// Calculates the total number of full chunks needed to store a list of transactions,
@@ -1624,7 +1622,7 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 #[cfg(test)]
 mod oracle_choice_tests {
     use super::{choose_oracle_price, millis_since_epoch};
-    use irys_types::storage_pricing::Amount;
+    use irys_types::{storage_pricing::Amount, UnixTimestampMs};
     use rust_decimal_macros::dec;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -1636,7 +1634,7 @@ mod oracle_choice_tests {
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
 
         let chosen = choose_oracle_price(
-            millis_since_epoch(parent_ts_ms),
+            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),
@@ -1655,7 +1653,7 @@ mod oracle_choice_tests {
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
 
         let chosen = choose_oracle_price(
-            millis_since_epoch(parent_ts_ms),
+            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),

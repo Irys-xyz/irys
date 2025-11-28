@@ -1,7 +1,7 @@
 use crate::utils::IrysNodeTest;
 use eyre::Result;
 use irys_actors::block_discovery::BlockTransactions;
-use irys_types::{NodeConfig, H256, U256};
+use irys_types::{NodeConfig, UnixTimestampMs, H256, U256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// This test ensures that if we attempt to submit a block with a timestamp
@@ -26,7 +26,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub invalid_timestamp: u128,
+        pub invalid_timestamp: UnixTimestampMs,
     }
 
     #[async_trait::async_trait]
@@ -48,7 +48,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             perv_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            _timestamp_ms: u128,
+            _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
@@ -69,7 +69,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             solution: &SolutionContext,
             prev_block_header: &IrysBlockHeader,
             mempool_bundle: irys_actors::block_producer::MempoolTxsBundle,
-            _current_timestamp: u128,
+            _current_timestamp: UnixTimestampMs,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
@@ -122,7 +122,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             prod: ProductionStrategy {
                 inner: genesis_node.node_ctx.block_producer_inner.clone(),
             },
-            invalid_timestamp: future_timestamp,
+            invalid_timestamp: UnixTimestampMs::from_millis(future_timestamp),
         }
     };
 
