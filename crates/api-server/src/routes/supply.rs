@@ -3,7 +3,7 @@ use eyre::{eyre, Result};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_reward_curve::HalvingCurve;
 use irys_types::IrysBlockHeader;
-use irys_types::U256;
+use irys_types::{serialization::string_u64, U256};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiState;
@@ -23,6 +23,7 @@ pub struct SupplyResponse {
     pub total_supply: String,
     pub genesis_supply: String,
     pub emitted_supply: String,
+    #[serde(with = "string_u64")]
     pub block_height: u64,
     pub inflation_cap: String,
     pub inflation_progress_percent: String,

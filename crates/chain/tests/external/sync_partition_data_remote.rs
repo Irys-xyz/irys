@@ -158,7 +158,7 @@ async fn sync_partition_data_remote_test() -> Result<()> {
             let publish_result = clients[0]
                 .http_client
                 .get(format!(
-                    "{}/v1/data_ledger/intervals?ledger=Publish&slot=0",
+                    "{}/v1/storage/intervals/Publish/0/Data",
                     clients[0].url
                 ))
                 .send()

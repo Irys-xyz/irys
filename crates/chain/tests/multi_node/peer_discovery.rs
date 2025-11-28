@@ -46,7 +46,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let app = node.start_public_api().await;
 
     // Invoke the peer list endpoint
-    let req = TestRequest::get().uri("/v1/peer_list").to_request();
+    let req = TestRequest::get().uri("/v1/peer-list").to_request();
     let resp = call_service(&app, req).await;
     let body = read_body(resp).await;
 
@@ -296,7 +296,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     // Verify the peer_list shows all the peers
     let req = TestRequest::get()
-        .uri("/v1/peer_list")
+        .uri("/v1/peer-list")
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .to_request();
     let resp = call_service(&app, req).await;

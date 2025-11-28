@@ -1,26 +1,33 @@
 use actix_web::{web, HttpResponse};
+use irys_types::serialization::{string_u128, string_u64};
 use serde::{Deserialize, Serialize};
 
 use crate::ApiState;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockAtHeight {
     pub block_hash: String,
     pub cumulative_diff: String,
+    #[serde(with = "string_u128")]
     pub timestamp: u128,
     pub solution_hash: String,
     pub is_tip: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ForkInfo {
+    #[serde(with = "string_u64")]
     pub height: u64,
     pub block_count: usize,
     pub blocks: Vec<BlockAtHeight>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BlockTreeForksResponse {
+    #[serde(with = "string_u64")]
     pub current_tip_height: u64,
     pub current_tip_hash: String,
     pub forks: Vec<ForkInfo>,

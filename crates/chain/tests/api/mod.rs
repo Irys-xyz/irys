@@ -25,7 +25,7 @@ pub async fn block_index_endpoint_request(
 ) -> reqwest::Response {
     client_request(&format!(
         "{}{}?height={}&limit={}",
-        &address, "/v1/block_index", &height, &limit
+        &address, "/v1/block-index", &height, &limit
     ))
     .await
 }
@@ -48,7 +48,7 @@ pub async fn network_config_endpoint_request(address: &str) -> reqwest::Response
 }
 
 pub async fn peer_list_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/peer_list")).await
+    client_request(&format!("{}{}", &address, "/v1/peer-list")).await
 }
 
 pub async fn version_endpoint_request(address: &str) -> reqwest::Response {

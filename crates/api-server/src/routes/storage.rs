@@ -6,6 +6,7 @@ use irys_types::DataLedger;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageIntervalsParams {
     ledger: DataLedger,
     slot_index: usize,
@@ -13,12 +14,14 @@ pub struct StorageIntervalsParams {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ChunkInterval {
     start: u32,
     end: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct StorageIntervalsResponse {
     ledger: DataLedger,
     slot_index: usize,
@@ -38,12 +41,14 @@ impl StorageIntervalsResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ChunkCountsParams {
     ledger: DataLedger,
     slot_index: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct ChunkCountsResponse {
     ledger: DataLedger,
     slot_index: usize,
