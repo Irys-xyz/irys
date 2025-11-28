@@ -2108,11 +2108,10 @@ impl IrysNodeTest<IrysNodeCtx> {
                                 let verify_tx_offset = unpacked.tx_offset;
 
                                 let (ctx, crx) = tokio::sync::oneshot::channel();
-                                let _ = peer
-                                    .node_ctx
-                                    .service_senders
-                                    .mempool
-                                    .send(MempoolServiceMessage::IngestChunk(unpacked, ctx).into());
+                                let _ =
+                                    peer.node_ctx.service_senders.mempool.send(
+                                        MempoolServiceMessage::IngestChunk(unpacked, ctx).into(),
+                                    );
                                 let _ = crx.await;
 
                                 // Verify the chunk is present on the peer DB (small retry loop)
@@ -2171,9 +2170,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(
-                    MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, tx).into(),
-                )
+                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, tx).into())
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
                 tracing::error!(

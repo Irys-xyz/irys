@@ -17,12 +17,12 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
+use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
-use irys_database::SystemLedger;
 use irys_types::{
-    BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, H256,
-    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError,
+    BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage,
+    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -1313,12 +1313,9 @@ where
             .collect();
 
         if !missing_data_ids.is_empty() {
-            let fetched = get_data_tx_in_parallel(
-                missing_data_ids,
-                &self.service_senders.mempool,
-                &self.db,
-            )
-            .await?;
+            let fetched =
+                get_data_tx_in_parallel(missing_data_ids, &self.service_senders.mempool, &self.db)
+                    .await?;
 
             for tx in fetched {
                 // Note: A tx can be in both submit and publish ledgers (published after submission)

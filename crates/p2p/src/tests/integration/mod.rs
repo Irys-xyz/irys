@@ -252,7 +252,10 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     let tx2 = generate_test_tx().header;
     // Modify the existing Submit ledger (index 1) instead of pushing a new ledger
     block.data_ledgers[1].tx_ids = H256List(vec![tx1.id, tx2.id]);
-    debug!("Added transactions to Submit ledger: {:?}", block.data_ledgers[1].tx_ids);
+    debug!(
+        "Added transactions to Submit ledger: {:?}",
+        block.data_ledgers[1].tx_ids
+    );
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
     signer
         .sign_block_header(&mut block)

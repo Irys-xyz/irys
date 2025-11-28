@@ -1,5 +1,4 @@
 use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
-use irys_actors::block_discovery::BlockTransactions;
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
@@ -9,6 +8,7 @@ use crate::tests::util::{
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
 use futures::{future, FutureExt as _};
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
@@ -268,7 +268,11 @@ async fn should_process_block() {
     let test_header = Arc::new(test_header.clone());
 
     service
-        .process_block::<ApiClientStub>(Arc::clone(&test_header), BlockTransactions::default(), false)
+        .process_block::<ApiClientStub>(
+            Arc::clone(&test_header),
+            BlockTransactions::default(),
+            false,
+        )
         .await
         .expect("can't process block");
 
@@ -415,9 +419,13 @@ async fn should_process_block_with_intermediate_block_in_api() {
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                pool.process_block::<ApiClientStub>(Arc::new(block.clone()), BlockTransactions::default(), false)
-                    .await
-                    .expect("to process block");
+                pool.process_block::<ApiClientStub>(
+                    Arc::new(block.clone()),
+                    BlockTransactions::default(),
+                    false,
+                )
+                .await
+                .expect("to process block");
             });
             GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
         }
@@ -723,7 +731,11 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     );
 
     let res = block_pool
-        .process_block::<ApiClientStub>(Arc::new(header_building_on_very_old_block.clone()), BlockTransactions::default(), false)
+        .process_block::<ApiClientStub>(
+            Arc::new(header_building_on_very_old_block.clone()),
+            BlockTransactions::default(),
+            false,
+        )
         .await;
 
     assert!(res.is_err());
@@ -880,7 +892,11 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
                 let res = pool
-                    .process_block::<ApiClientStub>(Arc::new(block.clone()), BlockTransactions::default(), false)
+                    .process_block::<ApiClientStub>(
+                        Arc::new(block.clone()),
+                        BlockTransactions::default(),
+                        false,
+                    )
                     .await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
@@ -963,7 +979,11 @@ async fn should_not_fast_track_block_already_in_index() {
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let err = service
-        .process_block::<ApiClientStub>(Arc::new(test_header.clone()), BlockTransactions::default(), true)
+        .process_block::<ApiClientStub>(
+            Arc::new(test_header.clone()),
+            BlockTransactions::default(),
+            true,
+        )
         .await
         .expect_err("to have an error");
 

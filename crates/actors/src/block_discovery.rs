@@ -443,33 +443,32 @@ impl BlockDiscoveryServiceInner {
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Use provided commitment transactions directly
-        let commitments: Vec<CommitmentTransaction> = if let Some(commitment_ledger) =
-            commitment_ledger
-        {
-            debug!(
-                "incoming block commitment txids, height {} hash {}\n{:#?}",
-                new_block_header.height, new_block_header.block_hash, commitment_ledger
-            );
+        let commitments: Vec<CommitmentTransaction> =
+            if let Some(commitment_ledger) = commitment_ledger {
+                debug!(
+                    "incoming block commitment txids, height {} hash {}\n{:#?}",
+                    new_block_header.height, new_block_header.block_hash, commitment_ledger
+                );
 
-            let expected_ids: std::collections::HashSet<_> =
-                commitment_ledger.tx_ids.0.iter().copied().collect();
+                let expected_ids: std::collections::HashSet<_> =
+                    commitment_ledger.tx_ids.0.iter().copied().collect();
 
-            if transactions.commitment_txs.len() != expected_ids.len() {
-                error!(
+                if transactions.commitment_txs.len() != expected_ids.len() {
+                    error!(
                     "Missing commitment transactions for block {} (height {}): expected {}, got {}",
                     new_block_header.block_hash,
                     new_block_header.height,
                     expected_ids.len(),
                     transactions.commitment_txs.len()
                 );
-                return Err(BlockDiscoveryError::MissingTransactions(
-                    commitment_ledger.tx_ids.0.clone(),
-                ));
-            }
-            transactions.commitment_txs
-        } else {
-            Vec::new()
-        };
+                    return Err(BlockDiscoveryError::MissingTransactions(
+                        commitment_ledger.tx_ids.0.clone(),
+                    ));
+                }
+                transactions.commitment_txs
+            } else {
+                Vec::new()
+            };
 
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",

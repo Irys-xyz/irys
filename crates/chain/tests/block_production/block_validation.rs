@@ -74,8 +74,13 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
-        ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>, BlockTransactions)>>
-        {
+        ) -> eyre::Result<
+            Option<(
+                Arc<IrysBlockHeader>,
+                Option<AdjustmentStats>,
+                BlockTransactions,
+            )>,
+        > {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,

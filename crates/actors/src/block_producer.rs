@@ -964,7 +964,13 @@ pub trait BlockProdStrategy {
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
         final_treasury: U256,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>, BlockTransactions)>> {
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            BlockTransactions,
+        )>,
+    > {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();

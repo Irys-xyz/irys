@@ -541,7 +541,9 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .block_discovery
             .clone(),
     );
-    let result = block_discovery.handle_block(block.clone(), transactions, false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), transactions, false)
+        .await;
     assert!(
         matches!(
             result,
@@ -814,7 +816,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     );
 
     // This should fail during prevalidation due to duplicate signers
-    let result = block_discovery.handle_block(block.clone(), transactions, false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), transactions, false)
+        .await;
 
     // Assert that the block was rejected due to duplicate ingress proof signers
     assert!(
