@@ -108,21 +108,21 @@ mod tests {
     fn evicts_entry_with_fewest_chunks() {
         let mut cache = PriorityPendingChunks::new(3, 10);
 
-        let root_a = [1u8; 32];
+        let root_a = [1_u8; 32];
         cache.put(make_chunk(root_a, 0, 1000));
         cache.put(make_chunk(root_a, 1, 1000));
         cache.put(make_chunk(root_a, 2, 1000));
 
-        let root_b = [2u8; 32];
+        let root_b = [2_u8; 32];
         cache.put(make_chunk(root_b, 0, 1000));
 
-        let root_c = [3u8; 32];
+        let root_c = [3_u8; 32];
         cache.put(make_chunk(root_c, 0, 1000));
         cache.put(make_chunk(root_c, 1, 1000));
 
         assert_eq!(cache.len(), 3);
 
-        let root_d = [4u8; 32];
+        let root_d = [4_u8; 32];
         cache.put(make_chunk(root_d, 0, 1000));
 
         assert_eq!(cache.len(), 3);
@@ -135,13 +135,13 @@ mod tests {
     proptest! {
         #[test]
         fn multi_chunk_entries_survive_single_chunk_flooding(
-            cache_size in 5..50usize,
-            legitimate_chunk_count in 2..10usize,
-            attacker_count in 10..100usize,
+            cache_size in 5..50_usize,
+            legitimate_chunk_count in 2..10_usize,
+            attacker_count in 10..100_usize,
         ) {
             let mut cache = PriorityPendingChunks::new(cache_size, 100);
 
-            let legitimate_root = [0xAAu8; 32];
+            let legitimate_root = [0xAA_u8; 32];
             for i in 0..legitimate_chunk_count as u32 {
                 cache.put(make_chunk(legitimate_root, i, 1000));
             }
@@ -164,7 +164,7 @@ mod tests {
     fn respects_max_chunks_per_entry() {
         let mut cache = PriorityPendingChunks::new(10, 3);
 
-        let root = [1u8; 32];
+        let root = [1_u8; 32];
         for i in 0..5 {
             cache.put(make_chunk(root, i, 1000));
         }
