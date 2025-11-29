@@ -806,12 +806,12 @@ mod tests {
         database, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
-    use reth_db::cursor::{DbDupCursorRO as _};
     use irys_domain::{BlockIndex, BlockTree};
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
         DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
+    use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
@@ -1218,7 +1218,10 @@ mod tests {
                 },
             };
             wtx.put::<CachedChunksIndex>(tx_header_old.data_root, idx_old)?;
-            wtx.put::<CachedChunks>(hash_old, irys_database::db_cache::CachedChunk::from(&chunk_old))?;
+            wtx.put::<CachedChunks>(
+                hash_old,
+                irys_database::db_cache::CachedChunk::from(&chunk_old),
+            )?;
 
             let chunk_new = mk_chunk(tx_header_new.data_root, 0, 11);
             let hash_new = chunk_new.chunk_path_hash();
@@ -1230,7 +1233,10 @@ mod tests {
                 },
             };
             wtx.put::<CachedChunksIndex>(tx_header_new.data_root, idx_new)?;
-            wtx.put::<CachedChunks>(hash_new, irys_database::db_cache::CachedChunk::from(&chunk_new))?;
+            wtx.put::<CachedChunks>(
+                hash_new,
+                irys_database::db_cache::CachedChunk::from(&chunk_new),
+            )?;
 
             eyre::Ok(())
         })??;
@@ -1246,7 +1252,11 @@ mod tests {
                     eligible += 1;
                 }
             }
-            eyre::ensure!(eligible == 1, "Expected exactly one eligible old entry, found {}", eligible);
+            eyre::ensure!(
+                eligible == 1,
+                "Expected exactly one eligible old entry, found {}",
+                eligible
+            );
             Ok(())
         })??;
 
@@ -1264,15 +1274,24 @@ mod tests {
             // Old root should have no entries
             let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
-            eyre::ensure!(walk_old.next().transpose()?.is_none(), "Old root entries still present");
+            eyre::ensure!(
+                walk_old.next().transpose()?.is_none(),
+                "Old root entries still present"
+            );
 
             // New root should still have its entry
             let mut cur_new = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let walk_new = cur_new.walk_dup(Some(tx_header_new.data_root), None)?;
             let remaining_new: Vec<_> = walk_new.collect::<Result<Vec<_>, _>>()?;
-            eyre::ensure!(remaining_new.len() == 1, "New root entry missing after prune");
+            eyre::ensure!(
+                remaining_new.len() == 1,
+                "New root entry missing after prune"
+            );
             let (_k, entry) = &remaining_new[0];
-            eyre::ensure!(entry.meta.updated_at.as_secs() >= 5, "New root entry should be newer than cutoff");
+            eyre::ensure!(
+                entry.meta.updated_at.as_secs() >= 5,
+                "New root entry should be newer than cutoff"
+            );
             Ok(())
         })??;
 
@@ -1366,7 +1385,10 @@ mod tests {
                 tx_header.data_root,
                 TxChunkOffset::from(1_u32),
             )?;
-            eyre::ensure!(m0.is_some() && m1.is_some(), "Chunks pruned below capacity threshold");
+            eyre::ensure!(
+                m0.is_some() && m1.is_some(),
+                "Chunks pruned below capacity threshold"
+            );
             Ok(())
         })??;
 
@@ -1389,7 +1411,10 @@ mod tests {
             // Expect indices pruned now that we're above capacity
             let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
             let mut walk = cur.walk(Some(tx_header.data_root))?;
-            eyre::ensure!(walk.next().transpose()?.is_none(), "Chunks not pruned above capacity threshold");
+            eyre::ensure!(
+                walk.next().transpose()?.is_none(),
+                "Chunks not pruned above capacity threshold"
+            );
             Ok(())
         })??;
 
