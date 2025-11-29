@@ -220,8 +220,11 @@ impl InnerCacheTask {
             > self.config.node_config.cache.max_cache_size_bytes as f64
                 * CHUNK_CACHE_TARGET_CAPACITY
         {
+            debug!("Cache above target capacity, proceeding with pruning");
             // Then, prune chunks that no longer have active ingress proofs
             self.prune_chunks_without_active_ingress_proofs()?;
+        } else {
+            debug!("Cache under target capacity, skipping chunk pruning");
         }
 
         Ok(())
@@ -807,6 +810,7 @@ mod tests {
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
+    use irys_testing_utils::initialize_tracing;
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
         DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
@@ -1301,6 +1305,7 @@ mod tests {
     // Ensure prune runs only when cache > 80% capacity.
     #[tokio::test]
     async fn runs_chunk_prune_only_above_capacity_threshold() -> eyre::Result<()> {
+        initialize_tracing();
         // Set a small max cache size so 2 chunks (32B each in testing config) reach threshold
         let mut node_config = NodeConfig::testing();
         // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
@@ -1317,6 +1322,7 @@ mod tests {
         // Create one data root with two chunks and mark them old to be eligible
         let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             data_size: 64,
+            data_root: DataRoot::random(),
             ..Default::default()
         });
         db.update(|wtx| {
@@ -1324,14 +1330,14 @@ mod tests {
             let c0 = UnpackedChunk {
                 data_root: tx_header.data_root,
                 data_size: tx_header.data_size,
-                data_path: Base64(vec![]),
+                data_path: Base64(vec![1]),
                 bytes: Base64(vec![7_u8; 8]),
                 tx_offset: TxChunkOffset::from(0_u32),
             };
             let c1 = UnpackedChunk {
                 data_root: tx_header.data_root,
                 data_size: tx_header.data_size,
-                data_path: Base64(vec![]),
+                data_path: Base64(vec![2]),
                 bytes: Base64(vec![8_u8; 8]),
                 tx_offset: TxChunkOffset::from(1_u32),
             };
