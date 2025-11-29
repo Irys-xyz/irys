@@ -439,6 +439,14 @@ impl InnerCacheTask {
             }
             processed += 1;
             let CachedIngressProof { address, proof } = compact.0;
+
+            // Associated txids
+            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
+                debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
+                to_delete.push(data_root);
+                continue;
+            };
+
             let check_result = Inner::is_ingress_proof_expired_static(
                 &self.block_tree_guard,
                 &self.db,
@@ -448,11 +456,6 @@ impl InnerCacheTask {
             if !check_result.expired_or_invalid {
                 continue;
             }
-            // Associated txids
-            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
-                debug!(ingress_proof.data_root = ?data_root, "Expired proof has no cached data root; skipping actions");
-                continue;
-            };
             let mut any_unpromoted = false;
             for txid in cached_data_root.txid_set.iter() {
                 if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
