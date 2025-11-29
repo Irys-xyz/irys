@@ -138,6 +138,8 @@ pub struct CachedChunkIndexEntry {
 /// structure containing any chunk cache index metadata, like the `chunk_path_hash` for chunk data lookups
 pub struct CachedChunkIndexMetadata {
     pub chunk_path_hash: ChunkPathHash,
+    /// Last time this index entry was updated
+    pub updated_at: UnixTimestamp,
 }
 
 impl From<CachedChunkIndexEntry> for CachedChunkIndexMetadata {

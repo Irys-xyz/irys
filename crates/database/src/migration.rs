@@ -71,7 +71,12 @@ pub fn check_db_version_and_run_migrations_if_needed(
     debug!("Current database version: {:?}", CURRENT_DB_VERSION);
     if let Some(v) = version {
         // A version exists. If it’s less than CURRENT_DB_VERSION, apply sequential migrations.
-        if v < CURRENT_DB_VERSION {}
+        if v < CURRENT_DB_VERSION {
+            debug!(
+                "Applying sequential migrations from {:?} to {:?}",
+                v, CURRENT_DB_VERSION
+            );
+        }
     } else {
         debug!("No DB schema version information found in the new database. Applying initial migration from v0 to v1.");
         old_db.update_eyre(|tx_old| {
@@ -159,7 +164,10 @@ mod tests {
             // CachedChunksIndex (dupsort with subkey = u32 encoded inside value)
             let index_entry = CachedChunkIndexEntry {
                 index: TxChunkOffset::from(0),
-                meta: CachedChunkIndexMetadata { chunk_path_hash },
+                meta: CachedChunkIndexMetadata {
+                    chunk_path_hash,
+                    updated_at: UnixTimestamp::now()?,
+                },
             };
             write_tx.put::<CachedChunksIndex>(data_root, index_entry)?;
 
