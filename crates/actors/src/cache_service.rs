@@ -36,7 +36,6 @@ pub const REGENERATE_PROOFS: bool = true;
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
 /// Maximum ingress proofs to scan per pruning invocation.
 const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
-const CHUNK_CACHE_TARGET_CAPACITY: f64 = 0.8;
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -218,7 +217,7 @@ impl InnerCacheTask {
         // Attempt pruning cache only if we're above 80% of max capacity
         if chunk_cache_size as f64
             > self.config.node_config.cache.max_cache_size_bytes as f64
-                * CHUNK_CACHE_TARGET_CAPACITY
+                * self.config.node_config.cache.chunk_cache_target_capacity
         {
             debug!("Cache above target capacity, proceeding with pruning");
             // Then, prune chunks that no longer have active ingress proofs
@@ -236,6 +235,7 @@ impl InnerCacheTask {
     /// Data roots currently undergoing proof generation are skipped to avoid races.
     #[tracing::instrument(level = "trace", skip_all)]
     fn prune_chunks_without_active_ingress_proofs(&self) -> eyre::Result<()> {
+        let local_address = self.config.irys_signer().address();
         let min_chunk_age_in_blocks = self
             .config
             .consensus
@@ -280,8 +280,21 @@ impl InnerCacheTask {
 
             // Presence of at least one proof indicates the data root is active
             let mut proofs_cursor = tx.cursor_read::<IngressProofs>()?;
-            let has_any_proof = proofs_cursor.seek_exact(data_root)?.is_some();
-            if !has_any_proof {
+            let mut has_any_local_proof = false;
+            let mut walker = proofs_cursor.walk(Some(data_root))?;
+            while let Some((key, compact)) = walker.next().transpose()? {
+                // Walked all records for this data root
+                if key != data_root {
+                    break;
+                }
+                // Found at least one proof, mark as active
+                if compact.0.address == local_address {
+                    has_any_local_proof = true;
+                    break;
+                }
+            }
+
+            if !has_any_local_proof {
                 pending_roots.push(data_root);
             }
 

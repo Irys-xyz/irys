@@ -21,7 +21,7 @@ use std::{env, path::PathBuf, time::Duration};
 /// The main configuration for an Irys node, containing all settings needed
 /// to participate in the network. This includes network mode, consensus rules,
 /// pricing parameters, and system resource allocations.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeConfig {
     /// Determines how the node joins and interacts with the network
@@ -410,7 +410,7 @@ pub struct RemotePackingConfig {
 /// # Cache Configuration
 ///
 /// Settings for in-memory caching to improve performance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CacheConfig {
     /// Number of blocks cache cleaning will lag behind block finalization
@@ -420,6 +420,10 @@ pub struct CacheConfig {
 
     #[serde(default = "default_max_cache_size_bytes")]
     pub max_cache_size_bytes: u64,
+
+    /// Target capacity for chunk cache as a fraction of max cache size (0.0 to 1.0)
+    #[serde(default = "default_cache_target_capacity")]
+    pub chunk_cache_target_capacity: f64,
 }
 
 /// Default maximum cache size: 10 GiB
@@ -428,12 +432,16 @@ pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
 const fn default_max_cache_size_bytes() -> u64 {
     DEFAULT_MAX_CACHE_SIZE_BYTES
 }
+const fn default_cache_target_capacity() -> f64 {
+    0.8
+}
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             cache_clean_lag: 0,
             max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
+            chunk_cache_target_capacity: default_cache_target_capacity(),
         }
     }
 }
@@ -790,6 +798,7 @@ impl NodeConfig {
             cache: CacheConfig {
                 cache_clean_lag: 2,
                 max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
+                chunk_cache_target_capacity: default_cache_target_capacity(),
             },
             http: HttpConfig {
                 public_ip: None,
@@ -933,6 +942,7 @@ impl NodeConfig {
             cache: CacheConfig {
                 cache_clean_lag: 2,
                 max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
+                chunk_cache_target_capacity: default_cache_target_capacity(),
             },
             http: HttpConfig {
                 public_ip: None,
