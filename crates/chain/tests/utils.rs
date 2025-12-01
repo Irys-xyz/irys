@@ -12,6 +12,7 @@ use alloy_core::primitives::FixedBytes;
 use alloy_eips::{BlockHashOrNumber, BlockId};
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
@@ -1957,8 +1958,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
     ) -> eyre::Result<()> {
-        use irys_actors::block_discovery::BlockTransactions;
-
         // Collect data txs from local node by ledger type
         let mut submit_txs = Vec::new();
         let mut publish_txs = Vec::new();

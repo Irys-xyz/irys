@@ -723,7 +723,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 
     // Create data transaction header and sign it
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::zero(), // Will be set by sign()
+        id: H256::zero(),
         anchor,
         signer: test_signer.address(),
         data_root,
