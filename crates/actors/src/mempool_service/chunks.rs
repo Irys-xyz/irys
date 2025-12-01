@@ -117,14 +117,16 @@ impl Inner {
                 }
                 let preheader_chunks_per_item =
                     std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
-                if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
-                    >= preheader_chunks_per_item
-                {
+                let current_chunk_count = self
+                    .mempool_state
+                    .pending_chunk_count_for_data_root(&chunk.data_root)
+                    .await;
+                if current_chunk_count >= preheader_chunks_per_item {
                     warn!(
-                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds pre-header capacity {}",
+                        "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
                         &chunk.data_root,
                         &chunk.tx_offset,
-                        *chunk.tx_offset,
+                        current_chunk_count,
                         preheader_chunks_per_item
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
@@ -156,9 +158,7 @@ impl Inner {
                     "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
                     chunk.data_size, data_size, chunk.data_root
                 );
-                self.mempool_state
-                    .put_chunk(chunk.clone(), max_chunks_per_item)
-                    .await;
+                self.mempool_state.put_chunk(chunk.clone()).await;
                 return Ok(());
             }
         }

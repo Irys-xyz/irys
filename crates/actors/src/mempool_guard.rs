@@ -1,5 +1,5 @@
 use crate::mempool_service::AtomicMempoolState;
-use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysTransactionId};
+use irys_types::{CommitmentTransaction, DataRoot, DataTransactionHeader, IrysTransactionId};
 use std::collections::HashMap;
 
 /// Wraps the internal `Arc<RwLock<_>>` to provide readonly access to mempool state
@@ -58,5 +58,12 @@ impl MempoolReadGuard {
         data_tx_ids: &[IrysTransactionId],
     ) -> HashMap<IrysTransactionId, DataTransactionHeader> {
         self.mempool_state.get_data_txs(data_tx_ids).await
+    }
+
+    /// Returns the number of pending chunks cached for a given data_root.
+    pub async fn pending_chunk_count_for_data_root(&self, data_root: &DataRoot) -> usize {
+        self.mempool_state
+            .pending_chunk_count_for_data_root(data_root)
+            .await
     }
 }
