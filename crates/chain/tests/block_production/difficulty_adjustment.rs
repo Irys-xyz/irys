@@ -3,6 +3,7 @@ use irys_types::NodeConfig;
 use rust_decimal_macros::dec;
 
 use crate::{utils::IrysNodeTest, validation::send_block_to_block_tree};
+use irys_actors::block_discovery::BlockTransactions;
 
 /// Ensures that the node adjusts its mining difficulty after the configured
 /// number of blocks and that the `last_diff_timestamp` metadata is updated to
@@ -115,7 +116,13 @@ async fn heavy_slow_tip_updated_correctly_in_forks_with_variying_cumulative_diff
     ];
     for ((block, _eth_block, _), _new_tip) in order.iter() {
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
-        send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+        send_block_to_block_tree(
+            &genesis_node.node_ctx,
+            block.clone(),
+            BlockTransactions::default(),
+            false,
+        )
+        .await?;
     }
 
     tracing::error!("...");

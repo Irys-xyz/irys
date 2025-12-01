@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::send_block_to_block_tree;
 use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
@@ -17,35 +17,6 @@ use irys_types::{IrysBlockHeader, NodeConfig};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
-
-// Helper function to send a block directly to the block tree service for validation
-async fn send_block_to_block_tree(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-    skip_vdf_validation: bool,
-) -> eyre::Result<()> {
-    use irys_actors::block_tree_service::BlockTreeServiceMessage;
-
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    let transactions = BlockTransactions {
-        commitment_txs: vec![],
-        data_txs: HashMap::new(),
-    };
-
-    node_ctx
-        .service_senders
-        .block_tree
-        .send(BlockTreeServiceMessage::BlockPreValidated {
-            block,
-            transactions,
-            skip_vdf_validation,
-            response: response_tx,
-        })?;
-
-    response_rx.await??;
-    Ok(())
-}
 
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(
@@ -111,7 +82,13 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
     signer.sign_block_header(&mut header)?;
     irys_block = Arc::new(header);
 
-    send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        irys_block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
     assert_validation_error(
@@ -153,7 +130,13 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
     signer.sign_block_header(&mut header)?;
     irys_block = Arc::new(header);
 
-    send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        irys_block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
     assert_validation_error(
@@ -202,7 +185,13 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     irys_block = Arc::new(header);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        irys_block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
     assert_validation_error(
@@ -260,7 +249,13 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     irys_block = Arc::new(header);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, irys_block.clone(), false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        irys_block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
     assert_validation_error(

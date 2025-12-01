@@ -6,6 +6,7 @@ use crate::utils::{
 };
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
@@ -14,6 +15,7 @@ use irys_actors::{
 };
 use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
+use std::collections::HashMap;
 
 #[test_log::test(tokio::test)]
 async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
@@ -122,7 +124,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unpledge.clone()],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unpledge.clone()],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -136,7 +141,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     send_block_to_block_tree(
         &victim_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unpledge.clone()],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unpledge.clone()],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -150,7 +158,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     send_block_to_block_tree(
         &evil_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unpledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unpledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -269,7 +280,10 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         Arc::clone(&block),
-        unpledge_txs,
+        BlockTransactions {
+            commitment_txs: unpledge_txs,
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -377,7 +391,10 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unpledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unpledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -502,12 +519,18 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
     let err = send_block_to_block_tree(
         &genesis_node.node_ctx,
         Arc::clone(&block),
-        commitments,
+        BlockTransactions {
+            commitment_txs: commitments,
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await
-    .unwrap_err();
+    .expect_err("epoch block with extra unpledge should be rejected");
 
+    let err = err
+        .downcast::<irys_actors::block_validation::PreValidationError>()
+        .expect("should be PreValidationError");
     assert!(
         matches!(
             err,

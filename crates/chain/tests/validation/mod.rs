@@ -36,15 +36,10 @@ use irys_types::{
 pub async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
+    transactions: BlockTransactions,
     skip_vdf_validation: bool,
-) -> Result<(), PreValidationError> {
+) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    let transactions = BlockTransactions {
-        commitment_txs,
-        data_txs: HashMap::new(),
-    };
 
     node_ctx
         .service_senders
@@ -54,10 +49,10 @@ pub async fn send_block_to_block_tree(
             transactions,
             skip_vdf_validation,
             response: response_tx,
-        })
-        .unwrap();
+        })?;
 
-    response_rx.await.unwrap()
+    response_rx.await??;
+    Ok(())
 }
 
 fn send_block_to_block_validation(
@@ -168,7 +163,10 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![invalid_pledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_pledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -273,7 +271,10 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![invalid_pledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_pledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -391,7 +392,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![pledge, stake],
+        BlockTransactions {
+            commitment_txs: vec![pledge, stake],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -491,12 +495,16 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     let err = send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![wrong_commitment],
+        BlockTransactions {
+            commitment_txs: vec![wrong_commitment],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await
-    .unwrap_err();
+    .expect_err("block with wrong commitment should be rejected");
 
+    let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
         err,
         PreValidationError::InvalidEpochSnapshot { .. }
@@ -926,9 +934,16 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     );
     dbg!(&block);
 
-    let err = send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false)
-        .await
-        .unwrap_err();
+    let err = send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await
+    .expect_err("block with missing commitments should be rejected");
+
+    let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
         err,
         PreValidationError::InvalidEpochSnapshot { .. }

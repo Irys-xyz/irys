@@ -5,6 +5,7 @@ use crate::utils::{
 };
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
@@ -13,6 +14,7 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
+use std::collections::HashMap;
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -149,7 +151,10 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unstake.clone()],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unstake.clone()],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -172,7 +177,10 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     send_block_to_block_tree(
         &peer_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unstake],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unstake],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -301,7 +309,10 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         Arc::clone(&block),
-        vec![invalid_unstake],
+        BlockTransactions {
+            commitment_txs: vec![invalid_unstake],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;

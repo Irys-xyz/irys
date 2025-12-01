@@ -1287,7 +1287,17 @@ async fn generate_expected_shadow_transactions(
         }
     };
 
-    let commitment_txs = &transactions.commitment_txs;
+    // Calculate is_epoch_block early since it's needed for multiple checks
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
+
+    // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
+    let commitment_txs: &[CommitmentTransaction] = if is_epoch_block {
+        &[]
+    } else {
+        &transactions.commitment_txs
+    };
 
     // Use pre-fetched submit ledger transactions
     let data_txs = transactions.get_ledger_txs(DataLedger::Submit).to_vec();
@@ -1303,9 +1313,6 @@ async fn generate_expected_shadow_transactions(
     let initial_treasury_balance = prev_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
-    let is_epoch_block = block
-        .height
-        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let expired_ledger_fees = if is_epoch_block {
         ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -1349,7 +1356,7 @@ async fn generate_expected_shadow_transactions(
         &prev_block,
         &block.solution_hash,
         &config.consensus,
-        &commitment_txs,
+        commitment_txs,
         &data_txs,
         &publish_ledger_with_txs,
         initial_treasury_balance,
