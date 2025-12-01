@@ -318,7 +318,6 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
             Err(e) => return Err(e.into()),
         }
 
-        // Parse header
         let block_hash = H256::from_slice(&header_buf[..32]);
         let num_ledgers_byte = header_buf[32];
 
