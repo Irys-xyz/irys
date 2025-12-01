@@ -249,13 +249,15 @@ async fn preheader_rejects_oversized_bytes() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
+async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     use actix_web::{http::StatusCode, test};
     use irys_types::{Base64, TxChunkOffset, UnpackedChunk};
 
     initialize_tracing();
 
     let mut genesis_config = NodeConfig::testing();
+    // Pre-header cap is min(max_chunks_per_item, 64) => default 64
+    let preheader_cap: u32 = 64;
 
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
@@ -283,32 +285,69 @@ async fn preheader_rejects_out_of_cap_tx_offset() -> eyre::Result<()> {
     )?;
     let tx = signer.sign_transaction(tx)?;
 
-    // Pre-header cap is min(max_chunks_per_item, 64) => default 64, so tx_offset >= 64 must be dropped
-    let chunk = UnpackedChunk {
+    // Fill the pre-header cache to capacity (64 chunks)
+    for offset in 0..preheader_cap {
+        let chunk = UnpackedChunk {
+            data_root: tx.header.data_root,
+            data_size: tx.header.data_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(data.clone()),
+            tx_offset: TxChunkOffset::from(offset),
+        };
+
+        let resp = test::call_service(
+            &app,
+            test::TestRequest::post()
+                .uri("/v1/chunk")
+                .set_json(&chunk)
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // Verify all chunks were cached
+    let pending_count = genesis_node
+        .node_ctx
+        .mempool_guard
+        .pending_chunk_count_for_data_root(&tx.header.data_root)
+        .await;
+    assert_eq!(
+        pending_count, preheader_cap as usize,
+        "Expected {} pending chunks but got {}",
+        preheader_cap, pending_count
+    );
+
+    // Now try to add one more chunk - should be rejected (cache full)
+    let overflow_chunk = UnpackedChunk {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
         bytes: Base64(data),
-        tx_offset: TxChunkOffset::from(64_u32),
+        tx_offset: TxChunkOffset::from(preheader_cap),
     };
 
-    // Post the chunk before the tx header
     let resp = test::call_service(
         &app,
         test::TestRequest::post()
             .uri("/v1/chunk")
-            .set_json(&chunk)
+            .set_json(&overflow_chunk)
             .to_request(),
     )
     .await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Ensure it did not get cached
-    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
-
-    // Post the tx header and confirm cache still empty
-    post_data_tx(&app, &tx).await;
-    genesis_node.wait_for_chunk_cache_count(0, 3).await?;
+    // Verify count is still at cap (overflow chunk was rejected)
+    let pending_count = genesis_node
+        .node_ctx
+        .mempool_guard
+        .pending_chunk_count_for_data_root(&tx.header.data_root)
+        .await;
+    assert_eq!(
+        pending_count, preheader_cap as usize,
+        "Cache should still have {} chunks after overflow rejection, but has {}",
+        preheader_cap, pending_count
+    );
 
     genesis_node.stop().await;
     Ok(())
