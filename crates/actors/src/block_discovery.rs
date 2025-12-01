@@ -382,7 +382,6 @@ impl BlockDiscoveryServiceInner {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
-        let _mempool = self.service_senders.mempool.clone();
         let mempool_config = self.config.consensus.mempool.clone();
 
         let previous_block_header = {
@@ -487,7 +486,9 @@ impl BlockDiscoveryServiceInner {
             );
             validate_transactions(&commitments, &commitment_ledger.tx_ids.0)?;
         } else if !commitments.is_empty() {
-            // No commitment ledger in header but we received commitments - this is an error
+            warn!(
+                block.height = ?new_block_header.height, block.hash = ?new_block_header.block_hash,
+                "provided block transactions contain commitment txs that were not part of the block header");
             return Err(BlockDiscoveryError::MissingTransactions(vec![]));
         }
 
@@ -950,67 +951,24 @@ pub async fn get_data_tx_in_parallel(
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<DataTransactionHeader>> {
-    let mempool_future = {
-        let guard = mempool_guard.clone();
-        let tx_ids = data_tx_ids.clone();
-        async move {
+    let guard = mempool_guard.clone();
+
+    let get_data_txs = move |tx_ids: Vec<IrysTransactionId>| -> BoxFuture<
+        'static,
+        eyre::Result<Vec<Option<DataTransactionHeader>>>,
+    > {
+        let guard = guard.clone();
+        Box::pin(async move {
             let mempool_map = guard.get_data_txs(&tx_ids).await;
-            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(mempool_map)
-        }
+            let results: Vec<Option<DataTransactionHeader>> = tx_ids
+                .iter()
+                .map(|id| mempool_map.get(id).cloned())
+                .collect();
+            Ok(results)
+        })
     };
 
-    let db_future = {
-        let tx_ids = data_tx_ids.clone();
-        let db_ref = db.clone();
-        async move {
-            let db_tx = db_ref.tx()?;
-            let mut results = HashMap::new();
-            for tx_id in &tx_ids {
-                if let Some(header) = tx_header_by_txid(&db_tx, tx_id)? {
-                    results.insert(*tx_id, header);
-                }
-            }
-            Ok::<HashMap<IrysTransactionId, DataTransactionHeader>, eyre::Report>(results)
-        }
-    };
-
-    let (mempool_result, db_result) = tokio::join!(mempool_future, db_future);
-
-    let mempool_map = mempool_result?;
-    let db_map = db_result?;
-
-    debug!(
-        mempool_count = mempool_map.len(),
-        db_count = db_map.len(),
-        "Query results retrieved"
-    );
-    trace!(
-        mempool_keys = ?mempool_map.keys().collect::<Vec<_>>(),
-        db_keys = ?db_map.keys().collect::<Vec<_>>(),
-        "Detailed query results"
-    );
-
-    // Combine results, preferring mempool
-    // this is because unmigrated promoted txs get their promoted_height updated in the mempool ONLY
-    // so we need to prefer it.
-    let mut headers = Vec::with_capacity(data_tx_ids.len());
-    let mut missing = Vec::new();
-
-    for tx_id in data_tx_ids {
-        if let Some(header) = mempool_map.get(&tx_id) {
-            headers.push(header.clone());
-        } else if let Some(header) = db_map.get(&tx_id) {
-            headers.push(header.clone());
-        } else {
-            missing.push(tx_id);
-        }
-    }
-
-    if missing.is_empty() {
-        Ok(headers)
-    } else {
-        Err(eyre::eyre!("Missing transactions: {:?}", missing))
-    }
+    get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
 }
 
 /// Get all data transactions from the mempool and database
