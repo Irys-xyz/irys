@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
-    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    block_discovery::BlockTransactions,
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -11,9 +11,7 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -1026,6 +1024,7 @@ pub async fn shadow_transactions_are_valid(
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    transactions: &BlockTransactions,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
@@ -1139,7 +1138,7 @@ pub async fn shadow_transactions_are_valid(
     });
 
     // 3. Generate expected shadow transactions
-    let expected_txs = generate_expected_shadow_transactions_from_db(
+    let expected_txs = generate_expected_shadow_transactions(
         config,
         service_senders,
         mempool_guard,
@@ -1148,6 +1147,7 @@ pub async fn shadow_transactions_are_valid(
         parent_epoch_snapshot,
         parent_commitment_snapshot,
         block_index,
+        transactions,
     )
     .await?;
 
@@ -1260,9 +1260,9 @@ pub async fn submit_payload_to_reth(
     Ok(())
 }
 
-/// Generates expected shadow transactions by looking up required data from the mempool or database
+/// Generates expected shadow transactions
 #[tracing::instrument(level = "trace", skip_all, err)]
-async fn generate_expected_shadow_transactions_from_db(
+async fn generate_expected_shadow_transactions(
     config: &Config,
     service_senders: &ServiceSenders,
     mempool_guard: &MempoolReadGuard,
@@ -1271,6 +1271,7 @@ async fn generate_expected_shadow_transactions_from_db(
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
     let prev_block = {
@@ -1286,14 +1287,17 @@ async fn generate_expected_shadow_transactions_from_db(
         }
     };
 
-    // Look up commitment txs
-    let commitment_txs = extract_commitment_txs(config, mempool_guard, block, db).await?;
+    let commitment_txs = &transactions.commitment_txs;
 
-    // Lookup data txs
-    let data_txs = extract_submit_ledger_txs(mempool_guard, block, db).await?;
+    // Use pre-fetched submit ledger transactions
+    let data_txs = transactions.get_ledger_txs(DataLedger::Submit).to_vec();
 
-    // Lookup publish ledger for term fee rewards
-    let publish_ledger_with_txs = extract_publish_ledger_with_txs(mempool_guard, block, db).await?;
+    // Use pre-fetched publish ledger transactions with proofs from block header
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
+    let publish_ledger_with_txs = PublishLedgerWithTxs {
+        txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
+        proofs: publish_ledger.proofs.clone(),
+    };
 
     // Get treasury balance from previous block
     let initial_treasury_balance = prev_block.treasury;
@@ -1374,66 +1378,6 @@ async fn generate_expected_shadow_transactions_from_db(
     );
 
     Ok(shadow_txs_vec)
-}
-
-async fn extract_commitment_txs(
-    config: &Config,
-    mempool_guard: &MempoolReadGuard,
-    block: &IrysBlockHeader,
-    db: &DatabaseProvider,
-) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
-    let is_epoch_block = block
-        .height
-        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
-    let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
-        vec![]
-    } else {
-        match &block.system_ledgers[..] {
-            [ledger] => {
-                ensure!(
-                    ledger.ledger_id == SystemLedger::Commitment,
-                    "only commitment ledger supported"
-                );
-
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db).await?
-            }
-            [] => {
-                // this is valid as we can have a block that contains 0 system ledgers
-                vec![]
-            }
-            // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
-            [..] => eyre::bail!("Currently we support at most 1 system ledger per block"),
-        }
-    };
-    Ok(commitment_txs)
-}
-
-async fn extract_submit_ledger_txs(
-    mempool_guard: &MempoolReadGuard,
-    block: &IrysBlockHeader,
-    db: &DatabaseProvider,
-) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
-    let (_publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
-    // we only access the submit ledger data. Publish ledger does not require billing the user extra
-    let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), mempool_guard, db).await?;
-    Ok(txs)
-}
-
-/// Extracts publish ledger with transactions and ingress proofs for term fee reward distribution
-async fn extract_publish_ledger_with_txs(
-    mempool_guard: &MempoolReadGuard,
-    block: &IrysBlockHeader,
-    db: &DatabaseProvider,
-) -> Result<PublishLedgerWithTxs, eyre::Error> {
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
-
-    // Fetch the actual transactions for the publish ledger
-    let txs = get_data_tx_in_parallel(publish_ledger.tx_ids.0.clone(), mempool_guard, db).await?;
-    Ok(PublishLedgerWithTxs {
-        txs,
-        proofs: publish_ledger.proofs.clone(),
-    })
 }
 
 /// Validates  the actual shadow transactions match the expected ones
@@ -1517,26 +1461,12 @@ pub fn is_seed_data_valid(
 #[tracing::instrument(level = "trace", skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
-    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
-    db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
+    commitment_txs: &[CommitmentTransaction],
 ) -> Result<(), ValidationError> {
-    // Extract commitment transaction IDs from the block
-    let block_tx_ids = block
-        .system_ledgers
-        .iter()
-        .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| ledger.tx_ids.0.as_slice())
-        .unwrap_or_else(|| &[]);
-
-    // Fetch all actual commitment transactions from the block
-    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db)
-        .await
-        .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
-
     // Validate that all commitment transactions have correct values
-    for (idx, tx) in actual_commitments.iter().enumerate() {
+    for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
             error!(
                 "Commitment transaction {} at position {} has invalid value: {}",
@@ -1579,7 +1509,7 @@ pub async fn commitment_txs_are_valid(
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
-        for (idx, pair) in actual_commitments
+        for (idx, pair) in commitment_txs
             .iter()
             .zip_longest(expected_commitments.iter())
             .enumerate()
@@ -1620,7 +1550,7 @@ pub async fn commitment_txs_are_valid(
         commitments: parent_commitment_snapshot.commitments.clone(),
     };
 
-    for tx in &actual_commitments {
+    for tx in commitment_txs {
         if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
             let partition_hash = H256::from(partition_hash);
             let owner = parent_epoch_snapshot
@@ -1646,7 +1576,7 @@ pub async fn commitment_txs_are_valid(
     }
 
     // Regular block validation: check priority ordering for stake and pledge commitments
-    let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
+    let stake_and_pledge_txs: Vec<&CommitmentTransaction> = commitment_txs
         .iter()
         .filter(|tx| {
             matches!(
@@ -1749,10 +1679,11 @@ pub fn calculate_term_storage_base_network_fee(
 pub async fn data_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
-    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
+    submit_txs: &[DataTransactionHeader],
+    publish_txs: &[DataTransactionHeader],
 ) -> Result<(), PreValidationError> {
     // Get the parent block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
@@ -1762,18 +1693,9 @@ pub async fn data_txs_are_valid(
             block_hash: block.previous_block_hash,
         })?;
 
-    // Extract data transactions from both ledgers
-    let (publish_ledger, submit_ledger) = extract_data_ledgers(block)
+    // Extract publish ledger for ingress proofs validation
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
-
-    // Get transactions from both ledgers
-    let publish_txs = get_data_tx_in_parallel(publish_ledger.tx_ids.0.clone(), mempool_guard, db)
-        .await
-        .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
-
-    let submit_txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), mempool_guard, db)
-        .await
-        .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
 
     // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
     let submit_ids: HashSet<H256> = submit_txs.iter().map(|tx| tx.id).collect();
@@ -2060,7 +1982,7 @@ pub async fn data_txs_are_valid(
             // Validate assigned ingress proofs and get counts
             let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
                 &tx_proofs,
-                &tx_header,
+                tx_header,
                 |hash| mempool_block_retriever(hash, service_senders),
                 block_tree_guard,
                 db,

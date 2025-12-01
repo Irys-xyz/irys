@@ -6,12 +6,14 @@ mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::utils::{
     assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
     BlockValidationOutcome, IrysNodeTest,
 };
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
@@ -39,12 +41,17 @@ pub async fn send_block_to_block_tree(
 ) -> Result<(), PreValidationError> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    let transactions = BlockTransactions {
+        commitment_txs,
+        data_txs: HashMap::new(),
+    };
+
     node_ctx
         .service_senders
         .block_tree
         .send(BlockTreeServiceMessage::BlockPreValidated {
             block,
-            commitment_txs: Arc::new(commitment_txs),
+            transactions,
             skip_vdf_validation,
             response: response_tx,
         })
@@ -57,11 +64,17 @@ fn send_block_to_block_validation(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
 ) -> Result<(), PreValidationError> {
+    let transactions = BlockTransactions {
+        commitment_txs: vec![],
+        data_txs: HashMap::new(),
+    };
+
     node_ctx
         .service_senders
         .validation_service
         .send(ValidationServiceMessage::ValidateBlock {
             block,
+            transactions,
             skip_vdf_validation: false,
         })
         .unwrap();
@@ -161,12 +174,9 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    // Note: The block is rejected with ShadowTransactionInvalid("Missing transactions")
-    // because we can't gossip invalid commitments to mempool (mempool validates them),
-    // but validation needs to look them up. In production, this scenario wouldn't occur.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block with invalid stake value should be rejected",
     );
 
@@ -269,12 +279,9 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    // Note: The block is rejected with ShadowTransactionInvalid("Missing transactions")
-    // because we can't gossip invalid commitments to mempool (mempool validates them),
-    // but validation needs to look them up. In production, this scenario wouldn't occur.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block with invalid pledge value should be rejected",
     );
 

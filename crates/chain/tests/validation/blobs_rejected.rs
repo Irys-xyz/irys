@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::utils::{
@@ -7,6 +8,7 @@ use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
 use alloy_eips::eip4895::{Withdrawal, Withdrawals};
 use alloy_primitives::Signature as AlloySignature;
 use alloy_primitives::{Bytes, B256, U256};
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
@@ -26,12 +28,17 @@ async fn send_block_to_block_tree(
 
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    let transactions = BlockTransactions {
+        commitment_txs: vec![],
+        data_txs: HashMap::new(),
+    };
+
     node_ctx
         .service_senders
         .block_tree
         .send(BlockTreeServiceMessage::BlockPreValidated {
             block,
-            commitment_txs: Arc::new(vec![]),
+            transactions,
             skip_vdf_validation,
             response: response_tx,
         })?;

@@ -383,9 +383,10 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    // The block is rejected because the commitment transaction has an invalid unpledge value.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid { .. }),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block containing invalid unpledge refund amount should be rejected",
     );
 

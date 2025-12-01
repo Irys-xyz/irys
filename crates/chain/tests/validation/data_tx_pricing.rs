@@ -4,6 +4,7 @@ use crate::utils::{
 };
 use irys_actors::{
     async_trait,
+    block_discovery::BlockTransactions,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{PreValidationError, ValidationError},
@@ -24,6 +25,7 @@ use irys_types::{
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
@@ -34,12 +36,38 @@ async fn send_block_to_block_tree(
 ) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
+    let transactions = BlockTransactions {
+        commitment_txs,
+        data_txs: HashMap::new(),
+    };
+
     node_ctx
         .service_senders
         .block_tree
         .send(BlockTreeServiceMessage::BlockPreValidated {
             block,
-            commitment_txs: Arc::new(commitment_txs),
+            transactions,
+            response: response_tx,
+            skip_vdf_validation: false,
+        })?;
+
+    Ok(response_rx.await??)
+}
+
+// Helper function to send a block with full BlockTransactions to the block tree service
+async fn send_block_to_block_tree_with_txs(
+    node_ctx: &IrysNodeCtx,
+    block: Arc<IrysBlockHeader>,
+    transactions: BlockTransactions,
+) -> eyre::Result<()> {
+    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+    node_ctx
+        .service_senders
+        .block_tree
+        .send(BlockTreeServiceMessage::BlockPreValidated {
+            block,
+            transactions,
             response: response_tx,
             skip_vdf_validation: false,
         })?;
@@ -611,13 +639,14 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         },
     };
 
-    let (promote_block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (promote_block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Validate by sending block directly to the block tree
-    send_block_to_block_tree(&genesis_node.node_ctx, promote_block.clone(), vec![]).await?;
+    send_block_to_block_tree_with_txs(&genesis_node.node_ctx, promote_block.clone(), transactions)
+        .await?;
 
     // Expect the block to be rejected for insufficient perm_fee during prevalidation
     let outcome = read_block_from_state(&genesis_node.node_ctx, &promote_block.block_hash).await;

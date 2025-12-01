@@ -92,11 +92,6 @@ impl BlockTransactions {
             .unwrap_or(&[])
     }
 
-    /// Get owned transactions for a specific data ledger
-    pub fn take_ledger_txs(&mut self, ledger: DataLedger) -> Vec<DataTransactionHeader> {
-        self.data_txs.remove(&ledger).unwrap_or_default()
-    }
-
     /// Iterate over all data transactions across all ledgers
     pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
         self.data_txs.values().flatten()
@@ -347,7 +342,7 @@ impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
-        mut transactions: BlockTransactions,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -428,8 +423,8 @@ impl BlockDiscoveryServiceInner {
             })?;
 
         // Validate submit transactions: count, IDs, and signatures
-        let submit_txs = transactions.take_ledger_txs(DataLedger::Submit);
-        validate_transactions(&submit_txs, &submit_ledger.tx_ids.0)?;
+        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+        validate_transactions(submit_txs, &submit_ledger.tx_ids.0)?;
 
         //====================================
         // Publish ledger TX Validation
@@ -451,8 +446,8 @@ impl BlockDiscoveryServiceInner {
             })?;
 
         // Validate publish transactions: count, IDs, and signatures
-        let publish_txs = transactions.take_ledger_txs(DataLedger::Publish);
-        validate_transactions(&publish_txs, &publish_ledger.tx_ids.0)?;
+        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+        validate_transactions(publish_txs, &publish_ledger.tx_ids.0)?;
 
         // Also validate ingress proofs for published transactions
         for tx_header in publish_txs.iter() {
@@ -478,14 +473,14 @@ impl BlockDiscoveryServiceInner {
             .find(|b| b.ledger_id == SystemLedger::Commitment);
 
         // Validate commitment transactions: count, IDs, and signatures
-        let commitments = transactions.commitment_txs;
+        let commitment_txs = &transactions.commitment_txs;
         if let Some(commitment_ledger) = commitment_ledger {
             debug!(
                 "incoming block commitment txids, height {} hash {}\n{:#?}",
                 new_block_header.height, new_block_header.block_hash, commitment_ledger
             );
-            validate_transactions(&commitments, &commitment_ledger.tx_ids.0)?;
-        } else if !commitments.is_empty() {
+            validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
+        } else if !commitment_txs.is_empty() {
             warn!(
                 block.height = ?new_block_header.height, block.hash = ?new_block_header.block_hash,
                 "provided block transactions contain commitment txs that were not part of the block header");
@@ -634,7 +629,7 @@ impl BlockDiscoveryServiceInner {
         // for commitments, only validate if we're not an epoch block
         // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
         if !is_epoch_block {
-            for tx in commitments.iter() {
+            for tx in commitment_txs.iter() {
                 if !valid_tx_anchor_blocks.contains(&tx.anchor) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
@@ -702,8 +697,6 @@ impl BlockDiscoveryServiceInner {
             Ok(()) => {
                 // Check if we've reached the end of an epoch and should finalize commitments
 
-                let arc_commitment_txs = Arc::new(commitments);
-
                 let (epoch_snapshot, mut parent_commitment_snapshot) = {
                     let read = block_tree_guard.read();
                     let parent_block = read.blocks.get(&parent_block_hash).unwrap_or_else(|| {
@@ -735,13 +728,13 @@ impl BlockDiscoveryServiceInner {
                     let commitments_match = expected_commitment_tx
                         .iter()
                         .map(|c| &**c) // Deref to inner CommitmentTransaction
-                        .eq(arc_commitment_txs.iter().map(|v| &**v));
+                        .eq(commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
                                 new_block_header.block_hash,
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
-                                arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
+                                commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),
@@ -749,7 +742,7 @@ impl BlockDiscoveryServiceInner {
                     }
                 } else {
                     // Validate and add each commitment transaction for non-epoch blocks
-                    for commitment_tx in arc_commitment_txs.iter() {
+                    for commitment_tx in commitment_txs.iter() {
                         let status = parent_commitment_snapshot
                             .get_commitment_status(commitment_tx, &epoch_snapshot);
 
@@ -819,7 +812,7 @@ impl BlockDiscoveryServiceInner {
                 block_tree_sender
                     .send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
-                        commitment_txs: arc_commitment_txs,
+                        transactions,
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })
