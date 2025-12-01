@@ -45,7 +45,13 @@ impl BlockProdStrategy for TrackingStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, reth::payload::EthBuiltPayload)>> {
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            reth::payload::EthBuiltPayload,
+            irys_actors::block_discovery::BlockTransactions,
+        )>,
+    > {
         // Track the solution hash and VDF step
         *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
         *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);
@@ -270,7 +276,7 @@ async fn serial_solution_reused_when_parent_changes_but_valid() -> eyre::Result<
 
     // Get the result
     let result = handle.await??;
-    let (block, _eth_payload) = result.expect("Block should be produced successfully");
+    let (block, _eth_payload, _) = result.expect("Block should be produced successfully");
 
     // Verify the block was built on node2's block (parent changed)
     assert_eq!(

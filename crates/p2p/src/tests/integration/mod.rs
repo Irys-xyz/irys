@@ -243,14 +243,13 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture1.add_peer(&fixture2);
     fixture2.add_peer(&fixture1);
 
-    // Create a test block with transactions in the Submit ledger (index 1)
+    // Create a test block with transactions
     let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
         block_hash: BlockHash::random(),
         ..IrysBlockHeaderV1::new_mock_header()
     });
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
-    // Modify the existing Submit ledger (index 1) instead of pushing a new ledger
     block.data_ledgers[1].tx_ids = H256List(vec![tx1.id, tx2.id]);
     debug!(
         "Added transactions to Submit ledger: {:?}",

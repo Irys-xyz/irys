@@ -131,7 +131,13 @@ pub enum BlockProducerCommand {
     SolutionFound {
         solution: SolutionContext,
         response: oneshot::Sender<
-            eyre::Result<Option<(Arc<irys_types::IrysBlockHeader>, EthBuiltPayload)>>,
+            eyre::Result<
+                Option<(
+                    Arc<irys_types::IrysBlockHeader>,
+                    EthBuiltPayload,
+                    BlockTransactions,
+                )>,
+            >,
         >,
     },
     /// Set the test blocks remaining (for testing)
@@ -351,7 +357,7 @@ impl BlockProducerService {
                     .fully_produce_new_block(solution)
                     .await?;
 
-                if let Some((irys_block_header, eth_built_payload)) = result {
+                if let Some((irys_block_header, eth_built_payload, block_transactions)) = result {
                     // Final guard: ensure tests haven't exhausted quota
                     if matches!(self.blocks_remaining_for_test, Some(0)) {
                         info!("Test guard exhausted; dropping candidate block before publication");
@@ -370,7 +376,11 @@ impl BlockProducerService {
                         debug!("Test blocks remaining after publication: {}", *remaining);
                     }
 
-                    let _ = response.send(Ok(Some((irys_block_header, eth_built_payload))));
+                    let _ = response.send(Ok(Some((
+                        irys_block_header,
+                        eth_built_payload,
+                        block_transactions,
+                    ))));
                     return Ok(());
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
@@ -769,7 +779,7 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)>> {
         let Some((block, stats, transactions, eth_built_payload)) =
             self.fully_produce_new_block_candidate(solution).await?
         else {
@@ -777,10 +787,10 @@ pub trait BlockProdStrategy {
         };
 
         let block = self
-            .broadcast_block(block, stats, transactions, &eth_built_payload)
+            .broadcast_block(block, stats, transactions.clone(), &eth_built_payload)
             .await?;
         let Some(block) = block else { return Ok(None) };
-        Ok(Some((block, eth_built_payload)))
+        Ok(Some((block, eth_built_payload, transactions)))
     }
 
     /// Extracts and collects all transactions that should be included in a block

@@ -124,8 +124,6 @@ where
 
     config: Config,
     service_senders: ServiceSenders,
-    /// Read guard for mempool state, used to query commitment transactions.
-    /// Public for direct access by GossipDataHandler for batch transaction queries.
     pub mempool_guard: MempoolReadGuard,
 }
 
@@ -743,6 +741,7 @@ where
             let canonical_height = self.block_status_provider.canonical_height();
 
             if current_block_height > canonical_height + BACKFILL_DEPTH {
+                // IMPORTANT! If the node is just processing blocks slower than the network, the sync service should catch it up eventually.
                 warn!(
                     "Block pool: The block {:?} (height {}) is too far ahead of the latest canonical block (height {}). This might indicate a potential issue.",
                     current_block_hash, current_block_height, canonical_height
@@ -755,6 +754,7 @@ where
                 "Requesting parent block {:?} for block {:?} from the network",
                 prev_block_hash, current_block_hash
             );
+            // Use the sync service to request parent block (fire and forget)
             if let Err(send_err) =
                 self.sync_service_sender
                     .send(SyncChainServiceMessage::RequestBlockFromTheNetwork {
@@ -777,6 +777,7 @@ where
         }
 
         if skip_validation_for_fast_track {
+            // Preemptively handle reth payload for the trusted sync path
             if let Err(err) = Self::pull_and_seal_execution_payload::<A>(
                 &self.execution_payload_provider,
                 &self.sync_service_sender,
@@ -807,6 +808,7 @@ where
             current_block_hash
         );
 
+        // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
         self.block_status_provider
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;

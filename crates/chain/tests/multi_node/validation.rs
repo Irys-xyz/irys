@@ -82,7 +82,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -137,11 +137,11 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    let (_block, eth_payload_other) = block_prod_strategy
+    let (_block, eth_payload_other, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -243,7 +243,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -340,7 +340,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();

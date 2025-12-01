@@ -9,7 +9,7 @@ use actix_web::{
     Error,
 };
 use alloy_core::primitives::FixedBytes;
-use alloy_eips::{BlockHashOrNumber, BlockId};
+use alloy_eips::BlockId;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
 use irys_actors::block_discovery::BlockTransactions;
@@ -28,7 +28,6 @@ use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
-    commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
@@ -61,10 +60,8 @@ use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
-    api::Block as _,
     network::{PeerInfo, Peers as _},
     payload::EthBuiltPayload,
-    providers::BlockReader as _,
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
@@ -1206,7 +1203,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_with_payload(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
         // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
         self.node_ctx
             .service_senders
@@ -1237,7 +1234,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_without_gossip(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
         self.with_gossip_disabled(self.mine_block_with_payload())
             .await
     }
@@ -1247,12 +1244,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<(
         Arc<IrysBlockHeader>,
         EthBuiltPayload,
+        BlockTransactions,
         BlockValidationOutcome,
     )> {
-        let (block, reth_payload) = self.mine_block_with_payload().await?;
+        let (block, reth_payload, block_transactions) = self.mine_block_with_payload().await?;
         let block_hash = &block.block_hash;
         let res = read_block_from_state(&self.node_ctx, block_hash).await;
-        Ok((block, reth_payload, res))
+        Ok((block, reth_payload, block_transactions, res))
     }
 
     /// Mine blocks until the next epoch boundary is reached.
@@ -1931,25 +1929,23 @@ impl IrysNodeTest<IrysNodeCtx> {
     ///
     /// Important:
     /// - This does NOT transfer:
-    ///   - Data transaction headers beyond what the block already references
     ///   - Any data chunks for those transactions
     ///   - The EVM execution payload for this block
     /// - In contrast, `send_full_block`:
-    ///   - Ingests data tx headers on the peer
     ///   - Optionally transfers chunks (when the peer has full ingress-proof validation enabled)
-    ///   - Pushes the EVM execution payload into the peer’s cache before delivering the header
+    ///   - Pushes the EVM execution payload into the peer's cache before delivering the header
     ///
     /// When to use:
     /// - Prefer `send_block_to_peer` when you only need to deliver the header and do not require
     ///   proof/chunk verification during validation (e.g., full ingress-proof validation is disabled),
     ///   or when the receiver already has all required chunks/payloads.
-    /// - If `enable_full_ingress_proof_validation` is true on the receiving node and the block’s
+    /// - If `enable_full_ingress_proof_validation` is true on the receiving node and the block's
     ///   Publish ledger contains transactions with proofs, use `send_full_block` (or pre-ingest chunks)
     ///   so validation can verify proofs against actual chunk bytes.
     ///
     /// Execution payload note:
     /// - `send_full_block` requires that the sender has the EVM execution payload available locally
-    ///   (otherwise it will panic). For blocks produced “without gossip,” prefer:
+    ///   (otherwise it will panic). For blocks produced "without gossip," prefer:
     ///   - Using `send_block_to_peer` for the header; and, if needed,
     ///   - Pushing the EVM payload to the peer separately (e.g., gossiping the EVM block) before
     ///     attempting a full transfer.
@@ -1957,51 +1953,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
+        block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
-        // Collect data txs from local node by ledger type
-        let mut submit_txs = Vec::new();
-        let mut publish_txs = Vec::new();
-        for (ledger_idx, ledger) in irys_block_header.data_ledgers.iter().enumerate() {
-            for tx_id in ledger.tx_ids.0.iter() {
-                let tx_header = self
-                    .get_storage_tx_header_from_mempool(tx_id)
-                    .await
-                    .or_else(|_| self.get_tx_header(tx_id))?;
-
-                if ledger_idx == DataLedger::Submit as usize {
-                    submit_txs.push(tx_header);
-                } else {
-                    publish_txs.push(tx_header);
-                }
-            }
-        }
-
-        // Collect commitment txs from local node
-        let mut commitment_txs = Vec::new();
-        for tx_id in irys_block_header
-            .system_ledgers
-            .iter()
-            .flat_map(|l| l.tx_ids.0.iter())
-        {
-            let mut commitment_tx = self.get_commitment_tx_from_mempool(tx_id).await;
-            if commitment_tx.is_err() {
-                commitment_tx = self
-                    .node_ctx
-                    .db
-                    .view_eyre(|tx| commitment_tx_by_txid(tx, tx_id))?
-                    .ok_or_else(|| eyre::eyre!("Commitment tx not found: {:?}", tx_id));
-            }
-            commitment_txs.push(commitment_tx?);
-        }
-
-        let block_transactions = BlockTransactions {
-            commitment_txs,
-            data_txs: std::collections::HashMap::from([
-                (DataLedger::Submit, submit_txs),
-                (DataLedger::Publish, publish_txs),
-            ]),
-        };
-
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
             .handle_block(
                 Arc::new(irys_block_header.clone()),
@@ -2037,21 +1990,12 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
+        eth_payload: EthBuiltPayload,
+        block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
-        // Collect data txs into submit and publish vectors based on ledger
-        let mut submit_txs = Vec::new();
-        let mut publish_txs = Vec::new();
-        let mut commitment_txs = Vec::new();
-
-        // Send data txs and collect them by ledger type
-        for (ledger_idx, ledger) in irys_block_header.data_ledgers.iter().enumerate() {
-            for tx_id in ledger.tx_ids.0.iter() {
-                // get tx locally from mempool or database
-                let tx_header = self
-                    .get_storage_tx_header_from_mempool(tx_id)
-                    .await
-                    .or_else(|_| self.get_tx_header(tx_id))?;
-
+        // Ingest data txs into peer's mempool
+        for (ledger, txs) in block_transactions.data_txs.iter() {
+            for tx_header in txs {
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 peer.node_ctx
                     .service_senders
@@ -2063,21 +2007,15 @@ impl IrysNodeTest<IrysNodeCtx> {
                 // Ignore possible ingestion errors in tests
                 let _ = rx.await?;
 
-                // Collect tx into the appropriate vector based on ledger type
-                // DataLedger::Publish = 0, DataLedger::Submit = 1
-                if ledger_idx == DataLedger::Submit as usize {
-                    submit_txs.push(tx_header.clone());
-                } else {
-                    publish_txs.push(tx_header.clone());
-                }
-
                 // Before sending the header, only transfer chunks if full validation is enabled
-                if peer
-                    .node_ctx
-                    .config
-                    .node_config
-                    .consensus_config()
-                    .enable_full_ingress_proof_validation
+                // and this is the Publish ledger
+                if *ledger == DataLedger::Publish
+                    && peer
+                        .node_ctx
+                        .config
+                        .node_config
+                        .consensus_config()
+                        .enable_full_ingress_proof_validation
                 {
                     // Transfer chunks for this tx to the peer so block validation can verify proofs
                     let chunk_size = self
@@ -2145,33 +2083,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         }
 
-        // Send commitment txs and collect them
-        for tx_id in irys_block_header
-            .system_ledgers
-            .iter()
-            .flat_map(|l| l.tx_ids.0.iter())
-        {
-            // get tx locally from mempool or database
-            let mut commitment_tx = self.get_commitment_tx_from_mempool(tx_id).await;
-            if commitment_tx.is_err() {
-                commitment_tx = self
-                    .node_ctx
-                    .db
-                    .view_eyre(|tx| commitment_tx_by_txid(tx, tx_id))?
-                    .ok_or_else(|| eyre::eyre!("Commitment tx not found: {:?}", tx_id));
-            }
-            let commitment_tx = commitment_tx?;
-
+        // Ingest commitment txs into peer's mempool
+        for commitment_tx in block_transactions.commitment_txs.iter() {
             tracing::error!(?commitment_tx.id);
-
-            // Collect commitment tx
-            commitment_txs.push(commitment_tx.clone());
 
             let (tx, rx) = tokio::sync::oneshot::channel();
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, tx).into())
+                .send(
+                    MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx.clone(), tx)
+                        .into(),
+                )
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
                 tracing::error!(
@@ -2182,32 +2105,10 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // IMPORTANT: Add execution payload to cache BEFORE sending block header
         // This prevents a race condition where validation starts before the payload is available
-
-        // Send execution payload if available
-        if let Some(evm_block) = self
-            .node_ctx
-            .reth_node_adapter
-            .inner
-            .provider
-            .block(BlockHashOrNumber::Hash(irys_block_header.evm_block_hash))?
-        {
-            peer.node_ctx
-                .block_pool
-                .add_execution_payload_to_cache(evm_block.seal_slow())
-                .await;
-        } else {
-            panic!("Full block cannot be sent to peer. Execution payload not available locally.");
-        }
-
-        // Build BlockTransactions from the collected transactions
-        use irys_actors::block_discovery::BlockTransactions;
-        let block_transactions = BlockTransactions {
-            commitment_txs,
-            data_txs: std::collections::HashMap::from([
-                (DataLedger::Submit, submit_txs),
-                (DataLedger::Publish, publish_txs),
-            ]),
-        };
+        peer.node_ctx
+            .block_pool
+            .add_execution_payload_to_cache(eth_payload.block().clone())
+            .await;
 
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())

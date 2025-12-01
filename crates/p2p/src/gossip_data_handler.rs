@@ -783,7 +783,7 @@ where
     /// Fetch all transactions for a block, using cache, mempool, and network fallback.
     ///
     /// This method combines multiple data sources:
-    /// 1. Cached transactions from the block pool (for orphan blocks)
+    /// 1. Cached transactions from the block pool
     /// 2. Mempool batch query via MempoolReadGuard
     /// 3. Network fetching for any still-missing transactions
     ///
@@ -797,7 +797,7 @@ where
     ) -> GossipResult<BlockTransactions> {
         let block_hash = block.block_hash;
 
-        // Step 1: Take any cached transactions for this block (from orphan processing)
+        // Take any cached transactions for this block
         let cached_txs = self.block_pool.take_cached_txs_for_block(&block_hash).await;
 
         // Separate cached txs by type
@@ -826,7 +826,7 @@ where
         let cached_commitment_ids: HashSet<H256> =
             fetched_commitment_txs.iter().map(|tx| tx.id).collect();
 
-        // Step 2: Collect required tx IDs from block header
+        // Collect required tx IDs from block header
         let data_tx_ids: Vec<H256> = block
             .data_ledgers
             .iter()
@@ -860,7 +860,7 @@ where
             cached_commitment_ids.len()
         );
 
-        // Step 3: Query mempool+DB in parallel for remaining transactions
+        // Query mempool+DB in parallel for remaining transactions
         // Note: We query both sources in parallel and combine results, allowing partial matches
         // since any missing txs will be fetched from network in the next step.
         let mempool_guard = &self.block_pool.mempool_guard;

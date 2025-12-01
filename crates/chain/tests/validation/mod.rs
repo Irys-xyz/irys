@@ -954,7 +954,7 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
         .await?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     peer_node.gossip_disable();
-    let (block, _payload) = peer_node.mine_block_without_gossip().await?;
+    let (block, _payload, _) = peer_node.mine_block_without_gossip().await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash);
 
     // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
