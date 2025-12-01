@@ -454,9 +454,6 @@ impl Inner {
         })? {
             Some(height) => height,
             None => {
-                self.mempool_state
-                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
-                    .await;
                 return Err(TxIngressError::InvalidAnchor(anchor).into());
             }
         };
@@ -1427,9 +1424,6 @@ impl Inner {
             })? {
             Some(height) => height,
             None => {
-                self.mempool_state
-                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
-                    .await;
                 return Err(TxIngressError::InvalidAnchor(anchor));
             }
         };
