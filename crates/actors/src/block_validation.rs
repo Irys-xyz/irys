@@ -647,17 +647,26 @@ pub async fn prevalidate_block(
     let commitment_txs = &transactions.commitment_txs;
 
     if let Some(commitment_ledger) = commitment_ledger {
-        // Check commitment tx count limit
-        let max_commitment_txs = config
-            .node_config
-            .consensus_config()
-            .mempool
-            .max_commitment_txs_per_block;
-        if commitment_txs.len() > max_commitment_txs as usize {
-            return Err(PreValidationError::TooManyCommitmentTxs {
-                max: max_commitment_txs,
-                got: commitment_txs.len(),
-            });
+        // Check commitment tx count limit (skip for epoch blocks which contain rollup of all epoch txs)
+        let is_epoch_block = block.height.is_multiple_of(
+            config
+                .node_config
+                .consensus_config()
+                .epoch
+                .num_blocks_in_epoch,
+        );
+        if !is_epoch_block {
+            let max_commitment_txs = config
+                .node_config
+                .consensus_config()
+                .mempool
+                .max_commitment_txs_per_block;
+            if commitment_txs.len() > max_commitment_txs as usize {
+                return Err(PreValidationError::TooManyCommitmentTxs {
+                    max: max_commitment_txs,
+                    got: commitment_txs.len(),
+                });
+            }
         }
 
         // Validate commitment transactions: count, IDs, and signatures
