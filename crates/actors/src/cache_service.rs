@@ -214,10 +214,10 @@ impl InnerCacheTask {
             ingress_proof_count
         );
 
-        // Attempt pruning cache only if we're above 80% of max capacity
+        // Attempt pruning cache only if we're above `prune_at_capacity_percent`% of max capacity.
         if chunk_cache_size as f64
             > self.config.node_config.cache.max_cache_size_bytes as f64
-                * self.config.node_config.cache.chunk_cache_target_capacity
+                * (self.config.node_config.cache.prune_at_capacity_percent / 100_f64)
         {
             debug!("Cache above target capacity, proceeding with pruning");
             // Then, prune chunks that no longer have active ingress proofs

@@ -421,9 +421,10 @@ pub struct CacheConfig {
     #[serde(default = "default_max_cache_size_bytes")]
     pub max_cache_size_bytes: u64,
 
-    /// Target capacity for chunk cache as a fraction of max cache size (0.0 to 1.0)
-    #[serde(default = "default_cache_target_capacity")]
-    pub chunk_cache_target_capacity: f64,
+    /// Target capacity for chunk cache as a percentage of it's total capacity (0 -> 100%)
+    /// Don't set this too low, or you won't be able to promote transactions
+    #[serde(default = "default_prune_at_capacity_percent")]
+    pub prune_at_capacity_percent: f64,
 }
 
 /// Default maximum cache size: 10 GiB
@@ -432,8 +433,9 @@ pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
 const fn default_max_cache_size_bytes() -> u64 {
     DEFAULT_MAX_CACHE_SIZE_BYTES
 }
-const fn default_cache_target_capacity() -> f64 {
-    0.8
+
+const fn default_prune_at_capacity_percent() -> f64 {
+    80_f64
 }
 
 impl Default for CacheConfig {
@@ -441,7 +443,7 @@ impl Default for CacheConfig {
         Self {
             cache_clean_lag: 0,
             max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-            chunk_cache_target_capacity: default_cache_target_capacity(),
+            prune_at_capacity_percent: default_prune_at_capacity_percent(),
         }
     }
 }
@@ -798,7 +800,7 @@ impl NodeConfig {
             cache: CacheConfig {
                 cache_clean_lag: 2,
                 max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-                chunk_cache_target_capacity: default_cache_target_capacity(),
+                prune_at_capacity_percent: default_prune_at_capacity_percent(),
             },
             http: HttpConfig {
                 public_ip: None,
@@ -942,7 +944,7 @@ impl NodeConfig {
             cache: CacheConfig {
                 cache_clean_lag: 2,
                 max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-                chunk_cache_target_capacity: default_cache_target_capacity(),
+                prune_at_capacity_percent: default_prune_at_capacity_percent(),
             },
             http: HttpConfig {
                 public_ip: None,
