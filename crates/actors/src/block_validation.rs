@@ -229,6 +229,10 @@ pub enum PreValidationError {
     #[error("Too many data transactions in submit ledger: max {max}, got {got}")]
     TooManyDataTxs { max: u64, got: usize },
 
+    /// Too many commitment transactions
+    #[error("Too many commitment transactions: max {max}, got {got}")]
+    TooManyCommitmentTxs { max: u64, got: usize },
+
     /// Missing transactions that were expected in block header
     #[error("Missing transactions: {0:?}")]
     MissingTransactions(Vec<IrysTransactionId>),
@@ -643,6 +647,19 @@ pub async fn prevalidate_block(
     let commitment_txs = &transactions.commitment_txs;
 
     if let Some(commitment_ledger) = commitment_ledger {
+        // Check commitment tx count limit
+        let max_commitment_txs = config
+            .node_config
+            .consensus_config()
+            .mempool
+            .max_commitment_txs_per_block;
+        if commitment_txs.len() > max_commitment_txs as usize {
+            return Err(PreValidationError::TooManyCommitmentTxs {
+                max: max_commitment_txs,
+                got: commitment_txs.len(),
+            });
+        }
+
         // Validate commitment transactions: count, IDs, and signatures
         validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
         debug!(
