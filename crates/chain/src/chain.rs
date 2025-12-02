@@ -1224,6 +1224,7 @@ impl IrysNode {
             receivers.chunk_cache,
             config.clone(),
             service_senders.gossip_broadcast.clone(),
+            service_senders.chunk_cache.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
