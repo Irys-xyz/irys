@@ -9,6 +9,7 @@ use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_provider::{providers::StaticFileProvider, ProviderFactory};
+use std::time::SystemTime;
 use std::{path::PathBuf, sync::Arc};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt as _;
@@ -105,6 +106,10 @@ async fn main() -> eyre::Result<()> {
             let timestamp_secs =
                 std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
                     .as_secs();
+            if timestamp_secs == 0 {
+                panic!("GENESIS TIMESTAMP MUST BE A CONCRETE VALUE FOR INIT STATE TO WORK! current time (ms) is: {}", &SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis())
+            }
+            info!("Using timestamp {} (secs)", &timestamp_secs);
             let chain_spec = irys_chain_spec(
                 config.consensus.chain_id,
                 &config.consensus.reth,
