@@ -62,7 +62,7 @@ use crate::mempool_guard::MempoolReadGuard;
 use crate::shadow_tx_generator::RollingHash;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_domain::{BlockIndex, EpochSnapshot};
+use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
     BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, IrysTransactionId,
@@ -90,6 +90,7 @@ pub async fn calculate_expired_ledger_fees(
     ledger_type: DataLedger,
     config: &Config,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
     expect_txs_to_be_promoted: bool,
@@ -147,6 +148,7 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             config,
             &block_index,
+            block_tree_guard,
             mempool_guard,
             db,
         )
@@ -164,6 +166,7 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             config,
             &block_index,
+            block_tree_guard,
             mempool_guard,
             db,
         )
@@ -177,6 +180,7 @@ pub async fn calculate_expired_ledger_fees(
             ledger_type,
             config,
             &block_index,
+            block_tree_guard,
             mempool_guard,
             db,
         )
@@ -188,7 +192,7 @@ pub async fn calculate_expired_ledger_fees(
 
     // Step 4: Process middle blocks
     let middle_miners =
-        process_middle_blocks(block_range.middle_blocks, ledger_type, mempool_guard, db).await?;
+        process_middle_blocks(block_range.middle_blocks, ledger_type, block_tree_guard, db).await?;
 
     // Step 5: Combine all transactions
     let mut all_tx_ids = Vec::new();
@@ -245,12 +249,18 @@ pub async fn calculate_expired_ledger_fees(
     Ok(fees)
 }
 
-/// Fetches a block header from database
+/// Fetches a block header from block tree or database
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
 async fn get_block_by_hash(
     block_hash: H256,
+    block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<IrysBlockHeader> {
+    // Check block tree first
+    if let Some(header) = block_tree_guard.read().get_block(&block_hash).cloned() {
+        return Ok(header);
+    }
+    // Fallback to database
     db.view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
         .ok_or_eyre("block not found in db")
 }
@@ -456,11 +466,12 @@ async fn process_boundary_block(
     ledger_type: DataLedger,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
+    block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     // Get the block and its transactions
-    let block = get_block_by_hash(block_hash, db).await?;
+    let block = get_block_by_hash(block_hash, block_tree_guard, db).await?;
     let ledger_tx_ids = block
         .get_data_ledger_tx_ids_ordered(ledger_type)
         .ok_or_eyre(format!(
@@ -583,13 +594,13 @@ fn filter_transactions_by_chunk_range(
 async fn process_middle_blocks(
     middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
     ledger_type: DataLedger,
-    _mempool_guard: &MempoolReadGuard,
+    block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     let mut tx_to_miners = BTreeMap::new();
 
     for (block_hash, miners) in middle_blocks {
-        let block = get_block_by_hash(block_hash, db).await?;
+        let block = get_block_by_hash(block_hash, block_tree_guard, db).await?;
         let ledger_tx_ids = block
             .get_data_ledger_tx_ids_ordered(ledger_type)
             .ok_or_eyre(format!("{:?} ledger is required", ledger_type))?;

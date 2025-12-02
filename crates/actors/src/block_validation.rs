@@ -1019,6 +1019,7 @@ pub fn poa_is_valid(
 pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
+    block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
@@ -1142,6 +1143,7 @@ pub async fn shadow_transactions_are_valid(
     let expected_txs = generate_expected_shadow_transactions_from_db(
         config,
         service_senders,
+        block_tree_guard,
         mempool_guard,
         block,
         db,
@@ -1265,6 +1267,7 @@ pub async fn submit_payload_to_reth(
 async fn generate_expected_shadow_transactions_from_db(
     config: &Config,
     service_senders: &ServiceSenders,
+    block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
@@ -1309,6 +1312,7 @@ async fn generate_expected_shadow_transactions_from_db(
             DataLedger::Submit, // Currently only Submit ledgers expire
             config,
             block_index,
+            block_tree_guard,
             mempool_guard,
             db,
             true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally

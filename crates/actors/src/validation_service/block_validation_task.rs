@@ -403,6 +403,7 @@ impl BlockValidationTask {
             shadow_transactions_are_valid(
                 config,
                 service_senders,
+                &self.block_tree_guard,
                 &self.service_inner.mempool_guard,
                 block,
                 &self.service_inner.db,

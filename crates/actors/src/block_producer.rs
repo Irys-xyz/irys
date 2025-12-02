@@ -1540,6 +1540,7 @@ pub trait BlockProdStrategy {
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
             Arc::clone(&self.inner().block_index),
+            &self.inner().block_tree_guard,
             &self.inner().mempool_guard,
             &self.inner().db,
             true, // we expect the txs to be promoted otherwise return perm fee
