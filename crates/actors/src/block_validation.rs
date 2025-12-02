@@ -1,6 +1,6 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
-    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel, BlockTransactions},
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -34,7 +34,7 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, Address, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    PoaData, UnixTimestamp, H256, U256,
+    IrysTransactionCommon, IrysTransactionId, PoaData, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{BlockHash, LedgerChunkRange};
@@ -224,6 +224,33 @@ pub enum PreValidationError {
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
     InvalidEpochSnapshot { error: String },
+
+    /// Too many data transactions in submit ledger
+    #[error("Too many data transactions in submit ledger: max {max}, got {got}")]
+    TooManyDataTxs { max: u64, got: usize },
+
+    /// Missing transactions that were expected in block header
+    #[error("Missing transactions: {0:?}")]
+    MissingTransactions(Vec<IrysTransactionId>),
+
+    /// Transaction ID mismatch between provided tx and block header
+    #[error("Transaction ID mismatch: expected {expected}, got {actual}")]
+    TransactionIdMismatch {
+        expected: IrysTransactionId,
+        actual: IrysTransactionId,
+    },
+
+    /// Invalid transaction signature
+    #[error("Invalid signature for transaction {0}")]
+    InvalidTransactionSignature(IrysTransactionId),
+
+    /// Commitment transactions provided but no commitment ledger in block header
+    #[error("Commitment transactions provided but no commitment ledger in block header")]
+    UnexpectedCommitmentTransactions,
+
+    /// Invalid data ledgers length
+    #[error("Invalid data ledgers length: expected {expected} ledgers, got {got}")]
+    InvalidDataLedgersLength { expected: u32, got: usize },
 }
 
 /// Validation error type that covers all block validation failures.
@@ -334,6 +361,7 @@ pub async fn prevalidate_block(
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
+    transactions: &BlockTransactions,
 ) -> Result<(), PreValidationError> {
     debug!(
         block.hash = ?block.block_hash,
@@ -534,6 +562,133 @@ pub async fn prevalidate_block(
     // TODO: add validation for the term ledger 'expires' field,
     // ensuring it gets properly updated on epoch boundaries, and it's
     // consistent with the block's height and parent block's height
+
+    // ========================================
+    // Transaction validation
+    // ========================================
+
+    // Validate submit ledger transactions
+    let submit_ledger = block
+        .data_ledgers
+        .get(DataLedger::Submit as usize)
+        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
+            expected: DataLedger::Submit.into(),
+            got: block.data_ledgers.len(),
+        })?;
+
+    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+
+    // Enforce max_data_txs_per_block on submit ledger
+    let max_data_txs = config
+        .node_config
+        .consensus_config()
+        .mempool
+        .max_data_txs_per_block;
+    if submit_txs.len() > max_data_txs as usize {
+        return Err(PreValidationError::TooManyDataTxs {
+            max: max_data_txs,
+            got: submit_txs.len(),
+        });
+    }
+
+    // Validate submit transactions: count, IDs, and signatures
+    validate_transactions(submit_txs, &submit_ledger.tx_ids.0)?;
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "submit_transactions_valid",
+    );
+
+    // Validate publish ledger transactions
+    let publish_ledger = block
+        .data_ledgers
+        .get(DataLedger::Publish as usize)
+        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
+            expected: DataLedger::Publish.into(),
+            got: block.data_ledgers.len(),
+        })?;
+
+    let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+
+    // Validate publish transactions: count, IDs, and signatures
+    validate_transactions(publish_txs, &publish_ledger.tx_ids.0)?;
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "publish_transactions_valid",
+    );
+
+    // Validate ingress proofs for published transactions
+    for tx_header in publish_txs.iter() {
+        let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
+            .map_err(|_| PreValidationError::IngressProofsMissing)?;
+        for proof in tx_proofs.iter() {
+            proof
+                .pre_validate(&tx_header.data_root)
+                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))?;
+        }
+    }
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "ingress_proofs_valid",
+    );
+
+    // Validate commitment ledger transactions
+    let commitment_ledger = block
+        .system_ledgers
+        .iter()
+        .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+    let commitment_txs = &transactions.commitment_txs;
+
+    if let Some(commitment_ledger) = commitment_ledger {
+        // Validate commitment transactions: count, IDs, and signatures
+        validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
+        debug!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            "commitment_transactions_valid",
+        );
+    } else if !commitment_txs.is_empty() {
+        // Commitment transactions provided but no commitment ledger in block header
+        return Err(PreValidationError::UnexpectedCommitmentTransactions);
+    }
+
+    Ok(())
+}
+
+/// Validate transactions against expected IDs from the block header.
+/// Checks: count matches, IDs match in order, signatures are valid.
+fn validate_transactions<T: IrysTransactionCommon>(
+    txs: &[T],
+    expected_ids: &[IrysTransactionId],
+) -> Result<(), PreValidationError> {
+    // Check count matches
+    if txs.len() != expected_ids.len() {
+        let provided_ids: std::collections::HashSet<_> =
+            txs.iter().map(IrysTransactionCommon::id).collect();
+        let missing: Vec<_> = expected_ids
+            .iter()
+            .filter(|id| !provided_ids.contains(id))
+            .copied()
+            .collect();
+        return Err(PreValidationError::MissingTransactions(missing));
+    }
+
+    // Check IDs match in order and signatures are valid
+    for (tx, expected_id) in txs.iter().zip(expected_ids.iter()) {
+        let actual_id = tx.id();
+        if actual_id != *expected_id {
+            return Err(PreValidationError::TransactionIdMismatch {
+                expected: *expected_id,
+                actual: actual_id,
+            });
+        }
+        if !tx.is_signature_valid() {
+            return Err(PreValidationError::InvalidTransactionSignature(actual_id));
+        }
+    }
 
     Ok(())
 }

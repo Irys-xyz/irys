@@ -166,6 +166,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             genesis_node.node_ctx.config.clone(),
             genesis_node.node_ctx.reward_curve.clone(),
             &parent_ema_snapshot,
+            &Default::default(),
         )
         .await;
         let err =
@@ -238,6 +239,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
         genesis_node.node_ctx.config.clone(),
         genesis_node.node_ctx.reward_curve.clone(),
         &parent_ema_snapshot,
+        &Default::default(),
     )
     .await;
 

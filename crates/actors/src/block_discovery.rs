@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
     block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    SystemLedger,
 };
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
@@ -19,7 +18,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionCommon, IrysTransactionId, TokioServiceHandle, H256,
+    IrysTransactionId, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -101,43 +100,6 @@ impl BlockTransactions {
     pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
         self.data_txs.values().flatten()
     }
-}
-
-/// Validate transactions against expected IDs from the block header.
-/// Checks: count matches, IDs match in order, signatures are valid.
-fn validate_transactions<T: IrysTransactionCommon>(
-    txs: &[T],
-    expected_ids: &[IrysTransactionId],
-) -> Result<(), BlockDiscoveryError> {
-    // Check count matches
-    if txs.len() != expected_ids.len() {
-        let provided_ids: std::collections::HashSet<_> = txs
-            .iter()
-            .map(irys_types::IrysTransactionCommon::id)
-            .collect();
-        let missing: Vec<_> = expected_ids
-            .iter()
-            .filter(|id| !provided_ids.contains(id))
-            .copied()
-            .collect();
-        return Err(BlockDiscoveryError::MissingTransactions(missing));
-    }
-
-    // Check IDs match in order and signatures are valid
-    for (tx, expected_id) in txs.iter().zip(expected_ids.iter()) {
-        let actual_id = tx.id();
-        if actual_id != *expected_id {
-            return Err(BlockDiscoveryError::TransactionIdMismatch {
-                expected: *expected_id,
-                actual: actual_id,
-            });
-        }
-        if !tx.is_signature_valid() {
-            return Err(BlockDiscoveryError::InvalidSignature(actual_id));
-        }
-    }
-
-    Ok(())
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -347,7 +309,7 @@ impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
-        mut transactions: BlockTransactions,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -412,34 +374,6 @@ impl BlockDiscoveryServiceInner {
         //------------------------------------
         // Get all the submit ledger transactions for the new block, error if not found
         // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
-        // If they are in our mempool and validated we know they are real, if not we have
-        // to retrieve and validate them from the block producer.
-        // TODO: in the future we'll retrieve the missing transactions from the block
-        // producer and validate them.
-        //
-        let submit_ledger = new_block_header
-            .data_ledgers
-            .get(DataLedger::Submit as usize)
-            .ok_or_else(|| {
-                BlockDiscoveryError::InvalidDataLedgersLength(
-                    DataLedger::Submit.into(),
-                    new_block_header.data_ledgers.len(),
-                )
-            })?;
-
-        // Validate submit transactions: count, IDs, and signatures
-        let submit_txs = transactions.take_ledger_txs(DataLedger::Submit);
-        validate_transactions(&submit_txs, &submit_ledger.tx_ids.0)?;
-
-        //====================================
-        // Publish ledger TX Validation
-        //------------------------------------
-        // 1. Validate the proof
-        // 2. Validate the transaction
-        // 3. Update the local tx headers index to include the ingress-proof.
-        //    This keeps the transaction from getting re-promoted each block.
-        //    (this last step performed in mempool after the block is confirmed)
-
         let publish_ledger = new_block_header
             .data_ledgers
             .get(DataLedger::Publish as usize)
@@ -450,47 +384,10 @@ impl BlockDiscoveryServiceInner {
                 )
             })?;
 
-        // Validate publish transactions: count, IDs, and signatures
-        let publish_txs = transactions.take_ledger_txs(DataLedger::Publish);
-        validate_transactions(&publish_txs, &publish_ledger.tx_ids.0)?;
-
-        // Also validate ingress proofs for published transactions
-        for tx_header in publish_txs.iter() {
-            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
-                BlockDiscoveryError::BlockValidationError(PreValidationError::IngressProofsMissing)
-            })?;
-            for proof in tx_proofs.iter() {
-                proof.pre_validate(&tx_header.data_root).map_err(|e| {
-                    BlockDiscoveryError::BlockValidationError(
-                        PreValidationError::IngressProofSignatureInvalid(e.to_string()),
-                    )
-                })?;
-            }
-        }
-
-        //====================================
-        // Commitment ledger TX Validation
-        //------------------------------------
-        // Extract the Commitment ledger from the block
-        let commitment_ledger = new_block_header
-            .system_ledgers
-            .iter()
-            .find(|b| b.ledger_id == SystemLedger::Commitment);
-
-        // Validate commitment transactions: count, IDs, and signatures
-        let commitments = transactions.commitment_txs;
-        if let Some(commitment_ledger) = commitment_ledger {
-            debug!(
-                "incoming block commitment txids, height {} hash {}\n{:#?}",
-                new_block_header.height, new_block_header.block_hash, commitment_ledger
-            );
-            validate_transactions(&commitments, &commitment_ledger.tx_ids.0)?;
-        } else if !commitments.is_empty() {
-            warn!(
-                block.height = ?new_block_header.height, block.hash = ?new_block_header.block_hash,
-                "provided block transactions contain commitment txs that were not part of the block header");
-            return Err(BlockDiscoveryError::MissingTransactions(vec![]));
-        }
+        // Get references to transactions for anchor validation
+        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+        let commitment_txs = &transactions.commitment_txs;
 
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",
@@ -634,7 +531,7 @@ impl BlockDiscoveryServiceInner {
         // for commitments, only validate if we're not an epoch block
         // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
         if !is_epoch_block {
-            for tx in commitments.iter() {
+            for tx in commitment_txs.iter() {
                 if !valid_tx_anchor_blocks.contains(&tx.anchor) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
@@ -694,6 +591,7 @@ impl BlockDiscoveryServiceInner {
             config,
             reward_curve,
             &parent_ema_snapshot,
+            &transactions,
         )
         .in_current_span()
         .await;
@@ -701,8 +599,7 @@ impl BlockDiscoveryServiceInner {
         match validation_result {
             Ok(()) => {
                 // Check if we've reached the end of an epoch and should finalize commitments
-
-                let arc_commitment_txs = Arc::new(commitments);
+                let arc_commitment_txs = Arc::new(commitment_txs.clone());
 
                 let (epoch_snapshot, mut parent_commitment_snapshot) = {
                     let read = block_tree_guard.read();
