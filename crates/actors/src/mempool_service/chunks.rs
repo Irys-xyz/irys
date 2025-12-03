@@ -8,8 +8,8 @@ use irys_database::{
     tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataRoot, DatabaseProvider,
-    GossipBroadcastMessage, IngressProof, H256,
+    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataLedger, DataRoot,
+    DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
 };
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
@@ -65,20 +65,47 @@ impl Inner {
                     chunk.tx_offset = ?chunk.tx_offset,
                     "Checking SMs for data_size"
                 );
-                // Get a list of all the local storage modules
                 let storage_modules = self.storage_modules_guard.read().clone();
 
-                // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
-                let sm_data_size = storage_modules
-                    .iter()
-                    .filter_map(|sm| {
-                        sm.collect_data_root_infos(chunk.data_root)
-                            .ok()
-                            .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
-                    })
-                    .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
-                    .max();
-                (sm_data_size, true)
+                // Find the max data_size and check if any source is from publish ledger
+                let mut sm_data_size: Option<u64> = None;
+                let mut from_publish_ledger = false;
+
+                for sm in storage_modules.iter() {
+                    let infos = match sm.collect_data_root_infos(chunk.data_root) {
+                        Ok(i) if !i.0.is_empty() => i,
+                        _ => continue,
+                    };
+
+                    for info in &infos.0 {
+                        let current_max = sm_data_size.unwrap_or(0);
+                        if info.data_size > current_max {
+                            sm_data_size = Some(info.data_size);
+                        }
+                    }
+
+                    // Publish ledger data can be trusted - chunks verified before tx accepted
+                    if sm
+                        .partition_assignment()
+                        .is_some_and(|pa| pa.ledger_id == Some(DataLedger::Publish.get_id()))
+                    {
+                        from_publish_ledger = true;
+                    }
+                }
+
+                // Publish ledger data is trusted; submit ledger needs verification
+                let confirmed = from_publish_ledger
+                    || sm_data_size
+                        .map(|ds| {
+                            self.verify_data_size_from_storage_modules(
+                                &storage_modules,
+                                chunk.data_root,
+                                ds,
+                            )
+                        })
+                        .unwrap_or(false);
+
+                (sm_data_size, confirmed)
             }
         };
 
@@ -460,6 +487,67 @@ impl Inner {
             }).in_current_span();
         }
         Ok(())
+    }
+
+    /// Verifies data_size by fetching the expected last chunk and validating its merkle proof.
+    fn verify_data_size_from_storage_modules(
+        &self,
+        storage_modules: &[std::sync::Arc<irys_domain::StorageModule>],
+        data_root: DataRoot,
+        claimed_data_size: u64,
+    ) -> bool {
+        let chunk_size = self.config.consensus.chunk_size;
+        let last_chunk_offset = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
+
+        for sm in storage_modules {
+            let infos = match sm.collect_data_root_infos(data_root) {
+                Ok(i) if !i.0.is_empty() => i,
+                _ => continue,
+            };
+
+            for info in &infos.0 {
+                let relative_offset = info.start_offset.0 as i64 + last_chunk_offset as i64;
+                if relative_offset < 0 {
+                    continue;
+                }
+
+                let partition_offset =
+                    irys_types::PartitionChunkOffset::from(relative_offset as u32);
+                let chunk = match sm.generate_full_chunk(partition_offset) {
+                    Ok(Some(c)) if c.data_root == data_root => c,
+                    _ => continue,
+                };
+
+                // Compute end byte offset: for the last chunk, it's data_size - 1
+                let target_offset = u128::from(claimed_data_size.saturating_sub(1));
+
+                if let Ok(result) = validate_path(data_root.0, &chunk.data_path, target_offset) {
+                    if result.is_rightmost_chunk {
+                        let confirmed_size = result.max_byte_range as u64;
+                        debug!(
+                            "Verified data_size {} for data_root {:?} via rightmost chunk proof",
+                            confirmed_size, data_root
+                        );
+                        // Cache the confirmed data_size so subsequent chunks skip verification
+                        if let Err(e) = self.irys_db.update_eyre(|db_tx| {
+                            confirm_data_size_for_data_root(db_tx, &data_root, confirmed_size)
+                        }) {
+                            warn!(
+                                "Failed to cache confirmed data_size for {:?}: {:?}",
+                                data_root, e
+                            );
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        debug!(
+            "Could not verify data_size {} for data_root {:?} - no valid rightmost chunk found",
+            claimed_data_size, data_root
+        );
+        false
     }
 }
 

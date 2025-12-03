@@ -262,9 +262,10 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
     let signer = genesis_config.new_random_signer();
     genesis_config.fund_genesis_accounts(vec![&signer]);
 
-    // Prepare a valid-sized chunk payload
+    // Prepare data large enough to have 65+ chunks (so we can fill cache with 64)
     let chunk_size = genesis_config.consensus_config().chunk_size as usize;
-    let data = vec![5_u8; chunk_size];
+    let tx_data = vec![5_u8; chunk_size * (preheader_cap as usize + 1)];
+    let chunk_bytes = vec![5_u8; chunk_size];
 
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
         .start()
@@ -273,12 +274,12 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
 
     // Get price from the API
     let price_info = genesis_node
-        .get_data_price(DataLedger::Publish, data.len() as u64)
+        .get_data_price(DataLedger::Publish, tx_data.len() as u64)
         .await
         .expect("Failed to get price");
 
     let tx = signer.create_publish_transaction(
-        data.clone(),
+        tx_data,
         genesis_node.get_anchor().await?,
         price_info.perm_fee.into(),
         price_info.term_fee.into(),
@@ -291,7 +292,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
             data_root: tx.header.data_root,
             data_size: tx.header.data_size,
             data_path: Base64(vec![]),
-            bytes: Base64(data.clone()),
+            bytes: Base64(chunk_bytes.clone()),
             tx_offset: TxChunkOffset::from(offset),
         };
 
@@ -323,7 +324,7 @@ async fn preheader_rejects_when_cache_full() -> eyre::Result<()> {
         data_root: tx.header.data_root,
         data_size: tx.header.data_size,
         data_path: Base64(vec![]),
-        bytes: Base64(data),
+        bytes: Base64(chunk_bytes),
         tx_offset: TxChunkOffset::from(preheader_cap),
     };
 
