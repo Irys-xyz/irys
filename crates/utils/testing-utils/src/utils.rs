@@ -1,5 +1,6 @@
 use chrono::{SecondsFormat, Utc};
 use color_eyre::eyre;
+use irys_utils::shutdown::spawn_shutdown_watchdog;
 use rand::{Rng as _, SeedableRng as _};
 use std::panic;
 use std::{fs::create_dir_all, path::PathBuf, str::FromStr as _};
@@ -153,17 +154,7 @@ pub fn setup_panic_hook() -> eyre::Result<()> {
         }
 
         // Spawn watchdog thread to force exit if graceful shutdown hangs
-        std::thread::spawn(move || {
-            const GRACEFUL_SHUTDOWN_TIMEOUT: std::time::Duration =
-                std::time::Duration::from_secs(30);
-            std::thread::sleep(GRACEFUL_SHUTDOWN_TIMEOUT);
-
-            eprintln!(
-                "\x1b[1;31mGraceful shutdown timeout after {:?}, forcing exit\x1b[0m",
-                GRACEFUL_SHUTDOWN_TIMEOUT
-            );
-            std::process::abort();
-        });
+        spawn_shutdown_watchdog(irys_types::ShutdownReason::FatalError("panic".to_string()));
     }));
 
     Ok(())
