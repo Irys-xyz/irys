@@ -34,7 +34,7 @@ pub enum ApiError {
     #[error("Invalid block parameter: {parameter}")]
     InvalidBlockParameter { parameter: String },
     #[error("{0}")]
-    Custom(pub String),
+    Custom(String),
     #[error("{0}")]
     CustomWithStatus(String, StatusCode),
 }
@@ -62,7 +62,7 @@ impl ResponseError for ApiError {
             Self::BalanceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidBlockParameter { .. } => StatusCode::BAD_REQUEST,
             Self::Custom(_) => StatusCode::BAD_REQUEST,
-            Self::CustomWithStatus(_, sc) => sc,
+            Self::CustomWithStatus(_, sc) => *sc,
         }
     }
 

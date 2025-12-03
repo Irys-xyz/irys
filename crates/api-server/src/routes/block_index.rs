@@ -1,5 +1,5 @@
-use crate::ApiState;
-use actix_web::{http::header::ContentType, web, HttpResponse};
+use crate::{error::ApiError, ApiState};
+use actix_web::web::{self, Json};
 use irys_types::{BlockIndexItem, BlockIndexQuery};
 
 /// Maximum number of blocks that can be requested in a single query.
@@ -20,9 +20,9 @@ pub async fn block_index_route(
         query.limit
     };
     if limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
-        return ApiError::Custom(format!(
+        return Err(ApiError::Custom(format!(
             "limit exceeds maximum allowed value of {MAX_BLOCK_INDEX_QUERY_LIMIT}"
-        ));
+        )));
     }
     let height = query.height;
 
@@ -35,5 +35,5 @@ pub async fn block_index_route(
         block_index_read.items[start..end].to_vec()
     };
 
-    Ok(requested_blocks)
+    Ok(Json(requested_blocks))
 }

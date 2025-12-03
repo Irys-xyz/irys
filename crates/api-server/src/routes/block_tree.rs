@@ -1,8 +1,9 @@
-use actix_web::{web, HttpResponse};
+use actix_web::{web, HttpResponse, ResponseError as _};
+use awc::http::StatusCode;
 use irys_types::serialization::{string_u128, string_u64};
 use serde::{Deserialize, Serialize};
 
-use crate::ApiState;
+use crate::{error::ApiError, ApiState};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,9 +42,11 @@ pub async fn get_block_tree_forks(state: web::Data<ApiState>) -> HttpResponse {
     let tip_block = match block_tree.get_block(&tip_hash) {
         Some(block) => block,
         None => {
-            return HttpResponse::InternalServerError().json(serde_json::json!({
-                "error": "Failed to get tip block"
-            }));
+            return ApiError::CustomWithStatus(
+                "Failed to get the tip block".to_owned(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .error_response();
         }
     };
 
