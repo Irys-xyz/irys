@@ -49,13 +49,8 @@ impl Inner {
         let res = self
             .irys_db
             .update(|rw_tx| -> Result<(), DatabaseError> {
-                rw_tx.put::<IngressProofs>(
-                    ingress_proof.data_root,
-                    CompactCachedIngressProof(CachedIngressProof {
-                        address,
-                        proof: ingress_proof.clone(),
-                    }),
-                )?;
+                irys_database::store_external_ingress_proof_checked(rw_tx, &ingress_proof, address)
+                    .map_err(|e| DatabaseError::Other(e.to_string()))?;
                 Ok(())
             })
             .map_err(|e| IngressProofError::DatabaseError(e.to_string()))?;

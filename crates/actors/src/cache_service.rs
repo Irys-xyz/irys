@@ -1057,11 +1057,13 @@ mod tests {
 
         // Insert a (non-expired) ingress proof entry for the data root so pruning treats it as active
         db.update(|wtx| {
-            let proof = CachedIngressProof {
-                address: irys_types::Address::random(),
-                ..Default::default()
-            };
-            wtx.put::<IngressProofs>(tx_header.data_root, proof.into())?;
+            let mut ingress_proof = IngressProof::default();
+            ingress_proof.data_root = tx_header.data_root;
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &ingress_proof,
+                irys_types::Address::random(),
+            )?;
             eyre::Ok(())
         })??;
 

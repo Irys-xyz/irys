@@ -256,7 +256,7 @@ impl Inner {
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
         if let Err(e) = self
             .irys_db
-            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
+            .update_eyre(|tx| irys_database::store_cached_chunk(tx, &chunk))
             .map_err(|e| {
                 error!(
                     "Database error caching chunk data_root {:?} tx_offset {}: {:?}",
@@ -547,13 +547,7 @@ pub fn generate_ingress_proof(
     assert_eq!(actual_chunk_count, expected_chunk_count);
 
     db.update(|rw_tx| {
-        rw_tx.put::<IngressProofs>(
-            data_root,
-            CompactCachedIngressProof(CachedIngressProof {
-                address: signer.address(),
-                proof: proof.clone(),
-            }),
-        )
+        irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer)
     })??;
 
     Ok(proof)
