@@ -5121,6 +5121,7 @@ dependencies = [
  "irys-vdf",
  "itertools 0.13.0",
  "lru 0.14.0",
+ "moka",
  "nodit",
  "openssl",
  "priority-queue",

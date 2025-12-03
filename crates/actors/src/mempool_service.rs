@@ -15,6 +15,7 @@ use crate::block_discovery::get_data_tx_in_parallel_inner;
 use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
 use crate::pledge_provider::MempoolPledgeProvider;
+use crate::pruned_cache::PrunedCache;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
@@ -190,6 +191,7 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+    pub pruned_cache: Arc<RwLock<PrunedCache>>,
 }
 
 pub struct MempoolServiceMessageWithSpan {
@@ -2657,6 +2659,7 @@ impl MempoolService {
         rx: UnboundedReceiver<MempoolServiceMessageWithSpan>,
         config: &Config,
         service_senders: &ServiceSenders,
+        pruned_cache: Arc<RwLock<PrunedCache>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> eyre::Result<TokioServiceHandle> {
         info!("Spawning mempool service");
@@ -2707,6 +2710,7 @@ impl MempoolService {
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
+                        pruned_cache,
                     }),
                 };
                 mempool_service

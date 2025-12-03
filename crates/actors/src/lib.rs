@@ -13,6 +13,7 @@ pub mod mempool_service;
 pub mod mining_bus;
 pub mod packing_service;
 pub mod partition_mining_service;
+pub mod pruned_cache;
 pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;

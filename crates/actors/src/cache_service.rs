@@ -2,6 +2,7 @@ use crate::ingress_proofs::{
     generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
 };
 use crate::mempool_service::Inner;
+use crate::pruned_cache::PrunedCache;
 use irys_database::{
     cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
 };
@@ -109,6 +110,7 @@ pub struct InnerCacheTask {
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
     pub ingress_proof_generation_state: IngressProofGenerationState,
     pub cache_sender: CacheServiceSender,
+    pub pruned_cache: Arc<RwLock<PrunedCache>>,
 }
 
 impl InnerCacheTask {
@@ -407,6 +409,11 @@ impl InnerCacheTask {
                     .saturating_add(delete_cached_chunks_by_data_root(&write_tx, data_root)?);
                 write_tx.delete::<CachedDataRoots>(data_root, None)?;
                 eviction_count += 1;
+
+                if let Ok(cache) = self.pruned_cache.read() {
+                    cache.roots.insert(data_root, ());
+                    cache.proofs.insert(data_root, ());
+                }
             }
         }
         debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
@@ -514,6 +521,13 @@ impl InnerCacheTask {
                     warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
                 }
             }
+
+            if let Ok(cache) = self.pruned_cache.read() {
+                for root in to_delete.iter() {
+                    cache.proofs.insert(*root, ());
+                }
+            }
+
             info!(
                 proofs.deleted = to_delete.len(),
                 "Deleted expired ingress proofs"
@@ -679,6 +693,7 @@ impl ChunkCacheService {
         config: Config,
         gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
         cache_sender: CacheServiceSender,
+        pruned_cache: Arc<RwLock<PrunedCache>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning chunk cache service");
@@ -697,6 +712,7 @@ impl ChunkCacheService {
                     gossip_broadcast,
                     ingress_proof_generation_state: IngressProofGenerationState::new(),
                     cache_sender,
+                    pruned_cache,
                 },
                 pruning_running: false,
                 pruning_queue: VecDeque::new(),

@@ -22,6 +22,7 @@ use irys_actors::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
     pledge_provider::MempoolPledgeProvider,
+    pruned_cache::PrunedCache,
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
@@ -1213,6 +1214,8 @@ impl IrysNode {
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
 
+        let pruned_cache = Arc::new(RwLock::new(PrunedCache::new(Duration::from_secs(3600))));
+
         let chunk_cache_handle = ChunkCacheService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
@@ -1221,6 +1224,7 @@ impl IrysNode {
             config.clone(),
             service_senders.gossip_broadcast.clone(),
             service_senders.chunk_cache.clone(),
+            pruned_cache.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
@@ -1254,6 +1258,7 @@ impl IrysNode {
             receivers.mempool,
             &config,
             &service_senders,
+            pruned_cache.clone(),
             runtime_handle.clone(),
         )?;
         let mempool_facade = MempoolServiceFacadeImpl::from(&service_senders);
