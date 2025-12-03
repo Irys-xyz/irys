@@ -33,6 +33,10 @@ pub enum ApiError {
     BalanceUnavailable { reason: String },
     #[error("Invalid block parameter: {parameter}")]
     InvalidBlockParameter { parameter: String },
+    #[error("{0}")]
+    Custom(pub String),
+    #[error("{0}")]
+    CustomWithStatus(String, StatusCode),
 }
 
 impl ApiError {
@@ -57,6 +61,8 @@ impl ResponseError for ApiError {
             Self::InvalidAddressFormat { .. } => StatusCode::BAD_REQUEST,
             Self::BalanceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidBlockParameter { .. } => StatusCode::BAD_REQUEST,
+            Self::Custom(_) => StatusCode::BAD_REQUEST,
+            Self::CustomWithStatus(_, sc) => sc,
         }
     }
 
