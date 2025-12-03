@@ -153,12 +153,6 @@ pub(crate) struct EpochInfoResponse {
     pub unassigned_partitions: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct EpochInfo {
-    pub current_epoch: u64,
-    pub partition_assignments: Vec<PartitionAssignment>,
-}
-
 /// Structures for slot replica verification
 #[derive(Debug, Clone)]
 pub(crate) struct SlotReplicaInfo {
@@ -181,17 +175,6 @@ pub(crate) struct SlotReplicaSummary {
     pub over_replicated_slots: usize,
     pub expected_replicas: usize,
     pub slots: Vec<SlotReplicaInfo>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct MiningRequest {
-    pub count: Option<u32>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct MiningResponse {
-    pub blocks_mined: u32,
-    pub latest_height: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

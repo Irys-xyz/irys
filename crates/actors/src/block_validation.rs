@@ -27,13 +27,14 @@ use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
 use irys_types::u256_from_le_bytes as hash_to_number;
 use irys_types::CommitmentType;
+use irys_types::UnixTimestampMs;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, Address, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    PoaData, H256, U256,
+    PoaData, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{BlockHash, LedgerChunkRange};
@@ -75,7 +76,10 @@ pub enum PreValidationError {
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
-    LastDiffTimestampMismatch { expected: u128, got: u128 },
+    LastDiffTimestampMismatch {
+        expected: UnixTimestampMs,
+        got: UnixTimestampMs,
+    },
     #[error("Invalid ledger id {ledger_id}")]
     LedgerIdInvalid { ledger_id: u32 },
     #[error("Invalid merkle proof: {0}")]
@@ -370,8 +374,8 @@ pub async fn prevalidate_block(
 
     // Check block timestamp drift
     timestamp_is_valid(
-        block.timestamp,
-        previous_block.timestamp,
+        block.timestamp.as_millis(),
+        previous_block.timestamp.as_millis(),
         config.consensus.max_future_timestamp_drift_millis,
     )?;
 
@@ -621,7 +625,7 @@ pub fn last_diff_timestamp_is_valid(
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> Result<(), PreValidationError> {
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
-    let expected = if block.height % blocks_between_adjustments == 0 {
+    let expected = if block.height.is_multiple_of(blocks_between_adjustments) {
         block.timestamp
     } else {
         previous_block.last_diff_timestamp
@@ -1091,7 +1095,7 @@ pub async fn shadow_transactions_are_valid(
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
-    let block_timestamp_sec = block.timestamp / 1000;
+    let block_timestamp_sec: u128 = block.timestamp_secs().as_secs().into();
     ensure!(
         payload_timestamp == block_timestamp_sec,
         "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
@@ -1258,11 +1262,11 @@ pub async fn submit_payload_to_reth(
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
 #[tracing::instrument(level = "trace", skip_all, err)]
-async fn generate_expected_shadow_transactions_from_db<'a>(
+async fn generate_expected_shadow_transactions_from_db(
     config: &Config,
     service_senders: &ServiceSenders,
     mempool_guard: &MempoolReadGuard,
-    block: &'a IrysBlockHeader,
+    block: &IrysBlockHeader,
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
@@ -1296,7 +1300,9 @@ async fn generate_expected_shadow_transactions_from_db<'a>(
     let initial_treasury_balance = prev_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let expired_ledger_fees = if is_epoch_block {
         ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -1377,7 +1383,9 @@ async fn extract_commitment_txs(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let commitment_txs = if is_epoch_block {
         // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
         vec![]
@@ -1442,6 +1450,9 @@ fn validate_shadow_transactions_match(
     expected: impl Iterator<Item = ShadowTransaction>,
     block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
+    // Verify solution hash matches the block
+    let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
+
     // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
@@ -1458,14 +1469,12 @@ fn validate_shadow_transactions_match(
             solution_hash,
         } = &actual
         {
-            // Verify solution hash matches the block
-            let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
             if *solution_hash != expected_hash {
                 eyre::bail!(
                     "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
                     idx,
-                    block_header.solution_hash,
-                    solution_hash
+                    H256::from(*expected_hash),
+                    H256::from(**solution_hash)
                 );
             }
         }
@@ -1563,7 +1572,9 @@ pub async fn commitment_txs_are_valid(
         (commitment_snapshot, epoch_snapshot)
     };
 
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         debug!(
@@ -1702,10 +1713,13 @@ pub fn calculate_perm_storage_total_fee(
     term_fee: U256,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
+    timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     calculate_perm_fee_from_config(
         bytes_to_store,
         &config.consensus,
+        number_of_ingress_proofs_total,
         ema_snapshot.ema_for_public_pricing(),
         term_fee,
     )
@@ -1718,11 +1732,14 @@ pub fn calculate_term_storage_base_network_fee(
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
+    timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<U256> {
+    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     irys_types::storage_pricing::calculate_term_fee(
         bytes_to_store,
         epochs_for_storage,
         &config.consensus,
+        number_of_ingress_proofs_total,
         ema_snapshot.ema_for_public_pricing(),
     )
 }
@@ -1828,16 +1845,24 @@ pub async fn data_txs_are_valid(
             config.consensus.epoch.submit_ledger_epoch_length,
         );
 
+        // Convert block timestamp from millis to seconds for hardfork params
+        let timestamp_secs = block.timestamp_secs();
         let expected_term_fee = calculate_term_storage_base_network_fee(
             tx.data_size,
             epochs_for_storage,
             &block_ema,
             config,
+            timestamp_secs,
         )
         .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-        let expected_perm_fee =
-            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)
-                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+        let expected_perm_fee = calculate_perm_storage_total_fee(
+            tx.data_size,
+            expected_term_fee,
+            &block_ema,
+            config,
+            timestamp_secs,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
 
         // Validate perm_fee is at least the expected amount
         let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
@@ -1868,12 +1893,18 @@ pub async fn data_txs_are_valid(
             }
         })?;
 
-        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
-            |e| PreValidationError::InvalidPermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            },
-        )?;
+        let number_of_ingress_proofs_total =
+            config.number_of_ingress_proofs_total_at(timestamp_secs);
+        PublishFeeCharges::new(
+            actual_perm_fee,
+            actual_term_fee,
+            &config.consensus,
+            number_of_ingress_proofs_total,
+        )
+        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        })?;
         Ok(())
     };
 
@@ -2013,10 +2044,11 @@ pub async fn data_txs_are_valid(
 
             // Take the smallest value, the configured proof count or the number
             // of staked miners that can produce a valid proof.
-            let proofs_per_tx = std::cmp::min(
-                config.consensus.number_of_ingress_proofs_total as usize,
-                total_miners,
-            );
+            let timestamp_secs = block.timestamp_secs();
+            let number_of_ingress_proofs_total =
+                config.number_of_ingress_proofs_total_at(timestamp_secs);
+            let proofs_per_tx =
+                std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
             publish_txs.len() * proofs_per_tx
         };
 
@@ -2047,8 +2079,9 @@ pub async fn data_txs_are_valid(
             )
             .await?;
 
+            let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
-                config.consensus.number_of_ingress_proofs_from_assignees as usize;
+                config.number_of_ingress_proofs_from_assignees_at(timestamp_secs) as usize;
 
             // While the protocol can require X number of assigned proofs, if there
             // is less than that many assigned to the slot, it still needs to function.
@@ -2282,9 +2315,12 @@ pub async fn data_txs_are_valid(
                 }
             }
 
-            if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
+            let timestamp_secs = block.timestamp_secs();
+            let number_of_ingress_proofs_total =
+                config.number_of_ingress_proofs_total_at(timestamp_secs);
+            if tx_proofs.len() != number_of_ingress_proofs_total as usize {
                 return Err(PreValidationError::IngressProofCountMismatch {
-                    expected: config.consensus.number_of_ingress_proofs_total as usize,
+                    expected: number_of_ingress_proofs_total as usize,
                     actual: tx_proofs.len(),
                 });
             }
@@ -3051,7 +3087,7 @@ mod tests {
             previous_cumulative_diff: U256::from(4000),
             miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
-            timestamp: 1000,
+            timestamp: UnixTimestampMs::from_millis(1000),
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
@@ -3310,7 +3346,7 @@ mod tests {
             previous_cumulative_diff: U256::from(4000),
             miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
-            timestamp: 1000,
+            timestamp: UnixTimestampMs::from_millis(1000),
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
@@ -3523,11 +3559,11 @@ mod tests {
     fn last_diff_timestamp_no_adjustment_ok() {
         let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 1;
-        prev.last_diff_timestamp = 1000;
+        prev.last_diff_timestamp = UnixTimestampMs::from_millis(1000);
 
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 2;
-        block.timestamp = 1500;
+        block.timestamp = UnixTimestampMs::from_millis(1500);
         block.last_diff_timestamp = prev.last_diff_timestamp;
 
         let mut config = ConsensusConfig::testing();
@@ -3542,11 +3578,11 @@ mod tests {
     fn last_diff_timestamp_adjustment_ok() {
         let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 9;
-        prev.last_diff_timestamp = 1000;
+        prev.last_diff_timestamp = UnixTimestampMs::from_millis(1000);
 
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 10;
-        block.timestamp = 2000;
+        block.timestamp = UnixTimestampMs::from_millis(2000);
         block.last_diff_timestamp = block.timestamp;
 
         let mut config = ConsensusConfig::testing();
@@ -3561,12 +3597,12 @@ mod tests {
     fn last_diff_timestamp_incorrect_fails() {
         let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 1;
-        prev.last_diff_timestamp = 1000;
+        prev.last_diff_timestamp = UnixTimestampMs::from_millis(1000);
 
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 2;
-        block.timestamp = 1500;
-        block.last_diff_timestamp = 999;
+        block.timestamp = UnixTimestampMs::from_millis(1500);
+        block.last_diff_timestamp = UnixTimestampMs::from_millis(999);
 
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;

@@ -1,6 +1,9 @@
 // Standard library imports
 use core::convert::Infallible;
 
+use alloy_rpc_types_engine::ExecutionData;
+use either::Either;
+
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
 use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
@@ -13,7 +16,6 @@ use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::result::ExecutionResult;
 use reth::revm::context::TxEnv;
-use reth::revm::either::Either;
 use reth::revm::primitives::hardfork::SpecId;
 use reth::revm::{Inspector, State};
 use reth_ethereum_primitives::Receipt;
@@ -21,12 +23,15 @@ use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, CommitChanges};
 use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use reth_evm::precompiles::PrecompilesMap;
-use reth_evm::{ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes};
+use reth_evm::{
+    ConfigureEngineEvm, ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes,
+};
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
 // External crate imports - Revm
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
-use revm::context::{BlockEnv, Cfg as _, CfgEnv, ContextTr as _};
+use revm::context::{BlockEnv, CfgEnv, ContextTr as _};
+use revm::handler::EthFrame;
 use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
@@ -122,6 +127,28 @@ where
 
     fn evm(&self) -> &Self::Evm {
         self.inner.evm()
+    }
+
+    fn execute_transaction_without_commit(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<
+        revm::context_interface::result::ExecResultAndState<
+            ExecutionResult<<Self::Evm as Evm>::HaltReason>,
+        >,
+        BlockExecutionError,
+    > {
+        self.inner.execute_transaction_without_commit(tx)
+    }
+
+    fn commit_transaction(
+        &mut self,
+        result: revm::context_interface::result::ExecResultAndState<
+            ExecutionResult<<Self::Evm as Evm>::HaltReason>,
+        >,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<u64, BlockExecutionError> {
+        self.inner.commit_transaction(result, tx)
     }
 }
 
@@ -236,9 +263,32 @@ where
 /// Irys EVM configuration that integrates shadow transaction support.
 #[derive(Debug, Clone)]
 pub struct IrysEvmConfig {
-    pub inner: EthEvmConfig<EthEvmFactory>,
+    pub inner: EthEvmConfig<ChainSpec, EthEvmFactory>,
     pub executor_factory: IrysBlockExecutorFactory,
     pub assembler: IrysBlockAssembler,
+}
+
+impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
+    fn evm_env_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<reth_evm::EvmEnvFor<Self>, Self::Error> {
+        self.inner.evm_env_for_payload(payload)
+    }
+
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<reth_evm::ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.inner.context_for_payload(payload)
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl reth_evm::ExecutableTxIterator<Self>, Self::Error> {
+        self.inner.tx_iterator_for_payload(payload)
+    }
 }
 
 impl ConfigureEvm for IrysEvmConfig {
@@ -256,7 +306,7 @@ impl ConfigureEvm for IrysEvmConfig {
         &self.assembler
     }
 
-    fn evm_env(&self, header: &Header) -> EvmEnv {
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv, Infallible> {
         self.inner.evm_env(header)
     }
 
@@ -271,7 +321,7 @@ impl ConfigureEvm for IrysEvmConfig {
     fn context_for_block<'a>(
         &self,
         block: &'a SealedBlock<alloy_consensus::Block<TransactionSigned>>,
-    ) -> EthBlockExecutionCtx<'a> {
+    ) -> Result<EthBlockExecutionCtx<'a>, Infallible> {
         self.inner.context_for_block(block)
     }
 
@@ -279,7 +329,7 @@ impl ConfigureEvm for IrysEvmConfig {
         &self,
         parent: &SealedHeader,
         attributes: Self::NextBlockEnvCtx,
-    ) -> EthBlockExecutionCtx<'_> {
+    ) -> Result<EthBlockExecutionCtx<'_>, Infallible> {
         self.inner.context_for_next_block(parent, attributes)
     }
 }
@@ -301,6 +351,7 @@ impl EvmFactory for IrysEvmFactory {
     type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
@@ -378,6 +429,7 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
         I,
         EthInstructions<EthInterpreter, EthEvmContext<DB>>,
         PRECOMPILE,
+        EthFrame,
     >,
     inspect: bool,
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
@@ -394,6 +446,7 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             I,
             EthInstructions<EthInterpreter, EthEvmContext<DB>>,
             PRECOMPILE,
+            EthFrame,
         >,
         inspect: bool,
     ) -> Self {
@@ -407,8 +460,13 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     /// Consumes self and return the inner EVM instance.
     pub fn into_inner(
         self,
-    ) -> RevmEvm<EthEvmContext<DB>, I, EthInstructions<EthInterpreter, EthEvmContext<DB>>, PRECOMPILE>
-    {
+    ) -> RevmEvm<
+        EthEvmContext<DB>,
+        I,
+        EthInstructions<EthInterpreter, EthEvmContext<DB>>,
+        PRECOMPILE,
+        EthFrame,
+    > {
         self.inner
     }
 
@@ -450,6 +508,7 @@ where
     type Error = EVMError<DB::Error>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PRECOMPILE;
     type Inspector = I;
 
@@ -486,8 +545,7 @@ where
         };
 
         if self.inspect {
-            self.inner.set_tx(tx);
-            self.inner.inspect_replay()
+            self.inner.inspect_tx(tx)
         } else {
             self.inner.transact(tx)
         }
@@ -589,6 +647,22 @@ where
 
     fn inspector_mut(&mut self) -> &mut Self::Inspector {
         &mut self.inner.inspector
+    }
+
+    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
+        (
+            &self.inner.ctx.journaled_state.database,
+            &self.inner.inspector,
+            &self.inner.precompiles,
+        )
+    }
+
+    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
+        (
+            &mut self.inner.ctx.journaled_state.database,
+            &mut self.inner.inspector,
+            &mut self.inner.precompiles,
+        )
     }
 }
 
@@ -731,7 +805,7 @@ where
 
         let result_state = ResultAndState {
             result: execution_result,
-            state: std::mem::take(&mut self.state),
+            state: std::mem::take(&mut self.state).into_iter().collect(),
         };
 
         // HACK so that inspecting using trace returns a valid frame
@@ -740,7 +814,7 @@ where
             // create the initial frame
             let mut frame = revm::handler::execution::create_init_frame(
                 &tx,
-                self.ctx().cfg().spec(),
+                None, // No precompiled bytecode for shadow transactions
                 tx.gas_limit,
             );
 
@@ -755,11 +829,13 @@ where
             let mut frame_result =
                 revm::handler::FrameResult::Call(revm::interpreter::CallOutcome {
                     result: InterpreterResult {
-                        result: revm::interpreter::InstructionResult::Continue,
+                        result: revm::interpreter::InstructionResult::Return,
                         output: Bytes::new(),
                         gas: revm::interpreter::Gas::new(0),
                     },
                     memory_offset: Default::default(),
+                    was_precompile_called: false,
+                    precompile_call_logs: Vec::new(),
                 });
 
             // inject the valid frame as the frame result
@@ -786,7 +862,7 @@ where
         };
 
         let ctx = self.ctx_mut();
-        let db = ctx.db();
+        let db = ctx.db_mut();
         Ok(db
             .basic(address)
             .map_err(<Self as Evm>::Error::Database)?
@@ -995,7 +1071,7 @@ where
             Ok((account, false))
         } else {
             // Create new account
-            let mut account = Account::new_not_existing();
+            let mut account = Account::new_not_existing(0);
 
             account.info.balance = fee;
 
@@ -1169,7 +1245,7 @@ where
             account
         } else {
             // Create a new account with the incremented balance
-            let mut account = Account::new_not_existing();
+            let mut account = Account::new_not_existing(0);
             account.info.balance = balance_increment.amount;
 
             tracing::debug!(

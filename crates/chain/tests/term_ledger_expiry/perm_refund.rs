@@ -164,10 +164,12 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     // Verify final balances
     let user1_final = U256::from_be_bytes(
         node.get_balance(user1_address, final_block.evm_block_hash)
+            .await
             .to_be_bytes(),
     );
     let user2_final = U256::from_be_bytes(
         node.get_balance(user2_address, final_block.evm_block_hash)
+            .await
             .to_be_bytes(),
     );
 

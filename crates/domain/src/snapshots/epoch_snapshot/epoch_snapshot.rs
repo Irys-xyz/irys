@@ -228,7 +228,10 @@ impl EpochSnapshot {
     }
 
     fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochSnapshotError> {
-        if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
+        if !block_header
+            .height
+            .is_multiple_of(self.config.consensus.epoch.num_blocks_in_epoch)
+        {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
                 block_header.height, self.config.consensus.epoch.num_blocks_in_epoch
@@ -1590,7 +1593,7 @@ mod tests {
             let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
 
             // First application succeeds
-            snapshot.apply_unpledges(&[tx.clone()]).unwrap();
+            snapshot.apply_unpledges(std::slice::from_ref(&tx)).unwrap();
 
             // Second application errors (target not found anymore)
             let res = snapshot.apply_unpledges(&[tx]);

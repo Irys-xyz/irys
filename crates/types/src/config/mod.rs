@@ -8,6 +8,7 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
+use crate::UnixTimestamp;
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -31,6 +32,22 @@ impl Config {
             chain_id: self.consensus.chain_id,
             chunk_size: self.consensus.chunk_size,
         }
+    }
+
+    /// Get the number of ingress proofs required at a given timestamp (in seconds).
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
+        self.0
+            .consensus
+            .hardforks
+            .number_of_ingress_proofs_total_at(timestamp)
+    }
+
+    /// Get the number of ingress proofs from assignees required at a given timestamp (in seconds).
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
+        self.0
+            .consensus
+            .hardforks
+            .number_of_ingress_proofs_from_assignees_at(timestamp)
     }
 
     // validate configuration invariants
@@ -63,6 +80,19 @@ impl Config {
             .num_chunks_in_partition
             .div_ceil(self.consensus.num_chunks_in_recall_range);
         ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
+
+        // ensure that prune_at_capacity_percent is a sane value
+        let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;
+        ensure!(
+            prune_at_capacity_percent > 0.0,
+            "prune_at_capacity_percent ({}) is too low! (must be >0%)",
+            prune_at_capacity_percent
+        );
+        ensure!(
+            prune_at_capacity_percent < 100.0,
+            "prune_at_capacity_percent ({}) is too high! (must be <100%)",
+            prune_at_capacity_percent
+        );
 
         Ok(())
     }
@@ -444,8 +474,6 @@ mod tests {
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
-        number_of_ingress_proofs_total = 1
-        number_of_ingress_proofs_from_assignees = 0
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
         pledge_base_value = 950.0
@@ -464,26 +492,12 @@ mod tests {
         timestamp_millis = 0
 
         [reth]
-        chain = 1270
+        gas_limit = 30000000
 
-        [reth.genesis]
-        nonce = "0x0"
-        timestamp = "0x0"
-        extraData = "0x"
-        gasLimit = "0x1c9c380"
-        difficulty = "0x0"
-        mixHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-        coinbase = "0x0000000000000000000000000000000000000000"
-
-        [reth.genesis.config]
-        chainId = 1270
-        daoForkSupport = false
-        terminalTotalDifficultyPassed = true
-
-        [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+        [reth.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
         balance = "0x152cf4e72a974f1c0000"
 
-        [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+        [reth.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
         balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
@@ -518,6 +532,10 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
+
+        [hardforks.frontier]
+        number_of_ingress_proofs_total = 1
+        number_of_ingress_proofs_from_assignees = 0
         "#;
 
         // Create the expected config

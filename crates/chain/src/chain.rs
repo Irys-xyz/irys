@@ -47,7 +47,6 @@ use irys_p2p::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_price_oracle::SingleOracle;
-use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -59,9 +58,9 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
-    TokioServiceHandle, H256, U256,
+    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
-use irys_types::{NetworkConfigWithDefaults as _, RethChainSpec, ShutdownReason};
+use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -120,7 +119,6 @@ pub struct IrysNodeCtx {
     stop_guard: StopGuard,
     pub peer_list: PeerList,
     pub sync_state: ChainSyncState,
-    pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
@@ -261,7 +259,6 @@ async fn start_reth_node(
     config: Config,
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
-    shadow_tx_store: ShadowTxStore,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -270,7 +267,6 @@ async fn start_reth_node(
         config.node_config.clone(),
         latest_block,
         random_ports,
-        shadow_tx_store.clone(),
     )
     .in_current_span()
     .await?;
@@ -355,7 +351,6 @@ impl IrysNode {
     async fn get_or_create_genesis_info(
         &self,
         node_mode: &NodeMode,
-        reth_consensus_config: RethChainSpec,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
@@ -370,12 +365,16 @@ impl IrysNode {
         if has_existing_data {
             // CASE 1: Load existing genesis block and commitments from database
             let (block, commitments) = self.load_existing_genesis(irys_db, block_index);
-            let mut reth_genesis = reth_consensus_config.genesis.clone();
-            reth_genesis.timestamp = Duration::from_millis(block.timestamp.try_into()?).as_secs();
+            let timestamp_secs = block.timestamp_secs().as_secs();
             return Ok((
                 block,
                 commitments,
-                irys_chain_spec(reth_consensus_config.chain, reth_genesis)?,
+                irys_chain_spec(
+                    self.config.consensus.chain_id,
+                    &self.config.consensus.reth,
+                    &self.config.consensus.hardforks,
+                    timestamp_secs,
+                )?,
             ));
         }
 
@@ -383,7 +382,7 @@ impl IrysNode {
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                self.create_new_genesis_block(reth_consensus_config).await
+                self.create_new_genesis_block().await
             }
             NodeMode::Peer => {
                 let expected_genesis_hash = self
@@ -395,15 +394,21 @@ impl IrysNode {
                 let (block, commitments) = self
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)
                     .await;
-                let mut reth_genesis = reth_consensus_config.genesis.clone();
-
-                reth_genesis.timestamp =
-                    Duration::from_millis(block.timestamp.try_into()?).as_secs();
-
+                let timestamp_secs = block.timestamp_secs().as_secs();
+                // TODO: we should enforce this
+                // assert_eq!(
+                //     timestamp_secs,
+                //     (self.config.consensus.genesis.timestamp_millis / 1000) as u64
+                // );
                 Ok((
                     block,
                     commitments,
-                    irys_chain_spec(reth_consensus_config.chain, reth_genesis)?,
+                    irys_chain_spec(
+                        self.config.consensus.chain_id,
+                        &self.config.consensus.reth,
+                        &self.config.consensus.hardforks,
+                        timestamp_secs,
+                    )?,
                 ))
             }
         }
@@ -450,11 +455,10 @@ impl IrysNode {
 
     async fn create_new_genesis_block(
         &self,
-        reth_consensus_config: RethChainSpec,
     ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
         // Create timestamp for genesis block (prefer configured value if provided)
         let configured_ts = self.config.consensus.genesis.timestamp_millis;
-        let timestamp = if configured_ts != 0 {
+        let timestamp_millis = if configured_ts != 0 {
             configured_ts
         } else {
             SystemTime::now()
@@ -463,17 +467,24 @@ impl IrysNode {
                 .as_millis()
         };
 
-        let mut reth_genesis = reth_consensus_config.genesis.clone();
+        // Convert to seconds for reth
+        let timestamp_secs = Duration::from_millis(timestamp_millis.try_into()?).as_secs();
 
-        // convert to seconds for reth
-        reth_genesis.timestamp = Duration::from_millis(timestamp.try_into()?).as_secs();
+        let reth_chain_spec = irys_chain_spec(
+            self.config.consensus.chain_id,
+            &self.config.consensus.reth,
+            &self.config.consensus.hardforks,
+            timestamp_secs,
+        )?;
 
-        let reth_chain_spec = irys_chain_spec(reth_consensus_config.chain, reth_genesis)?;
-
+        // Get hardfork params for genesis block using its timestamp
+        let number_of_ingress_proofs_total = self
+            .config
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
         let mut genesis_block = build_unsigned_irys_genesis_block(
             &self.config.consensus.genesis,
             reth_chain_spec.genesis_hash(),
-            self.config.consensus.number_of_ingress_proofs_total,
+            number_of_ingress_proofs_total,
         );
 
         // Generate genesis commitments from configuration
@@ -490,8 +501,8 @@ impl IrysNode {
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
             genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
         }
-        genesis_block.timestamp = timestamp;
-        genesis_block.last_diff_timestamp = timestamp;
+        genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
+        genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
         // Add commitment transactions to genesis block and get initial treasury
         let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
@@ -641,12 +652,7 @@ impl IrysNode {
 
         // Gets or creates the genesis block and commitments regardless of node mode
         let (genesis_block, genesis_commitments, reth_chainspec) = self
-            .get_or_create_genesis_info(
-                node_mode,
-                config.consensus.reth.clone(),
-                &irys_db,
-                &block_index,
-            )
+            .get_or_create_genesis_info(node_mode, &irys_db, &block_index)
             .await?;
 
         // Capture the genesis hash for network consensus
@@ -697,8 +703,6 @@ impl IrysNode {
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
-        let (shadow_tx_store, _shadow_tx_notification_stream) =
-            ShadowTxStore::new_with_notifications();
 
         let irys_provider = reth_provider::create_provider();
 
@@ -724,7 +728,6 @@ impl IrysNode {
             irys_db,
             block_index,
             self.gossip_listener,
-            shadow_tx_store.clone(),
             tokio_runtime.handle().clone(),
         )?;
 
@@ -734,7 +737,6 @@ impl IrysNode {
             self.config.clone(),
             reth_shutdown_receiver,
             main_actor_thread_shutdown_tx,
-            shadow_tx_store,
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
@@ -893,7 +895,6 @@ impl IrysNode {
         irys_db: DatabaseProvider,
         block_index: BlockIndex,
         gossip_listener: TcpListener,
-        shadow_tx_store: ShadowTxStore,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<JoinHandle<()>, eyre::Error> {
         let span = tracing::Span::current();
@@ -928,7 +929,6 @@ impl IrysNode {
                                 http_listener,
                                 irys_db,
                                 gossip_listener,
-                                shadow_tx_store,
                                 runtime_handle,
                             )
                             .instrument(tracing::Span::current())
@@ -990,7 +990,6 @@ impl IrysNode {
         config: Config,
         reth_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<ShutdownReason>,
-        shadow_tx_store: ShadowTxStore,
         reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<()>,
         irys_provider: IrysRethProvider,
@@ -1016,7 +1015,6 @@ impl IrysNode {
                         config,
                         reth_handle_sender,
                         latest_block_height,
-                        shadow_tx_store,
                     )
                     .in_current_span()
                     .await
@@ -1101,7 +1099,6 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
-        shadow_tx_store: ShadowTxStore,
         runtime_handle: tokio::runtime::Handle,
     ) -> eyre::Result<(
         IrysNodeCtx,
@@ -1113,8 +1110,7 @@ impl IrysNode {
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
-        let reth_node_adapter =
-            IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
+        let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into()).await?;
 
         // initialize packing service early
         let packing_service =
@@ -1227,6 +1223,8 @@ impl IrysNode {
             irys_db.clone(),
             receivers.chunk_cache,
             config.clone(),
+            service_senders.gossip_broadcast.clone(),
+            service_senders.chunk_cache.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
@@ -1386,7 +1384,6 @@ impl IrysNode {
             reth_node_adapter.clone(),
             receivers.block_producer,
             reth_node.provider.clone(),
-            shadow_tx_store.clone(),
             block_index,
             runtime_handle.clone(),
         );
@@ -1498,7 +1495,6 @@ impl IrysNode {
             stop_guard: StopGuard::new(),
             peer_list: peer_list_guard.clone(),
             sync_state: sync_state.clone(),
-            shadow_tx_store,
             reth_node_adapter,
             block_producer_inner,
             block_pool,
@@ -1652,13 +1648,12 @@ impl IrysNode {
             .is_some_and(|p| p.ends_with(".tmp"));
         let is_test_based_on_cfg_flag = cfg!(test);
         if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            error!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing")
+            panic!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
         }
         let span = tracing::Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = config.vdf.clone();
-
             move || {
                 let _span = span.enter();
 
@@ -1772,7 +1767,6 @@ impl IrysNode {
         reth_node_adapter: IrysRethNodeAdapter,
         block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
-        shadow_tx_store: ShadowTxStore,
         block_index: Arc<RwLock<BlockIndex>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
@@ -1788,8 +1782,7 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
-            shadow_tx_store,
-            beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
+            consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
         });
 
@@ -2103,6 +2096,8 @@ async fn stake_and_pledge(
     let has_pending_stake =
         pending_commitments.is_some_and(|commitments| commitments.stake.is_some());
 
+    let mut total_cost = U256::zero();
+
     // if we have a historic or pending stake, don't send another
     let is_staked = is_historically_staked || has_pending_stake;
     if !is_staked {
@@ -2114,6 +2109,8 @@ async fn stake_and_pledge(
         // post a stake tx
         let mut stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         signer.sign_commitment(&mut stake_tx)?;
+
+        total_cost += stake_tx.total_cost();
 
         post_commitment_tx(&stake_tx).await.unwrap();
         debug!(
@@ -2155,6 +2152,8 @@ async fn stake_and_pledge(
         signer.sign_commitment(&mut pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
+        total_cost += pledge_tx.total_cost();
+
         debug!(
             "Posted pledge tx {}/{} {:?} (value: {}, fee {})",
             idx + 1,
@@ -2164,7 +2163,10 @@ async fn stake_and_pledge(
             &pledge_tx.fee
         );
     }
-    debug!("Stake & Pledge check complete");
+    debug!(
+        "Stake & Pledge check complete - total cost: {}",
+        &total_cost
+    );
 
     Ok(())
 }

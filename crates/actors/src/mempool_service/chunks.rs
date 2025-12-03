@@ -1,3 +1,4 @@
+use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
 use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
@@ -126,9 +127,7 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state
-                    .put_chunk(chunk.clone(), preheader_chunks_per_item)
-                    .await;
+                self.mempool_state.put_chunk(chunk.clone()).await;
                 return Ok(());
             }
         };
@@ -307,55 +306,18 @@ impl Inner {
         // check if we have generated an ingress proof for this tx already
         // if we have, update it's expiry height
 
-        //  TODO: hook into whatever manages ingress proofs
-        let signer_addr = self.config.irys_signer().address();
-
-        // Check if ingress proof exists and get chunk count in a single transaction
-        let chunk_count_opt = self
+        // Determine existing proof state and chunk count
+        let (chunk_count_opt, existing_local_proof) = self
             .irys_db
             .view_eyre(|tx| {
-                // First check if proof already exists
-                let ingress_proof = irys_database::ingress_proof_by_data_root_address(
-                    tx,
-                    chunk.data_root,
-                    signer_addr,
-                )?;
+                let existing_local_proof: Option<IngressProof> = None;
 
-                if let Some(compact_proof) = ingress_proof {
-                    match self.is_ingress_proof_expired(&compact_proof.proof) {
-                        Ok(expired) => {
-                            if !expired {
-                                // Proof is valid, no need to proceed further
-                                return Ok(None);
-                            } else {
-                                info!(
-                                    proof.data_root = ?compact_proof.proof.data_root,
-                                    "Ingress proof for data root {:?} has expired", &compact_proof.proof.data_root
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let message = format!(
-                                "Error validating ingress proof anchor for data root {:?}: {:?}",
-                                &compact_proof.proof.data_root, e
-                            );
-                            error!(
-                                proof.data_root = ?compact_proof.proof.data_root,
-                                message
-                            );
-                            return Err(eyre::eyre!(message));
-                        }
-                    }
-                    // Return None to signal early return needed
-                    return Ok(None);
-                }
-
+                // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
                 let count = cursor
                     .dup_count(root_hash)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
-
-                Ok(Some(count))
+                Ok((Some(count), existing_local_proof))
             })
             .map_err(|e| {
                 error!(
@@ -365,14 +327,17 @@ impl Inner {
                 CriticalChunkIngressError::DatabaseError
             })?;
 
-        // Handle early return case
-        let Some(chunk_count) = chunk_count_opt else {
+        // Early return if we have a valid existing local proof
+        if chunk_count_opt.is_none() && existing_local_proof.is_some() {
             info!(
-                "Our ingress proof already exists for data root {}",
+                "Local ingress proof already exists and is valid for data root {}",
                 &root_hash
             );
             return Ok(());
-        };
+        }
+
+        let chunk_count =
+            chunk_count_opt.expect("chunk_count present when proof missing or expired");
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
@@ -387,59 +352,24 @@ impl Inner {
 
         if chunk_count == expected_chunk_count {
             // we *should* have all the chunks
-            // dispatch a ingress proof task
-
             let db = self.irys_db.clone();
-            let signer = self.config.irys_signer();
-            let chain_id = self.config.consensus.chain_id;
-            let gossip_sender = self.service_senders.gossip_broadcast.clone();
-
-            let latest_migrated = self
-                .block_tree_read_guard
-                .read()
-                .get_latest_canonical_entry()
-                .clone();
-
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();
-            self.exec.clone().spawn_blocking(
-                async move {
-                    let proof = generate_ingress_proof(
-                        db.clone(),
-                        root_hash,
-                        data_size,
-                        chunk_size,
-                        signer,
-                        chain_id,
-                        latest_migrated.block_hash,
-                    )
-                    // TODO: handle results instead of unwrapping
-                    .unwrap();
-
-                    match Self::validate_ingress_proof_anchor_static(
-                        &block_tree_read_guard,
-                        &db,
-                        &config,
-                        &proof,
-                    ) {
-                        Ok(()) => {
-                            // Gossip the ingress proof
-                            let gossip_broadcast_message = GossipBroadcastMessage::from(proof);
-                            if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-                                tracing::error!("Failed to send gossip data for ingress proof data_root {:?}: {:?}", root_hash, error);
-                            }
-                        }
-                        Err(e) => {
-                            // Don't broadcast expired proofs
-                            debug!(
-                                proof.data_root = ?proof.data_root,
-                                "Ingress proof anchor is too old or unknown, skipping broadcast: {:?}", e
-                            );
-                        }
-                    }
+            let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let cache_sender = self.service_senders.chunk_cache.clone();
+            let _fut = self.exec.clone().spawn_blocking(async move {
+                if let Err(e) = generate_and_store_ingress_proof(
+                    &block_tree_read_guard,
+                    &db,
+                    &config,
+                    chunk.data_root,
+                    None,
+                    &gossip_sender,
+                    &cache_sender,
+                ) {
+                    tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
                 }
-                .in_current_span(),
-            );
+            }).in_current_span();
         }
 
         let gossip_sender = &self.service_senders.gossip_broadcast.clone();

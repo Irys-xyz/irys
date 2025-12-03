@@ -1,8 +1,7 @@
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,
-    IrysNodeTest,
+    assert_validation_error, gossip_data_tx_to_node, read_block_from_state, solution_context,
+    BlockValidationOutcome, IrysNodeTest,
 };
-use crate::validation::unpledge_partition::gossip_data_tx_to_node;
 use irys_actors::{
     async_trait,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
@@ -21,7 +20,7 @@ use irys_types::storage_pricing::{
 use irys_types::IngressProofsList;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    OracleConfig, U256,
+    OracleConfig, UnixTimestamp, U256,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
@@ -136,8 +135,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 price_oracle: genesis_block_prod.price_oracle.clone(),
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
-                shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
-                beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
+                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
             }),
         },
@@ -256,8 +254,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
                 price_oracle: genesis_block_prod.price_oracle.clone(),
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
-                shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
-                beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
+                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
             }),
         },
@@ -389,16 +386,22 @@ async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> e
 
     let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
 
-    // Calculate expected fees using the provided EMA
+    // Calculate expected fees using hardfork params from config to match validation behavior
+    let number_of_ingress_proofs_total = genesis_node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
     )?;
 
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
     )?;
@@ -509,10 +512,15 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
 
     let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
 
-    // Calculate expected fees using the provided EMA
+    // Calculate expected fees using hardfork params from config to match validation behavior
+    let number_of_ingress_proofs_total = genesis_node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
     let expected_term_fee = calculate_term_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
     )?
     .checked_div(U256::from(2))
@@ -521,6 +529,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
     let expected_perm_fee = calculate_perm_fee_from_config(
         data_size,
         &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
         price_before_the_interval.ema_for_public_pricing(),
         expected_term_fee,
     )?;

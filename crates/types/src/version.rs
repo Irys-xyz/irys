@@ -24,16 +24,12 @@ pub enum PeerResponse {
 // Explicit integer protocol versions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u32)]
+#[derive(Default)]
 pub enum ProtocolVersion {
+    #[default]
     V1 = 1,
     // V2 = 2,
     // V3 = 3,
-}
-
-impl Default for ProtocolVersion {
-    fn default() -> Self {
-        Self::V1
-    }
 }
 
 /// Builds a user-agent string to identify this node implementation in the P2P network.

@@ -69,7 +69,9 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     // Refund will occur later at the epoch boundary.
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance_before_inclusion = genesis_node.get_balance(peer_addr, head_block.evm_block_hash);
+    let balance_before_inclusion = genesis_node
+        .get_balance(peer_addr, head_block.evm_block_hash)
+        .await;
 
     let inclusion_block_peer = genesis_node.mine_block().await?;
     genesis_node
@@ -164,8 +166,9 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     );
 
     // Fee-only debit semantics: balance decreases exactly by the commitment priority fee
-    let balance_after_inclusion =
-        genesis_node.get_balance(peer_addr, inclusion_block.evm_block_hash);
+    let balance_after_inclusion = genesis_node
+        .get_balance(peer_addr, inclusion_block.evm_block_hash)
+        .await;
     assert_eq!(
         balance_after_inclusion,
         balance_before_inclusion - U256::from(unpledge_tx.fee),
@@ -234,9 +237,9 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
                 if inc.target == peer_addr {
+                    let expected_amount: alloy_primitives::U256 = expected_refund_amount.into();
                     assert_eq!(
-                        inc.amount,
-                        expected_refund_amount.into(),
+                        inc.amount, expected_amount,
                         "Refund amount should equal last pledge value (builder's value)"
                     );
                     matched = true;
@@ -269,7 +272,9 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     );
 
     // User balance should increase by exactly the refund amount at epoch (zero priority fee)
-    let balance_after_epoch = genesis_node.get_balance(peer_addr, last_block.evm_block_hash);
+    let balance_after_epoch = genesis_node
+        .get_balance(peer_addr, last_block.evm_block_hash)
+        .await;
 
     assert_eq!(
         balance_after_epoch,
@@ -605,8 +610,9 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance_before_inclusion =
-        genesis_node.get_balance(genesis_signer.address(), head_block.evm_block_hash);
+    let balance_before_inclusion = genesis_node
+        .get_balance(genesis_signer.address(), head_block.evm_block_hash)
+        .await;
 
     let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
     let (total_fee, total_refund, unpledge_txs) = send_unpledge_all(
@@ -689,8 +695,9 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         "Every unpledge commitment should have a decoded shadow debit"
     );
 
-    let balance_after_inclusion =
-        genesis_node.get_balance(genesis_signer.address(), inclusion_block.evm_block_hash);
+    let balance_after_inclusion = genesis_node
+        .get_balance(genesis_signer.address(), inclusion_block.evm_block_hash)
+        .await;
     assert_eq!(
         balance_after_inclusion,
         balance_before_inclusion - total_fee,
@@ -787,8 +794,9 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         "Treasury must drop by the total refund amount"
     );
 
-    let balance_after_epoch =
-        genesis_node.get_balance(genesis_signer.address(), epoch_block.evm_block_hash);
+    let balance_after_epoch = genesis_node
+        .get_balance(genesis_signer.address(), epoch_block.evm_block_hash)
+        .await;
     let expected_final_balance = balance_before_inclusion - total_fee + total_refund;
     assert_eq!(
         balance_after_epoch, expected_final_balance,

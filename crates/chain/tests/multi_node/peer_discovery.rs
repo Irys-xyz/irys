@@ -308,8 +308,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
     assert!(
-        vec![
-            PeerAddress {
+        [PeerAddress {
                 gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
                 api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
                 execution: RethPeerInfo {
@@ -332,8 +331,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-            },
-        ]
+            }]
         .iter()
         .all(|addr| {
             let contains = peer_list.contains(addr);

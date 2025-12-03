@@ -9,10 +9,9 @@ mod unstake_edge_cases;
 use std::sync::Arc;
 
 use crate::utils::{
-    assert_validation_error, read_block_from_state, solution_context, BlockValidationOutcome,
-    IrysNodeTest,
+    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
+    BlockValidationOutcome, IrysNodeTest,
 };
-use crate::validation::unpledge_partition::gossip_commitment_to_node;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
@@ -528,7 +527,6 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
-
     // Tamper with last_epoch_hash to make it invalid
     let mut irys_block = (*block).clone();
     irys_block.last_epoch_hash = H256::random(); // Use random hash to ensure it's invalid
@@ -699,6 +697,8 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     genesis_config
         .consensus
         .get_mut()
+        .hardforks
+        .frontier
         .number_of_ingress_proofs_total = 2;
 
     let test_signer = genesis_config.new_random_signer();

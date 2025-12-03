@@ -134,7 +134,7 @@ impl EmaSnapshot {
         // Check if we're at an EMA boundary where we shift intervals
         // This happens at blocks 10, 20, 30, etc. (assuming the price adj interval is 10 blocks)
         let crossing_interval_boundary =
-            new_block.height % blocks_in_interval == 0 && new_block.height > 0;
+            new_block.height.is_multiple_of(blocks_in_interval) && new_block.height > 0;
 
         // Update the interval tracking
         let (ema_price_2_intervals_ago, ema_price_1_interval_ago) = if crossing_interval_boundary {

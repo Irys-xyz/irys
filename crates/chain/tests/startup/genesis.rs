@@ -57,12 +57,12 @@ async fn test_genesis_state_dump_and_restore() -> eyre::Result<()> {
 
     // mine at least one block (minimum for the dump code to work)
     node.mine_blocks(4).await?;
-    let _block_hash = node.wait_until_height(4, 20).await?;
 
     let reth_db = node.node_ctx.reth_db.clone();
     let dump_dir = node.cfg.base_directory.canonicalize()?;
     // create the dump (in the temp folder for this test)
-    let dump_path = dump_state(reth_db, dump_dir)?;
+    // We need to pass the provider to access headers from static files
+    let dump_path = dump_state(reth_db, &node.node_ctx.reth_handle.provider, dump_dir)?;
 
     let reth_data_dir = node.cfg.reth_data_dir().clone();
 

@@ -8,7 +8,7 @@ use crate::utils::IrysNodeTest;
 
 #[tokio::test]
 async fn test_overlapping_data_sizes() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "info");
+    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Create a node
@@ -22,7 +22,7 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
             consensus.num_partitions_per_slot = 1;
             consensus.num_chunks_in_partition = 10;
             consensus.epoch.num_blocks_in_epoch = 4;
-            consensus.number_of_ingress_proofs_total = 1;
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
             consensus.block_migration_depth = 1;
             consensus.epoch.submit_ledger_epoch_length = 1000;
         })

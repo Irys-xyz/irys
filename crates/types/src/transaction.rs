@@ -1299,6 +1299,7 @@ mod tests {
             }
         }
 
+        #[expect(dead_code)]
         #[derive(
             Clone, Debug, Default, Eq, Serialize, Deserialize, PartialEq, RlpEncodable, RlpDecodable,
         )]

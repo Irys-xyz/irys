@@ -22,10 +22,8 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx,
-    payload::{DeterministicShadowTxKey, ShadowTxStore},
-    reth_node_ethereum::EthEngineTypes,
-    IrysEthereumNode,
+    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysEthereumNode, IrysPayloadAttributes,
+    IrysPayloadBuilderAttributes, IrysPayloadTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
@@ -34,20 +32,20 @@ use irys_types::{
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    SystemTransactionLedger, TokioServiceHandle, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-    api::{BeaconConsensusEngineHandle, NodeTypes, PayloadKind},
+    api::{ConsensusEngineHandle, NodeTypes, PayloadKind},
     core::primitives::SealedBlock,
-    payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
+    payload::{EthBuiltPayload, PayloadBuilderHandle},
     revm::primitives::B256,
     tasks::shutdown::Shutdown,
 };
-use reth_payload_primitives::PayloadBuilderError;
+use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
 use std::time::UNIX_EPOCH;
 use std::{
@@ -170,13 +168,11 @@ pub struct BlockProducerInner {
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
     /// Reth node payload builder
-    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
+    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes<IrysPayloadTypes>>,
     /// Reth blockchain provider
     pub reth_provider: NodeProvider,
-    /// Shadow tx store
-    pub shadow_tx_store: ShadowTxStore,
     /// Reth beacon engine handle
-    pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
+    pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
 }
@@ -494,6 +490,16 @@ pub trait BlockProdStrategy {
         )>,
         BlockProductionError,
     > {
+        if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
+            warn!(
+                "Skipping solution for old step number {}, previous block step number {} for block {}",
+                solution.vdf_step,
+                prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_header.block_hash
+            );
+            return Ok(None);
+        }
+
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
@@ -589,7 +595,7 @@ pub trait BlockProdStrategy {
             {
                 Ok(result) => {
                     if retry_count > 0 {
-                        info!(
+                        error!(
                             solution.hash = %solution.solution_hash,
                             solution.vdf_step = solution.vdf_step,
                             retry.count = retry_count,
@@ -776,7 +782,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-        timestamp_ms: u128,
+        timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
@@ -837,47 +843,54 @@ pub trait BlockProdStrategy {
 
     #[tracing::instrument(level = "trace", skip_all, fields(
         payload.parent_evm_hash = %prev_block_header.evm_block_hash,
-        payload.timestamp_sec = timestamp_ms / 1000,
+        payload.timestamp_sec = timestamp_ms.to_secs().as_secs(),
         payload.shadow_tx_count = shadow_txs.len()
     ))]
     async fn build_and_submit_reth_payload(
         &self,
         prev_block_header: &IrysBlockHeader,
-        timestamp_ms: u128,
+        timestamp_ms: UnixTimestampMs,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
     ) -> Result<EthBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
-        // generate payload attributes
-        let attributes = PayloadAttributes {
-            timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
-            prev_randao: parent_mix_hash,
-            suggested_fee_recipient: self.inner().config.node_config.reward_address,
-            withdrawals: None, // these should ALWAYS be none
-            parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+        // generate payload attributes with shadow transactions
+        let rpc_attributes = IrysPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: timestamp_ms.to_secs().as_secs(), // **THIS HAS TO BE SECONDS**
+                prev_randao: parent_mix_hash,
+                suggested_fee_recipient: self.inner().config.node_config.reward_address,
+                withdrawals: None, // these should ALWAYS be none
+                parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+            },
+            shadow_txs,
         };
 
         debug!(
-            payload.timestamp_sec = attributes.timestamp,
-            payload.fee_recipient = %attributes.suggested_fee_recipient,
-            payload.parent_beacon_root = ?attributes.parent_beacon_block_root,
+            payload.timestamp_sec = rpc_attributes.inner.timestamp,
+            payload.fee_recipient = %rpc_attributes.inner.suggested_fee_recipient,
+            payload.parent_beacon_root = ?rpc_attributes.inner.parent_beacon_block_root,
+            payload.shadow_tx_count = rpc_attributes.shadow_txs.len(),
             "Payload attributes created"
         );
 
-        let attributes =
-            EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes);
+        // Convert to builder attributes - this computes the payload ID including shadow txs
+        let attributes = IrysPayloadBuilderAttributes::try_new(
+            prev_block_header.evm_block_hash,
+            rpc_attributes,
+            0, // version
+        )
+        .expect("IrysPayloadBuilderAttributes::try_new is infallible");
 
         let payload_builder = &self.inner().reth_payload_builder;
-        let beacon_engine_handle = &self.inner().beacon_engine_handle;
+        let consensus_engine_handle = &self.inner().consensus_engine_handle;
 
-        // store shadow txs
-        let key = DeterministicShadowTxKey::new(attributes.payload_id());
-        debug!(
+        tracing::debug!(
             payload.id = %attributes.payload_id(),
-            "Storing shadow transactions"
+            prev_height = prev_block_header.height,
+            "Built payload attributes with shadow transactions"
         );
-        self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
 
         // send & await the payload
         info!("Sending new payload to Reth");
@@ -902,7 +915,7 @@ pub trait BlockProdStrategy {
             .map_err(classify_payload_error)?;
 
         let evm_block_hash = built_payload.block().hash();
-        debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
+        tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
         let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
             panic!(
@@ -910,7 +923,7 @@ pub trait BlockProdStrategy {
                 evm_block_hash, e
             )
         });
-        let new_payload_result = beacon_engine_handle
+        let new_payload_result = consensus_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
                 sidecar,
@@ -941,7 +954,7 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
         mempool_bundle: MempoolTxsBundle,
-        current_timestamp: u128,
+        current_timestamp: UnixTimestampMs,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         perv_block_ema_snapshot: &EmaSnapshot,
@@ -950,16 +963,6 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
-
-        if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!(
-                "Skipping solution for old step number {}, previous block step number {} for block {}",
-                solution.vdf_step,
-                prev_block_header.vdf_limiter_info.global_step_number,
-                prev_block_hash
-            );
-            return Ok(None);
-        }
 
         // Publish Ledger Transactions
         let publish_chunks_added = calculate_chunks_added(
@@ -1096,8 +1099,7 @@ pub trait BlockProdStrategy {
                     required_proof_count: Some(
                         self.inner()
                             .config
-                            .consensus
-                            .number_of_ingress_proofs_total
+                            .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
                             .try_into()?,
                     ),
                 },
@@ -1352,7 +1354,7 @@ pub trait BlockProdStrategy {
     }
 
     fn is_epoch_block(&self, height: u64) -> bool {
-        height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
+        height.is_multiple_of(self.inner().config.consensus.epoch.num_blocks_in_epoch)
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1520,19 +1522,19 @@ fn millis_since_epoch(time: SystemTime) -> u128 {
 #[inline]
 #[tracing::instrument(level = "trace", skip_all)]
 fn choose_oracle_price(
-    parent_ts_ms: u128,
+    parent_ts_ms: UnixTimestampMs,
     parent_price: IrysTokenPrice,
     oracle_price: IrysTokenPrice,
     oracle_updated_ms: u128,
 ) -> IrysTokenPrice {
-    let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
+    let (chosen, source) = if parent_ts_ms.as_millis() > oracle_updated_ms {
         (parent_price, "parent_fallback")
     } else {
         (oracle_price, "oracle_fresh")
     };
 
     tracing::debug!(
-        parent_ts_ms,
+        parent_ts_ms = parent_ts_ms.as_millis(),
         oracle_updated_ms,
         parent_price = %parent_price,
         oracle_price = %oracle_price,
@@ -1555,26 +1557,25 @@ impl BlockProdStrategy for ProductionStrategy {
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> UnixTimestampMs {
+    let now_ms = UnixTimestampMs::now().unwrap();
+    let prev_secs = prev_block_header.timestamp.to_secs();
 
-    // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
-    // This can happen due to EVM blocks using second-precision time, instead of our millisecond precision
-    // this just waits until the next second (timers (afaict) never undersleep, so we don't need an extra buffer here)
-    // *dev configs can easily trigger this behaviour
-    // as_secs does not take into account/round the underlying nanos at all
-    let now =
-        if now.as_secs() == Duration::from_millis(prev_block_header.timestamp as u64).as_secs() {
-            let nanos_into_sec = now.subsec_nanos();
-            let nano_to_next_sec = 1_000_000_000 - nanos_into_sec;
-            let time_to_wait = Duration::from_nanos(nano_to_next_sec as u64);
-            info!("Waiting {:.2?} to prevent timestamp overlap", &time_to_wait);
-            tokio::time::sleep(time_to_wait).await;
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
-        } else {
-            now
-        };
-    now.as_millis()
+    // If we're in the same second as the previous block, wait until the next second.
+    // This prevents EVM timestamp collisions (EVM uses second-precision).
+    // Dev configs can easily trigger this behaviour due to fast block times.
+    if now_ms.to_secs() == prev_secs {
+        let ms_into_sec = (now_ms.as_millis() % 1000) as u64;
+        let wait_duration = Duration::from_millis(1000 - ms_into_sec);
+        info!(
+            "Waiting {:.2?} to prevent timestamp overlap",
+            &wait_duration
+        );
+        tokio::time::sleep(wait_duration).await;
+        return UnixTimestampMs::now().unwrap();
+    }
+
+    now_ms
 }
 
 /// Calculates the total number of full chunks needed to store a list of transactions,
@@ -1598,7 +1599,7 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 #[cfg(test)]
 mod oracle_choice_tests {
     use super::{choose_oracle_price, millis_since_epoch};
-    use irys_types::storage_pricing::Amount;
+    use irys_types::{storage_pricing::Amount, UnixTimestampMs};
     use rust_decimal_macros::dec;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -1610,7 +1611,7 @@ mod oracle_choice_tests {
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
 
         let chosen = choose_oracle_price(
-            millis_since_epoch(parent_ts_ms),
+            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),
@@ -1629,7 +1630,7 @@ mod oracle_choice_tests {
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
 
         let chosen = choose_oracle_price(
-            millis_since_epoch(parent_ts_ms),
+            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),

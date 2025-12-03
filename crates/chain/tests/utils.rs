@@ -77,6 +77,7 @@ use std::{
     future::Future,
     time::{Duration, Instant},
 };
+use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument};
 
@@ -1346,8 +1347,9 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .rpc_client()
             .ok_or_eyre("Unable to get RPC client")?;
-        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
-        reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::block_by_hash(
+        use alloy_primitives::Bytes;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
+        reth::rpc::api::EthApiClient::<TransactionRequest, Transaction, Block, Receipt, Header, Bytes>::block_by_hash(
             &client, hash, true,
         )
         .await?
@@ -1384,7 +1386,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         hash: &alloy_core::primitives::B256,
         seconds_to_wait: usize,
     ) -> eyre::Result<alloy_rpc_types_eth::Transaction> {
-        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction};
+        use alloy_primitives::Bytes;
+        use alloy_rpc_types_eth::{Block, Header, Receipt, Transaction, TransactionRequest};
         let retries_per_second = 50;
         let max_retries = seconds_to_wait * retries_per_second;
 
@@ -1396,10 +1399,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             .ok_or_eyre("Unable to get RPC client")?;
 
         for retry in 0..max_retries {
-            if let Some(tx) = reth::rpc::api::EthApiClient::<Transaction, Block, Receipt, Header>::transaction_by_hash(
-                &rpc, *hash,
-            )
-            .await? {
+            if let Some(tx) = reth::rpc::api::EthApiClient::<
+                TransactionRequest,
+                Transaction,
+                Block,
+                Receipt,
+                Header,
+                Bytes,
+            >::transaction_by_hash(&rpc, *hash)
+            .await?
+            {
                 info!(
                     "tx {} found in {:?} reth after {} retries",
                     &hash, &self.name, &retry
@@ -1610,7 +1619,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // get account reth balance at specific block
-    pub fn get_balance(&self, address: Address, evm_block_hash: FixedBytes<32>) -> U256 {
+    pub async fn get_balance(&self, address: Address, evm_block_hash: FixedBytes<32>) -> U256 {
         let block = Some(BlockId::Hash(RpcBlockHash {
             block_hash: evm_block_hash,
             require_canonical: Some(false),
@@ -1619,6 +1628,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .reth_node_adapter
             .rpc
             .get_balance_irys(address, block)
+            .await
     }
 
     /// Get the price for storing data via the price API endpoint
@@ -2890,6 +2900,30 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> impl Iterator<Item = eyre::Result<ChunkBytes>> {
         chunk_bytes_gen(count, chunk_size, seed)
     }
+
+    pub async fn gossip_commitment_to_node(
+        &self,
+        commitment: &CommitmentTransaction,
+    ) -> eyre::Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.node_ctx.service_senders.mempool.send(
+            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx).into(),
+        )?;
+
+        resp_rx.await??;
+        Ok(())
+    }
+
+    pub async fn gossip_data_tx_to_node(&self, tx: &DataTransactionHeader) -> eyre::Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.node_ctx
+            .service_senders
+            .mempool
+            .send(MempoolServiceMessage::IngestDataTxFromGossip(tx.clone(), resp_tx).into())?;
+
+        resp_rx.await??;
+        Ok(())
+    }
 }
 
 /// Construct a SolutionContext using a provided PoA chunk for the current step.
@@ -3280,4 +3314,31 @@ pub async fn verify_published_chunk<T, B>(
             chunk_offset
         );
     }
+}
+
+pub async fn gossip_commitment_to_node(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    commitment: &CommitmentTransaction,
+) -> eyre::Result<()> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx).into(),
+    )?;
+
+    resp_rx.await??;
+    Ok(())
+}
+
+pub async fn gossip_data_tx_to_node(
+    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
+    tx: &DataTransactionHeader,
+) -> eyre::Result<()> {
+    let (resp_tx, resp_rx) = oneshot::channel();
+    node.node_ctx
+        .service_senders
+        .mempool
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(tx.clone(), resp_tx).into())?;
+
+    resp_rx.await??;
+    Ok(())
 }

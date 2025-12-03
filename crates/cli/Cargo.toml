@@ -20,9 +20,12 @@ irys-types = { workspace = true, features = ["test-utils"] }
 clap = { workspace = true, features = ["derive"] }
 reth-node-core.workspace = true
 irys-reth-node-bridge.workspace = true
+irys-reth.workspace = true
 irys-chain.workspace = true
 tokio.workspace = true
 irys-domain.workspace = true
 irys-tui.workspace = true
+reth-provider.workspace = true
+reth-node-types.workspace = true
 [lints]
 workspace = true

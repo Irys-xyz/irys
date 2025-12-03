@@ -10,10 +10,12 @@ use crate::tables::{
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
+use irys_types::ingress::CachedIngressProof;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
-    H256, MEGABYTE,
+    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, PeerListItem,
+    TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -26,6 +28,7 @@ use reth_db::{
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
+use reth_db_api::Database as _;
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use tracing::{debug, warn};
 
@@ -94,8 +97,8 @@ pub fn block_header_by_hash<T: DbTx>(
     if include_chunk {
         if let Some(ref mut b) = block {
             b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
-            if b.poa.chunk.is_none() {
-                tracing::error!(block.hash = ?b.block_hash, target = "db::block_header", "poa chunk not present when reading the header");
+            if b.poa.chunk.is_none() && b.height != 0 {
+                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
             }
         }
     }
@@ -235,7 +238,11 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
     }
     let value = CachedChunkIndexEntry {
         index: chunk.tx_offset,
-        meta: CachedChunkIndexMetadata { chunk_path_hash },
+        meta: CachedChunkIndexMetadata {
+            chunk_path_hash,
+            updated_at: UnixTimestamp::now()
+                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
+        },
     };
 
     debug!(
@@ -313,6 +320,36 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     Ok(chunks_pruned)
 }
 
+/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
+/// It also removes the index values
+pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    older_than: UnixTimestamp,
+) -> eyre::Result<u64> {
+    let mut chunks_pruned = 0;
+    // get all chunks specified by the `CachedChunksIndex`
+    let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
+    while let Some((_k, c)) = walker.next().transpose()? {
+        if c.meta.updated_at >= older_than {
+            continue;
+        }
+        // delete them
+        tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
+        // delete the specific index entry instead of nuking the whole key
+        tx.delete::<CachedChunksIndex>(data_root, Some(c))?;
+        chunks_pruned += 1;
+    }
+    // If we removed all subkeys, remove the empty key bucket
+    let mut check_cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut remaining = check_cursor.walk_dup(Some(data_root), None)?;
+    if remaining.next().transpose()?.is_none() {
+        tx.delete::<CachedChunksIndex>(data_root, None)?;
+    }
+    Ok(chunks_pruned)
+}
+
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
     let chunk_count_u64 = u64::try_from(chunk_count)
@@ -366,6 +403,22 @@ pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Re
     Ok(tx.delete::<IngressProofs>(data_root, None)?)
 }
 
+pub fn store_ingress_proof(
+    db: &DatabaseProvider,
+    ingress_proof: &IngressProof,
+    signer: &IrysSigner,
+) -> eyre::Result<()> {
+    Ok(db.update(|rw_tx| {
+        rw_tx.put::<IngressProofs>(
+            ingress_proof.data_root,
+            CompactCachedIngressProof(CachedIngressProof {
+                address: signer.address(),
+                proof: ingress_proof.clone(),
+            }),
+        )
+    })??)
+}
+
 pub fn walk_all<T: Table, TX: DbTx>(
     read_tx: &TX,
 ) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {
@@ -378,7 +431,7 @@ pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(
     tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
 }
 
-pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseError> {
+pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
     if let Some(bytes) = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)? {
         let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
             DatabaseError::Other(

@@ -25,14 +25,12 @@ use crate::block_validation::{
     recall_recall_range_is_valid, shadow_transactions_are_valid, submit_payload_to_reth,
     ValidationError,
 };
-use crate::validation_service::{ValidationServiceInner, VdfValidationResult};
+use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
-use irys_vdf::state::CancelEnum;
 use std::ops::ControlFlow;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};
 
@@ -99,7 +97,7 @@ impl BlockValidationTask {
 
     /// Execute the concurrent validation task
     #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
-    pub async fn execute_concurrent(self) -> ValidationResult {
+    pub(super) async fn execute_concurrent(self) -> ValidationResult {
         let parent_got_cancelled = || {
             // Task was cancelled due to height difference
             // Return invalid to prevent this block from being accepted
@@ -134,50 +132,6 @@ impl BlockValidationTask {
                 return parent_got_cancelled();
             }
         }
-    }
-
-    #[tracing::instrument(skip_all, fields(block.hash = %self.block.block_hash, block.height = %self.block.height))]
-    pub(crate) async fn execute_vdf(
-        self,
-        cancel: Arc<AtomicU8>,
-        vdf_notify: Arc<tokio::sync::Notify>,
-    ) -> VdfValidationResult {
-        let inner = Arc::clone(&self.service_inner);
-        let block = Arc::clone(&self.block);
-        let skip_validation = self.skip_vdf_validation;
-        // run the VDF validation
-        // we use a task here as it'll drive the future more consistently than `poll_immediate`
-        let cancel2 = Arc::clone(&cancel);
-        let res = tokio::spawn(
-            async move {
-                let result = inner
-                    .ensure_vdf_is_valid(&block, cancel2, skip_validation)
-                    .await;
-                vdf_notify.notify_one(); // Signal completion
-                result
-            }
-            .in_current_span(),
-        )
-        .await
-        .expect("Failed to join ensure_vdf_is_valid task");
-
-        let mapped_res = res
-            .map(|()| VdfValidationResult::Valid)
-            .unwrap_or_else(|e| {
-                // use the value of `cancel` to figure out if we errored because we were cancelled
-                // TODO: switch this out for a definite Result type
-                let cancel_state = cancel.load(Ordering::Relaxed);
-                if cancel_state == CancelEnum::Cancelled as u8 {
-                    VdfValidationResult::Cancelled
-                } else {
-                    VdfValidationResult::Invalid(e)
-                }
-            });
-        debug!(
-            vdf.validation_result = ?mapped_res,
-            "Finished validating"
-        );
-        mapped_res
     }
 
     /// Wait for parent validation to complete

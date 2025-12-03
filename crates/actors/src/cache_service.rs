@@ -1,28 +1,41 @@
+use crate::ingress_proofs::{
+    generate_and_store_ingress_proof, reanchor_and_store_ingress_proof, RegenAction,
+};
+use crate::mempool_service::Inner;
+use irys_database::{
+    cached_data_root_by_data_root, delete_cached_chunks_by_data_root_older_than, tx_header_by_txid,
+};
 use irys_database::{
     db::IrysDatabaseExt as _,
-    db_cache::CachedDataRoot,
     delete_cached_chunks_by_data_root, get_cache_size,
     tables::{CachedChunks, CachedDataRoots, IngressProofs},
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
+use irys_types::ingress::CachedIngressProof;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, LedgerChunkOffset, TokioServiceHandle, GIGABYTE,
+    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    LedgerChunkOffset, TokioServiceHandle, UnixTimestamp, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;
 use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
-use std::sync::Arc;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, RwLock};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, info, warn, Instrument as _};
+use tracing::{debug, error, info, warn, Instrument as _};
+
+pub const REGENERATE_PROOFS: bool = true;
 
 /// Maximum evictions per invocation to prevent blocking the service.
 /// If this limit is reached, eviction will continue in the next cycle.
 const MAX_EVICTIONS_PER_RUN: usize = 10_000;
+/// Maximum ingress proofs to scan per pruning invocation.
+const MAX_PROOF_CHECKS_PER_RUN: usize = 1_000;
 
 #[derive(Debug)]
 pub enum CacheServiceAction {
@@ -31,136 +44,74 @@ pub enum CacheServiceAction {
         Arc<EpochSnapshot>,
         Option<oneshot::Sender<eyre::Result<()>>>,
     ),
+    /// Internal signal: pruning task completed
+    PruneCompleted(eyre::Result<()>),
+    /// Internal signal: epoch processing task completed
+    EpochProcessingCompleted(eyre::Result<()>),
+    /// Marks the start of ingress proof generation for the specified data root. Chunks that are
+    /// related to this data root should not be pruned if the ingress proof is still being generated.
+    NotifyProofGenerationStarted(DataRoot),
+    /// Send this when ingress proof generation is completed and the proof has been persisted to the
+    /// db. Chunks related to this data root can now be pruned if needed.
+    NotifyProofGenerationCompleted(DataRoot),
 }
 
-pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
+/// Tracks data roots for which ingress proofs are currently being generated
+/// to prevent race conditions with chunk pruning
+#[derive(Clone, Debug)]
+pub struct IngressProofGenerationState {
+    inner: Arc<RwLock<HashSet<DataRoot>>>,
+}
 
-#[derive(Debug)]
-pub struct ChunkCacheService {
-    pub config: Config,
-    pub block_index_guard: BlockIndexReadGuard,
-    pub block_tree_guard: BlockTreeReadGuard,
+impl Default for IngressProofGenerationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IngressProofGenerationState {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    pub fn mark_generating(&self, data_root: DataRoot) -> bool {
+        self.inner
+            .write()
+            .expect("expected to acquire a lock for an ingress proof generation state")
+            .insert(data_root)
+    }
+
+    pub fn unmark_generating(&self, data_root: DataRoot) {
+        self.inner
+            .write()
+            .expect("expected to acquire a lock for an ingress proof generation state")
+            .remove(&data_root);
+    }
+
+    pub fn is_generating(&self, data_root: DataRoot) -> bool {
+        self.inner
+            .read()
+            .expect("expected to acquire a lock for an ingress proof generation state")
+            .contains(&data_root)
+    }
+}
+
+/// Context for cache pruning tasks. You can safely clone this struct to spawn pruning tasks on
+/// separate runtimes/threads.
+#[derive(Debug, Clone)]
+pub struct InnerCacheTask {
     pub db: DatabaseProvider,
-    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
-    pub shutdown: Shutdown,
+    pub block_tree_guard: BlockTreeReadGuard,
+    pub block_index_guard: BlockIndexReadGuard,
+    pub config: Config,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+    pub ingress_proof_generation_state: IngressProofGenerationState,
+    pub cache_sender: CacheServiceSender,
 }
 
-impl ChunkCacheService {
-    /// Spawns the chunk cache service on the provided runtime.
-    ///
-    /// The service manages cache eviction based on the configured strategy
-    /// (time-based or size-based) and responds to block migration and epoch
-    /// processing events.
-    ///
-    /// # Arguments
-    ///
-    /// * `block_index_guard` - Read guard for block index lookups
-    /// * `block_tree_guard` - Read guard for canonical chain access
-    /// * `db` - Database provider for cache storage
-    /// * `rx` - Channel receiver for cache service actions
-    /// * `config` - Node configuration including eviction strategy
-    /// * `runtime_handle` - Tokio runtime for spawning the service
-    ///
-    /// # Returns
-    ///
-    /// A `TokioServiceHandle` for managing the service lifecycle
-    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_cache")]
-    pub fn spawn_service(
-        block_index_guard: BlockIndexReadGuard,
-        block_tree_guard: BlockTreeReadGuard,
-        db: DatabaseProvider,
-        rx: UnboundedReceiver<CacheServiceAction>,
-        config: Config,
-        runtime_handle: tokio::runtime::Handle,
-    ) -> TokioServiceHandle {
-        info!("Spawning chunk cache service");
-
-        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-
-        let handle = runtime_handle.spawn(async move {
-            let cache_service = Self {
-                shutdown: shutdown_rx,
-                block_index_guard,
-                block_tree_guard,
-                db,
-                config,
-                msg_rx: rx,
-            };
-            cache_service
-                .start()
-                .in_current_span()
-                .await
-                .expect("Chunk cache service encountered an irrecoverable error")
-        });
-
-        TokioServiceHandle {
-            name: "chunk_cache_service".to_string(),
-            handle,
-            shutdown_signal: shutdown_tx,
-        }
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    async fn start(mut self) -> eyre::Result<()> {
-        info!("Starting chunk cache service");
-
-        loop {
-            tokio::select! {
-                biased;
-
-                _ = &mut self.shutdown => {
-                    info!("Shutdown signal received for chunk cache service");
-                    break;
-                }
-                msg = self.msg_rx.recv() => {
-                    match msg {
-                        Some(msg) => {
-                            self.on_handle_message(msg);
-                        }
-                        None => {
-                            warn!("Message channel closed unexpectedly");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.on_handle_message(msg);
-        }
-
-        info!("shutting down chunk cache service gracefully");
-        Ok(())
-    }
-
-    /// Dispatches incoming cache service messages to appropriate handlers.
-    ///
-    /// Handles two message types:
-    /// - `OnBlockMigrated`: Triggers cache pruning based on block height
-    /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn on_handle_message(&mut self, msg: CacheServiceAction) {
-        match msg {
-            CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
-                let res = self.prune_cache(migration_height);
-                let Some(sender) = sender else { return };
-                if let Err(error) = sender.send(res) {
-                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
-                }
-            }
-            CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
-                let res = self.on_epoch_processed(epoch_snapshot);
-                if let Some(sender) = sender {
-                    if let Err(e) = sender.send(res) {
-                        warn!(custom.error = ?e, "Unable to send response for OnEpochProcessed")
-                    }
-                }
-            }
-        }
-    }
-
+impl InnerCacheTask {
     /// Processes epoch completion by pruning expired data roots.
     ///
     /// Determines the pruning horizon (one block before active submit ledger slots begin)
@@ -238,6 +189,9 @@ impl ChunkCacheService {
 
     #[tracing::instrument(level = "trace", skip_all, fields(migration_height))]
     fn prune_cache(&self, migration_height: u64) -> eyre::Result<()> {
+        // First, prune ingress proofs to figure out what data roots are still in use
+        self.prune_ingress_proofs()?;
+
         let prune_height = migration_height
             .saturating_sub(u64::from(self.config.node_config.cache.cache_clean_lag));
         debug!(
@@ -260,24 +214,133 @@ impl ChunkCacheService {
             ingress_proof_count
         );
 
-        let max_cache_size_bytes = self.config.node_config.cache.max_cache_size_bytes;
-        let size_limit_exceeded = chunk_cache_size > max_cache_size_bytes;
-
-        if size_limit_exceeded {
-            info!(
-                custom.size_exceeded = size_limit_exceeded,
-                custom.current_size_gb = (chunk_cache_size / GIGABYTE as u64),
-                custom.max_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
-                custom.current_count = chunk_cache_count,
-                "Cache limit exceeded"
-            );
-
-            // DISABLED. cache pruning logic NEEDS to respect the lifecycle rules for cached data roots and their associated chunks.
-            // self.prune_cache_by_size(chunk_cache_count, chunk_cache_size, *max_cache_size_bytes)?;
+        // Attempt pruning cache only if we're above `prune_at_capacity_percent`% of max capacity.
+        if chunk_cache_size as f64
+            > self.config.node_config.cache.max_cache_size_bytes as f64
+                * (self.config.node_config.cache.prune_at_capacity_percent / 100_f64)
+        {
+            debug!("Cache above target capacity, proceeding with pruning");
+            // Then, prune chunks that no longer have active ingress proofs
+            self.prune_chunks_without_active_ingress_proofs()?;
         } else {
-            debug!("Cache within size limits, no eviction needed");
+            debug!("Cache under target capacity, skipping chunk pruning");
         }
 
+        Ok(())
+    }
+
+    /// Prunes cached chunks for data roots that have no ingress proofs.
+    /// Since `prune_ingress_proofs()` runs immediately before this and removes
+    /// expired/invalid proofs, any remaining proof entry is treated as active.
+    /// Data roots currently undergoing proof generation are skipped to avoid races.
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn prune_chunks_without_active_ingress_proofs(&self) -> eyre::Result<()> {
+        let local_address = self.config.irys_signer().address();
+        let min_chunk_age_in_blocks = self
+            .config
+            .consensus
+            .block_migration_depth
+            .saturating_add(self.config.node_config.cache.cache_clean_lag as u32);
+        let target_time_between_blocks_secs =
+            self.config.consensus.difficulty_adjustment.block_time;
+        let min_chunk_age_secs =
+            u64::from(min_chunk_age_in_blocks).saturating_mul(target_time_between_blocks_secs);
+        let now = UnixTimestamp::now()
+            .expect("unable to get current unix timestamp")
+            .as_secs();
+        let delete_chunks_older_than =
+            UnixTimestamp::from_secs(now.saturating_sub(min_chunk_age_secs));
+
+        let tx = self.db.tx()?;
+
+        // Collect candidate data roots from CachedDataRoots
+        let mut cdr_cursor = tx.cursor_read::<CachedDataRoots>()?;
+        let mut cdr_walk = cdr_cursor.walk(None)?;
+
+        // Limit total evictions to avoid long pauses
+        let mut evictions_performed: usize = 0;
+
+        // We'll do deletions in a write tx per batch to keep lock times short
+        let mut pending_roots: Vec<DataRoot> = Vec::new();
+
+        while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
+            if evictions_performed >= MAX_EVICTIONS_PER_RUN {
+                warn!(
+                    chunk.evictions_performed = evictions_performed,
+                    "Hit max eviction limit in prune_chunks_without_active_ingress_proofs, will continue next cycle"
+                );
+                break;
+            }
+
+            // Skip if an ingress proof is actively being generated for this root
+            if self.ingress_proof_generation_state.is_generating(data_root) {
+                debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
+                continue;
+            }
+
+            // Presence of at least one proof indicates the data root is active
+            let mut proofs_cursor = tx.cursor_read::<IngressProofs>()?;
+            let mut has_any_local_proof = false;
+            let mut walker = proofs_cursor.walk(Some(data_root))?;
+            while let Some((key, compact)) = walker.next().transpose()? {
+                // Walked all records for this data root
+                if key != data_root {
+                    break;
+                }
+                // Found at least one proof, mark as active
+                if compact.0.address == local_address {
+                    has_any_local_proof = true;
+                    break;
+                }
+            }
+
+            if !has_any_local_proof {
+                pending_roots.push(data_root);
+            }
+
+            // Commit a small batch to avoid large transactions
+            if pending_roots.len() >= 256 {
+                let write_tx = self.db.tx_mut()?;
+                for root in pending_roots.drain(..) {
+                    debug!(
+                        chunk.data_root = ?root,
+                        "Pruning chunks for data root without active proofs"
+                    );
+                    let pruned = delete_cached_chunks_by_data_root_older_than(
+                        &write_tx,
+                        root,
+                        delete_chunks_older_than,
+                    )?;
+                    if pruned > 0 {
+                        evictions_performed = evictions_performed.saturating_add(1);
+                        debug!(chunk.data_root = ?root, chunk.pruined_chunks = pruned, "Pruned chunks for data root without active proofs");
+                    }
+                }
+                write_tx.commit()?;
+            }
+        }
+
+        // Flush any remaining pending deletions
+        if !pending_roots.is_empty() {
+            let write_tx = self.db.tx_mut()?;
+            for root in pending_roots.drain(..) {
+                let pruned = delete_cached_chunks_by_data_root_older_than(
+                    &write_tx,
+                    root,
+                    delete_chunks_older_than,
+                )?;
+                if pruned > 0 {
+                    evictions_performed = evictions_performed.saturating_add(1);
+                    debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
+                }
+            }
+            write_tx.commit()?;
+        }
+
+        info!(
+            chunk.eviction_batches = evictions_performed,
+            "Completed chunk pruning pass"
+        );
         Ok(())
     }
 
@@ -352,162 +415,405 @@ impl ChunkCacheService {
         Ok(())
     }
 
-    /// Collects all cached data roots with their metadata for FIFO eviction
-    /// Returns entries sorted by cached_at timestamp (oldest first)
-    fn collect_cache_entries_by_age(&self) -> eyre::Result<Vec<(DataRoot, CachedDataRoot)>> {
+    /// Scans ingress proofs with capacity-aware deletion and regeneration:
+    /// - (a) Promoted + expired: delete
+    /// - (b) Unpromoted + expired + at capacity: delete
+    /// - (c) Unpromoted + expired + under capacity + local author: regenerate
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn prune_ingress_proofs(&self) -> eyre::Result<()> {
+        let signer = self.config.irys_signer();
+        let local_addr = signer.address();
         let tx = self.db.tx()?;
-        let estimated_count = tx.entries::<CachedDataRoots>()?;
-        let mut entries = Vec::with_capacity(estimated_count);
-
-        let mut cursor = tx.cursor_read::<CachedDataRoots>()?;
+        let mut cursor = tx.cursor_read::<IngressProofs>()?;
+        // TODO: we can randomise the start of the cursor by providing a random key. MDBX will seek to the neareset key if it doesn't exist.
+        // we might want to do this to prevent scanning over just the first `MAX_PROOF_CHECKS_PER_RUN` valid entries.
         let mut walker = cursor.walk(None)?;
+        let mut to_delete: Vec<DataRoot> = Vec::new();
+        let mut to_reanchor: Vec<IngressProof> = Vec::new();
+        let mut to_regen: Vec<IngressProof> = Vec::new();
+        let mut processed = 0_usize;
+        let max_cache_size_bytes = &self.config.node_config.cache.max_cache_size_bytes;
 
-        while let Some((data_root, cached)) = walker.next().transpose()? {
-            entries.push((data_root, cached));
-        }
-
-        entries.sort_by_key(|(_, cached)| cached.cached_at);
-
-        Ok(entries)
-    }
-
-    /// Prunes cache entries older than max_age_seconds
-    /// Uses FIFO eviction based on cached_at timestamp
-    #[tracing::instrument(level = "trace", skip_all, fields(max_age_seconds))]
-    fn prune_cache_by_time(&self, max_age_seconds: u64) -> eyre::Result<()> {
-        let now = irys_types::UnixTimestamp::now()
-            .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
-
-        let expiry_threshold = now.saturating_sub_secs(max_age_seconds);
-
+        // Determine if cache is at capacity based on the CachedChunks table
+        let (chunk_count, chunk_cache_size) =
+            get_cache_size::<CachedChunks, _>(&tx, self.config.consensus.chunk_size)?;
+        let at_capacity = chunk_cache_size >= *max_cache_size_bytes;
         debug!(
-            custom.now = now.as_secs(),
-            custom.threshold = expiry_threshold.as_secs(),
-            custom.max_age_seconds = max_age_seconds,
-            "Time-based eviction: checking for expired entries"
+            "Cache is {} at capacity - capacity: {}B, size {}B ({} chunks)",
+            if at_capacity { "" } else { "not" },
+            &max_cache_size_bytes,
+            chunk_cache_size,
+            &chunk_count
         );
 
-        let entries = self.collect_cache_entries_by_age()?;
-
-        let mut evicted_count = 0_u64;
-        let mut evicted_size = 0_u64;
-
-        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
-            if cached.cached_at >= expiry_threshold {
+        while let Some((data_root, compact)) = walker.next().transpose()? {
+            if processed >= MAX_PROOF_CHECKS_PER_RUN {
                 break;
             }
+            processed += 1;
+            let CachedIngressProof { address, proof } = compact.0;
 
-            let age_seconds = now.saturating_seconds_since(cached.cached_at);
-            debug!(
-                data_root.data_root = ?data_root,
-                data_root.cached_at = cached.cached_at.as_secs(),
-                data_root.age_seconds = age_seconds,
-                "Evicting expired cache entry"
+            // Associated txids
+            let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
+                debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
+                to_delete.push(data_root);
+                continue;
+            };
+
+            let check_result = Inner::is_ingress_proof_expired_static(
+                &self.block_tree_guard,
+                &self.db,
+                &self.config,
+                &proof,
             );
+            if !check_result.expired_or_invalid {
+                continue;
+            }
+            let mut any_unpromoted = false;
+            for txid in cached_data_root.txid_set.iter() {
+                if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
+                    if tx_header.promoted_height.is_none() {
+                        any_unpromoted = true;
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                        break;
+                    }
+                }
+            }
 
-            let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
-            let approx_size = chunk_count * self.config.consensus.chunk_size;
+            let is_locally_produced = address == local_addr;
 
-            // Each entry gets its own transaction for incremental progress.
-            // Batching would be faster but risks all-or-nothing failure on large evictions.
-            let write_tx = self.db.tx_mut()?;
-            write_tx.delete::<IngressProofs>(data_root, None)?;
-            let chunks_removed = delete_cached_chunks_by_data_root(&write_tx, data_root)?;
-            write_tx.delete::<CachedDataRoots>(data_root, None)?;
-            write_tx.commit()?;
-
-            evicted_count += chunks_removed;
-            evicted_size += approx_size;
+            if at_capacity {
+                // Unpromoted + expired + at capacity: delete
+                to_delete.push(data_root);
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+            } else if is_locally_produced && any_unpromoted {
+                match check_result.regeneration_action {
+                    RegenAction::Reanchor => {
+                        to_reanchor.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for reanchoring");
+                    }
+                    RegenAction::Regenerate => {
+                        to_regen.push(proof);
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
+                    }
+                    RegenAction::DoNotRegenerate => {
+                        error!("We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.", &data_root);
+                    }
+                }
+            } else {
+                // Not local + expired: delete
+                to_delete.push(data_root);
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (promoted)");
+            }
         }
 
-        info!(
-            custom.evicted_count = evicted_count,
-            custom.evicted_size_gb = (evicted_size / GIGABYTE as u64),
-            custom.max_age_seconds = max_age_seconds,
-            "Time-based cache eviction complete"
-        );
+        // Delete expired proofs using a proper removal function
+        if !to_delete.is_empty() {
+            for root in to_delete.iter() {
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
+                    warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+                }
+            }
+            info!(
+                proofs.deleted = to_delete.len(),
+                "Deleted expired ingress proofs"
+            );
+        }
+
+        // Regenerate local expired proofs (only when under capacity)
+        for proof in to_reanchor.iter() {
+            if REGENERATE_PROOFS {
+                if let Err(e) = reanchor_and_store_ingress_proof(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    &signer,
+                    proof,
+                    &self.gossip_broadcast,
+                    &self.cache_sender,
+                ) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                }
+            } else {
+                debug!(
+                    ingress_proof.data_root = ?proof.data_root,
+                    "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
+                );
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                    warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
+                }
+            }
+        }
+
+        for proof in to_regen.iter() {
+            if REGENERATE_PROOFS {
+                if let Err(report) = generate_and_store_ingress_proof(
+                    &self.block_tree_guard,
+                    &self.db,
+                    &self.config,
+                    proof.data_root,
+                    None,
+                    &self.gossip_broadcast,
+                    &self.cache_sender,
+                ) {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
+                }
+            } else {
+                debug!(
+                    ingress_proof.data_root = ?proof.data_root,
+                    "Regeneration disabled, removing ingress proof for data root"
+                );
+                if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+                }
+            }
+        }
+
+        if !to_reanchor.is_empty() {
+            info!(
+                proofs.regenerated = to_reanchor.len(),
+                "Reanchored expired local ingress proofs (under capacity)"
+            );
+        }
 
         Ok(())
     }
 
-    /// Prunes cache entries to bring cache size under configured limit
-    /// Uses FIFO eviction based on cached_at timestamp (oldest first)
-    #[tracing::instrument(level = "trace", skip_all, fields(max_cache_size_bytes))]
-    fn prune_cache_by_size(
+    fn spawn_pruning_task(
         &self,
-        current_chunk_count: u64,
-        current_chunk_size: u64,
-        max_cache_size_bytes: u64,
-    ) -> eyre::Result<()> {
-        /// Eviction target to prevent thrashing near size limit boundary.
-        /// Evicts to 90% (9/10) of limit to provide a buffer before next eviction.
-        /// Example: 10GB limit evicts down to 9GB, providing 1GB buffer.
-        /// NB: moved here as otherwise rust flags them as unused
-        const SIZE_EVICTION_TARGET_NUMERATOR: u64 = 9;
-        const SIZE_EVICTION_TARGET_DENOMINATOR: u64 = 10;
-
-        let target_size_with_margin = max_cache_size_bytes
-            .saturating_div(SIZE_EVICTION_TARGET_DENOMINATOR)
-            .saturating_mul(SIZE_EVICTION_TARGET_NUMERATOR);
-
-        debug!(
-            custom.current_size_gb = (current_chunk_size / GIGABYTE as u64),
-            custom.target_size_gb = (max_cache_size_bytes / GIGABYTE as u64),
-            custom.target_with_margin_gb = (target_size_with_margin / GIGABYTE as u64),
-            "Size-based eviction: cache limit exceeded"
-        );
-
-        let entries = self.collect_cache_entries_by_age()?;
-
-        let mut evicted_count = 0_u64;
-        let mut evicted_size = 0_u64;
-        let mut running_chunk_count = current_chunk_count;
-        let mut running_chunk_size = current_chunk_size;
-
-        let now = irys_types::UnixTimestamp::now()
-            .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?;
-
-        for (data_root, cached) in entries.into_iter().take(MAX_EVICTIONS_PER_RUN) {
-            if running_chunk_size <= target_size_with_margin {
-                break;
+        migration_height: u64,
+        response_sender: Option<oneshot::Sender<eyre::Result<()>>>,
+    ) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let res = clone.prune_cache(migration_height);
+            let completion = match &res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(eyre::eyre!(e.to_string())),
+            };
+            if let Some(sender) = response_sender {
+                if let Err(error) = sender.send(res) {
+                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+                }
             }
+            // Notify service that pruning finished (drive the queue)
+            if let Err(e) = clone
+                .cache_sender
+                .send(CacheServiceAction::PruneCompleted(completion))
+            {
+                warn!(custom.error = ?e, "Failed to notify PruneCompleted");
+            }
+        });
+    }
 
-            let age_seconds = now.saturating_seconds_since(cached.cached_at);
+    fn spawn_epoch_processing(
+        &self,
+        epoch_snapshot: Arc<EpochSnapshot>,
+        response_sender: Option<oneshot::Sender<eyre::Result<()>>>,
+    ) {
+        let clone = self.clone();
+        std::thread::spawn(move || {
+            let res = clone.on_epoch_processed(epoch_snapshot);
+            let completion = match &res {
+                Ok(_) => Ok(()),
+                Err(e) => Err(eyre::eyre!(e.to_string())),
+            };
+            if let Some(sender) = response_sender {
+                if let Err(e) = sender.send(res) {
+                    warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
+                }
+            }
+            // Notify service that epoch processing finished (drive the queue)
+            if let Err(e) = clone
+                .cache_sender
+                .send(CacheServiceAction::EpochProcessingCompleted(completion))
+            {
+                warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
+            }
+        });
+    }
+}
 
-            debug!(
-                data_root.data_root = ?data_root,
-                data_root.cached_at = cached.cached_at.as_secs(),
-                data_root.age_seconds = age_seconds,
-                data_root.data_size = cached.data_size,
-                "Evicting oldest cache entry to free space"
-            );
+pub type CacheServiceSender = UnboundedSender<CacheServiceAction>;
 
-            let chunk_count = cached.data_size.div_ceil(self.config.consensus.chunk_size);
-            let approx_size = chunk_count * self.config.consensus.chunk_size;
+#[derive(Debug)]
+pub struct ChunkCacheService {
+    pub msg_rx: UnboundedReceiver<CacheServiceAction>,
+    pub shutdown: Shutdown,
+    pub cache_task: InnerCacheTask,
+    // Serialized execution for each task type
+    pruning_running: bool,
+    pruning_queue: VecDeque<(u64, Option<oneshot::Sender<eyre::Result<()>>>)>,
+    epoch_running: bool,
+    epoch_queue: VecDeque<(
+        Arc<EpochSnapshot>,
+        Option<oneshot::Sender<eyre::Result<()>>>,
+    )>,
+}
 
-            // Each entry gets its own transaction for incremental progress.
-            // Batching would be faster but risks all-or-nothing failure on large evictions.
-            let write_tx = self.db.tx_mut()?;
-            write_tx.delete::<IngressProofs>(data_root, None)?;
-            let chunks_removed = delete_cached_chunks_by_data_root(&write_tx, data_root)?;
-            write_tx.delete::<CachedDataRoots>(data_root, None)?;
-            write_tx.commit()?;
+impl ChunkCacheService {
+    /// Spawns the chunk cache service on the provided runtime.
+    ///
+    /// The service manages cache eviction based on the configured strategy
+    /// (time-based or size-based) and responds to block migration and epoch
+    /// processing events.
+    ///
+    /// # Arguments
+    ///
+    /// * `block_index_guard` - Read guard for block index lookups
+    /// * `block_tree_guard` - Read guard for canonical chain access
+    /// * `db` - Database provider for cache storage
+    /// * `rx` - Channel receiver for cache service actions
+    /// * `config` - Node configuration including eviction strategy
+    /// * `runtime_handle` - Tokio runtime for spawning the service
+    ///
+    /// # Returns
+    ///
+    /// A `TokioServiceHandle` for managing the service lifecycle
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_cache")]
+    pub fn spawn_service(
+        block_index_guard: BlockIndexReadGuard,
+        block_tree_guard: BlockTreeReadGuard,
+        db: DatabaseProvider,
+        rx: UnboundedReceiver<CacheServiceAction>,
+        config: Config,
+        gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+        cache_sender: CacheServiceSender,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> TokioServiceHandle {
+        info!("Spawning chunk cache service");
 
-            evicted_count += chunks_removed;
-            evicted_size += approx_size;
-            running_chunk_count = running_chunk_count.saturating_sub(chunks_removed);
-            running_chunk_size = running_chunk_size.saturating_sub(approx_size);
+        let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
+
+        let handle = runtime_handle.spawn(async move {
+            let cache_service = Self {
+                shutdown: shutdown_rx,
+                msg_rx: rx,
+                cache_task: InnerCacheTask {
+                    db,
+                    block_tree_guard,
+                    block_index_guard,
+                    config,
+                    gossip_broadcast,
+                    ingress_proof_generation_state: IngressProofGenerationState::new(),
+                    cache_sender,
+                },
+                pruning_running: false,
+                pruning_queue: VecDeque::new(),
+                epoch_running: false,
+                epoch_queue: VecDeque::new(),
+            };
+            cache_service
+                .start()
+                .in_current_span()
+                .await
+                .expect("Chunk cache service encountered an irrecoverable error")
+        });
+
+        TokioServiceHandle {
+            name: "chunk_cache_service".to_string(),
+            handle,
+            shutdown_signal: shutdown_tx,
+        }
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn start(mut self) -> eyre::Result<()> {
+        info!("Starting chunk cache service");
+
+        loop {
+            tokio::select! {
+                biased;
+
+                _ = &mut self.shutdown => {
+                    info!("Shutdown signal received for chunk cache service");
+                    break;
+                }
+                msg = self.msg_rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            self.on_handle_message(msg);
+                        }
+                        None => {
+                            warn!("Message channel closed unexpectedly");
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
-        info!(
-            custom.evicted_count = evicted_count,
-            custom.evicted_size_gb = (evicted_size / GIGABYTE as u64),
-            custom.remaining_count = running_chunk_count,
-            custom.remaining_size_gb = (running_chunk_size / GIGABYTE as u64),
-            "Size-based cache eviction complete (FIFO)"
-        );
+        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            self.on_handle_message(msg);
+        }
 
+        info!("shutting down chunk cache service gracefully");
         Ok(())
+    }
+
+    /// Dispatches incoming cache service messages to appropriate handlers.
+    ///
+    /// Handles two message types:
+    /// - `OnBlockMigrated`: Triggers cache pruning based on block height
+    /// - `OnEpochProcessed`: Triggers pruning based on epoch slot expiry
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn on_handle_message(&mut self, msg: CacheServiceAction) {
+        debug!(
+            queue.pruning_running = ?self.pruning_running,
+            queue.pruning_queued = ?self.pruning_queue.len(),
+            queue.epoch_running = ?self.epoch_running,
+            queue.epoch_queued = ?self.epoch_queue.len(),
+            "CacheService received message: {:?}", msg
+        );
+        match msg {
+            CacheServiceAction::OnBlockMigrated(migration_height, sender) => {
+                // Enqueue pruning; start if idle
+                self.pruning_queue.push_back((migration_height, sender));
+                if !self.pruning_running {
+                    if let Some((h, s)) = self.pruning_queue.pop_front() {
+                        self.pruning_running = true;
+                        self.cache_task.spawn_pruning_task(h, s);
+                    }
+                }
+            }
+            CacheServiceAction::OnEpochProcessed(epoch_snapshot, sender) => {
+                // Enqueue epoch processing; start if idle
+                self.epoch_queue.push_back((epoch_snapshot, sender));
+                if !self.epoch_running {
+                    if let Some((e, s)) = self.epoch_queue.pop_front() {
+                        self.epoch_running = true;
+                        self.cache_task.spawn_epoch_processing(e, s);
+                    }
+                }
+            }
+            CacheServiceAction::PruneCompleted(_res) => {
+                // Mark pruning idle and kick next if queued
+                self.pruning_running = false;
+                if let Some((h, s)) = self.pruning_queue.pop_front() {
+                    self.pruning_running = true;
+                    self.cache_task.spawn_pruning_task(h, s);
+                }
+            }
+            CacheServiceAction::EpochProcessingCompleted(_res) => {
+                // Mark epoch processing idle and kick next if queued
+                self.epoch_running = false;
+                if let Some((e, s)) = self.epoch_queue.pop_front() {
+                    self.epoch_running = true;
+                    self.cache_task.spawn_epoch_processing(e, s);
+                }
+            }
+            CacheServiceAction::NotifyProofGenerationStarted(data_root) => {
+                self.cache_task
+                    .ingress_proof_generation_state
+                    .mark_generating(data_root);
+            }
+            CacheServiceAction::NotifyProofGenerationCompleted(data_root) => {
+                self.cache_task
+                    .ingress_proof_generation_state
+                    .unmark_generating(data_root);
+            }
+        }
     }
 }
 
@@ -517,13 +823,15 @@ mod tests {
     use eyre::WrapErr as _;
     use irys_database::{
         database, open_or_create_db,
-        tables::{CachedDataRoots, IrysTables},
+        tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
     };
     use irys_domain::{BlockIndex, BlockTree};
+    use irys_testing_utils::initialize_tracing;
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
         DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
+    use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
 
     // This test prevents a regression of bug: mempool-only data roots (with empty block_set field)
@@ -578,19 +886,28 @@ mod tests {
             RwLock::new(block_index),
         ));
 
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
-            config: config.clone(),
-            block_index_guard,
-            block_tree_guard,
-            db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            cache_task: InnerCacheTask {
+                db: db.clone(),
+                block_tree_guard,
+                block_index_guard,
+                config: config.clone(),
+                gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+                ingress_proof_generation_state: IngressProofGenerationState::new(),
+                cache_sender: tx,
+            },
+            pruning_running: false,
+            pruning_queue: VecDeque::new(),
+            epoch_running: false,
+            epoch_queue: VecDeque::new(),
         };
 
         // Invoke pruning with prune_height > 0 which should NOT delete mempool-only roots
-        service.prune_data_root_cache(1)?;
+        service.cache_task.prune_data_root_cache(1)?;
 
         db.view(|rtx| -> eyre::Result<()> {
             let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
@@ -652,19 +969,28 @@ mod tests {
             RwLock::new(block_index),
         ));
 
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
         let service = ChunkCacheService {
-            config: config.clone(),
-            block_index_guard,
-            block_tree_guard,
-            db: db.clone(),
             msg_rx: rx,
             shutdown: shutdown_rx,
+            cache_task: InnerCacheTask {
+                db: db.clone(),
+                block_tree_guard,
+                block_index_guard,
+                config: config.clone(),
+                gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+                ingress_proof_generation_state: IngressProofGenerationState::new(),
+                cache_sender: tx,
+            },
+            pruning_running: false,
+            pruning_queue: VecDeque::new(),
+            epoch_running: false,
+            epoch_queue: VecDeque::new(),
         };
 
         // Prune with prune_height greater than expiry (6 > 5) -> should delete
-        service.prune_data_root_cache(6)?;
+        service.cache_task.prune_data_root_cache(6)?;
 
         // Verify it was pruned
         db.view(|rtx| -> eyre::Result<()> {
@@ -677,92 +1003,12 @@ mod tests {
     }
 
     // ========================================================================
-    // Test Helpers
-    // ========================================================================
-
-    async fn setup_test_service_with_size(size: u64) -> eyre::Result<ChunkCacheService> {
-        let mut node_config = NodeConfig::testing();
-        node_config.cache.max_cache_size_bytes = size;
-        let config = Config::new(node_config);
-
-        let db_env = open_or_create_db(
-            irys_testing_utils::utils::temporary_directory(None, false),
-            IrysTables::ALL,
-            None,
-        )?;
-        let db = DatabaseProvider(Arc::new(db_env));
-
-        let genesis_block = IrysBlockHeader::new_mock_header();
-        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
-        let block_tree_guard =
-            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config)
-            .await
-            .wrap_err("failed to build BlockIndex for test")?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
-
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
-
-        Ok(ChunkCacheService {
-            config: config.clone(),
-            block_index_guard,
-            block_tree_guard,
-            db: db.clone(),
-            msg_rx: rx,
-            shutdown: shutdown_rx,
-        })
-    }
-
-    fn insert_entry_with_timestamp(
-        service: &ChunkCacheService,
-        timestamp: irys_types::UnixTimestamp,
-    ) -> eyre::Result<DataRoot> {
-        use rand::Rng as _;
-
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 32] = rng.gen();
-        let data_root = DataRoot::from(random_bytes);
-
-        service.db.update(|wtx| {
-            let cached = irys_database::db_cache::CachedDataRoot {
-                data_size: 1024, // 1 KB
-                data_size_confirmed: true,
-                txid_set: vec![],
-                block_set: vec![],
-                expiry_height: None,
-                cached_at: timestamp,
-            };
-            wtx.put::<CachedDataRoots>(data_root, cached)?;
-            eyre::Ok(())
-        })??;
-
-        Ok(data_root)
-    }
-
-    #[expect(dead_code)]
-    fn get_cache_entry_count(service: &ChunkCacheService) -> eyre::Result<usize> {
-        service
-            .db
-            .view_eyre(|tx| Ok(tx.entries::<CachedDataRoots>()?))
-    }
-
-    #[expect(dead_code)]
-    fn cache_contains(service: &ChunkCacheService, root: DataRoot) -> eyre::Result<bool> {
-        service
-            .db
-            .view_eyre(|tx| Ok(tx.get::<CachedDataRoots>(root)?.is_some()))
-    }
-
-    // ========================================================================
     // FIFO Ordering Property Tests
     // ========================================================================
 
     #[cfg(test)]
     mod fifo_properties {
-        use super::*;
+
         use irys_types::UnixTimestamp;
         use proptest::prelude::*;
 
@@ -774,42 +1020,493 @@ mod tests {
                 UnixTimestamp::from_secs(secs)
             }
         }
+    }
 
-        proptest! {
-            #![proptest_config(ProptestConfig::with_cases(10))]
-            #[test]
-            fn slow_fifo_ordering_always_maintained(
-                timestamps in prop::collection::vec(unix_timestamps(), 5..20)
-            ) {
-                let rt = tokio::runtime::Runtime::new().unwrap();
-                rt.block_on(async {
+    // Chunks should remain when there is an active ingress proof present for the data_root.
+    #[tokio::test]
+    async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
 
-                    let service = setup_test_service_with_size(10_000_000)
-                        .await
-                        .unwrap();
+        // Create tx header + data root + chunk
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+        let chunk = UnpackedChunk {
+            data_root: tx_header.data_root,
+            data_size: tx_header.data_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![1_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            eyre::Ok(())
+        })??;
 
-                    // Insert entries with random timestamps
-                    for timestamp in timestamps {
-                        insert_entry_with_timestamp(&service, timestamp)
-                            .unwrap();
-                    }
+        // Insert a (non-expired) ingress proof entry for the data root so pruning treats it as active
+        db.update(|wtx| {
+            let proof = CachedIngressProof {
+                address: irys_types::Address::random(),
+                ..Default::default()
+            };
+            wtx.put::<IngressProofs>(tx_header.data_root, proof.into())?;
+            eyre::Ok(())
+        })??;
 
-                    // Collect entries and verify sorted
-                    let entries = service.collect_cache_entries_by_age().unwrap();
+        // Setup minimal service context
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
 
-                    for window in entries.windows(2) {
-                        prop_assert!(
-                            window[0].1.cached_at <= window[1].1.cached_at,
-                            "FIFO order violated: {} > {}",
-                            window[0].1.cached_at.as_secs(),
-                            window[1].1.cached_at.as_secs()
-                        );
-                    }
+        // Execute chunk-only pruning (proofs present so should skip deletion)
+        service_task.prune_chunks_without_active_ingress_proofs()?;
 
-                    Ok::<(), proptest::test_runner::TestCaseError>(())
-                })
-                .unwrap();
+        // Verify chunk still exists
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let has_index = walk.next().transpose()?.is_some();
+            eyre::ensure!(
+                has_index,
+                "CachedChunksIndex entry missing after prune but proof was active"
+            );
+            // Attempt to resolve chunk from index metadata
+            if let Some((_, idx_entry)) = rtx
+                .cursor_dup_read::<CachedChunksIndex>()?
+                .seek_exact(tx_header.data_root)?
+            {
+                let meta: irys_database::db_cache::CachedChunkIndexMetadata = idx_entry.into();
+                let chunk_entry = rtx.get::<CachedChunks>(meta.chunk_path_hash)?;
+                eyre::ensure!(
+                    chunk_entry.is_some(),
+                    "CachedChunks value missing after prune but proof was active"
+                );
             }
-        }
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    // Chunks should be pruned when there is no ingress proof for the data_root.
+    #[tokio::test]
+    async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+        let chunk = UnpackedChunk {
+            data_root: tx_header.data_root,
+            data_size: tx_header.data_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![2_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            // Mark the cached chunk as very old so it qualifies for age-based pruning
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                // Delete the current index entry and reinsert with an old timestamp
+                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
+            }
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Execute chunk pruning (no proofs -> should delete)
+        service_task.prune_chunks_without_active_ingress_proofs()?;
+
+        // Verify chunk removed
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let index_entry = walk.next().transpose()?;
+            eyre::ensure!(
+                index_entry.is_none(),
+                "CachedChunksIndex entry still present but should have been pruned"
+            );
+            Ok(())
+        })??;
+        Ok(())
+    }
+
+    // Chunks older than threshold should be deleted while newer ones should remain.
+    #[tokio::test]
+    async fn prunes_only_chunks_older_than_threshold() -> eyre::Result<()> {
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create two data roots: one "old" and one "new"
+        let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            data_root: DataRoot::random(),
+            ..Default::default()
+        });
+        let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            data_root: DataRoot::random(),
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header_old, None)?;
+            database::cache_data_root(wtx, &tx_header_new, None)?;
+            eyre::Ok(())
+        })??;
+
+        let mk_chunk = |data_root: irys_types::H256, offset: u32, byte: u8| UnpackedChunk {
+            data_root,
+            data_size: 64,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![byte; 8]),
+            tx_offset: TxChunkOffset::from(offset),
+        };
+
+        db.update(|wtx| {
+            // Manually insert index and chunk entries with controlled timestamps
+            let chunk_old = mk_chunk(tx_header_old.data_root, 0, 10);
+            let hash_old = chunk_old.chunk_path_hash();
+            let idx_old = irys_database::db_cache::CachedChunkIndexEntry {
+                index: chunk_old.tx_offset,
+                meta: irys_database::db_cache::CachedChunkIndexMetadata {
+                    chunk_path_hash: hash_old,
+                    updated_at: UnixTimestamp::from_secs(0),
+                },
+            };
+            wtx.put::<CachedChunksIndex>(tx_header_old.data_root, idx_old)?;
+            wtx.put::<CachedChunks>(
+                hash_old,
+                irys_database::db_cache::CachedChunk::from(&chunk_old),
+            )?;
+
+            let chunk_new = mk_chunk(tx_header_new.data_root, 0, 11);
+            let hash_new = chunk_new.chunk_path_hash();
+            let idx_new = irys_database::db_cache::CachedChunkIndexEntry {
+                index: chunk_new.tx_offset,
+                meta: irys_database::db_cache::CachedChunkIndexMetadata {
+                    chunk_path_hash: hash_new,
+                    updated_at: UnixTimestamp::from_secs(10),
+                },
+            };
+            wtx.put::<CachedChunksIndex>(tx_header_new.data_root, idx_new)?;
+            wtx.put::<CachedChunks>(
+                hash_new,
+                irys_database::db_cache::CachedChunk::from(&chunk_new),
+            )?;
+
+            eyre::Ok(())
+        })??;
+
+        // Directly exercise the DB helper with a controlled cutoff time.
+        // Use cutoff=5s so 0s is pruned and 10s is retained.
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
+            let mut eligible = 0;
+            while let Some((_k, entry)) = walk_old.next().transpose()? {
+                if entry.meta.updated_at < UnixTimestamp::from_secs(5) {
+                    eligible += 1;
+                }
+            }
+            eyre::ensure!(
+                eligible == 1,
+                "Expected exactly one eligible old entry, found {}",
+                eligible
+            );
+            Ok(())
+        })??;
+
+        db.update(|wtx| {
+            let pruned = delete_cached_chunks_by_data_root_older_than(
+                wtx,
+                tx_header_old.data_root,
+                UnixTimestamp::from_secs(5),
+            )?;
+            eyre::ensure!(pruned >= 1, "Expected old root chunk to be pruned");
+            eyre::Ok(())
+        })??;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Old root should have no entries
+            let mut cur_old = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk_old = cur_old.walk_dup(Some(tx_header_old.data_root), None)?;
+            eyre::ensure!(
+                walk_old.next().transpose()?.is_none(),
+                "Old root entries still present"
+            );
+
+            // New root should still have its entry
+            let mut cur_new = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let walk_new = cur_new.walk_dup(Some(tx_header_new.data_root), None)?;
+            let remaining_new: Vec<_> = walk_new.collect::<Result<Vec<_>, _>>()?;
+            eyre::ensure!(
+                remaining_new.len() == 1,
+                "New root entry missing after prune"
+            );
+            let (_k, entry) = &remaining_new[0];
+            eyre::ensure!(
+                entry.meta.updated_at.as_secs() >= 5,
+                "New root entry should be newer than cutoff"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // Ensure prune runs only when cache > 80% capacity.
+    #[tokio::test]
+    async fn runs_chunk_prune_only_above_capacity_threshold() -> eyre::Result<()> {
+        initialize_tracing();
+        // Set a small max cache size so 2 chunks (32B each in testing config) reach threshold
+        let mut node_config = NodeConfig::testing();
+        // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
+        node_config.cache.max_cache_size_bytes = 96;
+        let config_below = Config::new(node_config.clone());
+
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create one data root with two chunks and mark them old to be eligible
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            data_root: DataRoot::random(),
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            let c0 = UnpackedChunk {
+                data_root: tx_header.data_root,
+                data_size: tx_header.data_size,
+                data_path: Base64(vec![1]),
+                bytes: Base64(vec![7_u8; 8]),
+                tx_offset: TxChunkOffset::from(0_u32),
+            };
+            let c1 = UnpackedChunk {
+                data_root: tx_header.data_root,
+                data_size: tx_header.data_size,
+                data_path: Base64(vec![2]),
+                bytes: Base64(vec![8_u8; 8]),
+                tx_offset: TxChunkOffset::from(1_u32),
+            };
+            database::cache_chunk(wtx, &c0)?;
+            database::cache_chunk(wtx, &c1)?;
+
+            // Mark both chunks as very old
+            let mut cur = wtx.cursor_dup_write::<CachedChunksIndex>()?;
+            let mut walk = cur.walk_dup(Some(tx_header.data_root), None)?;
+            while let Some((_k, entry)) = walk.next().transpose()? {
+                wtx.delete::<CachedChunksIndex>(tx_header.data_root, Some(entry.clone()))?;
+                let mut updated = entry.clone();
+                updated.meta.updated_at = UnixTimestamp::from_secs(0);
+                wtx.put::<CachedChunksIndex>(tx_header.data_root, updated)?;
+            }
+            eyre::Ok(())
+        })??;
+
+        // Minimal service context
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config_below.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config_below.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Below-capacity prune: should NOT remove chunks
+        let task_below = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard: block_tree_guard.clone(),
+            block_index_guard: block_index_guard.clone(),
+            config: config_below.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx.clone(),
+        };
+        task_below.prune_cache(0)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Expect both indices still present
+            let m0 = irys_database::cached_chunk_meta_by_offset(
+                rtx,
+                tx_header.data_root,
+                TxChunkOffset::from(0_u32),
+            )?;
+            let m1 = irys_database::cached_chunk_meta_by_offset(
+                rtx,
+                tx_header.data_root,
+                TxChunkOffset::from(1_u32),
+            )?;
+            eyre::ensure!(
+                m0.is_some() && m1.is_some(),
+                "Chunks pruned below capacity threshold"
+            );
+            Ok(())
+        })??;
+
+        // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
+        let mut node_config2 = node_config.clone();
+        node_config2.cache.max_cache_size_bytes = 64;
+        let config_above = Config::new(node_config2);
+        let task_above = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config_above,
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+        task_above.prune_cache(0)?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            // Expect indices pruned now that we're above capacity
+            let mut cur = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = cur.walk(Some(tx_header.data_root))?;
+            eyre::ensure!(
+                walk.next().transpose()?.is_none(),
+                "Chunks not pruned above capacity threshold"
+            );
+            Ok(())
+        })??;
+
+        Ok(())
+    }
+
+    // Chunks should not be pruned when proof generation state marks the data_root active, even with no ingress proof yet.
+    #[tokio::test]
+    async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+        let chunk = UnpackedChunk {
+            data_root: tx_header.data_root,
+            data_size: tx_header.data_size,
+            data_path: Base64(vec![]),
+            bytes: Base64(vec![3_u8; 8]),
+            tx_offset: TxChunkOffset::from(0_u32),
+        };
+        db.update(|wtx| {
+            database::cache_chunk(wtx, &chunk)?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let generation_state = IngressProofGenerationState::new();
+        generation_state.mark_generating(tx_header.data_root);
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: generation_state,
+            cache_sender: tx,
+        };
+
+        service_task.prune_chunks_without_active_ingress_proofs()?;
+
+        db.view(|rtx| -> eyre::Result<()> {
+            let mut dup_cursor = rtx.cursor_dup_read::<CachedChunksIndex>()?;
+            let mut walk = dup_cursor.walk(Some(tx_header.data_root))?;
+            let still_present = walk.next().transpose()?.is_some();
+            eyre::ensure!(
+                still_present,
+                "CachedChunksIndex entry wrongly pruned during active generation state"
+            );
+            Ok(())
+        })??;
+        Ok(())
     }
 }

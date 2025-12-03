@@ -1,34 +1,46 @@
 use alloy_eips::BlockId;
 use alloy_primitives::U256;
+use async_trait::async_trait;
 use std::collections::HashMap;
 
 use irys_types::Address;
-use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
 use reth_node_api::{BlockTy, FullNodeComponents, NodeTypes};
 use reth_provider::{BlockReader, StateProviderBox};
-use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, TraceExt};
+use reth_rpc_eth_api::helpers::{EthApiSpec, EthTransactions, LoadState, SpawnBlocking, TraceExt};
 use tracing::warn;
 
+#[async_trait]
 pub trait IrysRethLoadStateExt: LoadState {
     /// Get the account balance.
-    fn balance(&self, address: Address, block_id: Option<BlockId>) -> Result<U256, Self::Error>;
+    async fn balance(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> Result<U256, Self::Error>;
 }
 
+#[async_trait]
 impl<T> IrysRethLoadStateExt for T
 where
-    T: LoadState,
+    T: LoadState + SpawnBlocking,
 {
-    fn balance(&self, address: Address, block_id: Option<BlockId>) -> Result<U256, Self::Error> {
+    async fn balance(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> Result<U256, Self::Error> {
         Ok(self
-            .state_at_block_id_or_latest(block_id)?
+            .state_at_block_id_or_latest(block_id)
+            .await?
             .account_balance(&address)
             .unwrap_or_default()
             .unwrap_or(U256::ZERO))
     }
 }
 
+#[async_trait]
 pub trait IrysRethRpcTestContextExt<Node, EthApi>
 where
     Node: FullNodeComponents<Types: NodeTypes<ChainSpec: EthereumHardforks>>,
@@ -36,23 +48,28 @@ where
         + EthTransactions
         + TraceExt,
 {
-    fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256>;
+    async fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256>;
 
-    fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
+    async fn get_balance_irys(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> irys_types::U256;
 
-    fn get_balances_irys(
+    async fn get_balances_irys(
         &self,
         addresses: &[Address],
         block_id: Option<BlockId>,
     ) -> HashMap<Address, irys_types::U256>;
 
-    fn get_balance_irys_canonical_and_pending(
+    async fn get_balance_irys_canonical_and_pending(
         &self,
         address: Address,
         block_id: Option<BlockId>,
     ) -> eyre::Result<irys_types::U256>;
 }
 
+#[async_trait]
 impl<Node, EthApi> IrysRethRpcTestContextExt<Node, EthApi> for RpcTestContext<Node, EthApi>
 where
     Node: FullNodeComponents<Types: NodeTypes<ChainSpec: EthereumHardforks>>,
@@ -60,17 +77,22 @@ where
         + EthTransactions
         + TraceExt,
 {
-    fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256> {
+    async fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256> {
         let eth_api = self.inner.eth_api();
-        Ok(eth_api.balance(address, block_id)?)
+        Ok(eth_api.balance(address, block_id).await?)
     }
 
     /// Modified version of the above `get_balance` impl,
     /// which will return an Irys U256, and will return a value of `0` if getting the balance fails
-    fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256 {
+    async fn get_balance_irys(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> irys_types::U256 {
         let eth_api = self.inner.eth_api();
         eth_api
             .balance(address, block_id)
+            .await
             .map(std::convert::Into::into)
             .inspect_err(|e| {
                 warn!(
@@ -81,19 +103,20 @@ where
             .unwrap_or(irys_types::U256::zero())
     }
 
-    fn get_balances_irys(
+    async fn get_balances_irys(
         &self,
         addresses: &[Address],
         block_id: Option<BlockId>,
     ) -> HashMap<Address, irys_types::U256> {
-        addresses
-            .into_par_iter()
-            .map(|address| (*address, self.get_balance_irys(*address, block_id)))
-            .collect()
+        let mut results = HashMap::new();
+        for address in addresses {
+            results.insert(*address, self.get_balance_irys(*address, block_id).await);
+        }
+        results
     }
 
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.
-    fn get_balance_irys_canonical_and_pending(
+    async fn get_balance_irys_canonical_and_pending(
         &self,
         address: Address,
         block_id: Option<BlockId>,
