@@ -127,9 +127,7 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state
-                    .put_chunk(chunk.clone(), preheader_chunks_per_item)
-                    .await;
+                self.mempool_state.put_chunk(chunk.clone()).await;
                 return Ok(());
             }
         };
@@ -358,6 +356,7 @@ impl Inner {
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let cache_sender = self.service_senders.chunk_cache.clone();
             let _fut = self.exec.clone().spawn_blocking(async move {
                 if let Err(e) = generate_and_store_ingress_proof(
                     &block_tree_read_guard,
@@ -366,6 +365,7 @@ impl Inner {
                     chunk.data_root,
                     None,
                     &gossip_sender,
+                    &cache_sender,
                 ) {
                     tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
                 }

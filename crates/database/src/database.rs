@@ -238,7 +238,11 @@ pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Re
     }
     let value = CachedChunkIndexEntry {
         index: chunk.tx_offset,
-        meta: CachedChunkIndexMetadata { chunk_path_hash },
+        meta: CachedChunkIndexMetadata {
+            chunk_path_hash,
+            updated_at: UnixTimestamp::now()
+                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
+        },
     };
 
     debug!(
@@ -313,6 +317,36 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     }
     // delete the key (and all subkeys) from the index
     tx.delete::<CachedChunksIndex>(data_root, None)?;
+    Ok(chunks_pruned)
+}
+
+/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
+/// It also removes the index values
+pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    older_than: UnixTimestamp,
+) -> eyre::Result<u64> {
+    let mut chunks_pruned = 0;
+    // get all chunks specified by the `CachedChunksIndex`
+    let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
+    while let Some((_k, c)) = walker.next().transpose()? {
+        if c.meta.updated_at >= older_than {
+            continue;
+        }
+        // delete them
+        tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
+        // delete the specific index entry instead of nuking the whole key
+        tx.delete::<CachedChunksIndex>(data_root, Some(c))?;
+        chunks_pruned += 1;
+    }
+    // If we removed all subkeys, remove the empty key bucket
+    let mut check_cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut remaining = check_cursor.walk_dup(Some(data_root), None)?;
+    if remaining.next().transpose()?.is_none() {
+        tx.delete::<CachedChunksIndex>(data_root, None)?;
+    }
     Ok(chunks_pruned)
 }
 

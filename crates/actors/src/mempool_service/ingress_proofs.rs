@@ -1,3 +1,4 @@
+use crate::cache_service::{CacheServiceAction, CacheServiceSender};
 use crate::mempool_service::{IngressProofError, Inner};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::reth_db::transaction::DbTx as _;
@@ -294,6 +295,7 @@ pub fn generate_and_store_ingress_proof(
     data_root: DataRoot,
     anchor_hint: Option<H256>,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    cache_sender: &CacheServiceSender,
 ) -> eyre::Result<IngressProof> {
     let signer: IrysSigner = config.irys_signer();
     let chain_id = config.consensus.chain_id;
@@ -309,7 +311,10 @@ pub fn generate_and_store_ingress_proof(
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
     // Generate + persist
-    let proof = crate::mempool_service::chunks::generate_ingress_proof(
+    // Notify start of proof generation
+    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
+
+    let proof_res = crate::mempool_service::chunks::generate_ingress_proof(
         db.clone(),
         data_root,
         data_size,
@@ -317,10 +322,25 @@ pub fn generate_and_store_ingress_proof(
         signer,
         chain_id,
         anchor,
-    )?;
+    );
+
+    let proof = match proof_res {
+        Ok(p) => p,
+        Err(e) => {
+            // Notify completion on error
+            let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+                data_root,
+            ));
+            return Err(e);
+        }
+    };
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
+    // Notify completion after stored & gossiped
+    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        data_root,
+    ));
     Ok(proof)
 }
 
@@ -331,8 +351,21 @@ pub fn reanchor_and_store_ingress_proof(
     signer: &IrysSigner,
     proof: &IngressProof,
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    cache_sender: &CacheServiceSender,
 ) -> eyre::Result<IngressProof> {
-    calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)?;
+    // Notify start of reanchoring
+    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
+        proof.data_root,
+    ));
+
+    if let Err(e) =
+        calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)
+    {
+        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+            proof.data_root,
+        ));
+        return Err(e);
+    }
 
     let latest_anchor = block_tree_guard
         .read()
@@ -343,12 +376,25 @@ pub fn reanchor_and_store_ingress_proof(
     let mut proof = proof.clone();
     // Re-anchor and re-sign
     proof.anchor = anchor;
-    signer.sign_ingress_proof(&mut proof)?;
+    if let Err(e) = signer.sign_ingress_proof(&mut proof) {
+        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+            proof.data_root,
+        ));
+        return Err(e);
+    }
 
-    store_ingress_proof(db, &proof, signer)?;
+    if let Err(e) = store_ingress_proof(db, &proof, signer) {
+        let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+            proof.data_root,
+        ));
+        return Err(e);
+    }
 
     gossip_ingress_proof(gossip_sender, &proof, block_tree_guard, db, config);
 
+    let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
+        proof.data_root,
+    ));
     Ok(proof)
 }
 

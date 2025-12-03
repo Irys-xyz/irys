@@ -81,6 +81,19 @@ impl Config {
             .div_ceil(self.consensus.num_chunks_in_recall_range);
         ensure!(self.consensus.vdf.max_allowed_vdf_fork_steps >= minimum_step_capacity , "vdf.max_allowed_vdf_fork_steps ({}) is smaller than the minimum required to store all recall ranges for a partition ({})", &self.consensus.vdf.max_allowed_vdf_fork_steps, &minimum_step_capacity );
 
+        // ensure that prune_at_capacity_percent is a sane value
+        let prune_at_capacity_percent = self.node_config.cache.prune_at_capacity_percent;
+        ensure!(
+            prune_at_capacity_percent > 0.0,
+            "prune_at_capacity_percent ({}) is too low! (must be >0%)",
+            prune_at_capacity_percent
+        );
+        ensure!(
+            prune_at_capacity_percent < 100.0,
+            "prune_at_capacity_percent ({}) is too high! (must be <100%)",
+            prune_at_capacity_percent
+        );
+
         Ok(())
     }
 }
