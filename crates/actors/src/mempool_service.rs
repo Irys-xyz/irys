@@ -1926,7 +1926,7 @@ impl AtomicMempoolState {
         self.read()
             .await
             .pending_chunks
-            .peek(data_root)
+            .get(data_root)
             .map(lru::LruCache::len)
             .unwrap_or(0)
     }

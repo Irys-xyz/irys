@@ -68,6 +68,10 @@ impl PriorityPendingChunks {
         self.entries.get_mut(data_root)
     }
 
+    pub fn get(&self, data_root: &DataRoot) -> Option<&LruCache<TxChunkOffset, UnpackedChunk>> {
+        self.entries.get(data_root)
+    }
+
     /// Evict the entry with the fewest chunks.
     fn evict_lowest_priority(&mut self) {
         if self.entries.is_empty() {
