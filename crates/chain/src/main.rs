@@ -1,5 +1,5 @@
 use irys_chain::{utils::load_config, IrysNode};
-use irys_testing_utils::setup_panic_hook;
+use irys_testing_utils::setup_panic_hook_with_sigint;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -40,7 +40,7 @@ async fn main() -> eyre::Result<()> {
         init_tracing().expect("initializing tracing should work");
     }
 
-    setup_panic_hook().expect("custom panic hook installation to succeed");
+    setup_panic_hook_with_sigint(false).expect("custom panic hook installation to succeed");
     reth_cli_util::sigsegv_handler::install();
     // load the config
     let config = load_config()?;
@@ -50,6 +50,7 @@ async fn main() -> eyre::Result<()> {
     let handle = IrysNode::new(config)?.start().await?;
     handle.start_mining()?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
+
     // wait for the node to be shut down
     let shutdown_reason =
         tokio::task::spawn_blocking(|| reth_thread_handle.unwrap().join().unwrap()).await?;
