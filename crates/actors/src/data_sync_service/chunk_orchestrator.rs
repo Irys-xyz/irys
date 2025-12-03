@@ -109,6 +109,7 @@ impl ChunkOrchestrator {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn populate_request_queue(&mut self) {
         // Retain in-flight requests (for telemetry tracking) and pending entropy requests.
         // Remove completed requests and pending requests for chunks that changed type
@@ -232,6 +233,7 @@ impl ChunkOrchestrator {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn should_throttle_requests(&self) -> bool {
         let storage_throughput = self.storage_module.write_throughput_bps();
         let target_throughput = self.config.data_sync.max_storage_throughput_bps;
@@ -518,6 +520,10 @@ impl ChunkOrchestrator {
         Ok(completion_record)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(
+        chunk.offset = %chunk_offset,
+        peer.address = %peer_addr
+    ))]
     pub fn on_chunk_failed(
         &mut self,
         chunk_offset: PartitionChunkOffset,

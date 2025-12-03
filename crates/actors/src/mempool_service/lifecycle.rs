@@ -8,16 +8,16 @@ use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, H256,
 };
-use reth_db::{transaction::DbTx as _, Database as _};
+use reth_db::Database as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
     /// read publish txs from block. Overwrite copies in mempool with proof
-    #[instrument(skip_all, fields(hash= %block.block_hash(), height = %block.height()), err)]
+    #[instrument(skip_all, fields(block.hash= %block.block_hash(), block.height = %block.height()), err)]
     pub async fn handle_block_confirmed_message(
-        &mut self,
+        &self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
@@ -27,18 +27,22 @@ impl Inner {
                 // Get mempool header if available
                 let mempool_header = self
                     .mempool_state
-                    .read()
+                    .valid_submit_ledger_tx_cloned(txid)
                     .await
-                    .valid_submit_ledger_tx
-                    .get(txid)
-                    .cloned()
                     .inspect(|_tx| {
                         debug!("Got tx {} from mempool", txid);
                     });
 
                 // Get and update DB header if needed
-                let mut db_header = match self.read_tx() {
-                    Ok(read_tx) => match tx_header_by_txid(&read_tx, txid) {
+                let mut db_header = self
+                    .irys_db
+                    .view(|tx| tx_header_by_txid(tx, txid))
+                    .map_err(|e| {
+                        warn!("Failed to open DB read transaction: {}", e);
+                        e
+                    })
+                    .ok()
+                    .and_then(|result| match result {
                         Ok(Some(h)) => {
                             debug!("Got tx {} from DB", txid);
                             Some(h)
@@ -51,18 +55,13 @@ impl Inner {
                             warn!("DB error loading tx {}: {}", txid, e);
                             None
                         }
-                    },
-                    Err(e) => {
-                        warn!("Failed to open DB read transaction: {}", e);
-                        None
-                    }
-                };
+                    });
 
                 if let Some(ref mut db_tx) = db_header {
                     if db_tx.promoted_height.is_none() {
                         db_tx.promoted_height = Some(block.height);
                         if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
-                            error!("Failed to update tx header in DB: {}", e);
+                            error!("Failed to update tx header in DB for tx {}: {}", txid, e);
                         }
                     }
                 }
@@ -78,13 +77,11 @@ impl Inner {
                     header.promoted_height = Some(block.height);
                 }
 
-                // Update mempool
-                let mut mempool_guard = self.mempool_state.write().await;
-                mempool_guard
-                    .valid_submit_ledger_tx
-                    .insert(header.id, header.clone());
-                mempool_guard.recent_valid_tx.put(header.id, ());
-                drop(mempool_guard);
+                // Update mempool with bounded insert
+                // For confirmed blocks, we log warnings but don't fail if mempool is full
+                self.mempool_state
+                    .bounded_insert_data_tx(header.clone())
+                    .await;
 
                 info!("Promoted tx:\n{:#?}", header);
             }
@@ -128,7 +125,8 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn handle_reorg(&mut self, event: ReorgEvent) -> eyre::Result<()> {
+    #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
+    pub async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing reorg: {} orphaned blocks from height {}",
             &event.old_fork.len(),
@@ -160,16 +158,10 @@ impl Inner {
     /// Re-process all currently valid mempool txs
     /// all this does is take all valid submit & commitment txs, and passes them back through ingress
     #[instrument(skip_all)]
-    pub async fn reprocess_all_txs(&mut self) -> eyre::Result<()> {
+    pub async fn reprocess_all_txs(&self) -> eyre::Result<()> {
         // re-process all valid txs
-        let (valid_submit_ledger_tx, valid_commitment_tx) = {
-            let mut state = self.mempool_state.write().await;
-            state.recent_valid_tx.clear();
-            (
-                std::mem::take(&mut state.valid_submit_ledger_tx),
-                std::mem::take(&mut state.valid_commitment_tx),
-            )
-        };
+        let (valid_submit_ledger_tx, valid_commitment_tx) =
+            self.mempool_state.take_all_valid_txs().await;
         for (id, tx) in valid_submit_ledger_tx {
             match self.handle_data_tx_ingress_message_gossip(tx).await {
                 Ok(_) => debug!("resubmitted data tx {} to mempool", &id),
@@ -208,16 +200,11 @@ impl Inner {
     /// - Do not call from normal ingress paths; promotion state should be preserved during ingress.
     /// - Intended usage is within reorg handlers (e.g., `handle_confirmed_data_tx_reorg`) to
     ///   revert promotion for txs promoted on orphaned forks.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?txid))]
     async fn mark_unpromoted_in_mempool(&self, txid: H256) -> eyre::Result<()> {
         // Try fast-path: clear in-place if present in the mempool
-        {
-            let mut state = self.mempool_state.write().await;
-            if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-                header.promoted_height = None;
-                state.recent_valid_tx.put(txid, ());
-                tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
-                return Ok(());
-            }
+        if self.mempool_state.clear_promoted_height(txid).await {
+            return Ok(());
         }
 
         tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
@@ -228,13 +215,16 @@ impl Inner {
     /// this uses modified rules compared to regular anchor validation - it doesn't care about maturity, and adds an extra grace window so that txs are only expired after anchor_expiry_depth + block_migration_depth
     /// this is to ensure txs stay in the mempool long enough for their parent block to confirm
     /// swallows errors from get_anchor_height (but does log them)
-    pub async fn should_prune_tx(
-        &mut self,
-        current_height: u64,
-        tx: &impl IrysTransactionCommon,
-    ) -> bool {
-        let anchor_height = match self.get_anchor_height(tx.id(), tx.anchor()).await {
-            Ok(h) => h,
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), current_height = current_height
+    ))]
+    pub fn should_prune_tx(&self, current_height: u64, tx: &impl IrysTransactionCommon) -> bool {
+        let anchor_height = match self
+            .get_anchor_height(tx.anchor(), false /* does not need to be canonical */)
+        {
+            Ok(Some(h)) => h,
+            // if we don't know about the anchor, we should prune
+            // note: this can happen, i.e if we did a block rollback.
+            Ok(None) => return true,
             Err(e) => {
                 // we can't tell due to an error
                 error!("Error checking if we should prune tx {} - {}", &tx.id(), e);
@@ -242,7 +232,7 @@ impl Inner {
             }
         };
 
-        let effective_expiry_depth = self.config.consensus.mempool.anchor_expiry_depth as u32
+        let effective_expiry_depth = self.config.consensus.mempool.tx_anchor_expiry_depth as u32
             + self.config.consensus.block_migration_depth
             + 5;
 
@@ -263,7 +253,7 @@ impl Inner {
     /// Re-validates the anchors for every tx, using `validate_anchor_for_expiry`
     /// txs that are no longer valid are removed from the mempool and marked as invalid so we no longer accept them
     #[instrument(skip_all)]
-    pub async fn prune_pending_txs(&mut self) {
+    pub async fn prune_pending_txs(&self) {
         let current_height = match self.get_latest_block_height() {
             Ok(height) => height,
             Err(e) => {
@@ -275,57 +265,47 @@ impl Inner {
             }
         };
         // re-process all valid data txs
-        let tx_ids = {
-            let state = self.mempool_state.read().await;
-            state
-                .valid_submit_ledger_tx
-                .keys()
-                .copied()
-                .collect::<Vec<_>>()
-        };
+        let tx_ids = self.mempool_state.all_valid_submit_ledger_ids().await;
         for tx_id in tx_ids {
             let tx = {
-                let state = self.mempool_state.read().await;
                 // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone across lock points
-                state.valid_submit_ledger_tx.get(&tx_id).cloned()
+                self.mempool_state
+                    .valid_submit_ledger_tx_cloned(&tx_id)
+                    .await
             };
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(tx) = tx {
-                if self.should_prune_tx(current_height, &tx).await {
-                    let mut state = self.mempool_state.write().await;
-                    state.valid_submit_ledger_tx.remove(&tx_id);
-                    Self::mark_tx_as_invalid(state, tx_id, TxIngressError::InvalidAnchor);
+                if self.should_prune_tx(current_height, &tx) {
+                    self.mempool_state
+                        .remove_valid_submit_ledger_tx(&tx_id)
+                        .await;
+                    self.mempool_state
+                        .mark_tx_as_invalid(tx_id, TxIngressError::InvalidAnchor(tx.anchor))
+                        .await;
                 }
             }
         }
 
         // re-process all valid commitment txs
-        let addresses = {
-            let state = self.mempool_state.read().await;
-            state
-                .valid_commitment_tx
-                .keys()
-                .copied()
-                .collect::<Vec<_>>()
-        };
+        let addresses = self
+            .mempool_state
+            .all_valid_commitment_ledger_addresses()
+            .await;
         for address in addresses {
-            let txs = {
-                let state = self.mempool_state.read().await;
-                // TODO: change this so it's an Arc<DataTransactionHeader> so we can cheaply clone
-                state.valid_commitment_tx.get(&address).cloned()
-            };
+            let txs = self
+                .mempool_state
+                .valid_commitment_txs_cloned(&address)
+                .await;
 
             // TODO: unwrap here? we should always be able to get the value if the key exists
             if let Some(txs) = txs {
                 for tx in txs {
-                    if self.should_prune_tx(current_height, &tx).await {
-                        self.remove_commitment_tx(&tx.id).await;
-                        Self::mark_tx_as_invalid(
-                            self.mempool_state.write().await,
-                            tx.id,
-                            TxIngressError::InvalidAnchor,
-                        );
+                    if self.should_prune_tx(current_height, &tx) {
+                        self.mempool_state.remove_commitment_tx(&tx.id).await;
+                        self.mempool_state
+                            .mark_tx_as_invalid(tx.id, TxIngressError::InvalidAnchor(tx.anchor))
+                            .await;
                     }
                 }
             }
@@ -351,8 +331,9 @@ impl Inner {
     /// 2) reduce down both forks to a `HashMap<SystemLedger, HashSet<IrysTransactionId>>`
     /// 3) reduce down to a set of SystemLedger specific orphaned transactions
     /// 4) resubmit these orphaned commitment transactions to the mempool
+    #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
     pub async fn handle_confirmed_commitment_tx_reorg(
-        &mut self,
+        &self,
         event: &ReorgEvent,
     ) -> eyre::Result<()> {
         let ReorgEvent {
@@ -485,7 +466,8 @@ impl Inner {
     /// 6) handle double promotions (when a publish tx is promoted in both forks)
     ///     6.1) get the associated proof from the new fork
     ///     6.2) update mempool state valid_submit_ledger_tx to store the correct ingress proof
-    pub async fn handle_confirmed_data_tx_reorg(&mut self, event: &ReorgEvent) -> eyre::Result<()> {
+    #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
+    pub async fn handle_confirmed_data_tx_reorg(&self, event: &ReorgEvent) -> eyre::Result<()> {
         let ReorgEvent {
             old_fork, new_fork, ..
         } = event;
@@ -640,13 +622,7 @@ impl Inner {
 
                 tx.promoted_height = Some(promoted_in_block.height);
                 // update entry
-                {
-                    let mut mempool_state_write_guard = self.mempool_state.write().await;
-                    mempool_state_write_guard
-                        .valid_submit_ledger_tx
-                        .entry(tx.id)
-                        .and_modify(|t| *t = tx);
-                }
+                self.mempool_state.update_submit_transaction(tx).await;
                 debug!(
                     "Reorged dual-published tx with {} proofs for {}",
                     &tx_proofs.len(),
@@ -666,7 +642,8 @@ impl Inner {
     /// When a block is migrated from the block_tree to the block_index at the migration depth
     /// it moves from "the cache" (largely the mempool) to "the index" (long term storage, usually
     /// in a database or disk)
-    pub async fn handle_block_migrated(&mut self, event: BlockMigratedEvent) -> eyre::Result<()> {
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %event.block.block_hash, block.height = event.block.height))]
+    pub async fn handle_block_migrated(&self, event: BlockMigratedEvent) -> eyre::Result<()> {
         tracing::debug!(
             "Processing block migrated broadcast: {} height: {}",
             event.block.block_hash,
@@ -674,7 +651,6 @@ impl Inner {
         );
 
         let migrated_block = (*event.block).clone();
-        // todo: investigate the `poa chunk` - after uncommenting the `eyre::ensure` below, all the tests pass.
         // Yet the code is architected in a way where we could migrate a block without a PoA chunk being present.
         eyre::ensure!(
             migrated_block.poa.chunk.is_some(),
@@ -688,104 +664,85 @@ impl Inner {
             .handle_get_commitment_tx_message(commitment_tx_ids)
             .await;
 
-        let tx = self
-            .irys_db
-            .tx_mut()
-            .expect("to get a mutable tx reference from the db");
+        // Remove all commitments from mempool in one batch operation
+        self.mempool_state
+            .remove_commitment_txs(commitments.values().map(|x| x.id))
+            .await;
 
-        for commitment_tx in commitments.values() {
-            // Insert the commitment transaction in to the db, perform migration
-            insert_commitment_tx(&tx, commitment_tx)?;
-            // Remove the commitment tx from the mempool cache, completing the migration
-            self.remove_commitment_tx(&commitment_tx.id()).await;
-        }
-        tx.inner.commit()?;
+        // stage 1: insert commitment transactions into database
+        self.irys_db.update_eyre(|tx| {
+            for commitment_tx in commitments.values() {
+                // Insert the commitment transaction in to the db, perform migration
+                insert_commitment_tx(tx, commitment_tx)?;
+            }
+            Ok(())
+        })?;
 
         // stage 2: move submit transactions from tree to index
         let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
         {
-            let mut_tx = self
-                .irys_db
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .expect("expected to read/write to database");
-
             // FIXME: this next line is less efficient than it needs to be?
             //        why would we read mdbx txs when we are migrating?
             let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
-            data_tx_headers
-                .into_iter()
-                .enumerate()
-                .for_each(|(idx, maybe_header)| match maybe_header {
-                    Some(ref header) => {
-                        if let Err(err) = insert_tx_header(&mut_tx, header) {
+
+            self.irys_db.update_eyre(|tx| {
+                for (idx, maybe_header) in data_tx_headers.into_iter().enumerate() {
+                    match maybe_header {
+                        Some(header) => {
+                            if let Err(err) = insert_tx_header(tx, &header) {
+                                error!(
+                                    "Could not insert transaction header - txid: {} err: {}",
+                                    header.id, err
+                                );
+                            }
+                        }
+                        None => {
                             error!(
-                                "Could not insert transaction header - txid: {} err: {}",
-                                header.id, err
+                                "Could not find transaction {} header in mempool",
+                                &submit_tx_ids[idx]
                             );
                         }
                     }
-                    None => {
-                        error!(
-                            "Could not find transaction {} header in mempool",
-                            &submit_tx_ids[idx]
-                        );
-                    }
-                });
-            mut_tx.commit().expect("expect to commit to database");
+                }
+                Ok(())
+            })?;
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
         let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
         {
-            let mut_tx = self
-                .irys_db
-                .tx_mut()
-                .map_err(|e| {
-                    error!("Failed to create mdbx transaction: {}", e);
-                })
-                .expect("expected to read/write to database");
-
             let publish_tx_headers = self
                 .handle_get_data_tx_message(publish_tx_ids.clone())
                 .await;
 
-            publish_tx_headers
-                .into_iter()
-                .flatten()
-                .for_each(|mut header| {
+            self.irys_db.update_eyre(|mut_tx| {
+                for mut header in publish_tx_headers.into_iter().flatten() {
                     if header.promoted_height.is_none() {
                         header.promoted_height = Some(event.block.height);
-                        panic!(
+                        eyre::bail!(
                             "Migrating publish tx with no promoted_height {} at height {}",
-                            header.id, event.block.height
+                            header.id,
+                            event.block.height
                         );
                     }
 
-                    if let Err(err) = insert_tx_header(&mut_tx, &header) {
+                    if let Err(err) = insert_tx_header(mut_tx, &header) {
                         error!(
                             "Could not insert transaction header - txid: {} err: {}",
                             header.id, err
                         );
                     }
-                });
-            mut_tx.commit().expect("expect to commit to database");
+                }
+                Ok(())
+            })?;
         }
 
         let mempool_state = &self.mempool_state.clone();
 
         // Remove the submit tx from the pending valid_submit_ledger_tx pool
-        {
-            let mut mempool_state_write_guard = mempool_state.write().await;
-            for txid in submit_tx_ids.iter() {
-                mempool_state_write_guard
-                    .valid_submit_ledger_tx
-                    .remove(txid);
-                mempool_state_write_guard.recent_valid_tx.pop(txid);
-            }
-        }
+        mempool_state
+            .remove_transactions_from_pending_valid_pool(&submit_tx_ids)
+            .await;
 
         // add block with optional poa chunk to index
         self.irys_db

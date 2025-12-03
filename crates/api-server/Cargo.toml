@@ -9,18 +9,22 @@ irys-actors.workspace = true
 irys-database.workspace = true
 irys-domain.workspace = true
 irys-reth-node-bridge.workspace = true
+irys-reward-curve.workspace = true
 irys-types.workspace = true
 
 reth.workspace = true
+alloy-eips.workspace = true
 awc.workspace = true
 socket2.workspace = true
 base58.workspace = true
+hex.workspace = true
 tokio.workspace = true
 serde_json = { workspace = true, features = ["std", "raw_value"] }
 serde.workspace = true
 actix-web.workspace = true
 actix-cors = "0.7"
 tracing.workspace = true
+tracing-actix-web = "0.7"
 semver.workspace = true
 eyre.workspace = true
 thiserror.workspace = true

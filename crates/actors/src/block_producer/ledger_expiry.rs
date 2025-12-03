@@ -60,6 +60,7 @@
 use crate::block_discovery::get_data_tx_in_parallel;
 use crate::mempool_service::MempoolServiceMessage;
 use crate::shadow_tx_generator::RollingHash;
+use crate::MempoolServiceMessageWithSpan;
 use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
@@ -91,7 +92,7 @@ pub async fn calculate_expired_ledger_fees(
     ledger_type: DataLedger,
     config: &Config,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
     db: DatabaseProvider,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
@@ -247,13 +248,14 @@ pub async fn calculate_expired_ledger_fees(
 }
 
 /// Fetches a block header from mempool or database
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
 async fn get_block_by_hash(
     block_hash: H256,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<IrysBlockHeader> {
     let (tx, rx) = oneshot::channel();
-    mempool_sender.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+    mempool_sender.send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx).into())?;
 
     match rx.await? {
         Some(header) => Ok(header),
@@ -464,7 +466,7 @@ async fn process_boundary_block(
     ledger_type: DataLedger,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     // Get the block and its transactions
@@ -516,6 +518,13 @@ async fn process_boundary_block(
 /// # Returns
 ///
 /// mapping of tx ID to miners who stored it
+#[tracing::instrument(level = "trace", skip_all, fields(
+    chunk.prev_max_offset = %prev_max_offset,
+    chunk.partition_start = %partition_range.start(),
+    chunk.partition_end = %partition_range.end(),
+    tx.count = transactions.len(),
+    boundary.is_earliest = is_earliest
+))]
 fn filter_transactions_by_chunk_range(
     transactions: Vec<DataTransactionHeader>,
     prev_max_offset: LedgerChunkOffset,
@@ -584,7 +593,7 @@ fn filter_transactions_by_chunk_range(
 async fn process_middle_blocks(
     middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
     ledger_type: DataLedger,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
     let mut tx_to_miners = BTreeMap::new();
@@ -671,9 +680,11 @@ fn aggregate_balance_deltas(
                     .perm_fee
                     .ok_or_eyre("unpromoted tx should have the prem fee present")?;
                 // Add refund to the vector (already sorted by tx_id due to transaction sorting)
-                balance_delta
-                    .user_perm_fee_refunds
-                    .push((data_tx.id, perm_fee, data_tx.signer));
+                balance_delta.user_perm_fee_refunds.push((
+                    data_tx.id,
+                    perm_fee.get(),
+                    data_tx.signer,
+                ));
             } else {
                 tracing::debug!(
                     tx.id = ?data_tx.id,
@@ -742,14 +753,14 @@ mod tests {
         // Create test transactions
         let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
-            term_fee: U256::from(1000),
+            term_fee: U256::from(1000).into(),
             data_size: 100,
             ..Default::default()
         });
 
         let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
-            term_fee: U256::from(2000),
+            term_fee: U256::from(2000).into(),
             data_size: 200,
             ..Default::default()
         });

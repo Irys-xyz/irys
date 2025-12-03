@@ -69,6 +69,10 @@ pub struct NodeConfig {
 
     pub genesis_peer_discovery_timeout_millis: u64,
 
+    /// Default network configuration used by all services unless overridden
+    #[serde(default = "default_network_defaults")]
+    pub network_defaults: NetworkDefaults,
+
     /// Peer-to-peer network communication settings
     pub gossip: GossipConfig,
 
@@ -112,6 +116,10 @@ pub struct NodeConfig {
     /// P2P pull/request parameters
     #[serde(default)]
     pub p2p_pull: P2PPullConfig,
+
+    /// Sync parameters - how many blocks to pull in parallel, timeouts, etc
+    #[serde(default)]
+    pub sync: SyncConfig,
 }
 
 /// # Node Operation Mode
@@ -186,6 +194,10 @@ pub enum OracleConfig {
 
         /// Number of blocks between price updates
         smoothing_interval: u64,
+        /// Initial direction of price movement. When true the mock increases first;
+        /// when false it decreases first.
+        #[serde(default = "super::default_oracle_initial_direction_up")]
+        initial_direction_up: bool,
         /// Poll interval in milliseconds for refreshing the mock oracle price snapshots.
         #[serde(default = "default_mock_oracle_poll_interval_ms")]
         poll_interval_ms: u64,
@@ -230,6 +242,10 @@ const fn default_mock_oracle_poll_interval_ms() -> u64 {
     10_000
 }
 
+pub(crate) const fn default_oracle_initial_direction_up() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct StorageSyncConfig {
@@ -255,6 +271,58 @@ pub struct DataSyncServiceConfig {
     pub chunk_request_timeout: Duration,
 }
 
+/// # Network Defaults
+///
+/// Default IP addresses used across all services unless overridden.
+/// This allows you to specify public_ip and bind_ip once instead of
+/// repeating them for each service (http, gossip, reth).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkDefaults {
+    /// Default public IP address advertised to other peers
+    pub public_ip: String,
+    /// Default bind IP address for all services
+    pub bind_ip: String,
+}
+
+/// Network configuration with optional overrides
+pub trait NetworkConfigWithDefaults {
+    /// Get the optional public IP
+    fn public_ip_option(&self) -> &Option<String>;
+
+    /// Get the optional bind IP
+    fn bind_ip_option(&self) -> &Option<String>;
+
+    /// Get the public IP, falling back to network defaults if not set
+    fn public_ip<'a>(&'a self, defaults: &'a NetworkDefaults) -> &'a str {
+        self.public_ip_option()
+            .as_deref()
+            .unwrap_or(&defaults.public_ip)
+    }
+
+    /// Get the bind IP, falling back to network defaults if not set
+    fn bind_ip<'a>(&'a self, defaults: &'a NetworkDefaults) -> &'a str {
+        self.bind_ip_option()
+            .as_deref()
+            .unwrap_or(&defaults.bind_ip)
+    }
+}
+
+/// Macro to implement NetworkConfigWithDefaults for types with public_ip and bind_ip fields
+macro_rules! impl_network_config_with_defaults {
+    ($type:ty) => {
+        impl NetworkConfigWithDefaults for $type {
+            fn public_ip_option(&self) -> &Option<String> {
+                &self.public_ip
+            }
+
+            fn bind_ip_option(&self) -> &Option<String> {
+                &self.bind_ip
+            }
+        }
+    };
+}
+
 /// # Gossip Network Configuration
 ///
 /// Settings for peer-to-peer communication between nodes.
@@ -262,14 +330,18 @@ pub struct DataSyncServiceConfig {
 #[serde(deny_unknown_fields)]
 pub struct GossipConfig {
     /// The IP address that's going to be announced to other peers
-    pub public_ip: String,
+    #[serde(default)]
+    pub public_ip: Option<String>,
     /// The port to accept connections from other peers
     pub public_port: u16,
     /// The IP address the gossip service binds to
-    pub bind_ip: String,
+    #[serde(default)]
+    pub bind_ip: Option<String>,
     /// The port number the gossip service listens on
     pub bind_port: u16,
 }
+
+impl_network_config_with_defaults!(GossipConfig);
 
 /// # Reth Node Configuration
 ///
@@ -287,11 +359,13 @@ pub struct RethNetworkConfig {
     #[serde(default)]
     pub use_random_ports: bool,
     /// The IP address that's going to be announced to other peers
-    pub public_ip: String,
+    #[serde(default)]
+    pub public_ip: Option<String>,
     /// The port to accept connections from other peers
     pub public_port: u16,
     /// The IP address that Reth binds to
-    pub bind_ip: String,
+    #[serde(default)]
+    pub bind_ip: Option<String>,
     /// The port number the Reth listens on
     pub bind_port: u16,
     // peer ID
@@ -299,6 +373,8 @@ pub struct RethNetworkConfig {
     #[serde(default)]
     pub peer_id: reth_transaction_pool::PeerId,
 }
+
+impl_network_config_with_defaults!(RethNetworkConfig);
 
 /// # Data Packing Configuration
 ///
@@ -332,56 +408,35 @@ pub struct RemotePackingConfig {
     pub timeout: Option<Duration>,
 }
 
-/// Default maximum cache size: 10 GB
-pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
-
-/// Cache eviction strategy - node operators select one
+/// # Cache Configuration
+///
+/// Settings for in-memory caching to improve performance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-pub enum CacheEvictionStrategy {
-    /// Time-based eviction: remove cached data after a fixed time period
-    /// Runs on every prune_cache() call, evicts entries older than max_age
-    TimeBased {
-        /// Maximum age of cached data in seconds before eviction
-        /// Example: 86400 = 24 hours, 604800 = 7 days
-        max_age_seconds: u64,
-    },
+#[serde(default, deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Number of blocks cache cleaning will lag behind block finalization
+    /// Higher values keep more data in cache but use more memory
+    #[serde(default)]
+    pub cache_clean_lag: u8,
 
-    /// Size-based eviction: remove oldest cached data (FIFO) when limits exceeded
-    /// Runs on every prune_cache() call, evicts oldest entries when over limit
-    SizeBased {
-        /// Maximum cache size in bytes
-        /// Default: 10737418240 (10 GB)
-        #[serde(default = "default_max_cache_size_bytes")]
-        max_cache_size_bytes: u64,
-    },
+    #[serde(default = "default_max_cache_size_bytes")]
+    pub max_cache_size_bytes: u64,
 }
+
+/// Default maximum cache size: 10 GiB
+pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
 
 const fn default_max_cache_size_bytes() -> u64 {
     DEFAULT_MAX_CACHE_SIZE_BYTES
 }
 
-impl Default for CacheEvictionStrategy {
+impl Default for CacheConfig {
     fn default() -> Self {
-        Self::SizeBased {
+        Self {
+            cache_clean_lag: 0,
             max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
         }
     }
-}
-
-/// # Cache Configuration
-///
-/// Settings for in-memory caching to improve performance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CacheConfig {
-    /// Number of blocks cache cleaning will lag behind block finalization
-    /// Higher values keep more data in cache but use more memory
-    pub cache_clean_lag: u8,
-
-    /// Cache eviction strategy - choose time-based OR size-based
-    #[serde(default)]
-    pub eviction_strategy: CacheEvictionStrategy,
 }
 
 /// # HTTP API Configuration
@@ -391,14 +446,18 @@ pub struct CacheConfig {
 #[serde(deny_unknown_fields)]
 pub struct HttpConfig {
     /// The IP address visible to the outside world
-    pub public_ip: String,
+    #[serde(default)]
+    pub public_ip: Option<String>,
     /// The port that is visible to the outside world
     pub public_port: u16,
     /// The IP address the HTTP service binds to
-    pub bind_ip: String,
+    #[serde(default)]
+    pub bind_ip: Option<String>,
     /// The port that the Node's HTTP server should listen on. Set to 0 for randomization.
     pub bind_port: u16,
 }
+
+impl_network_config_with_defaults!(HttpConfig);
 
 /// P2P handshake configuration with sensible defaults
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -435,13 +494,17 @@ pub struct P2PGossipConfig {
     pub broadcast_batch_size: usize,
     /// Interval between broadcast steps in milliseconds
     pub broadcast_batch_throttle_interval: u64,
+    /// Enable scoring of peers based on their behavior. Disabling this might help with reducing
+    /// noise during debug, otherwise it's recommended to keep it enabled.
+    pub enable_scoring: bool,
 }
 
 impl Default for P2PGossipConfig {
     fn default() -> Self {
         Self {
-            broadcast_batch_size: 5,
-            broadcast_batch_throttle_interval: 1_000,
+            broadcast_batch_size: 50,
+            broadcast_batch_throttle_interval: 100,
+            enable_scoring: true,
         }
     }
 }
@@ -468,10 +531,44 @@ impl Default for P2PPullConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SyncConfig {
+    /// How many blocks to fetch in parallel per batch during the sync
+    pub block_batch_size: usize,
+    /// How often to check if we're behind and need to sync
+    pub periodic_sync_check_interval_secs: u64,
+    /// Timeout for retry block pull/process
+    pub retry_block_request_timeout_secs: u64,
+    /// Whether to enable periodic sync checks
+    pub enable_periodic_sync_check: bool,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        Self {
+            block_batch_size: 50,
+            // Check every 30 seconds if we're behind
+            periodic_sync_check_interval_secs: 30,
+            retry_block_request_timeout_secs: 30,
+            enable_periodic_sync_check: true,
+        }
+    }
+}
+
 /// Default for `peer_filter_mode` when the field is not present in the provided TOML.
 /// This keeps legacy configurations working by defaulting to unrestricted mode.
 fn default_peer_filter_mode() -> PeerFilterMode {
     PeerFilterMode::Unrestricted
+}
+
+/// Default network configuration when not specified in the config file.
+/// Uses localhost for public_ip and binds to all interfaces.
+fn default_network_defaults() -> NetworkDefaults {
+    NetworkDefaults {
+        public_ip: "127.0.0.1".to_string(),
+        bind_ip: "0.0.0.0".to_string(),
+    }
 }
 
 /// # VDF (Verifiable Delay Function) Configuration
@@ -527,6 +624,26 @@ pub struct MempoolNodeConfig {
     /// Maximum number of valid chunk hashes to keep track of
     /// Prevents re-processing and re-gossipping of recently seen chunks
     pub max_valid_chunks: usize,
+
+    /// Maximum number of data transactions to hold in mempool
+    /// Prevents unbounded growth. Conservative: max_data_txs_per_block * block_migration_depth * 3
+    pub max_valid_submit_txs: usize,
+
+    /// Maximum number of addresses with pending commitment transactions
+    /// Prevents unbounded growth. Conservative: num_staked_miners * 3
+    pub max_valid_commitment_addresses: usize,
+
+    /// Maximum commitment transactions per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_commitments_per_address: usize,
+
+    /// Maximum number of concurrent handlers for the mempool messages
+    #[serde(default = "default_max_concurrent_mempool_tasks")]
+    pub max_concurrent_mempool_tasks: usize,
+}
+
+pub fn default_max_concurrent_mempool_tasks() -> usize {
+    30
 }
 
 impl NodeConfig {
@@ -543,6 +660,7 @@ impl NodeConfig {
                 .expect("consensus cfg does not exist"),
             ConsensusOptions::Testnet => ConsensusConfig::testnet(),
             ConsensusOptions::Testing => ConsensusConfig::testing(),
+            ConsensusOptions::Mainnet => ConsensusConfig::mainnet(),
             ConsensusOptions::Custom(consensus_config) => consensus_config.clone(),
         }
     }
@@ -577,7 +695,11 @@ impl NodeConfig {
     }
 
     pub fn local_api_url(&self) -> String {
-        format!("http://{}:{}", self.http.bind_ip, self.http.bind_port)
+        format!(
+            "http://{}:{}",
+            self.http.bind_ip(&self.network_defaults),
+            self.http.bind_port
+        )
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -617,6 +739,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
+                initial_direction_up: true,
                 poll_interval_ms: default_mock_oracle_poll_interval_ms(),
             }],
             mining_key,
@@ -638,18 +761,22 @@ impl NodeConfig {
             initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
+            network_defaults: NetworkDefaults {
+                public_ip: "127.0.0.1".to_string(),
+                bind_ip: "127.0.0.1".to_string(),
+            },
             gossip: GossipConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 0,
-                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 0,
             },
             reth: RethConfig {
                 network: RethNetworkConfig {
                     use_random_ports: true,
-                    public_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    public_ip: Some("0.0.0.0".to_string()),
                     public_port: 0,
-                    bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                    bind_ip: Some("0.0.0.0".to_string()),
                     bind_port: 0,
                     peer_id: Default::default(),
                 },
@@ -664,12 +791,12 @@ impl NodeConfig {
             },
             cache: CacheConfig {
                 cache_clean_lag: 2,
-                eviction_strategy: CacheEvictionStrategy::default(),
+                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
             },
             http: HttpConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 0,
-                bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 0,
             },
             mempool: MempoolNodeConfig {
@@ -682,6 +809,10 @@ impl NodeConfig {
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
+                max_concurrent_mempool_tasks: 30,
             },
 
             vdf: VdfNodeConfig {
@@ -693,6 +824,7 @@ impl NodeConfig {
             p2p_pull: P2PPullConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
+            sync: SyncConfig::default(),
         }
     }
 
@@ -750,6 +882,7 @@ impl NodeConfig {
                 incremental_change: Amount::token(dec!(0.00000000000001))
                     .expect("valid token amount"),
                 smoothing_interval: 15,
+                initial_direction_up: true,
                 poll_interval_ms: default_mock_oracle_poll_interval_ms(),
             }],
             mining_key,
@@ -772,18 +905,22 @@ impl NodeConfig {
             initial_stake_and_pledge_whitelist: vec![],
             initial_whitelist: vec![],
             peer_filter_mode: PeerFilterMode::Unrestricted,
+            network_defaults: NetworkDefaults {
+                public_ip: "127.0.0.1".to_string(),
+                bind_ip: "0.0.0.0".to_string(),
+            },
             gossip: GossipConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 8081,
-                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 8081,
             },
             reth: RethConfig {
                 network: RethNetworkConfig {
                     use_random_ports: false,
-                    public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    public_ip: None,
                     public_port: 9009,
-                    bind_ip: "127.0.0.1".parse().expect("valid IP address"),
+                    bind_ip: Some("127.0.0.1".to_string()),
                     bind_port: 9009,
                     peer_id: Default::default(),
                 },
@@ -798,12 +935,12 @@ impl NodeConfig {
             },
             cache: CacheConfig {
                 cache_clean_lag: 2,
-                eviction_strategy: CacheEvictionStrategy::default(),
+                max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
             },
             http: HttpConfig {
-                public_ip: "127.0.0.1".parse().expect("valid IP address"),
+                public_ip: None,
                 public_port: 8080,
-                bind_ip: "0.0.0.0".parse().expect("valid IP address"),
+                bind_ip: None,
                 bind_port: 8080,
             },
 
@@ -817,6 +954,10 @@ impl NodeConfig {
                 max_invalid_items: 10_000,
                 max_valid_items: 10_000,
                 max_valid_chunks: 10_000,
+                max_valid_submit_txs: 3000,
+                max_valid_commitment_addresses: 300,
+                max_commitments_per_address: 20,
+                max_concurrent_mempool_tasks: 30,
             },
 
             vdf: VdfNodeConfig {
@@ -829,6 +970,8 @@ impl NodeConfig {
 
             genesis_peer_discovery_timeout_millis: 10000,
             stake_pledge_drives: false,
+
+            sync: SyncConfig::default(),
         }
     }
 
@@ -866,16 +1009,25 @@ impl NodeConfig {
     /// Get the PeerAddress for this node configuration
     pub fn peer_address(&self) -> PeerAddress {
         PeerAddress {
-            api: format!("{}:{}", self.http.public_ip, self.http.public_port)
-                .parse()
-                .expect("valid SocketAddr expected"),
-            gossip: format!("{}:{}", self.gossip.public_ip, self.gossip.public_port)
-                .parse()
-                .expect("valid SocketAddr expected"),
+            api: format!(
+                "{}:{}",
+                self.http.public_ip(&self.network_defaults),
+                self.http.public_port
+            )
+            .parse()
+            .expect("valid SocketAddr expected"),
+            gossip: format!(
+                "{}:{}",
+                self.gossip.public_ip(&self.network_defaults),
+                self.gossip.public_port
+            )
+            .parse()
+            .expect("valid SocketAddr expected"),
             execution: RethPeerInfo {
                 peering_tcp_addr: format!(
                     "{}:{}",
-                    &self.reth.network.public_ip, &self.reth.network.public_port
+                    self.reth.network.public_ip(&self.network_defaults),
+                    self.reth.network.public_port
                 )
                 .parse()
                 .expect("valid SocketAddr expected"),

@@ -1,4 +1,4 @@
-use crate::utils::{future_or_mine_on_timeout, mine_blocks, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
@@ -28,7 +28,7 @@ async fn external_api() -> eyre::Result<()> {
     initialize_tracing();
     let mut testing_config = NodeConfig::testing();
     testing_config.http.bind_port = 8080; // external test, should never be run concurrently
-    testing_config.http.bind_ip = "0.0.0.0".to_string();
+    testing_config.http.bind_ip = Some("0.0.0.0".to_string());
 
     let account1 = IrysSigner::random_signer(&testing_config.consensus_config());
     let mut node = IrysNodeTest::new_genesis(testing_config.clone());
@@ -140,15 +140,12 @@ async fn external_api() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
+    let _start_offset = node
+        .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
+        .await?
+        .unwrap();
 
-    mine_blocks(&node.node_ctx, 10).await?;
+    node.mine_blocks(10).await?;
 
     // sleep so the client has a chance to read the chunks
     sleep(Duration::from_millis(100_000)).await;

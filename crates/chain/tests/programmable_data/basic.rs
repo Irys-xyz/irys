@@ -20,7 +20,7 @@ use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _,
 use irys_types::{irys::IrysSigner, Address};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
-use crate::utils::{future_or_mine_on_timeout, IrysNodeTest};
+use crate::utils::IrysNodeTest;
 
 // Codegen from artifact.
 // taken from https://github.com/alloy-rs/examples/blob/main/examples/contracts/examples/deploy_from_artifact.rs
@@ -95,12 +95,9 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     let mut deploy_fut = Box::pin(deploy_builder.deploy());
 
-    let contract_address = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut deploy_fut,
-        Duration::from_millis(500),
-    )
-    .await??;
+    let contract_address = node
+        .future_or_mine_on_timeout(&mut deploy_fut, Duration::from_millis(500))
+        .await??;
 
     let contract = IrysProgrammableDataBasic::new(contract_address, alloy_provider.clone());
 
@@ -146,8 +143,8 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         .create_publish_transaction(
             data_bytes.clone(),
             node.get_anchor().await?,
-            price_info.perm_fee,
-            price_info.term_fee,
+            price_info.perm_fee.into(),
+            price_info.term_fee.into(),
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
@@ -188,12 +185,8 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         }
     });
 
-    future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut tx_header_fut,
-        Duration::from_millis(500),
-    )
-    .await?;
+    node.future_or_mine_on_timeout(&mut tx_header_fut, Duration::from_millis(500))
+        .await?;
 
     // upload chunk(s)
     for (tx_chunk_offset, chunk_node) in tx.chunks.iter().enumerate() {
@@ -254,13 +247,10 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
         None
     });
 
-    let _start_offset = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut start_offset_fut,
-        Duration::from_millis(500),
-    )
-    .await?
-    .unwrap();
+    let _start_offset = node
+        .future_or_mine_on_timeout(&mut start_offset_fut, Duration::from_millis(500))
+        .await?
+        .unwrap();
 
     // let read_chunk = &node.chunk_provider.get_chunk_by_ledger_offset(
     //     irys_database::Ledger::Publish,
@@ -301,12 +291,9 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
     let invocation_call = invocation_builder.send().await?;
     let mut invocation_receipt_fut = Box::pin(invocation_call.get_receipt());
-    let _res = future_or_mine_on_timeout(
-        node.node_ctx.clone(),
-        &mut invocation_receipt_fut,
-        Duration::from_millis(500),
-    )
-    .await??;
+    let _res = node
+        .future_or_mine_on_timeout(&mut invocation_receipt_fut, Duration::from_millis(500))
+        .await?;
 
     let stored_bytes = contract.getStorage().call().await?;
     let stored_message = String::from_utf8(stored_bytes.to_vec())?;

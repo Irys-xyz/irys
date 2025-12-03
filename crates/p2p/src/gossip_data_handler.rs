@@ -2,11 +2,15 @@ use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
     rate_limiting::DataRequestTracker,
-    types::{InternalGossipError, InvalidDataError},
+    types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::{block_discovery::BlockDiscoveryFacade, ChunkIngressError, MempoolFacade};
+use futures::stream::{self, StreamExt as _};
+use irys_actors::{
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    CriticalChunkIngressError, MempoolFacade,
+};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
@@ -16,12 +20,15 @@ use irys_types::{
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
     IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
+use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tracing::log::warn;
-use tracing::{debug, error, Span};
+use tracing::{debug, error, instrument, warn, Instrument as _, Span};
+
+pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
+pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -72,6 +79,7 @@ where
     B: BlockDiscoveryFacade,
     A: ApiClient,
 {
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_chunk(
         &self,
         chunk_request: GossipRequest<UnpackedChunk>,
@@ -88,49 +96,67 @@ where
             }
             Err(error) => {
                 match error {
-                    ChunkIngressError::UnknownTransaction => {
-                        // TODO:
-                        //  I suppose we have to ask the peer for transaction,
-                        //  but what if it doesn't have one?
-                        Ok(())
+                    ChunkIngressError::Critical(err) => {
+                        match err {
+                            // ===== External invalid data errors
+                            CriticalChunkIngressError::InvalidProof => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
+                            ),
+                            CriticalChunkIngressError::InvalidDataHash => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash),
+                            ),
+                            CriticalChunkIngressError::InvalidChunkSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
+                            ),
+                            CriticalChunkIngressError::InvalidDataSize => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
+                            ),
+                            // ===== Internal errors
+                            CriticalChunkIngressError::DatabaseError => {
+                                Err(GossipError::Internal(InternalGossipError::Database(
+                                    "Chunk ingress database error".to_string(),
+                                )))
+                            }
+                            CriticalChunkIngressError::ServiceUninitialized => Err(
+                                GossipError::Internal(InternalGossipError::ServiceUninitialized),
+                            ),
+                            CriticalChunkIngressError::Other(other) => {
+                                Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+                            }
+                        }
                     }
-                    // ===== External invalid data errors
-                    ChunkIngressError::InvalidProof => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::InvalidDataHash => Err(GossipError::InvalidData(
-                        InvalidDataError::ChinkInvalidDataHash,
-                    )),
-                    ChunkIngressError::InvalidChunkSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::InvalidDataSize => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidDataSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedBytes => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    ChunkIngressError::PreHeaderOversizedDataPath => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidProof,
-                    )),
-                    ChunkIngressError::PreHeaderOffsetExceedsCap => Err(GossipError::InvalidData(
-                        InvalidDataError::ChunkInvalidChunkSize,
-                    )),
-                    // ===== Internal errors
-                    ChunkIngressError::DatabaseError => {
-                        Err(GossipError::Internal(InternalGossipError::Database))
-                    }
-                    ChunkIngressError::ServiceUninitialized => Err(GossipError::Internal(
-                        InternalGossipError::ServiceUninitialized,
-                    )),
-                    ChunkIngressError::Other(other) => {
-                        Err(GossipError::Internal(InternalGossipError::Unknown(other)))
+
+                    ChunkIngressError::Advisory(err) => {
+                        match err {
+                            // ===== Interval data 'errors' (peers should not be punished)
+                            AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedBytes,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::Other(other) => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::Other(other),
+                                )))
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_transaction(
         &self,
         transaction_request: GossipRequest<DataTransactionHeader>,
@@ -188,12 +214,13 @@ where
                 Ok(())
             }
             Err(error) => {
-                error!("Error when sending transaction to mempool: {:?}", error);
+                error!("Error when sending transaction to mempool: {}", error);
                 Err(error)
             }
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_ingress_proof(
         &self,
         proof_request: GossipRequest<IngressProof>,
@@ -237,12 +264,13 @@ where
                 Ok(())
             }
             Err(error) => {
-                error!("Error when sending ingress proof to mempool: {:?}", error);
+                error!("Error when sending ingress proof to mempool: {}", error);
                 Err(error)
             }
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_commitment_tx(
         &self,
         transaction_request: GossipRequest<CommitmentTransaction>,
@@ -301,7 +329,7 @@ where
             }
             Err(error) => {
                 error!(
-                    "Error when sending commitment transaction to mempool: {:?}",
+                    "Error when sending commitment transaction to mempool: {}",
                     error
                 );
                 Err(error)
@@ -310,6 +338,7 @@ where
     }
 
     /// Pulls a block from the network and sends it to the BlockPool for processing
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_process_block(
         &self,
         block_hash: BlockHash,
@@ -342,10 +371,12 @@ where
             peer_info.address.api,
             peer_info.address.gossip,
         )
+        .in_current_span()
         .await
     }
 
     /// Pulls a block from a specific peer and sends it to the BlockPool for processing
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_process_block_from_peer(
         &self,
         block_hash: BlockHash,
@@ -372,17 +403,20 @@ where
             peer_info.address.api,
             peer_info.address.gossip,
         )
+        .in_current_span()
         .await
     }
 
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), parent = &self.span)]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
         source_api_address: SocketAddr,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
-        let span = self.span.clone();
-        let _span = span.enter();
+        if block_header_request.data.poa.chunk.is_none() {
+            error!("received a block without a POA chunk");
+        }
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
@@ -397,8 +431,8 @@ where
         let sync_target = self.sync_state.sync_target_height();
         if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
-                "Node {}: Block {} is out of the sync range (target: {}, highest processed: {}), skipping",
-                self.gossip_client.mining_address, block_hash, &sync_target, &self.sync_state.highest_processed_block()
+                "Node {}: Block {} height {} is out of the sync range (target: {}, highest processed: {}), skipping",
+                self.gossip_client.mining_address, block_hash, block_header.height, &sync_target, &self.sync_state.highest_processed_block()
             );
             return Ok(());
         }
@@ -410,8 +444,8 @@ where
         // able to keep track of which peers seen what
         if has_block_already_been_received && !is_block_requested_by_the_pool {
             debug!(
-                "Node {}: Block {} already seen and not requested by the pool, skipping",
-                self.gossip_client.mining_address, block_header.block_hash
+                "Node {}: Block {} height {} already seen and not requested by the pool, skipping",
+                self.gossip_client.mining_address, block_header.block_hash, block_header.height
             );
             return Ok(());
         }
@@ -434,8 +468,10 @@ where
                 ))
             );
 
-            self.peer_list
-                .decrease_peer_score(&source_miner_address, ScoreDecreaseReason::BogusData);
+            self.peer_list.decrease_peer_score(
+                &source_miner_address,
+                ScoreDecreaseReason::BogusData("Invalid block signature".into()),
+            );
 
             return Err(GossipError::InvalidData(
                 InvalidDataError::InvalidBlockSignature,
@@ -453,17 +489,21 @@ where
 
         if has_block_already_been_processed {
             debug!(
-                "Node {}: Block {} has already been processed, skipping",
-                self.gossip_client.mining_address, block_header.block_hash
+                "Node {}: Block {} height {} has already been processed, skipping",
+                self.gossip_client.mining_address, block_header.block_hash, block_header.height
             );
             return Ok(());
         }
 
         debug!(
-            "Node {}: Block {} has not been processed yet, starting processing",
-            self.gossip_client.mining_address, block_header.block_hash
+            "Node {}: Block {} height {} has not been processed yet, starting processing",
+            self.gossip_client.mining_address, block_header.block_hash, block_header.height
         );
 
+        debug!(
+            "Collecting missing/invalid data transactions for block {} height {}",
+            block_hash, block_header.height
+        );
         let mut missing_invalid_tx_ids = Vec::new();
 
         for tx_id in block_header
@@ -475,6 +515,10 @@ where
                 missing_invalid_tx_ids.push(tx_id);
             }
         }
+        debug!(
+            "Collected missing data tx ids for block {} height {}: {:?}",
+            block_hash, block_header.height, missing_invalid_tx_ids
+        );
 
         for system_tx_id in block_header
             .system_ledgers
@@ -488,11 +532,15 @@ where
                 missing_invalid_tx_ids.push(system_tx_id);
             }
         }
+        debug!(
+            "Collected missing commitment tx ids for block {} height {}: {:?}",
+            block_hash, block_header.height, missing_invalid_tx_ids
+        );
 
         if !missing_invalid_tx_ids.is_empty() {
             debug!(
-                "Missing/invalid transactions to fetch: {:?}",
-                missing_invalid_tx_ids
+                "Missing/invalid transactions to fetch for block {} height {}: {:?}",
+                block_hash, block_header.height, missing_invalid_tx_ids
             );
         }
 
@@ -501,95 +549,125 @@ where
             .remove_from_blacklist(missing_invalid_tx_ids.clone())
             .await
             .map_err(|error| {
-                error!("Failed to remove txs from mempool blacklist");
+                error!("Failed to remove txs from the mempool blacklist");
                 GossipError::unknown(&error)
             })?;
 
-        // TODO: make this parallel with a limited number of concurrent fetches, maybe 10?
-        // Fetch and process each missing transaction one-by-one with retries
-        for tx_id_to_fetch in missing_invalid_tx_ids {
-            // Try source peer first
-            let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
-            let mut last_err: Option<String> = None;
+        debug!(
+            "Fetching missing transactions from the network for block {} height {}",
+            block_hash, block_header.height
+        );
 
-            match self
-                .api_client
-                .get_transaction(source_api_address, tx_id_to_fetch)
-                .await
-            {
-                Ok(resp) => {
-                    fetched = Some((resp, source_miner_address));
+        // Fetch missing transactions in parallel with a concurrency limit of 10
+        let fetch_results: Vec<_> = stream::iter(missing_invalid_tx_ids)
+            .map(|tx_id_to_fetch| async move {
+                // Try source peer first
+                let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
+                let mut last_err: Option<String> = None;
+
+                match self
+                    .api_client
+                    .get_transaction(source_api_address, tx_id_to_fetch)
+                    .await
+                {
+                    Ok(resp) => {
+                        fetched = Some((resp, source_miner_address));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to fetch tx {} from source peer {}: {}",
+                            tx_id_to_fetch, source_api_address, e
+                        );
+                        last_err = Some(e.to_string());
+                    }
                 }
-                Err(e) => {
-                    warn!(
-                        "Failed to fetch tx {:?} from source peer {}: {:?}",
-                        tx_id_to_fetch, source_api_address, e
-                    );
-                    last_err = Some(e.to_string());
-                }
-            }
 
-            // If source failed, try top 5 active peers (excluding the source)
-            if fetched.is_none() {
-                let mut exclude = std::collections::HashSet::new();
-                exclude.insert(source_miner_address);
-                let top_peers = self.peer_list.top_active_peers(Some(5), Some(exclude));
+                // If the source failed, try random 7 out of the top 15 active peers (excluding the source)
+                if fetched.is_none() {
+                    let mut exclude = std::collections::HashSet::new();
+                    exclude.insert(source_miner_address);
+                    let mut top_peers = self
+                        .peer_list
+                        .top_active_peers(Some(MAX_PEERS_TO_SELECT_FROM), Some(exclude));
+                    top_peers.shuffle(&mut rand::thread_rng());
+                    top_peers.truncate(MAX_TX_PEERS_TO_TRY);
 
-                for (peer_addr, peer_item) in top_peers {
-                    match self
-                        .api_client
-                        .get_transaction(peer_item.address.api, tx_id_to_fetch)
-                        .await
-                    {
-                        Ok(resp) => {
-                            fetched = Some((resp, peer_addr));
-                            break;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to fetch tx {:?} from peer {}: {:?}",
-                                tx_id_to_fetch, peer_item.address.api, e
-                            );
-                            last_err = Some(e.to_string());
-                            continue;
+                    for (peer_addr, peer_item) in top_peers {
+                        match self
+                            .api_client
+                            .get_transaction(peer_item.address.api, tx_id_to_fetch)
+                            .await
+                        {
+                            Ok(resp) => {
+                                fetched = Some((resp, peer_addr));
+                                break;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to fetch tx {} from peer {}: {}",
+                                    tx_id_to_fetch, peer_item.address.api, e
+                                );
+                                last_err = Some(e.to_string());
+                                continue;
+                            }
                         }
                     }
                 }
+
+                match fetched {
+                    Some((tx_response, from_miner_addr)) => Ok((tx_response, from_miner_addr)),
+                    None => {
+                        let err_msg = format!(
+                            "Failed to fetch transaction {:?} from source {} and top peers{}",
+                            tx_id_to_fetch,
+                            source_api_address,
+                            last_err
+                                .as_ref()
+                                .map(|e| format!("; last error: {}", e))
+                                .unwrap_or_default()
+                        );
+                        Err(err_msg)
+                    }
+                }
+            })
+            .buffer_unordered(10)
+            .collect()
+            .await;
+
+        // Process results and store fetched transactions
+        for result in fetch_results {
+            match result {
+                Ok((tx_response, from_miner_addr)) => {
+                    // Store the fetched transaction in the BlockPool's per-block cache
+                    let tx_id = match &tx_response {
+                        IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
+                        IrysTransactionResponse::Storage(tx) => tx.id,
+                    };
+
+                    self.block_pool
+                        .add_tx_for_block(block_hash, tx_response)
+                        .await;
+
+                    // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
+                    debug!(
+                        "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
+                        tx_id, block_hash
+                    );
+                    // Record that we have seen this transaction from the peer that served it
+                    self.cache
+                        .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
+                }
+                Err(err_msg) => {
+                    error!("{}", err_msg);
+                    return Err(GossipError::Network(err_msg));
+                }
             }
-
-            let Some((tx_response, from_miner_addr)) = fetched else {
-                let err_msg = format!(
-                    "Failed to fetch transaction {:?} from source {} and top peers{:?}",
-                    tx_id_to_fetch,
-                    source_api_address,
-                    last_err
-                        .as_ref()
-                        .map(|e| format!("; last error: {}", e))
-                        .unwrap_or_default()
-                );
-                error!("{:?}", err_msg);
-                return Err(GossipError::Network(err_msg));
-            };
-
-            // Store the fetched transaction in the BlockPool's per-block cache
-            let tx_id = match &tx_response {
-                IrysTransactionResponse::Commitment(commitment_tx) => commitment_tx.id,
-                IrysTransactionResponse::Storage(tx) => tx.id,
-            };
-
-            self.block_pool
-                .add_tx_for_block(block_hash, tx_response)
-                .await;
-
-            // TODO: validate the txid/signature here? it would prevent invalid txids from showing up in logs
-            debug!(
-                "Stored fetched transaction {:?} (unverified) for block {:?} into BlockPool cache",
-                tx_id, block_hash
-            );
-            // Record that we have seen this transaction from the peer that served it
-            self.cache
-                .record_seen(from_miner_addr, GossipCacheKey::Transaction(tx_id))?;
         }
+
+        debug!(
+            "Got all missing transactions for block {} height {}, sending to processing",
+            block_hash, block_header.height
+        );
 
         let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
         let is_in_the_trusted_sync_range = self
@@ -604,11 +682,11 @@ where
 
         self.block_pool
             .process_block::<A>(Arc::new(block_header), skip_block_validation)
-            .await
-            .map_err(GossipError::BlockPool)?;
+            .await?;
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_add_execution_payload_to_cache(
         &self,
         evm_block_hash: EvmBlockHash,
@@ -647,6 +725,7 @@ where
         Err(last_err.expect("Error must be set after 3 attempts"))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_execution_payload(
         &self,
         execution_payload_request: GossipRequest<Block>,
@@ -736,6 +815,7 @@ where
             .map(|s| s.is_known_valid_and_present())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data(
         &self,
         peer_info: &PeerListItem,
@@ -758,12 +838,17 @@ where
 
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let block_result = self.block_pool.get_block_data(&block_hash).await;
-
-                let maybe_block = block_result.map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
 
                 match maybe_block {
                     Some(block) => {
+                        if block.poa.chunk.is_none() {
+                            error!(
+                                target = "p2p::gossip_data_handler::handle_get_data",
+                                block.hash = ?block.block_hash,
+                                "Block pool returned a block without a POA chunk"
+                            );
+                        }
                         let data = Arc::new(GossipData::Block(block));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
@@ -816,17 +901,23 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data_sync(
         &self,
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
             GossipDataRequest::Block(block_hash) => {
-                let maybe_block = self
-                    .block_pool
-                    .get_block_data(&block_hash)
-                    .await
-                    .map_err(GossipError::BlockPool)?;
+                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
+                if let Some(block) = &maybe_block {
+                    if block.poa.chunk.is_none() {
+                        error!(
+                            target = "p2p::gossip_data_handler::handle_get_data_sync",
+                            block.hash = ?block.block_hash,
+                            "Block pool returned a block without a POA chunk"
+                        );
+                    }
+                }
                 Ok(maybe_block.map(GossipData::Block))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
@@ -841,6 +932,7 @@ where
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
         self.mempool
             .get_stake_and_pledge_whitelist()
@@ -849,6 +941,7 @@ where
             .collect()
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn pull_and_process_stake_and_pledge_whitelist(&self) -> GossipResult<()> {
         let allowed_miner_addresses = self
             .gossip_client
@@ -863,7 +956,7 @@ where
             .await
             .map_err(|e| {
                 GossipError::Internal(InternalGossipError::Unknown(format!(
-                    "get_stake_and_pledge_whitelist() errored: {:?}",
+                    "get_stake_and_pledge_whitelist() errored: {}",
                     e
                 )))
             })

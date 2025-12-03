@@ -1,57 +1,39 @@
 use std::path::Path;
 
 use irys_types::{
-    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, RelativeChunkOffset, TxPath,
-    TxPathHash, UnpackedChunk,
+    ChunkDataPath, ChunkPathHash, DataRoot, PartitionChunkOffset, TxPath, TxPathHash, MEGABYTE,
+    TERABYTE,
 };
 use reth_db::{
+    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     transaction::{DbTx, DbTxMut},
-    DatabaseEnv,
+    ClientVersion, DatabaseEnv,
 };
 
-use crate::open_or_create_db;
+use crate::{
+    open_or_create_db,
+    submodule::tables::{DataRootInfo, DataRootInfosByDataRoot},
+};
 
 use super::tables::{
-    ChunkDataPathByPathHash, ChunkOffsetsByPathHash, ChunkPathHashes, ChunkPathHashesByOffset,
-    DataSizeByDataRoot, RelativeStartOffsets, StartOffsetsByDataRoot, SubmoduleTables,
-    TxPathByTxPathHash,
+    ChunkDataPathByPathHash, ChunkPathHashes, ChunkPathHashesByOffset, DataRootInfos,
+    SubmoduleTables, TxPathByTxPathHash,
 };
 
 /// Creates or opens a *submodule* MDBX database
 pub fn create_or_open_submodule_db<P: AsRef<Path>>(path: P) -> eyre::Result<DatabaseEnv> {
-    open_or_create_db(path, SubmoduleTables::ALL, None)
-}
-
-/// writes a chunk's data path to the database using the provided write transaction
-pub fn write_chunk_data_path<T: DbTxMut + DbTx>(
-    tx: &T,
-    offset: PartitionChunkOffset,
-    data_path: ChunkDataPath,
-    // optional path hash, computed from data_path if None
-    path_hash: Option<ChunkPathHash>,
-) -> eyre::Result<()> {
-    let path_hash = path_hash.unwrap_or_else(|| UnpackedChunk::hash_data_path(&data_path));
-    add_offset_for_path_hash(tx, offset, path_hash)?;
-
-    add_data_path_hash_to_offset_index(tx, offset, Some(path_hash))
-}
-
-/// writes a chunk's data path to the database using the provided transaction
-pub fn add_offset_for_path_hash<T: DbTxMut + DbTx>(
-    tx: &T,
-    offset: PartitionChunkOffset,
-    path_hash: ChunkPathHash,
-) -> eyre::Result<()> {
-    let mut offsets = tx
-        .get::<ChunkOffsetsByPathHash>(path_hash)?
-        .unwrap_or_default();
-
-    // this can be slow, we expect that in 99% of cases, ChunkOffsets will only have 1 element
-    if !offsets.0.contains(&offset) {
-        offsets.0.push(offset);
-    }
-
-    Ok(tx.put::<ChunkOffsetsByPathHash>(path_hash, offsets)?)
+    open_or_create_db(
+        path,
+        SubmoduleTables::ALL,
+        Some(
+            DatabaseArguments::new(ClientVersion::default())
+                .with_max_read_transaction_duration(Some(MaxReadTransactionDuration::Unbounded))
+                // see https://github.com/isar/libmdbx/blob/0e8cb90d0622076ce8862e5ffbe4f5fcaa579006/mdbx.h#L3608
+                .with_growth_step((10 * MEGABYTE).into())
+                .with_shrink_threshold((20 * MEGABYTE).try_into()?)
+                .with_geometry_max_size(Some(2 * TERABYTE)),
+        ),
+    )
 }
 
 /// gets the full data path for the chunk with the provided offset
@@ -147,50 +129,35 @@ pub fn set_path_hashes_by_offset<T: DbTxMut>(
     Ok(tx.put::<ChunkPathHashesByOffset>(offset, path_hashes)?)
 }
 
-/// get all the start offsets for the `data_root`
-pub fn get_start_offsets_by_data_root<T: DbTx>(
+/// get DataRootInfos for the `data_root`
+pub fn get_data_root_infos_for_data_root<T: DbTx>(
     tx: &T,
     data_root: DataRoot,
-) -> eyre::Result<Option<RelativeStartOffsets>> {
-    Ok(tx.get::<StartOffsetsByDataRoot>(data_root)?)
+) -> eyre::Result<Option<DataRootInfos>> {
+    Ok(tx.get::<DataRootInfosByDataRoot>(data_root)?)
 }
 
-/// set (overwrite) all the start offsets for the `data_root`
-pub fn set_start_offsets_by_data_root<T: DbTxMut>(
+/// set (overwrite) the DataRootInfos for the `data_root`
+pub fn set_data_root_infos_for_data_root<T: DbTxMut>(
     tx: &T,
     data_root: DataRoot,
-    start_offsets: RelativeStartOffsets,
+    infos: DataRootInfos,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<StartOffsetsByDataRoot>(data_root, start_offsets)?)
+    Ok(tx.put::<DataRootInfosByDataRoot>(data_root, infos)?)
 }
 
-///add a start offset to the start offsets for the `data_root`
-pub fn add_start_offset_to_data_root_index<T: DbTxMut + DbTx>(
+/// Track the start_offset and data_size metadata for the `data_root`
+pub fn add_data_root_info<T: DbTxMut + DbTx>(
     tx: &T,
     data_root: DataRoot,
-    start_offset: RelativeChunkOffset,
+    info: &DataRootInfo,
 ) -> eyre::Result<()> {
-    let mut offsets = get_start_offsets_by_data_root(tx, data_root)?.unwrap_or_default();
-    if !offsets.0.contains(&start_offset) {
-        offsets.0.push(start_offset);
+    let mut data_root_infos = get_data_root_infos_for_data_root(tx, data_root)?.unwrap_or_default();
+    if !data_root_infos.0.contains(info) {
+        data_root_infos.0.push(info.clone());
     }
-    set_start_offsets_by_data_root(tx, data_root, offsets)?;
+    set_data_root_infos_for_data_root(tx, data_root, data_root_infos)?;
     Ok(())
-}
-
-pub fn get_data_size_by_data_root<T: DbTx>(
-    tx: &T,
-    data_root: DataRoot,
-) -> eyre::Result<Option<u64>> {
-    Ok(tx.get::<DataSizeByDataRoot>(data_root)?)
-}
-
-pub fn set_data_size_for_data_root<T: DbTxMut>(
-    tx: &T,
-    data_root: DataRoot,
-    data_size: u64,
-) -> eyre::Result<()> {
-    Ok(tx.put::<DataSizeByDataRoot>(data_root, data_size)?)
 }
 
 /// clear db
@@ -198,7 +165,91 @@ pub fn clear_submodule_database<T: DbTxMut>(tx: &T) -> eyre::Result<()> {
     tx.clear::<ChunkPathHashesByOffset>()?;
     tx.clear::<ChunkDataPathByPathHash>()?;
     tx.clear::<TxPathByTxPathHash>()?;
-    tx.clear::<ChunkOffsetsByPathHash>()?;
-    tx.clear::<StartOffsetsByDataRoot>()?;
+    tx.clear::<DataRootInfosByDataRoot>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::IrysDatabaseExt as _;
+    use crate::submodule::tables::DataRootInfos;
+    use crate::submodule::{
+        add_data_root_info, get_data_root_infos_for_data_root, set_data_root_infos_for_data_root,
+    };
+    use crate::{
+        open_or_create_db,
+        submodule::tables::{DataRootInfo, SubmoduleTables},
+    };
+    use irys_types::RelativeChunkOffset;
+    use irys_types::H256;
+    use reth_db::transaction::DbTx as _;
+    use reth_db::Database as _;
+
+    #[test]
+    fn db_compact_dataroot_info() -> eyre::Result<()> {
+        let builder = tempfile::Builder::new()
+            .prefix("irys-datarootinfo-")
+            .rand_bytes(8)
+            .tempdir();
+        let tmpdir = builder
+            .expect("Not able to create a temporary directory.")
+            .keep();
+
+        let db = open_or_create_db(tmpdir, SubmoduleTables::ALL, None)?;
+        let write_tx = db.tx_mut()?;
+        let infos = vec![
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(0),
+                data_size: 0,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(-20),
+                data_size: 100,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(10000),
+                data_size: 4000,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(i32::MIN),
+                data_size: u64::MAX,
+            },
+            DataRootInfo {
+                start_offset: RelativeChunkOffset(i32::MAX),
+                data_size: u64::MAX,
+            },
+        ];
+        let data_root = H256::zero();
+        set_data_root_infos_for_data_root(&write_tx, data_root, DataRootInfos(infos.clone()))?;
+        write_tx.commit()?;
+
+        let infos2 = db
+            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+            .unwrap();
+
+        assert_eq!(infos, infos2.0);
+
+        // add a DataRootInfo to existing DataRootInfos
+        let new_data_root_info = DataRootInfo {
+            start_offset: RelativeChunkOffset(1),
+            data_size: 100,
+        };
+
+        db.update_eyre(|tx| add_data_root_info(tx, data_root, &new_data_root_info))?;
+
+        let infos3 = db
+            .view_eyre(|tx| get_data_root_infos_for_data_root(tx, data_root))?
+            .unwrap();
+
+        assert_eq!(infos3.0.len(), 6);
+        assert_eq!(*infos3.0.last().unwrap(), new_data_root_info);
+
+        let random_data_root = H256::random();
+        let missing_infos =
+            db.view_eyre(|tx| get_data_root_infos_for_data_root(tx, random_data_root))?;
+
+        assert!(missing_infos.is_none());
+
+        Ok(())
+    }
 }

@@ -1,22 +1,25 @@
 pub mod error;
 pub mod routes;
+pub mod utils;
 
 use actix_cors::Cors;
 use actix_web::{
     dev::{HttpServiceFactory, Server},
     error::InternalError,
-    middleware,
     web::{self, JsonConfig, Redirect},
     App, HttpResponse, HttpServer,
 };
-use irys_actors::{mempool_service::MempoolServiceMessage, pledge_provider::MempoolPledgeProvider};
+use irys_actors::{
+    mempool_guard::MempoolReadGuard, pledge_provider::MempoolPledgeProvider,
+    MempoolServiceMessageWithSpan,
+};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
 use routes::{
-    block, block_index, block_tree, commitment, full_config, get_chunk, index, ledger, mempool,
-    mining, network_config, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
+    mining, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -25,6 +28,7 @@ use std::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{info, warn};
+use tracing_actix_web::TracingLogger;
 
 use crate::routes::anchor;
 
@@ -33,7 +37,8 @@ pub const API_VERSION: &str = "v1";
 
 #[derive(Clone)]
 pub struct ApiState {
-    pub mempool_service: UnboundedSender<MempoolServiceMessage>,
+    pub mempool_service: UnboundedSender<MempoolServiceMessageWithSpan>,
+    pub mempool_guard: MempoolReadGuard,
     pub chunk_provider: Arc<ChunkProvider>,
     pub peer_list: PeerList,
     pub db: DatabaseProvider,
@@ -90,11 +95,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
         .route("/genesis", web::get().to(index::genesis_route))
-        .route(
-            "/network/config",
-            web::get().to(network_config::get_network_config),
-        )
-        .route("/config", web::get().to(full_config::get_full_config))
+        .route("/network/config", web::get().to(config::get_config))
         .route("/peer_list", web::get().to(peer_list::peer_list_route))
         .route(
             "/price/commitment/stake",
@@ -125,6 +126,7 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
+        .route("/balance/{address}", web::get().to(balance::get_balance))
         // Ledger endpoints
         .route(
             "/ledger/submit/{miner_address}/summary",
@@ -163,6 +165,8 @@ pub fn routes() -> impl HttpServiceFactory {
         )
         // Mining endpoint
         .route("/mining/info", web::get().to(mining::get_mining_info))
+        // Supply endpoint
+        .route("/supply", web::get().to(routes::supply::supply))
 }
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
@@ -170,6 +174,9 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     info!(custom.port = ?port, "Starting API server");
     let state = web::Data::new(app_state);
     HttpServer::new(move || {
+        let span = tracing::info_span!(target: "irys-api-http", "api_server");
+        let _guard = span.enter();
+
         let awc_client = awc::Client::new();
         App::new()
             .app_data(state.clone())
@@ -178,7 +185,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
                 JsonConfig::default()
                     .limit(1024 * 1024) // Set JSON payload limit to 1MB
                     .error_handler(|err, req| {
-                        warn!("JSON decode error for req {:?} - {:?}", &req.path(), &err);
+                        warn!("JSON decode error for req {} - {}", &req.path(), &err);
                         let error_message = format!("JSON decode/parse error: {}", err);
                         InternalError::from_response(
                             err,
@@ -191,7 +198,7 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
             .wrap(Cors::permissive())
-            .wrap(middleware::Logger::default().log_target("api-server"))
+            .wrap(TracingLogger::default()) // TODO: figure out how to change the `target` so we can easily filter HTTP and Gossip server logs
     })
     .listen(listener)
     .unwrap()

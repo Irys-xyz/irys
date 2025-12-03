@@ -84,13 +84,10 @@ where
             .with_local_transactions_config(pool_config.local_transactions_config.clone())
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
-        let validator = TransactionValidationTaskExecutor {
-            validator: IrysShadowTxValidator {
-                eth_tx_validator: validator.validator,
-            },
-            to_validation_task: validator.to_validation_task,
-        };
+            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
+            .map(|eth_validator| IrysShadowTxValidator {
+                eth_tx_validator: eth_validator,
+            });
 
         let ordering = PdAwareCoinbaseTipOrdering::default();
         let transaction_pool =
@@ -155,7 +152,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
 }

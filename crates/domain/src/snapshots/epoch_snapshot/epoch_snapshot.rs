@@ -78,8 +78,8 @@ pub enum EpochSnapshotError {
     #[error("provided previous epoch block does not match snapshot history")]
     IncorrectPreviousEpochBlock,
     /// Validation of commitments failed
-    #[error("validation of epoch commitments failed")]
-    InvalidCommitments,
+    #[error("validation of epoch commitments failed: {0}")]
+    InvalidCommitments(String),
     /// Unpledge targeted partition not found in assignments
     #[error("unpledge target partition {partition_hash:?} for signer {signer:?} not found in assignments")]
     UnpledgeTargetNotFound {
@@ -228,7 +228,10 @@ impl EpochSnapshot {
     }
 
     fn is_epoch_block(&self, block_header: &IrysBlockHeader) -> Result<(), EpochSnapshotError> {
-        if block_header.height % self.config.consensus.epoch.num_blocks_in_epoch != 0 {
+        if !block_header
+            .height
+            .is_multiple_of(self.config.consensus.epoch.num_blocks_in_epoch)
+        {
             error!(
                 "Not an epoch block height: {} num_blocks_in_epoch: {}",
                 block_header.height, self.config.consensus.epoch.num_blocks_in_epoch
@@ -239,7 +242,7 @@ impl EpochSnapshot {
     }
 
     /// Main worker function
-    #[tracing::instrument(skip_all, err, fields(
+    #[tracing::instrument(level = "trace", skip_all, err, fields(
         block.hash = ?new_epoch_block.block_hash
     ))]
     pub fn perform_epoch_tasks(
@@ -272,7 +275,7 @@ impl EpochSnapshot {
 
         // Validate the commitments
         Self::validate_commitments(new_epoch_block, &new_epoch_commitments)
-            .map_err(|_| EpochSnapshotError::InvalidCommitments)?;
+            .map_err(|e| EpochSnapshotError::InvalidCommitments(e.to_string()))?;
 
         debug!(
             block.height = new_epoch_block.height,
@@ -1590,7 +1593,7 @@ mod tests {
             let tx = make_unpledge_tx(&snapshot.config.consensus, signer, ph);
 
             // First application succeeds
-            snapshot.apply_unpledges(&[tx.clone()]).unwrap();
+            snapshot.apply_unpledges(std::slice::from_ref(&tx)).unwrap();
 
             // Second application errors (target not found anymore)
             let res = snapshot.apply_unpledges(&[tx]);

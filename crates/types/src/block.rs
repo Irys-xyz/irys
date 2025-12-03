@@ -15,9 +15,9 @@ use crate::{
     partition::PartitionHash,
     resolve_proofs,
     serialization::{optional_string_u64, string_u64},
-    string_u128,
+    time::UnixTimestampMs,
     transaction::DataTransactionHeader,
-    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeave, H256List, IngressProofsList,
+    u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
 
@@ -296,8 +296,13 @@ impl IrysBlockHeader {
     }
 
     /// Get the timestamp (convenience method)
-    pub fn timestamp(&self) -> u128 {
+    pub fn timestamp(&self) -> UnixTimestampMs {
         self.timestamp
+    }
+
+    /// Get the timestamp as seconds (convenience for hardfork comparisons)
+    pub fn timestamp_secs(&self) -> crate::UnixTimestamp {
+        self.timestamp.to_secs()
     }
 }
 
@@ -354,8 +359,7 @@ pub struct IrysBlockHeaderV1 {
     pub solution_hash: H256,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of the last difficulty adjustment
-    #[serde(with = "string_u128")]
-    pub last_diff_timestamp: u128,
+    pub last_diff_timestamp: UnixTimestampMs,
 
     /// The solution hash of the previous block in the chain.
     pub previous_solution_hash: H256,
@@ -388,8 +392,7 @@ pub struct IrysBlockHeaderV1 {
     pub miner_address: Address,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
-    #[serde(with = "string_u128")]
-    pub timestamp: u128,
+    pub timestamp: UnixTimestampMs,
 
     /// A list of system transaction ledgers
     pub system_ledgers: Vec<SystemTransactionLedger>,
@@ -496,7 +499,7 @@ pub fn is_ema_recalculation_block(height: u64, blocks_in_price_adjustment_interv
     if height < (blocks_in_price_adjustment_interval * 2) {
         true
     } else {
-        (height.saturating_add(1)) % blocks_in_price_adjustment_interval == 0
+        (height.saturating_add(1)).is_multiple_of(blocks_in_price_adjustment_interval)
     }
 }
 
@@ -619,11 +622,11 @@ impl DataTransactionLedger {
         }
         let txs_data_roots = data_txs
             .iter()
-            .map(|h| DataRootLeave {
+            .map(|h| DataRootLeaf {
                 data_root: h.data_root,
                 tx_size: h.data_size as usize, // TODO: check this
             })
-            .collect::<Vec<DataRootLeave>>();
+            .collect::<Vec<DataRootLeaf>>();
         let data_root_leaves = generate_leaves_from_data_roots(&txs_data_roots).unwrap();
         let root = generate_data_root(data_root_leaves).unwrap();
         let root_id = root.id;
@@ -764,7 +767,7 @@ impl IrysBlockHeaderV1 {
         Self {
             diff: U256::from(1000),
             cumulative_diff: U256::from(5000),
-            last_diff_timestamp: 1622543200,
+            last_diff_timestamp: UnixTimestampMs::from_millis(1622543200),
             solution_hash: default_solution_hash,
             previous_solution_hash: H256::zero(),
             last_epoch_hash: H256::random(),
@@ -784,7 +787,7 @@ impl IrysBlockHeaderV1 {
             },
             reward_address: Address::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
-            timestamp: now.as_millis(),
+            timestamp: UnixTimestampMs::from_millis(now.as_millis()),
             system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
             data_ledgers: vec![
                 // Permanent Publish Ledger
@@ -841,8 +844,10 @@ pub struct CombinedBlockHeader {
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
 )]
 #[repr(u32)]
+#[derive(Default)]
 pub enum DataLedger {
     /// The permanent publish ledger
+    #[default]
     Publish = 0,
     /// An expiring term ledger used for submitting to the publish ledger
     Submit = 1,
@@ -858,12 +863,6 @@ impl PartialEq<u32> for DataLedger {
 impl PartialEq<DataLedger> for u32 {
     fn eq(&self, other: &DataLedger) -> bool {
         *self == other.get_id()
-    }
-}
-
-impl Default for DataLedger {
-    fn default() -> Self {
-        Self::Publish
     }
 }
 
@@ -1134,6 +1133,7 @@ mod tests {
                 signature: Default::default(), // signature is ignored by RLP & substituted with the default value
                 data_root: H256::random(),
                 chain_id: 1,
+                anchor: H256::from([10_u8; 32]),
             })])),
             required_proof_count: None,
         };
@@ -1291,7 +1291,7 @@ mod tests {
 
         for proof in proofs {
             let encoded_proof = Base64(proof.proof.clone());
-            validate_path(tx_root.0, &encoded_proof, proof.offset as u128).unwrap();
+            validate_path(tx_root.0, &encoded_proof, proof.last_byte_index as u128).unwrap();
         }
     }
 

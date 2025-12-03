@@ -29,24 +29,22 @@ api = "172.21.0.3:8080"
 [trusted_peers.execution]
 peering_tcp_addr = "172.21.0.3:9010"
 
+# Default network configuration - all services use this public_ip unless overridden
+[network_defaults]
+public_ip = "172.21.0.4"
+bind_ip = "0.0.0.0"
 
 [gossip]
-public_ip = "172.21.0.4"
 public_port = 9009
-bind_ip = "0.0.0.0"
 bind_port = 9009
 
 [http]
-public_ip = "172.21.0.4"
 public_port = 8080
-bind_ip = "0.0.0.0"
 bind_port = 8080
 
 [reth.network]
 use_random_ports = false
-public_ip = "172.21.0.4"
 public_port = 9010
-bind_ip = "0.0.0.0"
 bind_port = 9010
 
 [storage]
@@ -101,8 +99,6 @@ num_chunks_in_partition = 60
 num_chunks_in_recall_range = 10
 num_partitions_per_slot = 3
 entropy_packing_iterations = 1000
-number_of_ingress_proofs_total = 1
-number_of_ingress_proofs_from_assignees = 0
 safe_minimum_number_of_years = 200
 stake_value = 20000.0
 pledge_base_value = 950.0
@@ -189,3 +185,7 @@ num_capacity_partitions = 30
 
 [consensus.Custom.ema]
 price_adjustment_interval = 10
+
+[consensus.Custom.hardforks.frontier]
+number_of_ingress_proofs_total = 1
+number_of_ingress_proofs_from_assignees = 0

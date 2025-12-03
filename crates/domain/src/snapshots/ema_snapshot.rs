@@ -56,7 +56,13 @@ use irys_types::{
 use std::sync::Arc;
 
 /// Snapshot of EMA-related pricing data for a specific block.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// Ema snapshot contains core expression of "how much USD is a single irys token worth".
+/// Most of our data pricing is expressed in USD. So as the irys token goes up
+/// in value compared to the dollar, we need less irys to cover the same usd fee.
+/// The opposite is also true: if irys goes down in value then we need more of
+/// it to cover the base fees.
+#[derive(Debug, Clone, Default, PartialEq, Hash)]
 pub struct EmaSnapshot {
     /// EMA price to use for public pricing operations (from block 2 intervals ago).
     /// This is the "stable" price that external systems and users see.
@@ -128,7 +134,7 @@ impl EmaSnapshot {
         // Check if we're at an EMA boundary where we shift intervals
         // This happens at blocks 10, 20, 30, etc. (assuming the price adj interval is 10 blocks)
         let crossing_interval_boundary =
-            new_block.height % blocks_in_interval == 0 && new_block.height > 0;
+            new_block.height.is_multiple_of(blocks_in_interval) && new_block.height > 0;
 
         let ema_price_2_intervals_ago =
             self.calculate_public_pricing_ema_for_height(new_block.height, blocks_in_interval);
@@ -271,6 +277,17 @@ impl EmaSnapshot {
             self.ema_price_2_intervals_ago
         }
     }
+
+    // NON CANONICAL HASH
+    // SHOULD BE USED FOR DEBUGGING ONLY
+    pub fn get_hash(&self) -> String {
+        use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+        let mut hasher = DefaultHasher::new();
+        self.hash(&mut hasher);
+        let res = hasher.finish();
+        use base58::ToBase58 as _;
+        res.to_le_bytes().to_base58()
+    }
 }
 
 /// Cap the provided price value to fit within the max/min acceptable range.
@@ -286,7 +303,7 @@ impl EmaSnapshot {
 /// - Input $1.15 → Returns $1.10 (capped at max)
 /// - Input $0.85 → Returns $0.90 (capped at min)
 /// - Input $1.05 → Returns $1.05 (within range)
-#[tracing::instrument(skip_all, fields(
+#[tracing::instrument(level = "trace", skip_all, fields(
     price.desired = ?desired_price,
     price.base = ?base_price,
     price.safe_range = ?safe_range

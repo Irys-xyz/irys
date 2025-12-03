@@ -8,6 +8,7 @@ pub mod cache_service;
 pub mod chunk_migration_service;
 pub mod commitment_refunds;
 pub mod data_sync_service;
+pub mod mempool_guard;
 pub mod mempool_service;
 pub mod mining_bus;
 pub mod packing_service;
@@ -20,6 +21,7 @@ pub mod validation_service;
 
 pub use block_producer::*;
 pub use data_sync_service::*;
+pub use mempool_guard::*;
 pub use mempool_service::*;
 pub use mining_bus::MiningBus;
 pub use partition_mining_service::*;

@@ -267,6 +267,7 @@ impl LedgerExpiryTestContext {
         let genesis_block = node.get_block_by_height(0).await?;
         let initial_balance = U256::from_be_bytes(
             node.get_balance(miner_address, genesis_block.evm_block_hash)
+                .await
                 .to_be_bytes(),
         );
 
@@ -335,9 +336,11 @@ impl LedgerExpiryTestContext {
             let tx = self.post_data_tx(anchor, data, &self.signer).await;
 
             // Track fees
-            self.total_term_fees = self.total_term_fees.saturating_add(tx.header.term_fee);
+            self.total_term_fees = self
+                .total_term_fees
+                .saturating_add(tx.header.term_fee.into());
             if let Some(perm_fee) = tx.header.perm_fee {
-                self.total_perm_fees = self.total_perm_fees.saturating_add(perm_fee);
+                self.total_perm_fees = self.total_perm_fees.saturating_add(perm_fee.into());
             }
 
             self.transactions.push(tx.clone());
@@ -543,22 +546,23 @@ impl LedgerExpiryTestContext {
     }
 
     /// Get current balance for miner
-    fn get_miner_balance(&self, block_hash: B256) -> U256 {
+    async fn get_miner_balance(&self, block_hash: B256) -> U256 {
         U256::from_be_bytes(
             self.get_balance(self.miner_address, block_hash)
+                .await
                 .to_be_bytes(),
         )
     }
 
     /// Verify balance after initial blocks
-    fn verify_initial_balance(&self) -> eyre::Result<()> {
+    async fn verify_initial_balance(&self) -> eyre::Result<()> {
         let last_block = self.blocks_mined.last().expect("Should have mined blocks");
         let expected = self
             .initial_balance
             .saturating_add(self.total_block_rewards)
             .saturating_add(self.immediate_term_rewards);
 
-        let actual = self.get_miner_balance(last_block.evm_block_hash);
+        let actual = self.get_miner_balance(last_block.evm_block_hash).await;
 
         assert_eq!(
             actual, expected,
@@ -570,7 +574,7 @@ impl LedgerExpiryTestContext {
     }
 
     /// Verify final balance matches all expected fees
-    fn verify_final_balance(&self) -> eyre::Result<()> {
+    async fn verify_final_balance(&self) -> eyre::Result<()> {
         // Get the reth context to examine shadow transactions
         let reth_context = self.node.node_ctx.reth_node_adapter.clone();
 
@@ -631,7 +635,7 @@ impl LedgerExpiryTestContext {
             .saturating_add(self.expected_expiry_fees);
 
         let final_block = self.blocks_mined.last().expect("Should have final block");
-        let actual = self.get_miner_balance(final_block.evm_block_hash);
+        let actual = self.get_miner_balance(final_block.evm_block_hash).await;
 
         info!("Balance breakdown:");
         info!("  Initial balance:           {}", self.initial_balance);
@@ -692,16 +696,16 @@ async fn ledger_expiry_test(params: LedgerExpiryTestParams) -> eyre::Result<()> 
     )
     .await?;
     ctx.calculate_immediate_rewards()?;
-    ctx.verify_initial_balance()?;
+    ctx.verify_initial_balance().await?;
 
     // Mine blocks to trigger expiry
     ctx.mine_to_trigger_expiry().await?;
     ctx.calculate_expiry_fees(params.expected_expired_tx_count)?;
 
     // Verify final balance
-    ctx.verify_final_balance()?;
+    ctx.verify_final_balance().await?;
 
     // Cleanup
-    ctx.node.node_ctx.stop().await;
+    ctx.node.stop().await;
     Ok(())
 }

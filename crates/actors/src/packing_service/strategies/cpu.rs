@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
 use irys_packing::capacity_single::compute_entropy_chunk;
+use irys_types::Address;
 use irys_types::{partition::PartitionHash, Config, PartitionChunkOffset, PartitionChunkRange};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::yield_now;
@@ -37,11 +38,12 @@ impl CpuPackingStrategy {
 
 #[async_trait]
 impl super::PackingStrategy for CpuPackingStrategy {
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = *chunk_range.0.start(), chunk.range_end = *chunk_range.0.end(), partition.hash = %partition_hash))]
     async fn pack(
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
@@ -78,7 +80,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
                 .spawn_blocking(move || {
                     let mut out = Vec::with_capacity(chunk_size);
                     compute_entropy_chunk(
-                        mining_address.into(),
+                        mining_address,
                         i as u64,
                         partition_hash.0,
                         entropy_iterations,
@@ -89,7 +91,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
 
                     debug!(
                         target: "irys::packing::progress",
-                        "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {:?} iterations {}",
+                        "CPU Packing chunk offset {} for SM {} partition_hash {} mining_address {} iterations {}",
                         &i,
                         &storage_module_id,
                         &partition_hash,

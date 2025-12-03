@@ -92,8 +92,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .create_publish_transaction(
             data_bytes.clone(),
             node.get_anchor().await?,
-            price_info.perm_fee,
-            price_info.term_fee,
+            price_info.perm_fee.into(),
+            price_info.term_fee.into(),
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();
@@ -153,7 +153,7 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         ingress_proofs = node
             .node_ctx
             .db
-            .view(walk_all::<IngressProofs, _>)
+            .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
             .unwrap()
             .unwrap();
         if ingress_proofs.len() == expected_proofs {
@@ -186,8 +186,8 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
         .create_publish_transaction(
             data,
             node.get_anchor().await?,
-            price_info.perm_fee,
-            price_info.term_fee,
+            price_info.perm_fee.into(),
+            price_info.term_fee.into(),
         )
         .unwrap();
     let tx = account1.sign_transaction(tx).unwrap();

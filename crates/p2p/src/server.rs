@@ -2,15 +2,14 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
+use crate::block_pool::CriticalBlockPoolError;
 use crate::types::{GossipResponse, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
-    BlockPoolError,
 };
 use actix_web::{
     dev::Server,
-    middleware,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
@@ -24,7 +23,8 @@ use irys_types::{
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn, Instrument as _};
+use tracing_actix_web::TracingLogger;
 
 /// Default deduplication window in milliseconds for data requests
 /// Prevents rapid duplicate requests within this time window
@@ -99,7 +99,8 @@ where
         if let Err(error) = server.data_handler.handle_chunk(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
@@ -111,9 +112,10 @@ where
         miner_address: Address,
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
-            let msg = "Failed to get peer address from gossip POST request";
-            debug!(msg);
-            return Err(HttpResponse::BadRequest().reason(msg).finish());
+            warn!("Failed to get peer address from gossip POST request");
+            return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            )));
         };
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
@@ -137,10 +139,7 @@ where
         }
     }
 
-    #[expect(
-        clippy::unused_async,
-        reason = "Actix-web handler signature requires handlers to be async"
-    )]
+    #[tracing::instrument(skip_all)]
     async fn handle_block(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
@@ -160,9 +159,9 @@ where
         let gossip_request = irys_block_header_json.0;
         let source_miner_address = gossip_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest()
-                .reason("Failed to get a request source")
-                .finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            ));
         };
 
         let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
@@ -172,31 +171,45 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         let this_node_id = server.data_handler.gossip_client.mining_address;
+        let block_hash = gossip_request.data.block_hash;
+        let block_height = gossip_request.data.height;
+        if gossip_request.data.poa.chunk.is_none() {
+            error!(
+                target = "p2p::server",
+                block.hash = ?gossip_request.data.block_hash,
+                "received a block without a POA chunk"
+            );
+        }
 
-        tokio::spawn(async move {
-            let block_hash_string = gossip_request.data.block_hash;
-            if let Err(error) = server
-                .data_handler
-                .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
-                .await
-            {
-                Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
-                error!(
-                    "Node {:?}: Failed to process the block {:?}: {:?}",
-                    this_node_id, block_hash_string, error
-                );
-                // return HttpResponse::InternalServerError().finish();
-            } else {
-                info!(
-                    "Node {:?}: Server handler handled block {:?}",
-                    this_node_id, block_hash_string
-                );
+        tokio::spawn(
+            async move {
+                let block_hash_string = gossip_request.data.block_hash;
+                if let Err(error) = server
+                    .data_handler
+                    .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
+                    .in_current_span()
+                    .await
+                {
+                    Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
+                    if !error.is_advisory() {
+                        error!(
+                            "Node {:?}: Failed to process the block {} height {}: {:?}",
+                            this_node_id, block_hash_string, block_height, error
+                        );
+                    }
+                } else {
+                    info!(
+                        "Node {:?}: Server handler handled block {} height {}",
+                        this_node_id, block_hash_string, block_height
+                    );
+                }
             }
-        });
+            .in_current_span(),
+        );
 
         debug!(
-            "Node {:?}: Started handling block and returned ok response to the peer",
-            this_node_id
+            "Node {:?}: Started handling block {} height {} and returned ok response to the peer",
+            this_node_id, block_hash, block_height
         );
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
@@ -234,7 +247,8 @@ where
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip execution payload handled");
@@ -269,7 +283,8 @@ where
         if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip data handled");
@@ -308,7 +323,8 @@ where
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip data handled");
@@ -347,7 +363,8 @@ where
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send ingress proof: {}", error);
-            return HttpResponse::InternalServerError().finish();
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
 
         debug!("Gossip data handled");
@@ -360,9 +377,9 @@ where
     )]
     async fn handle_health_check(server: Data<Self>, req: actix_web::HttpRequest) -> HttpResponse {
         let Some(peer_addr) = req.peer_addr() else {
-            return HttpResponse::BadRequest()
-                .reason("Failed to get the source address from the request")
-                .finish();
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            ));
         };
 
         match server.peer_list.peer_by_gossip_address(peer_addr) {
@@ -397,16 +414,26 @@ where
         peer_list: &PeerList,
     ) {
         match error {
-            GossipError::InvalidData(_) => {
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            GossipError::InvalidData(invalid_data_error) => {
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::BogusData(format!(
+                        "Invalid data: {:?}",
+                        invalid_data_error
+                    )),
+                );
             }
-            GossipError::BlockPool(BlockPoolError::BlockError(_)) => {
-                peer_list.decrease_peer_score(peer_miner_address, ScoreDecreaseReason::BogusData);
+            GossipError::BlockPool(CriticalBlockPoolError::BlockError(msg)) => {
+                peer_list.decrease_peer_score(
+                    peer_miner_address,
+                    ScoreDecreaseReason::BogusData(format!("Block pool error: {:?}", msg)),
+                );
             }
             _ => {}
         };
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
@@ -450,15 +477,18 @@ where
             Ok(has_data) => HttpResponse::Ok().json(GossipResponse::Accepted(has_data)),
             Err(GossipError::RateLimited) => {
                 debug!("Rate limited data request from peer");
-                HttpResponse::TooManyRequests().finish()
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::RateLimited))
             }
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
-                HttpResponse::InternalServerError().finish()
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
             }
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn handle_pull_data(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
@@ -482,12 +512,14 @@ where
         match server
             .data_handler
             .handle_get_data_sync(data_request.0)
+            .in_current_span()
             .await
         {
             Ok(maybe_data) => HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data)),
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
-                HttpResponse::InternalServerError().finish()
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
             }
         }
     }
@@ -503,10 +535,13 @@ where
         let server = self;
 
         let server_handle = HttpServer::new(move || {
+            let span = tracing::info_span!(target: "irys-api-gossip", "gossip_server");
+            let _guard = span.enter();
+
             App::new()
                 .app_data(Data::new(server.clone()))
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
-                .wrap(middleware::Logger::default().log_target("gossip-server")) // TODO: use tracing_actix_web TracingLogger
+                .wrap(TracingLogger::default())
                 .service(
                     web::scope("/gossip")
                         .route("/transaction", web::post().to(Self::handle_transaction))
@@ -574,7 +609,7 @@ mod tests {
         let miner = Address::new([1_u8; 20]);
         peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
 
-        let error = GossipError::BlockPool(BlockPoolError::BlockError("bad".into()));
+        let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         GossipServer::<MempoolStub, BlockDiscoveryStub, ApiClientStub>::handle_invalid_data(
             &miner, &error, &peer_list,
         );

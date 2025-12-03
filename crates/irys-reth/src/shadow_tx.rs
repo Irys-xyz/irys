@@ -120,7 +120,7 @@ impl TransactionPacket {
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
-            Self::PdBaseFeeUpdate(_) => None,
+            Self::PdBaseFeeUpdate(_) => None, // Protocol-level update, no fee payer
         }
     }
 }
@@ -436,41 +436,6 @@ impl Default for TransactionPacket {
     }
 }
 
-/// PD base fee update: sets per-chunk base fee value in EVM state (metadata-only; no direct balance move).
-#[derive(
-    serde::Deserialize,
-    serde::Serialize,
-    Debug,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Default,
-    // manual Borsh impls below
-    arbitrary::Arbitrary,
-)]
-pub struct PdBaseFeeUpdate {
-    /// Base fee per PD chunk (tokens, 1e18 scale)
-    pub per_chunk: U256,
-}
-
-impl BorshSerialize for PdBaseFeeUpdate {
-    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
-        writer.write_all(&self.per_chunk.to_be_bytes::<32>())?;
-        Ok(())
-    }
-}
-
-impl BorshDeserialize for PdBaseFeeUpdate {
-    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
-        let mut buf = [0_u8; 32];
-        reader.read_exact(&mut buf)?;
-        let per_chunk = U256::from_be_bytes(buf);
-        Ok(Self { per_chunk })
-    }
-}
-
 /// Balance decrement: used for staking and storage fee collection shadow txs.
 #[derive(
     serde::Deserialize,
@@ -667,6 +632,42 @@ impl BorshDeserialize for BlockRewardIncrement {
         reader.read_exact(&mut amount_buf)?;
         let amount = U256::from_be_bytes(amount_buf);
         Ok(Self { amount })
+    }
+}
+
+/// PD base fee update: sets the protocol-wide PD base fee per chunk.
+/// This is a metadata-only shadow tx that updates EVM state without transferring value.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct PdBaseFeeUpdate {
+    /// Base fee per PD chunk (tokens, 1e18 scale)
+    pub per_chunk: U256,
+}
+
+impl BorshSerialize for PdBaseFeeUpdate {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(&self.per_chunk.to_be_bytes::<32>())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for PdBaseFeeUpdate {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut buf = [0_u8; 32];
+        reader.read_exact(&mut buf)?;
+        let per_chunk = U256::from_be_bytes(buf);
+        Ok(Self { per_chunk })
     }
 }
 

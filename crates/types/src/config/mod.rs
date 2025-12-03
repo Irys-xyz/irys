@@ -8,6 +8,7 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
+use crate::UnixTimestamp;
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
@@ -33,13 +34,29 @@ impl Config {
         }
     }
 
+    /// Get the number of ingress proofs required at a given timestamp (in seconds).
+    pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
+        self.0
+            .consensus
+            .hardforks
+            .number_of_ingress_proofs_total_at(timestamp)
+    }
+
+    /// Get the number of ingress proofs from assignees required at a given timestamp (in seconds).
+    pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
+        self.0
+            .consensus
+            .hardforks
+            .number_of_ingress_proofs_from_assignees_at(timestamp)
+    }
+
     // validate configuration invariants
     // TODO: expand this!
     pub fn validate(&self) -> eyre::Result<()> {
         // ensures the block tree is able to contain all unmigrated blocks
         ensure!(
             (self.consensus.block_migration_depth as u64) <= self.consensus.block_tree_depth,
-            "Block tree depth ({}) is smaller than the block migration depth ({})",
+            "Block tree depth ({}) is smaller than the block migration depth ({}) - the block tree must be able to hold blocks until they're migrated",
             &self.consensus.block_tree_depth,
             &self.consensus.block_migration_depth
         );
@@ -47,7 +64,7 @@ impl Config {
         // ensure that txs aren't removed from the mempool due to expired anchors before a block migrates
         ensure!(
             std::convert::TryInto::<u8>::try_into(self.consensus.block_migration_depth)?
-                <= (self.consensus.mempool.anchor_expiry_depth)
+                <= (self.consensus.mempool.tx_anchor_expiry_depth)
         );
 
         if matches!(self.node_config.node_mode, NodeMode::Peer) {
@@ -117,11 +134,15 @@ impl From<&NodeConfig> for MempoolConfig {
             max_valid_items: value.mempool.max_valid_items,
             max_invalid_items: value.mempool.max_invalid_items,
             max_valid_chunks: value.mempool.max_valid_chunks,
+            max_valid_submit_txs: value.mempool.max_valid_submit_txs,
+            max_valid_commitment_addresses: value.mempool.max_valid_commitment_addresses,
+            max_commitments_per_address: value.mempool.max_commitments_per_address,
             // consensus
             max_data_txs_per_block: consensus.max_data_txs_per_block,
             max_commitment_txs_per_block: consensus.max_commitment_txs_per_block,
-            anchor_expiry_depth: consensus.anchor_expiry_depth,
+            anchor_expiry_depth: consensus.tx_anchor_expiry_depth,
             commitment_fee: consensus.commitment_fee,
+            max_concurrent_mempool_tasks: value.mempool.max_concurrent_mempool_tasks,
         }
     }
 }
@@ -193,12 +214,10 @@ pub struct MempoolConfig {
 
     /// Maximum number of pre-header chunks to keep per data root before the header arrives
     /// Limits speculative storage window for out-of-order chunks
-    #[serde(default)]
     pub max_preheader_chunks_per_item: usize,
 
     /// Maximum allowed pre-header data_path bytes for chunk proofs
     /// Mitigates DoS on speculative chunk storage before header arrival
-    #[serde(default)]
     pub max_preheader_data_path_bytes: usize,
 
     /// Maximum number of valid tx txids to keep track of
@@ -215,6 +234,21 @@ pub struct MempoolConfig {
     /// Maximum number of valid chunk hashes to keep track of
     /// Prevents re-processing and re-gossipping of recently seen chunks
     pub max_valid_chunks: usize,
+
+    /// Maximum number of data transactions to hold in mempool
+    /// Prevents unbounded growth. Conservative: max_data_txs_per_block * block_migration_depth * 3
+    pub max_valid_submit_txs: usize,
+
+    /// Maximum number of addresses with pending commitment transactions
+    /// Prevents unbounded growth. Conservative: num_staked_miners * 3
+    pub max_valid_commitment_addresses: usize,
+
+    /// Maximum commitment transactions per address
+    /// Limits the resources that can be consumed by a single address
+    pub max_commitments_per_address: usize,
+
+    /// Maximum number of concurrent handlers for mempool messages
+    pub max_concurrent_mempool_tasks: usize,
 }
 
 pub mod serde_utils {
@@ -427,8 +461,6 @@ mod tests {
         num_chunks_in_recall_range = 2
         num_partitions_per_slot = 1
         entropy_packing_iterations = 1000
-        number_of_ingress_proofs_total = 1
-        number_of_ingress_proofs_from_assignees = 0
         safe_minimum_number_of_years = 200
         stake_value = 20000.0
         pledge_base_value = 950.0
@@ -447,32 +479,19 @@ mod tests {
         timestamp_millis = 0
 
         [reth]
-        chain = 1270
+        gas_limit = 30000000
 
-        [reth.genesis]
-        nonce = "0x0"
-        timestamp = "0x0"
-        extraData = "0x"
-        gasLimit = "0x1c9c380"
-        difficulty = "0x0"
-        mixHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
-        coinbase = "0x0000000000000000000000000000000000000000"
-
-        [reth.genesis.config]
-        chainId = 1270
-        daoForkSupport = false
-        terminalTotalDifficultyPassed = true
-
-        [reth.genesis.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
+        [reth.alloc.0x64f1a2829e0e698c18e7792d6e74f67d89aa0a32]
         balance = "0x152cf4e72a974f1c0000"
 
-        [reth.genesis.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
+        [reth.alloc.0xa93225cbf141438629f1bd906a31a1c5401ce924]
         balance = "0x152cf4e72a974f1c0000"
 
         [mempool]
         max_data_txs_per_block = 100
         max_commitment_txs_per_block = 100
-        anchor_expiry_depth = 20
+        tx_anchor_expiry_depth = 20
+        ingress_proof_anchor_expiry_depth = 200
         commitment_fee = 100
 
         [programmable_data]
@@ -503,6 +522,10 @@ mod tests {
 
         [ema]
         price_adjustment_interval = 10
+
+        [hardforks.frontier]
+        number_of_ingress_proofs_total = 1
+        number_of_ingress_proofs_from_assignees = 0
         "#;
 
         // Create the expected config
@@ -601,6 +624,9 @@ mod tests {
         max_invalid_items = 10_000
         max_valid_items = 10_000
         max_valid_chunks = 10000
+        max_valid_submit_txs = 3000
+        max_valid_commitment_addresses = 300
+        max_commitments_per_address = 20
         "#;
 
         // Create the expected config
@@ -625,6 +651,15 @@ mod tests {
                 .parse()
                 .unwrap(),
         ];
+        // Set network_defaults to match what deserialization will produce (using default_network_defaults)
+        expected_config.network_defaults.bind_ip = "0.0.0.0".to_string();
+        // Set explicit IPs to match the old-style TOML config
+        expected_config.gossip.public_ip = Some("127.0.0.1".to_string());
+        expected_config.gossip.bind_ip = Some("127.0.0.1".to_string());
+        expected_config.http.public_ip = Some("127.0.0.1".to_string());
+        expected_config.http.bind_ip = Some("127.0.0.1".to_string());
+        expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
+        expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();

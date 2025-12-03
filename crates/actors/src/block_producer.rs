@@ -22,10 +22,8 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx,
-    payload::{DeterministicShadowTxKey, ShadowTxStore},
-    reth_node_ethereum::EthEngineTypes,
-    IrysEthereumNode,
+    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysEthereumNode, IrysPayloadAttributes,
+    IrysPayloadBuilderAttributes, IrysPayloadTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
@@ -40,20 +38,20 @@ use irys_types::{
     Address, AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
     IrysBlockHeader, IrysTokenPrice, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, VDFLimiterInfo, H256, U256,
+    TokioServiceHandle, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
 use nodit::interval::ii;
 use openssl::sha;
 use reth::{
-    api::{BeaconConsensusEngineHandle, NodeTypes, PayloadKind},
+    api::{ConsensusEngineHandle, NodeTypes, PayloadKind},
     core::primitives::SealedBlock,
-    payload::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadBuilderHandle},
+    payload::{EthBuiltPayload, PayloadBuilderHandle},
     revm::primitives::B256,
-    rpc::types::BlockId,
     tasks::shutdown::Shutdown,
 };
+use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
 use std::time::UNIX_EPOCH;
 use std::{
@@ -61,7 +59,44 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, error_span, info, warn, Instrument as _};
+
+/// Error type for block production that distinguishes between retryable and irrecoverable errors
+#[derive(Debug, thiserror::Error)]
+pub enum BlockProductionError {
+    /// Retryable errors that should trigger a rebuild attempt with a new parent
+    #[error("retryable error during block production")]
+    Retryable {
+        #[source]
+        source: eyre::Error,
+    },
+    /// Irrecoverable errors that should abort block production
+    #[error("irrecoverable error during block production")]
+    Irrecoverable {
+        #[source]
+        source: eyre::Error,
+    },
+}
+
+impl From<eyre::Report> for BlockProductionError {
+    fn from(source: eyre::Report) -> Self {
+        Self::Irrecoverable { source }
+    }
+}
+
+/// Classifies PayloadBuilderError into retryable or irrecoverable categories
+fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
+    match err {
+        // Retryable errors - parent block/header not yet available
+        e @ (PayloadBuilderError::MissingParentHeader(_)
+        | PayloadBuilderError::MissingParentBlock(_)) => {
+            BlockProductionError::Retryable { source: e.into() }
+        }
+
+        // All other errors are irrecoverable
+        e => BlockProductionError::Irrecoverable { source: e.into() },
+    }
+}
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
@@ -140,13 +175,11 @@ pub struct BlockProducerInner {
     /// The Irys price oracle
     pub price_oracle: Arc<IrysPriceOracle>,
     /// Reth node payload builder
-    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes>,
+    pub reth_payload_builder: PayloadBuilderHandle<EthEngineTypes<IrysPayloadTypes>>,
     /// Reth blockchain provider
     pub reth_provider: NodeProvider,
-    /// Shadow tx store
-    pub shadow_tx_store: ShadowTxStore,
     /// Reth beacon engine handle
-    pub beacon_engine_handle: BeaconConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
+    pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
 }
@@ -217,7 +250,7 @@ pub struct MempoolTxsBundle {
 
 impl BlockProducerService {
     /// Spawn a new block producer service
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_producer")]
     pub fn spawn_service(
         inner: Arc<BlockProducerInner>,
         blocks_remaining_for_test: Option<u64>,
@@ -253,7 +286,7 @@ impl BlockProducerService {
         }
     }
 
-    #[tracing::instrument(skip_all, ret, err)]
+    #[tracing::instrument(level = "trace", skip_all, ret, err)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block producer service");
         debug!(
@@ -288,7 +321,7 @@ impl BlockProducerService {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
@@ -312,41 +345,39 @@ impl BlockProducerService {
                     debug!("Test blocks remaining: {}", blocks_remaining);
                 }
 
-                let inner = self.inner.clone();
-                let result = Self::produce_block_inner(inner, solution).await?;
+                let production_strategy = ProductionStrategy {
+                    inner: self.inner.clone(),
+                };
+                let result = production_strategy
+                    .fully_produce_new_block(solution)
+                    .await?;
 
-                // Only decrement blocks_remaining_for_test when a block is successfully produced
-                if let Some((irys_block_header, eth_built_payload)) = &result {
+                if let Some((irys_block_header, eth_built_payload)) = result {
+                    // Final guard: ensure tests haven't exhausted quota
+                    if matches!(self.blocks_remaining_for_test, Some(0)) {
+                        info!("Test guard exhausted; dropping candidate block before publication");
+                        let _ = response.send(Ok(None));
+                        return Ok(());
+                    }
+
                     info!(
                         block.hash = %irys_block_header.block_hash,
                         block.height = irys_block_header.height,
-                        "Block production completed successfully"
+                        "Block publication completed successfully"
                     );
-
-                    // Broadcast the EVM payload
-                    let execution_payload_gossip_data =
-                        GossipBroadcastMessage::from(eth_built_payload.block().clone());
-                    if let Err(payload_broadcast_error) = self
-                        .inner
-                        .service_senders
-                        .gossip_broadcast
-                        .send(execution_payload_gossip_data)
-                    {
-                        error!(
-                            "Failed to broadcast execution payload: {:?}",
-                            payload_broadcast_error
-                        );
-                    }
 
                     if let Some(remaining) = self.blocks_remaining_for_test.as_mut() {
                         *remaining = remaining.saturating_sub(1);
-                        debug!("Test blocks remaining after production: {}", *remaining);
+                        debug!("Test blocks remaining after publication: {}", *remaining);
                     }
+
+                    let _ = response.send(Ok(Some((irys_block_header, eth_built_payload))));
+                    return Ok(());
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
+                    let _ = response.send(Ok(None));
+                    return Ok(());
                 }
-
-                let _ = response.send(Ok(result));
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
                 debug!(
@@ -358,26 +389,6 @@ impl BlockProducerService {
             }
         }
         Ok(())
-    }
-
-    /// Internal method to produce a block without the non-Send trait
-    #[tracing::instrument(skip_all, fields(
-        solution.hash = %solution.solution_hash,
-        solution.vdf_step = solution.vdf_step,
-        solution.mining_address = %solution.mining_address
-    ))]
-    async fn produce_block_inner(
-        inner: Arc<BlockProducerInner>,
-        solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        info!(
-            solution.partition_hash = %solution.partition_hash,
-            solution.chunk_offset = solution.chunk_offset,
-            "Starting block production for solution"
-        );
-
-        let production_strategy = ProductionStrategy { inner };
-        production_strategy.fully_produce_new_block(solution).await
     }
 }
 
@@ -413,7 +424,7 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx))?;
+            .send(MempoolServiceMessage::GetBlockHeader(block_hash, false, tx).into())?;
 
         match rx.await? {
             Some(header) => Ok(header),
@@ -478,19 +489,30 @@ pub trait BlockProdStrategy {
         solution: &SolutionContext,
         prev_block_header: IrysBlockHeader,
         prev_block_ema_snapshot: Arc<EmaSnapshot>,
-    ) -> eyre::Result<
+    ) -> Result<
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
+        BlockProductionError,
     > {
+        if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
+            warn!(
+                "Skipping solution for old step number {}, previous block step number {} for block {}",
+                solution.vdf_step,
+                prev_block_header.vdf_limiter_info.global_step_number,
+                prev_block_header.block_hash
+            );
+            return Ok(None);
+        }
+
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
         let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
 
-        let block_reward = self.block_reward(&prev_block_header, current_timestamp)?;
+        let block_reward = self.block_reward(&prev_block_header)?;
 
         // Calculate the new EMA for block header (stored in block, used for next calculations)
         let ema_calculation = self
@@ -553,7 +575,7 @@ pub trait BlockProdStrategy {
     /// the latest validated block on timeout to ensure production continues.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
-    #[tracing::instrument(skip(self), level = "debug")]
+    #[tracing::instrument(skip_all, level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
         const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
@@ -578,36 +600,102 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block_without_gossip(
         &self,
         solution: &SolutionContext,
-    ) -> eyre::Result<
+    ) -> Result<
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             EthBuiltPayload,
         )>,
+        BlockProductionError,
     > {
-        let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
-        self.produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
-            .await
+        const MAX_RETRY_ATTEMPTS: usize = 5;
+        let mut retry_count = 0;
+
+        loop {
+            // Fetch the current best parent block
+            let (prev_block_header, prev_block_ema_snapshot) = self.parent_irys_block().await?;
+            let block_hash = prev_block_header.block_hash;
+
+            // Attempt to produce the block
+            match self
+                .produce_block_with_parent(solution, prev_block_header, prev_block_ema_snapshot)
+                .instrument(error_span!("produce_block_with_parent", parent.block = ?block_hash))
+                .await
+            {
+                Ok(result) => {
+                    if retry_count > 0 {
+                        error!(
+                            solution.hash = %solution.solution_hash,
+                            solution.vdf_step = solution.vdf_step,
+                            retry.count = retry_count,
+                            "RETRY_SUCCESS: Block produced after retryable errors"
+                        );
+                    }
+                    return Ok(result);
+                }
+                Err(BlockProductionError::Retryable { source }) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRY_ATTEMPTS {
+                        error!(
+                            solution.hash = %solution.solution_hash,
+                            solution.vdf_step = solution.vdf_step,
+                            error.type = "retryable",
+                            error.source = %source,
+                            retry.count = retry_count,
+                            retry.max_attempts = MAX_RETRY_ATTEMPTS,
+                            "Max retry attempts reached for retryable error, aborting"
+                        );
+                        return Err(BlockProductionError::Irrecoverable {
+                            source: source
+                                .wrap_err(format!("max retries ({}) exceeded", MAX_RETRY_ATTEMPTS)),
+                        });
+                    }
+
+                    warn!(
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        error.type = "retryable",
+                        error.source = %source,
+                        retry.attempt = retry_count,
+                        retry.max_attempts = MAX_RETRY_ATTEMPTS,
+                        "Retryable error during block production, will retry with new parent"
+                    );
+                    // Continue loop to retry with fresh parent
+                }
+                Err(e @ BlockProductionError::Irrecoverable { .. }) => {
+                    error!(
+                        solution.hash = %solution.solution_hash,
+                        solution.vdf_step = solution.vdf_step,
+                        error.type = "irrecoverable",
+                        "Irrecoverable error during block production, aborting"
+                    );
+                    return Err(e);
+                }
+            }
+        }
     }
 
-    /// Produces a new block with automatic parent chain rebuild capability.
+    /// Produces a new block candidate with automatic parent chain rebuild capability.
+    /// This does NOT broadcast or publish the block.
     ///
     /// # Race Condition Handling
     /// This function addresses a critical race condition where the canonical parent block
     /// can change while we're producing a block, which would waste the valuable mining solution.
     ///
-    /// ## The Problem
-    /// 1. Block production takes time
-    /// 2. During this time, another node might broadcast a new block
-    /// 3. If that block becomes the new canonical tip, building on the old parent wastes the solution
-    ///
-    /// ## The Solution
     /// After producing a block, we check if the parent is still the best canonical block.
     /// If not, we rebuild the block on the new parent, reusing the same solution hash.
-    async fn fully_produce_new_block(
+    #[tracing::instrument(level = "trace", skip_all, err)]
+    async fn fully_produce_new_block_candidate(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+    ) -> Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            EthBuiltPayload,
+        )>,
+        BlockProductionError,
+    > {
         let mut rebuild_attempts = 0;
 
         // Initial block production
@@ -694,7 +782,23 @@ pub trait BlockProdStrategy {
             );
         }
 
-        let block = self.broadcast_block(block, stats).await?;
+        Ok(Some((block, stats, eth_built_payload)))
+    }
+
+    /// Produces and broadcasts a new block. Kept for tests and direct strategies.
+    async fn fully_produce_new_block(
+        &self,
+        solution: SolutionContext,
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
+        let Some((block, stats, eth_built_payload)) =
+            self.fully_produce_new_block_candidate(solution).await?
+        else {
+            return Ok(None);
+        };
+
+        let block = self
+            .broadcast_block(block, stats, &eth_built_payload)
+            .await?;
         let Some(block) = block else { return Ok(None) };
         Ok(Some((block, eth_built_payload)))
     }
@@ -708,9 +812,9 @@ pub trait BlockProdStrategy {
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
         pd_base_fee: Amount<(CostPerChunk, Irys)>,
-        timestamp_ms: u128,
+        timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
-    ) -> eyre::Result<(EthBuiltPayload, U256)> {
+    ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
 
@@ -768,49 +872,56 @@ pub trait BlockProdStrategy {
         Ok((payload, final_treasury_balance))
     }
 
-    #[tracing::instrument(skip_all, fields(
+    #[tracing::instrument(level = "trace", skip_all, fields(
         payload.parent_evm_hash = %prev_block_header.evm_block_hash,
-        payload.timestamp_sec = timestamp_ms / 1000,
+        payload.timestamp_sec = timestamp_ms.to_secs().as_secs(),
         payload.shadow_tx_count = shadow_txs.len()
     ))]
     async fn build_and_submit_reth_payload(
         &self,
         prev_block_header: &IrysBlockHeader,
-        timestamp_ms: u128,
+        timestamp_ms: UnixTimestampMs,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
-    ) -> eyre::Result<EthBuiltPayload> {
+    ) -> Result<EthBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
-        // generate payload attributes
-        let attributes = PayloadAttributes {
-            timestamp: (timestamp_ms / 1000) as u64, // **THIS HAS TO BE SECONDS**
-            prev_randao: parent_mix_hash,
-            suggested_fee_recipient: self.inner().config.node_config.reward_address,
-            withdrawals: None, // these should ALWAYS be none
-            parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+        // generate payload attributes with shadow transactions
+        let rpc_attributes = IrysPayloadAttributes {
+            inner: PayloadAttributes {
+                timestamp: timestamp_ms.to_secs().as_secs(), // **THIS HAS TO BE SECONDS**
+                prev_randao: parent_mix_hash,
+                suggested_fee_recipient: self.inner().config.node_config.reward_address,
+                withdrawals: None, // these should ALWAYS be none
+                parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
+            },
+            shadow_txs,
         };
 
         debug!(
-            payload.timestamp_sec = attributes.timestamp,
-            payload.fee_recipient = %attributes.suggested_fee_recipient,
-            payload.parent_beacon_root = ?attributes.parent_beacon_block_root,
+            payload.timestamp_sec = rpc_attributes.inner.timestamp,
+            payload.fee_recipient = %rpc_attributes.inner.suggested_fee_recipient,
+            payload.parent_beacon_root = ?rpc_attributes.inner.parent_beacon_block_root,
+            payload.shadow_tx_count = rpc_attributes.shadow_txs.len(),
             "Payload attributes created"
         );
 
-        let attributes =
-            EthPayloadBuilderAttributes::new(prev_block_header.evm_block_hash, attributes);
+        // Convert to builder attributes - this computes the payload ID including shadow txs
+        let attributes = IrysPayloadBuilderAttributes::try_new(
+            prev_block_header.evm_block_hash,
+            rpc_attributes,
+            0, // version
+        )
+        .expect("IrysPayloadBuilderAttributes::try_new is infallible");
 
         let payload_builder = &self.inner().reth_payload_builder;
-        let beacon_engine_handle = &self.inner().beacon_engine_handle;
+        let consensus_engine_handle = &self.inner().consensus_engine_handle;
 
-        // store shadow txs
-        let key = DeterministicShadowTxKey::new(attributes.payload_id());
-        debug!(
+        tracing::debug!(
             payload.id = %attributes.payload_id(),
-            "Storing shadow transactions"
+            prev_height = prev_block_header.height,
+            "Built payload attributes with shadow transactions"
         );
-        self.inner().shadow_tx_store.set_shadow_txs(key, shadow_txs);
 
         // send & await the payload
         info!("Sending new payload to Reth");
@@ -819,7 +930,7 @@ pub trait BlockProdStrategy {
             .send_new_payload(attributes.clone())
             .await
             .map_err(|e| eyre!("Failed to send payload to builder: {}", e))?
-            .map_err(|e| eyre!("Payload builder returned error: {}", e))?;
+            .map_err(classify_payload_error)?;
 
         debug!(
             payload.id = %payload_id,
@@ -832,9 +943,10 @@ pub trait BlockProdStrategy {
             .ok_or_else(|| {
                 eyre!("Failed to resolve payload future - payload builder returned None")
             })?
-            .map_err(|e| eyre!("Failed to build payload: {}", e))?;
+            .map_err(classify_payload_error)?;
 
         let evm_block_hash = built_payload.block().hash();
+        tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
         let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
             panic!(
@@ -842,18 +954,21 @@ pub trait BlockProdStrategy {
                 evm_block_hash, e
             )
         });
-        let new_payload_result = beacon_engine_handle
+        let new_payload_result = consensus_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
                 sidecar,
             })
-            .await?;
+            .await
+            .map_err(|e| BlockProductionError::Irrecoverable {
+                source: eyre::eyre!("beacon engine error: {}", e),
+            })?;
 
-        eyre::ensure!(
-            new_payload_result.status == PayloadStatusEnum::Valid,
-            "Reth has gone out of sync {:?}",
-            new_payload_result.status
-        );
+        if new_payload_result.status != PayloadStatusEnum::Valid {
+            return Err(BlockProductionError::Irrecoverable {
+                source: eyre::eyre!("Reth has gone out of sync: {:?}", new_payload_result.status),
+            });
+        }
 
         info!(
             payload.block_hash = %built_payload.block().hash(),
@@ -864,12 +979,13 @@ pub trait BlockProdStrategy {
         Ok(built_payload)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn produce_block_without_broadcasting(
         &self,
         solution: &SolutionContext,
         prev_block_header: &IrysBlockHeader,
         mempool_bundle: MempoolTxsBundle,
-        current_timestamp: u128,
+        current_timestamp: UnixTimestampMs,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         ema_calculation: ExponentialMarketAvgCalculation,
@@ -878,16 +994,6 @@ pub trait BlockProdStrategy {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
-
-        if solution.vdf_step <= prev_block_header.vdf_limiter_info.global_step_number {
-            warn!(
-                "Skipping solution for old step number {}, previous block step number {} for block {}",
-                solution.vdf_step,
-                prev_block_header.vdf_limiter_info.global_step_number,
-                prev_block_hash
-            );
-            return Ok(None);
-        }
 
         // Publish Ledger Transactions
         let publish_chunks_added = calculate_chunks_added(
@@ -1020,8 +1126,7 @@ pub trait BlockProdStrategy {
                     required_proof_count: Some(
                         self.inner()
                             .config
-                            .consensus
-                            .number_of_ingress_proofs_total
+                            .number_of_ingress_proofs_total_at(current_timestamp.to_secs())
                             .try_into()?,
                     ),
                 },
@@ -1068,10 +1173,12 @@ pub trait BlockProdStrategy {
         Ok(Some((block, stats)))
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn broadcast_block(
         &self,
         block: Arc<IrysBlockHeader>,
         stats: Option<AdjustmentStats>,
+        eth_built_payload: &EthBuiltPayload,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {
@@ -1134,6 +1241,24 @@ pub trait BlockProdStrategy {
             }
         }?;
 
+        // Gossip the EVM payload
+        let execution_payload_gossip_data =
+            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+        if let Err(payload_broadcast_error) = self
+            .inner()
+            .service_senders
+            .gossip_broadcast
+            .send(execution_payload_gossip_data)
+        {
+            error!(
+                block.hash = ?block.block_hash,
+                block.height = ?block.height,
+                payload.hash = ?eth_built_payload.block().hash(),
+                "Failed to broadcast execution payload: {:?}",
+                payload_broadcast_error
+            );
+        }
+
         if is_difficulty_updated {
             self.inner()
                 .mining_broadcaster
@@ -1152,13 +1277,28 @@ pub trait BlockProdStrategy {
     fn block_reward(
         &self,
         prev_block_header: &IrysBlockHeader,
-        current_timestamp: u128,
     ) -> Result<Amount<irys_types::storage_pricing::phantoms::Irys>, eyre::Error> {
-        let reward_amount = self.inner().reward_curve.reward_between(
-            // adjust ms -> sec
-            prev_block_header.timestamp.saturating_div(1000),
-            current_timestamp.saturating_div(1000),
-        )?;
+        // Calculate rewards using fixed block intervals, not actual timestamps.
+        // This prevents block producers from manipulating timestamps to maximize rewards
+        // and ensures consistent emissions over time.
+
+        let previous_height = prev_block_header.height();
+
+        let target_block_time_seconds = self
+            .inner()
+            .config
+            .consensus
+            .difficulty_adjustment
+            .block_time;
+
+        // Use height * target_block_time for consistent reward curve positioning
+        let previous_block_seconds = (previous_height * target_block_time_seconds) as u128;
+        let current_block_seconds = previous_block_seconds + target_block_time_seconds as u128;
+
+        let reward_amount = self
+            .inner()
+            .reward_curve
+            .reward_between(previous_block_seconds, current_block_seconds)?;
         Ok(reward_amount)
     }
 
@@ -1204,6 +1344,7 @@ pub trait BlockProdStrategy {
         Ok(ema_calculation)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1257,10 +1398,10 @@ pub trait BlockProdStrategy {
     }
 
     fn is_epoch_block(&self, height: u64) -> bool {
-        height % self.inner().config.consensus.epoch.num_blocks_in_epoch == 0
+        height.is_multiple_of(self.inner().config.consensus.epoch.num_blocks_in_epoch)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn fetch_best_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1269,15 +1410,12 @@ pub trait BlockProdStrategy {
         self.inner()
             .service_senders
             .mempool
-            .send(MempoolServiceMessage::GetBestMempoolTxs(
-                Some(BlockId::Hash(prev_block_header.evm_block_hash.into())),
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetBestMempoolTxs(prev_block_header.block_hash, tx).into())
             .expect("to send MempoolServiceMessage");
         rx.await.expect("to receive txns")
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn fetch_parent_snapshots(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1297,7 +1435,7 @@ pub trait BlockProdStrategy {
         Ok((epoch, commit))
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn build_commitment_ledger_epoch(
         &self,
         commit_snapshot: &CommitmentSnapshot,
@@ -1317,7 +1455,7 @@ pub trait BlockProdStrategy {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     fn derive_unpledge_refunds(
         &self,
         commit_snapshot: &CommitmentSnapshot,
@@ -1340,6 +1478,7 @@ pub trait BlockProdStrategy {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn get_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -1425,20 +1564,21 @@ fn millis_since_epoch(time: SystemTime) -> u128 {
 }
 
 #[inline]
+#[tracing::instrument(level = "trace", skip_all)]
 fn choose_oracle_price(
-    parent_ts_ms: u128,
+    parent_ts_ms: UnixTimestampMs,
     parent_price: IrysTokenPrice,
     oracle_price: IrysTokenPrice,
     oracle_updated_ms: u128,
 ) -> IrysTokenPrice {
-    let (chosen, source) = if parent_ts_ms > oracle_updated_ms {
+    let (chosen, source) = if parent_ts_ms.as_millis() > oracle_updated_ms {
         (parent_price, "parent_fallback")
     } else {
         (oracle_price, "oracle_fresh")
     };
 
     tracing::debug!(
-        parent_ts_ms,
+        parent_ts_ms = parent_ts_ms.as_millis(),
         oracle_updated_ms,
         parent_price = %parent_price,
         oracle_price = %oracle_price,
@@ -1460,26 +1600,26 @@ impl BlockProdStrategy for ProductionStrategy {
     }
 }
 
-pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> u128 {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+#[tracing::instrument(level = "trace", skip_all)]
+pub async fn current_timestamp(prev_block_header: &IrysBlockHeader) -> UnixTimestampMs {
+    let now_ms = UnixTimestampMs::now().unwrap();
+    let prev_secs = prev_block_header.timestamp.to_secs();
 
-    // This exists to prevent block validation errors in the unlikely* case two blocks are produced with the exact same timestamp
-    // This can happen due to EVM blocks using second-precision time, instead of our millisecond precision
-    // this just waits until the next second (timers (afaict) never undersleep, so we don't need an extra buffer here)
-    // *dev configs can easily trigger this behaviour
-    // as_secs does not take into account/round the underlying nanos at all
-    let now =
-        if now.as_secs() == Duration::from_millis(prev_block_header.timestamp as u64).as_secs() {
-            let nanos_into_sec = now.subsec_nanos();
-            let nano_to_next_sec = 1_000_000_000 - nanos_into_sec;
-            let time_to_wait = Duration::from_nanos(nano_to_next_sec as u64);
-            info!("Waiting {:.2?} to prevent timestamp overlap", &time_to_wait);
-            tokio::time::sleep(time_to_wait).await;
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
-        } else {
-            now
-        };
-    now.as_millis()
+    // If we're in the same second as the previous block, wait until the next second.
+    // This prevents EVM timestamp collisions (EVM uses second-precision).
+    // Dev configs can easily trigger this behaviour due to fast block times.
+    if now_ms.to_secs() == prev_secs {
+        let ms_into_sec = (now_ms.as_millis() % 1000) as u64;
+        let wait_duration = Duration::from_millis(1000 - ms_into_sec);
+        info!(
+            "Waiting {:.2?} to prevent timestamp overlap",
+            &wait_duration
+        );
+        tokio::time::sleep(wait_duration).await;
+        return UnixTimestampMs::now().unwrap();
+    }
+
+    now_ms
 }
 
 /// Calculates the total number of full chunks needed to store a list of transactions,
@@ -1503,7 +1643,7 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 #[cfg(test)]
 mod oracle_choice_tests {
     use super::{choose_oracle_price, millis_since_epoch};
-    use irys_types::storage_pricing::Amount;
+    use irys_types::{storage_pricing::Amount, UnixTimestampMs};
     use rust_decimal_macros::dec;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -1515,7 +1655,7 @@ mod oracle_choice_tests {
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
 
         let chosen = choose_oracle_price(
-            millis_since_epoch(parent_ts_ms),
+            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),
@@ -1534,7 +1674,7 @@ mod oracle_choice_tests {
         let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
 
         let chosen = choose_oracle_price(
-            millis_since_epoch(parent_ts_ms),
+            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
             parent_price,
             oracle_price,
             millis_since_epoch(oracle_updated_at),

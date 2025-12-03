@@ -1,10 +1,11 @@
-use alloy_evm::precompiles::DynPrecompile;
+use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
 use alloy_primitives::Bytes;
 use irys_types::precompile::PD_PRECOMPILE_ADDRESS;
 use reth_evm::precompiles::PrecompilesMap;
 use revm::precompile::PrecompileError;
 use revm::precompile::{PrecompileOutput, PrecompileResult};
 use revm::primitives::hardfork::SpecId;
+use std::borrow::Cow;
 use tracing::{debug, warn};
 
 use crate::precompiles::pd::constants::PD_BASE_GAS_COST;
@@ -18,7 +19,9 @@ use super::context::PdContext;
 /// Programmable Data precompile implementation.
 #[inline]
 fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
-    move |data: &[u8], gas_limit: u64| -> PrecompileResult {
+    move |input: PrecompileInput<'_>| -> PrecompileResult {
+        let data = input.data;
+        let gas_limit = input.gas;
         debug!(
             data_len = data.len(),
             gas_limit = gas_limit,
@@ -53,7 +56,7 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
 
         let decoded_id = PdFunctionId::try_from(data[0]).map_err(|e| {
             warn!(function_id = data[0], "PD precompile: unknown function ID");
-            PrecompileError::Other(format!("PD precompile: {}", e))
+            PrecompileError::Other(Cow::Owned(format!("PD precompile: {}", e)))
         })?;
 
         debug!(function_id = ?decoded_id, "PD precompile: decoded function ID");
@@ -105,7 +108,9 @@ fn pd_precompile(pd_context: PdContext) -> DynPrecompile {
 
         Ok(PrecompileOutput {
             gas_used: total_gas,
+            gas_refunded: 0,
             bytes: res.bytes,
+            reverted: false,
         })
     }
     .into()

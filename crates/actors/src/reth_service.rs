@@ -1,4 +1,5 @@
 use crate::mempool_service::MempoolServiceMessage;
+use crate::MempoolServiceMessageWithSpan;
 use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -21,7 +22,7 @@ pub struct RethService {
     cmd_rx: UnboundedReceiver<RethServiceMessage>,
     handle: IrysRethNodeAdapter,
     db: DatabaseProvider,
-    mempool: UnboundedSender<MempoolServiceMessage>,
+    mempool: UnboundedSender<MempoolServiceMessageWithSpan>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -57,8 +58,9 @@ pub struct ForkChoiceUpdate {
     pub finalized_hash: B256,
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 async fn evm_block_hash_from_block_hash(
-    mempool_service: &UnboundedSender<MempoolServiceMessage>,
+    mempool_service: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
@@ -67,7 +69,7 @@ async fn evm_block_hash_from_block_hash(
     let irys_header = {
         let (tx, rx) = oneshot::channel();
         mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx))
+            .send(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx).into())
             .expect("expected send to mempool to succeed");
         let mempool_response = rx.await?;
         match mempool_response {
@@ -99,7 +101,7 @@ impl RethService {
     pub fn spawn_service(
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
-        mempool: UnboundedSender<MempoolServiceMessage>,
+        mempool: UnboundedSender<MempoolServiceMessageWithSpan>,
         cmd_rx: UnboundedReceiver<RethServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -132,7 +134,7 @@ impl RethService {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn run(mut self) -> eyre::Result<()> {
         info!("Starting Reth service");
 
@@ -178,6 +180,7 @@ impl RethService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn handle_forkchoice(&mut self, update: ForkChoiceUpdateMessage) -> eyre::Result<()> {
         debug!(?update, "Received fork choice update command");
 
@@ -186,7 +189,7 @@ impl RethService {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), err, ret)]
+    #[tracing::instrument(level = "trace", skip_all, err, ret)]
     async fn resolve_new_fcu(
         &self,
         new_fcu: ForkChoiceUpdateMessage,
@@ -284,6 +287,7 @@ impl RethService {
         Ok(fcu)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn connect_to_peer(&self, peer: RethPeerInfo) -> eyre::Result<()> {
         info!(
             reth_peer.id = %peer.peer_id,
@@ -298,6 +302,7 @@ impl RethService {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn get_peering_info(&self) -> eyre::Result<RethPeerInfo> {
         let handle = self.handle.clone();
         let peer_id = *handle.inner.network.peer_id();

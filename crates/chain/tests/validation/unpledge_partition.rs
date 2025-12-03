@@ -1,63 +1,19 @@
 use std::sync::Arc;
 
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{
+    assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
+    IrysNodeTest,
+};
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
-use irys_actors::validation_service::ValidationServiceMessage;
+use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    mempool_service::MempoolServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
-    BlockProdStrategy, BlockProducerInner, ProductionStrategy,
+    shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
+    ProductionStrategy,
 };
-use irys_chain::IrysNodeCtx;
 use irys_types::CommitmentType;
-use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, NodeConfig, U256};
-use tokio::sync::oneshot;
-
-pub(super) async fn gossip_commitment_to_node(
-    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-    commitment: &CommitmentTransaction,
-) -> eyre::Result<()> {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
-    )?;
-
-    resp_rx.await??;
-    Ok(())
-}
-
-pub(super) async fn gossip_data_tx_to_node(
-    node: &IrysNodeTest<irys_chain::IrysNodeCtx>,
-    tx: &DataTransactionHeader,
-) -> eyre::Result<()> {
-    let (resp_tx, resp_rx) = oneshot::channel();
-    node.node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(
-            tx.clone(),
-            resp_tx,
-        ))?;
-
-    resp_rx.await??;
-    Ok(())
-}
-
-pub(super) fn send_block_to_validation_service(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-    skip_vdf_validation: bool,
-) {
-    node_ctx
-        .service_senders
-        .validation_service
-        .send(ValidationServiceMessage::ValidateBlock {
-            block,
-            skip_vdf_validation,
-        })
-        .unwrap();
-}
+use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
 async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Result<()> {
@@ -171,10 +127,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     )
     .await?;
     let genesis_outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         genesis_outcome,
-        BlockValidationOutcome::Discarded,
-        "genesis node should discard block with unpledge referencing unowned partition"
+        |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
+        "genesis node should discard block with unpledge referencing unowned partition",
     );
 
     send_block_to_block_tree(
@@ -185,10 +141,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     )
     .await?;
     let victim_outcome = read_block_from_state(&victim_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         victim_outcome,
-        BlockValidationOutcome::Discarded,
-        "victim peer should also discard the malicious block"
+        |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
+        "victim peer should also discard the malicious block",
     );
 
     send_block_to_block_tree(
@@ -199,10 +155,10 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
     )
     .await?;
     let evil_outcome = read_block_from_state(&evil_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         evil_outcome,
-        BlockValidationOutcome::Discarded,
-        "malicious peer must not accept its own invalid block"
+        |e| matches!(e, ValidationError::UnpledgePartitionNotOwned { .. }),
+        "malicious peer must not accept its own invalid block",
     );
 
     evil_node.stop().await;
@@ -319,10 +275,18 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "block containing invalid unpledge count should be rejected"
+        |e| {
+            matches!(
+                e,
+                ValidationError::CommitmentSnapshotRejected {
+                    status: irys_domain::CommitmentSnapshotStatus::InvalidPledgeCount,
+                    ..
+                }
+            )
+        },
+        "block containing invalid unpledge count should be rejected",
     );
 
     genesis_node.stop().await;
@@ -419,10 +383,10 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "block containing invalid unpledge refund amount should be rejected"
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid { .. }),
+        "block containing invalid unpledge refund amount should be rejected",
     );
 
     genesis_node.stop().await;
@@ -534,13 +498,22 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
         "Malicious block must be at epoch boundary"
     );
 
-    send_block_to_validation_service(&genesis_node.node_ctx, Arc::clone(&block), false);
+    let err = send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        Arc::clone(&block),
+        commitments,
+        false,
+    )
+    .await
+    .unwrap_err();
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
-        outcome,
-        BlockValidationOutcome::Discarded,
-        "epoch block with extra unpledge should be rejected"
+    assert!(
+        matches!(
+            err,
+            irys_actors::block_validation::PreValidationError::InvalidEpochSnapshot { .. }
+        ),
+        "epoch block with extra unpledge should be rejected during pre-validation, got: {:?}",
+        err
     );
 
     genesis_node.stop().await;

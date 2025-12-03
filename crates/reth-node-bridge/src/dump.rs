@@ -1,10 +1,12 @@
+use alloy_consensus::BlockHeader;
 use alloy_genesis::GenesisAccount;
 use alloy_primitives::B256;
 use irys_database::reth_db::{
-    self, cursor::*, transaction::*, Bytecodes, Headers, PlainAccountState, PlainStorageState,
+    self, cursor::*, transaction::*, Bytecodes, PlainAccountState, PlainStorageState,
     StageCheckpoints,
 };
 use irys_types::Address;
+use reth_provider::HeaderProvider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
@@ -38,10 +40,15 @@ pub struct GenesisAccountWithAddress {
 /// This generated file is designed to be compatible with Reth's existing `init-state` command, for loading larger genesis states.
 /// note: there is a (possible) hazard here where the latest reth block might not be the same state that's represented in the State tables\
 /// so it is recommended you capture either when the node is off, or a few seconds after it's produced a block.
-pub fn dump_state(
+pub fn dump_state<P>(
     reth_db: impl reth_db::Database,
+    header_provider: &P,
     dump_base_path: PathBuf,
-) -> eyre::Result<PathBuf> {
+) -> eyre::Result<PathBuf>
+where
+    P: HeaderProvider,
+    P::Header: BlockHeader,
+{
     let read_tx = reth_db.tx()?;
     // read the latest block
     let latest_reth_block = read_tx
@@ -49,8 +56,9 @@ pub fn dump_state(
         .map(|ch| ch.block_number)
         .expect("unable to get latest reth block");
 
-    let latest_reth_block_header = read_tx
-        .get::<Headers>(latest_reth_block)?
+    // Headers are stored in static files, so we need to use the HeaderProvider to access them
+    let latest_reth_block_header = header_provider
+        .header_by_number(latest_reth_block)?
         .expect("To get latest block header");
 
     let row_count = read_tx.entries::<PlainAccountState>()?;
@@ -76,7 +84,7 @@ pub fn dump_state(
     serde_json::to_writer(
         &mut writer,
         &StateRoot {
-            root: latest_reth_block_header.state_root,
+            root: latest_reth_block_header.state_root(),
         },
     )?;
 

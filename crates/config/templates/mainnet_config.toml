@@ -1,0 +1,112 @@
+consensus = "Mainnet"
+node_mode = "Peer"
+sync_mode = "Full"
+base_directory = ".irys"
+mining_key = "0000000000000000000000000000000000000000000000000000000000000001"
+reward_address = "0x0000000000000000000000000000000000000000"
+stake_pledge_drives = false
+genesis_peer_discovery_timeout_millis = 10000
+
+
+# mainnet-node-1 (GENESIS)
+[[trusted_peers]]
+gossip = "194.164.87.66:9009"
+api = "194.164.87.66:80"
+
+[trusted_peers.execution]
+peering_tcp_addr = "194.164.87.66:9010"
+
+# mainnet-node-2
+[[trusted_peers]]
+gossip = "157.180.51.67:9009"
+api = "157.180.51.67:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "157.180.51.67:9010"
+
+# mainnet-node-3
+[[trusted_peers]]
+gossip = "57.129.145.193:9009"
+api = "57.129.145.193:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "57.129.145.193:9010"
+
+# mainnet-node-4
+[[trusted_peers]]
+gossip = "89.35.53.102:9009"
+api = "89.35.53.102:8080"
+
+[trusted_peers.execution]
+peering_tcp_addr = "89.35.53.102:9010"
+
+
+# Default network configuration used by all services (http, gossip, reth)
+# Individual services can override these values if needed
+[network_defaults]
+public_ip = "127.0.0.1"
+bind_ip = "0.0.0.0"
+
+[gossip]
+public_port = 8081
+bind_port = 8081
+
+[http]
+public_port = 8080
+bind_port = 8080
+
+[reth.network]
+use_random_ports = false
+public_port = 30303
+bind_port = 30303
+
+[storage]
+num_writes_before_sync = 100
+
+[data_sync]
+max_storage_throughput_bps = 1047961600
+bandwidth_adjustment_interval = "1s"
+chunk_request_timeout = "15s"
+max_pending_chunk_requests = 100
+
+[packing.local]
+cpu_packing_concurrency = 4
+gpu_packing_batch_size = 1024
+
+[cache]
+cache_clean_lag = 2
+
+[cache.eviction_strategy]
+type = "size_based"
+max_cache_size_bytes = 10737418240 # 10 GB
+
+[[oracles]]
+type = "coingecko"
+api_key = "provide-coingecko-api-key"
+# Coin ids are listed at https://docs.coingecko.com/reference/coins-list
+# Or in this official spreadsheet https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
+coin_id = "irys"
+# Set to true when using a CoinGecko demo API key (see https://docs.coingecko.com/v3.0.1/reference/introduction)
+demo_api_key = true
+# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+poll_interval_ms = 300000
+
+[[oracles]]
+type = "coinmarketcap"
+api_key = "provide-coinmarketcap-api-key"
+# CoinMarketCap ids can be found via https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
+id = "1"
+# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+poll_interval_ms = 300000
+
+[mempool]
+max_pending_pledge_items = 100
+max_pledges_per_item = 100
+max_pending_chunk_items = 30
+max_chunks_per_item = 500
+max_valid_items = 10000
+max_invalid_items = 10000
+max_valid_chunks = 10000
+
+[vdf]
+parallel_verification_thread_limit = 4

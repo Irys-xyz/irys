@@ -70,8 +70,8 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         .create_publish_transaction(
             data_bytes.clone(),
             node.get_anchor().await?,
-            price_info.perm_fee,
-            price_info.term_fee,
+            price_info.perm_fee.into(),
+            price_info.term_fee.into(),
         )
         .unwrap();
     let tx = main_signer.sign_transaction(tx).unwrap();
@@ -210,7 +210,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
         attempts
     );
 
-    node.node_ctx.stop().await;
+    node.stop().await;
 
     Ok(())
 }

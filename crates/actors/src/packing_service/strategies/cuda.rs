@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
-use irys_packing::capacity_pack_range_cuda_c;
-use irys_types::{partition::PartitionHash, split_interval, Config, PartitionChunkRange};
+use irys_packing::{capacity_pack_range_cuda_c, CUDAConfig};
+use irys_types::{partition::PartitionHash, split_interval, Address, Config, PartitionChunkRange};
 use tokio::sync::Semaphore;
 use tokio::task::yield_now;
 use tracing::{debug, warn};
@@ -37,11 +37,12 @@ impl CudaPackingStrategy {
 
 #[async_trait]
 impl super::PackingStrategy for CudaPackingStrategy {
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = *chunk_range.0.start(), chunk.range_end = *chunk_range.0.end(), partition.hash = %partition_hash))]
     async fn pack(
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
@@ -85,33 +86,25 @@ impl super::PackingStrategy for CudaPackingStrategy {
             // Pack batch on GPU
             let handle = runtime_handle.clone().spawn(async move {
                 let out = runtime_handle
-                    .spawn_blocking(move || {
-                        let buffer_size: usize =
-                            (num_chunks * chunk_size).try_into().unwrap_or_else(|_| {
-                                warn!("Buffer size conversion overflow, using max value");
-                                usize::MAX
-                            });
-                        let mut out: Vec<u8> = Vec::with_capacity(buffer_size);
+                    .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
+                        let mut out: Vec<u8> = Vec::with_capacity(
+                            (num_chunks * chunk_size as u32).try_into().unwrap(),
+                        );
                         capacity_pack_range_cuda_c(
                             num_chunks,
-                            mining_address.into(),
+                            mining_address,
                             start as u64,
                             partition_hash,
                             entropy_iterations,
                             chain_id,
+                            CUDAConfig::from_device_default()?,
                             &mut out,
-                        );
-                        out
+                        )?;
+                        eyre::Result::Ok(out)
                     })
                     .await
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            target: "irys::packing::cuda",
-                            error = %e,
-                            "CUDA packing task panicked, returning empty buffer"
-                        );
-                        Vec::new()
-                    });
+                    .unwrap() // TODO: error handling
+                    .unwrap();
 
                 // Write packed chunks
                 for i in 0..num_chunks {

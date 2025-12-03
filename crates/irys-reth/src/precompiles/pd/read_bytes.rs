@@ -344,7 +344,9 @@ pub fn read_bytes_range(
 
     Ok(PrecompileOutput {
         gas_used: 0,
+        gas_refunded: 0,
         bytes: extracted,
+        reverted: false,
     })
 }
 

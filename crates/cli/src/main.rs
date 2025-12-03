@@ -7,6 +7,8 @@ use irys_reth_node_bridge::genesis::init_state;
 use irys_types::chainspec::irys_chain_spec;
 use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
+use reth_node_types::NodeTypesWithDBAdapter;
+use reth_provider::{providers::StaticFileProvider, ProviderFactory};
 use std::{path::PathBuf, sync::Arc};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt as _;
@@ -92,15 +94,22 @@ async fn main() -> eyre::Result<()> {
 
     match args.command {
         Commands::DumpState { .. } => {
-            dump_state(cli_init_reth_db(DatabaseEnvKind::RO)?, "./".into())?;
+            let (reth_db, provider_factory) = cli_init_reth_provider()?;
+            dump_state(reth_db, &provider_factory, "./".into())?;
             Ok(())
         }
         Commands::InitState { state_path } => {
             let node_config: NodeConfig = load_config()?;
             let config = Config::new(node_config.clone());
+            // Convert timestamp from millis to seconds for reth
+            let timestamp_secs =
+                std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
+                    .as_secs();
             let chain_spec = irys_chain_spec(
-                config.consensus.reth.chain,
-                config.consensus.reth.genesis.clone(),
+                config.consensus.chain_id,
+                &config.consensus.reth,
+                &config.consensus.hardforks,
+                timestamp_secs,
             )?;
             init_state(node_config, chain_spec, state_path).await
         }
@@ -257,6 +266,59 @@ pub fn cli_init_reth_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv
     )?);
 
     Ok(reth_db)
+}
+
+/// Initialize reth database and provider factory for commands that need header access
+pub fn cli_init_reth_provider() -> eyre::Result<(
+    Arc<DatabaseEnv>,
+    ProviderFactory<NodeTypesWithDBAdapter<irys_reth::IrysEthereumNode, Arc<DatabaseEnv>>>,
+)> {
+    // load the config
+    let config = std::env::var("CONFIG")
+        .unwrap_or_else(|_| "config.toml".to_owned())
+        .parse::<PathBuf>()
+        .expect("file path to be valid");
+    let node_config = std::fs::read_to_string(config)
+        .map(|config_file| toml::from_str::<NodeConfig>(&config_file).expect("invalid config file"))
+        .unwrap_or_else(|err| {
+            tracing::warn!(
+                custom.error = ?err,
+                "config file not provided, defaulting to testnet config"
+            );
+            NodeConfig::testnet()
+        });
+    let config = Config::new(node_config.clone());
+
+    // open the Reth database
+    let db_path = node_config.reth_data_dir().join("db");
+    let reth_db = Arc::new(DatabaseEnv::open(
+        &db_path,
+        DatabaseEnvKind::RO,
+        irys_database::reth_db::mdbx::DatabaseArguments::new(default_client_version())
+            .with_log_level(None)
+            .with_exclusive(Some(false)),
+    )?);
+
+    // Create chain spec for the provider factory
+    // Convert timestamp from millis to seconds for reth
+    let timestamp_secs =
+        std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
+            .as_secs();
+    let chain_spec = irys_chain_spec(
+        config.consensus.chain_id,
+        &config.consensus.reth,
+        &config.consensus.hardforks,
+        timestamp_secs,
+    )?;
+
+    // Create static file provider for reading headers
+    let static_files_path = node_config.reth_data_dir().join("static_files");
+    let static_file_provider = StaticFileProvider::read_only(static_files_path, false)?;
+
+    // Create provider factory
+    let provider_factory = ProviderFactory::new(reth_db.clone(), chain_spec, static_file_provider)?;
+
+    Ok((reth_db, provider_factory))
 }
 
 pub fn cli_init_irys_db(access: DatabaseEnvKind) -> eyre::Result<Arc<DatabaseEnv>> {

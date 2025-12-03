@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use irys_domain::StorageModule;
-use irys_types::{partition::PartitionHash, PartitionChunkRange};
+use irys_types::{partition::PartitionHash, Address, PartitionChunkRange};
 
 /// Trait for different packing strategies
 #[async_trait]
@@ -19,7 +19,7 @@ pub(super) trait PackingStrategy: Send + Sync {
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,

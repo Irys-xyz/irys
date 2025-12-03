@@ -308,8 +308,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("Parsed JSON: {:?}", peer_list);
     assert!(
-        vec![
-            PeerAddress {
+        [PeerAddress {
                 gossip: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
                 api: "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
                 execution: RethPeerInfo {
@@ -332,8 +331,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                     peering_tcp_addr: "127.0.0.3:8082".parse().unwrap(),
                     peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
                 },
-            },
-        ]
+            }]
         .iter()
         .all(|addr| {
             let contains = peer_list.contains(addr);
@@ -379,7 +377,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
         .consensus
         .get_mut()
         .mempool
-        .anchor_expiry_depth = 20;
+        .tx_anchor_expiry_depth = 20;
 
     testing_config_genesis
         .consensus
@@ -455,7 +453,7 @@ async fn heavy_should_reinitialize_handshakes() -> eyre::Result<()> {
     // Decreasing peer1 score just to speed up the pruning process
     ctx_genesis_node.node_ctx.peer_list.decrease_peer_score(
         &stopped_peer_1.cfg.miner_address(),
-        ScoreDecreaseReason::Offline,
+        ScoreDecreaseReason::Offline("Test pruning".to_string()),
     );
 
     // Wait for genesis to remove peer1 from its temp peer list

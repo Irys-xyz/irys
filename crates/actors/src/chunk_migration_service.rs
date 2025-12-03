@@ -74,6 +74,7 @@ pub enum ChunkMigrationServiceMessage {
 }
 
 impl ChunkMigrationServiceInner {
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn new(
         block_index: Arc<RwLock<BlockIndex>>,
         storage_modules_guard: &StorageModulesReadGuard,
@@ -81,7 +82,7 @@ impl ChunkMigrationServiceInner {
         service_senders: ServiceSenders,
         config: Config,
     ) -> Self {
-        println!("service started: chunk_migration");
+        tracing::info!("service started: chunk_migration");
         Self {
             block_index,
             config,
@@ -91,6 +92,7 @@ impl ChunkMigrationServiceInner {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn handle_message(&mut self, msg: ChunkMigrationServiceMessage) -> eyre::Result<()> {
         match msg {
             ChunkMigrationServiceMessage::BlockMigrated(block_header, all_txs) => {
@@ -102,7 +104,11 @@ impl ChunkMigrationServiceInner {
             } => {
                 let response_value = self.on_update_storage_module_indexes(block_hash);
                 if let Err(e) = receiver.send(response_value) {
-                    tracing::error!("UpdateStorageModuleIndexes receiver.send() error: {:?}", e);
+                    tracing::error!(
+                        "UpdateStorageModuleIndexes receiver.send() error for block {}: {:?}",
+                        block_hash,
+                        e
+                    );
                 };
             }
         }
@@ -193,14 +199,22 @@ impl ChunkMigrationServiceInner {
         }
 
         // forward the finalization message to the cache service for cleanup
-        let _ = service_senders
+        if let Err(e) = service_senders
             .chunk_cache
-            .send(CacheServiceAction::OnBlockMigrated(block_height, None));
+            .send(CacheServiceAction::OnBlockMigrated(block_height, None))
+        {
+            tracing::warn!(
+                block.height = ?block_height,
+                "Failed to send block migrated message to cache service: {}",
+                e
+            );
+        }
 
         Ok(())
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 pub fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
@@ -214,29 +228,29 @@ pub fn process_ledger_transactions(
     let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index.clone());
     let mut prev_chunk_offset = block_offsets.start();
 
-    for ((_txid, tx_path), (data_root, data_size)) in path_pairs {
-        let num_chunks_in_tx: u32 = data_size
+    for ((_txid, tx_path), tx) in path_pairs {
+        let num_chunks_in_tx: u32 = tx
+            .data_size
             .div_ceil(chunk_size as u64)
             .try_into()
             .expect("Value exceeds u32::MAX");
+
         let tx_chunk_range = LedgerChunkRange(ie(
             prev_chunk_offset,
             prev_chunk_offset + num_chunks_in_tx as u64,
         ));
 
         update_storage_module_indexes(
+            tx,
             &tx_path.proof,
-            data_root,
             tx_chunk_range,
             ledger,
             storage_modules_guard,
-            data_size,
         )?;
 
         process_transaction_chunks(
+            tx,
             num_chunks_in_tx,
-            data_root,
-            data_size,
             tx_chunk_range,
             ledger,
             storage_modules_guard,
@@ -244,7 +258,9 @@ pub fn process_ledger_transactions(
         )?;
 
         for module in storage_modules_guard.read().iter() {
-            let _ = module.sync_pending_chunks();
+            if let Err(e) = module.sync_pending_chunks() {
+                tracing::warn!("Failed to sync pending chunks: {:#}", e);
+            }
         }
 
         prev_chunk_offset += num_chunks_in_tx as u64;
@@ -254,9 +270,8 @@ pub fn process_ledger_transactions(
 }
 
 fn process_transaction_chunks(
+    tx: &DataTransactionHeader,
     num_chunks_in_tx: u32,
-    data_root: DataRoot,
-    data_size: u64,
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
@@ -265,7 +280,7 @@ fn process_transaction_chunks(
     for tx_chunk_offset in 0..num_chunks_in_tx {
         let tx_chunk_offset = TxChunkOffset::from(tx_chunk_offset);
         // Attempt to retrieve the cached chunk from the mempool
-        let chunk_info = match get_cached_chunk(db, data_root, tx_chunk_offset) {
+        let chunk_info = match get_cached_chunk(db, tx.data_root, tx_chunk_offset) {
             Ok(Some(info)) => info,
             _ => continue,
         };
@@ -277,7 +292,7 @@ fn process_transaction_chunks(
 
         // Write the chunk data to the Storage Module
         if let Some(module) = storage_module {
-            write_chunk_to_module(&module, chunk_info, data_root, data_size, tx_chunk_offset)?;
+            write_chunk_to_module(&module, chunk_info, tx, tx_chunk_offset)?;
         }
     }
     Ok(())
@@ -297,6 +312,7 @@ fn process_transaction_chunks(
 /// # Returns
 /// A `LedgerChunkRange` representing the [start, end] chunk offsets of the chunks
 /// added to the ledger by the specified block.
+#[tracing::instrument(level = "trace", skip_all, fields(block.height = block.height, ledger = ?ledger))]
 fn get_block_offsets_in_ledger(
     block: &IrysBlockHeader,
     ledger: DataLedger,
@@ -311,30 +327,37 @@ fn get_block_offsets_in_ledger(
             .get_item(block.height - 1)
             .map(|prev| prev.ledgers[ledger].total_chunks)
             .unwrap_or(0)
-            .saturating_sub(1)
     } else {
         0
     };
 
+    // Calculate the end offset, accounting for blocks that add no chunks to the ledger.
+    // If chunks were added: end_offset = total_chunks - 1 (convert count to 0-indexed offset)
+    // If no chunks added: end_offset = start_offset (creates an empty/invalid range, which
+    // correctly signals that this block contributed nothing to the ledger)
+    let end_chunk_offset = if block.data_ledgers[ledger].total_chunks > start_chunk_offset {
+        block.data_ledgers[ledger].total_chunks.saturating_sub(1)
+    } else {
+        start_chunk_offset
+    };
+
     // debug!(
     //     "get_block_range - {} {}",
-    //     start_chunk_offset,
-    //     block.data_ledgers[ledger].total_chunks.saturating_sub(1)
+    //     start_chunk_offset, end_chunk_offset
     // );
 
     LedgerChunkRange(ii(
         LedgerChunkOffset::from(start_chunk_offset),
-        // We subtract 1 from `total_chunks` to get the offsets
-        LedgerChunkOffset::from(block.data_ledgers[ledger].total_chunks.saturating_sub(1)),
+        LedgerChunkOffset::from(end_chunk_offset),
     ))
 }
 
 #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
-fn get_tx_path_pairs(
-    block: &IrysBlockHeader,
+fn get_tx_path_pairs<'a>(
+    block: &'a IrysBlockHeader,
     ledger: DataLedger,
-    txs: &[DataTransactionHeader],
-) -> eyre::Result<Vec<((H256, Proof), (DataRoot, u64))>> {
+    txs: &'a [DataTransactionHeader],
+) -> eyre::Result<Vec<((H256, Proof), &'a DataTransactionHeader)>> {
     let (tx_root, proofs) = DataTransactionLedger::merklize_tx_root(txs);
 
     let block_tx_root = block.data_ledgers[ledger].tx_root;
@@ -350,29 +373,24 @@ fn get_tx_path_pairs(
     Ok(proofs
         .into_iter()
         .zip(txs.iter())
-        .map(|(proof, tx)| ((tx.id, proof), (tx.data_root, tx.data_size)))
+        .map(|(proof, tx)| ((tx.id, proof), tx))
         .collect())
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn update_storage_module_indexes(
+    data_tx: &DataTransactionHeader,
     tx_path_proof: &[u8],
-    data_root: DataRoot,
     tx_chunk_range: LedgerChunkRange,
     ledger: DataLedger,
     storage_modules_guard: &StorageModulesReadGuard,
-    data_size: u64,
 ) -> Result<(), MigrationError> {
     let overlapped_modules =
         get_overlapped_storage_modules(storage_modules_guard, ledger, &tx_chunk_range);
 
     for storage_module in overlapped_modules {
         storage_module
-            .index_transaction_data(
-                &tx_path_proof.to_vec(),
-                data_root,
-                tx_chunk_range,
-                data_size,
-            )
+            .index_transaction_data(data_tx, &tx_path_proof.to_vec(), tx_chunk_range)
             .map_err(|e| {
                 error!(
                     "Failed to add tx path + data_root + start_offset to index: {}",
@@ -413,26 +431,29 @@ fn find_storage_module(
     })
 }
 
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn write_chunk_to_module(
     storage_module: &Arc<StorageModule>,
     chunk_info: (CachedChunkIndexMetadata, CachedChunk),
-    data_root: DataRoot,
-    data_size: u64,
+    tx: &DataTransactionHeader,
     chunk_offset: TxChunkOffset,
 ) -> Result<(), MigrationError> {
     let data_path = Base64::from(chunk_info.1.data_path.0.clone());
 
     if let Some(bytes) = chunk_info.1.chunk {
         let chunk = UnpackedChunk {
-            data_root,
-            data_size,
+            data_root: tx.data_root,
+            data_size: tx.data_size,
             data_path,
             bytes,
             tx_offset: chunk_offset,
         };
 
         storage_module.write_data_chunk(&chunk).map_err(|e| {
-            error!("{:?}", e);
+            error!(
+                "Failed to write chunk for data_root {:?} chunk_offset {} data_size {}: {:?}",
+                tx.data_root, chunk_offset, tx.data_size, e
+            );
             MigrationError::ChunkIndexWrite
         })?;
     }
@@ -479,6 +500,7 @@ impl ChunkMigrationService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting DataSync Service");
 

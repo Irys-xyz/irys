@@ -31,6 +31,7 @@ pub async fn get_node_info(
 
     let (chain, blocks) = get_canonical_chain(block_tree.clone()).await.unwrap();
     let latest = chain.last().unwrap();
+    let max_diff = block_tree.read().get_max_cumulative_difficulty_block();
 
     NodeInfo {
         version: "0.0.1".into(),
@@ -44,6 +45,7 @@ pub async fn get_node_info(
         is_syncing: sync_state.is_syncing(),
         current_sync_height: sync_state.sync_target_height(),
         uptime_secs: started_at.elapsed().as_secs(),
+        cumulative_difficulty: max_diff.0,
         mining_address,
     }
 }

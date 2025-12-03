@@ -25,7 +25,7 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     // Testnet / single node config
     config.consensus.get_mut().block_migration_depth = 1;
     let anchor_expiry_depth = 10;
-    config.consensus.get_mut().mempool.anchor_expiry_depth = anchor_expiry_depth;
+    config.consensus.get_mut().mempool.tx_anchor_expiry_depth = anchor_expiry_depth;
     let signer = IrysSigner::random_signer(&config.consensus_config());
     let signer2 = IrysSigner::random_signer(&config.consensus_config());
     config.consensus.extend_genesis_accounts(vec![
@@ -84,8 +84,8 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 node.get_anchor().await?,
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();
@@ -234,7 +234,10 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
     debug!("P2 block {}", &blk.height);
 
     // ensure the ingress proof still exists
-    let ingress_proofs = db.view(walk_all::<IngressProofs, _>).unwrap().unwrap();
+    let ingress_proofs = db
+        .view(|read_tx| walk_all::<IngressProofs, _>(read_tx))
+        .unwrap()
+        .unwrap();
     assert_eq!(ingress_proofs.len(), 1);
 
     // same chunks as tx1
@@ -263,8 +266,8 @@ async fn slow_heavy_double_root_data_promotion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 block1.block_hash,
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .unwrap();
         let tx = s.sign_transaction(tx).unwrap();

@@ -84,11 +84,11 @@ async fn heavy_test_block_with_incorrect_pd_base_fee_gets_rejected() -> eyre::Re
     // 2. The genesis node expects PD base fee calculated using base_fee_floor = 0.001
     // 3. The shadow transactions won't match, so the block is rejected
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
-        outcome,
-        BlockValidationOutcome::Discarded,
+    assert!(
+        matches!(outcome, BlockValidationOutcome::Discarded(_)),
         "Genesis node should have rejected the block with incorrect PD base fee \
-         (peer used base_fee_floor=0.01, genesis expects base_fee_floor=0.001)"
+         (peer used base_fee_floor=0.01, genesis expects base_fee_floor=0.001), got: {:?}",
+        outcome
     );
 
     // Cleanup

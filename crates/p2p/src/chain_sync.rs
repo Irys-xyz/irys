@@ -1,3 +1,4 @@
+use crate::block_pool::{BlockRemovalReason, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
 use crate::{BlockPool, GossipError, GossipResult};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
@@ -12,7 +13,7 @@ use irys_types::{
 };
 use rand::prelude::SliceRandom as _;
 use reth::tasks::shutdown::Shutdown;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,6 +40,7 @@ pub type ChainSyncResult<T> = Result<T, ChainSyncError>;
 impl From<GossipError> for ChainSyncError {
     fn from(err: GossipError) -> Self {
         match err {
+            GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", &err)),
             GossipError::Network(msg) => Self::Network(msg),
             GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
             GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
@@ -65,10 +67,6 @@ impl From<GossipError> for ChainSyncError {
     }
 }
 
-const BLOCK_BATCH_SIZE: usize = 10;
-const PERIODIC_SYNC_CHECK_INTERVAL_SECS: u64 = 30; // Check every 30 seconds if we're behind
-const RETRY_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 30; // Timeout for retry block pull/process
-
 /// Messages that can be sent to the SyncService
 #[derive(Debug)]
 pub enum SyncChainServiceMessage {
@@ -93,6 +91,7 @@ pub enum SyncChainServiceMessage {
         use_trusted_peers_only: bool,
         response: oneshot::Sender<GossipResult<()>>,
     },
+    AttemptReprocessingBlock(BlockHash),
 }
 
 /// Inner service containing the sync logic
@@ -419,8 +418,19 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 "Failed to pull and process block {:?}: {:?}",
                 block_hash, err
             );
-            self.block_pool.remove_requested_block(&block_hash).await;
-            self.block_pool.remove_block_from_cache(&block_hash).await;
+
+            if !err.is_advisory() {
+                self.block_pool.remove_requested_block(&block_hash).await;
+                self.block_pool
+                    .remove_block_from_cache(
+                        &block_hash,
+                        BlockRemovalReason::FailedToProcess(FailureReason::FailedToPull(
+                            err.clone(),
+                        )),
+                    )
+                    .await;
+            }
+
             Err(ChainSyncError::Internal(format!(
                 "Network error: {:?}",
                 err
@@ -432,7 +442,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
 }
 
 impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T, B, M> {
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     pub fn spawn_service(
         inner: ChainSyncServiceInner<T, B, M>,
         rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
@@ -464,19 +474,36 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> ChainSyncResult<()> {
-        info!("Starting sync service");
+        info!("Starting the sync service");
+        let period_secs = self
+            .inner
+            .config
+            .node_config
+            .sync
+            .periodic_sync_check_interval_secs;
+        let is_periodic_check_enabled = self
+            .inner
+            .config
+            .node_config
+            .sync
+            .enable_periodic_sync_check;
 
-        // Set up periodic sync check timer
-        let mut periodic_timer = interval(Duration::from_secs(PERIODIC_SYNC_CHECK_INTERVAL_SECS));
+        let periodic_sync_check_interval = if is_periodic_check_enabled {
+            Duration::from_secs(period_secs)
+        } else {
+            Duration::MAX
+        };
+        // Set up a periodic sync check timer
+        let mut periodic_timer = interval(periodic_sync_check_interval);
         periodic_timer.tick().await; // Consume the first immediate tick
 
         loop {
             tokio::select! {
                 biased; // enable bias so polling happens in definition order
 
-                // Check for shutdown signal
+                // Check for a shutdown signal
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for sync service");
                     break;
@@ -507,7 +534,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_message(&self, msg: SyncChainServiceMessage) -> ChainSyncResult<()> {
         match msg {
             SyncChainServiceMessage::InitialSync(response_sender) => {
@@ -575,6 +602,25 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     }
                 });
             }
+            SyncChainServiceMessage::AttemptReprocessingBlock(block_hash) => {
+                debug!(
+                    "SyncChainService: Received a request to attempt reprocessing block {:?}",
+                    block_hash
+                );
+                let inner = self.inner.clone();
+                tokio::spawn(async move {
+                    if let Err(block_pool_error) =
+                        inner.block_pool.reprocess_block::<T>(block_hash).await
+                    {
+                        // Just log the error - no need to send it back anywhere, block pool will
+                        //  handle cache cleanup internally
+                        error!(
+                            "Failed to reprocess block {:?}: {:?}",
+                            block_hash, block_pool_error
+                        );
+                    }
+                });
+            }
         }
         Ok(())
     }
@@ -623,6 +669,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 ) -> ChainSyncResult<()> {
     let migration_depth = config.consensus.block_migration_depth as usize;
     let sync_mode = config.node_config.sync_mode;
+    let block_batch_size = config.node_config.sync.block_batch_size;
+    let retry_block_request_timeout_secs = config.node_config.sync.retry_block_request_timeout_secs;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -716,7 +764,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         &api_client,
         // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
         sync_state.sync_target_height() + 1,
-        BLOCK_BATCH_SIZE,
+        block_batch_size,
         5,
         is_trusted_mode,
     )
@@ -802,7 +850,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
                                     // Try to reprocess the last prevalidated block
                                     match timeout(
-                                        Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                                        Duration::from_secs(retry_block_request_timeout_secs),
                                         gossip_data_handler.pull_and_process_block(
                                             retry_block.block_hash,
                                             sync_state.is_syncing_from_a_trusted_peer(),
@@ -817,7 +865,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                                             warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
                                         }
                                         Err(_) => {
-                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", RETRY_BLOCK_REQUEST_TIMEOUT_SECS, retry_block.block_hash);
+                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
                                         }
                                     }
                                 }
@@ -892,7 +940,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                 peer_list,
                 &api_client,
                 sync_target,
-                BLOCK_BATCH_SIZE,
+                block_batch_size,
                 5,
                 is_trusted_mode,
             )
@@ -944,6 +992,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         &api_client,
         gossip_data_handler.clone(),
         is_trusted_mode,
+        retry_block_request_timeout_secs,
     )
     .await
     {
@@ -1040,6 +1089,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
     api_client: &impl ApiClient,
     gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
     use_trusted_peers_only: bool,
+    retry_block_request_timeout_secs: u64,
 ) -> ChainSyncResult<()> {
     // Collect unique hashes with their reporting peers (trusted or top-N active peers)
     let peers_by_top_block_hash =
@@ -1086,7 +1136,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
             for (idx, peer) in peers.into_iter().enumerate() {
                 let attempt_num = idx + 1;
                 match tokio::time::timeout(
-                    Duration::from_secs(RETRY_BLOCK_REQUEST_TIMEOUT_SECS),
+                    Duration::from_secs(retry_block_request_timeout_secs),
                     handler.pull_and_process_block_from_peer(block_hash, &peer),
                 )
                 .await
@@ -1108,7 +1158,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
                     Err(_) => {
                         warn!(
                             "Post-sync: Attempt {} timed out ({}s) pulling block {:?} from peer {:?}",
-                            attempt_num, RETRY_BLOCK_REQUEST_TIMEOUT_SECS, block_hash, peer.0
+                            attempt_num, retry_block_request_timeout_secs, block_hash, peer.0
                         );
                     }
                 }
@@ -1205,175 +1255,86 @@ async fn check_and_update_full_validation_switch_height(
     }
 }
 
+#[instrument(skip_all, fields(
+    index_request.start = start,
+    index_request.limit = limit,
+    index_request.retries = retries,
+    index_request.fetch_from_trusted_peers_only = fetch_from_trusted_peers_only
+), err)]
 async fn get_block_index(
     peer_list: &PeerList,
     api_client: &impl ApiClient,
     start: usize,
     limit: usize,
     retries: usize,
-    fetch_from_the_trusted_peer: bool,
+    fetch_from_trusted_peers_only: bool,
 ) -> ChainSyncResult<Vec<BlockIndexItem>> {
     debug!(
         "Fetching block index starting from height {} with limit {}",
         start, limit
     );
-    let mut peers_to_fetch_index_from = if fetch_from_the_trusted_peer {
-        debug!("Fetching block index from trusted peers");
-        peer_list.online_trusted_peers()
-    } else {
-        debug!("Fetching block index from top active peers");
-        peer_list.top_active_peers(None, None)
-    };
+    // Ideally, if we fetch an index batch, we should wait until the whole batch is processed
+    //  before fetching the next batch to avoid errors in case if a batch had a faulty block.
+    //  However, in the first version it doesn't matter as much as the first release, since
+    //  at first the network is going to run in a controlled environment with trusted nodes.
+    //  However, we should make a more sophisticated algorithm for a follow-up release.
+    let peers = synced_peers_sorted_by_cumulative_diff(
+        peer_list,
+        api_client,
+        fetch_from_trusted_peers_only,
+    )
+    .await?;
 
-    if peers_to_fetch_index_from.is_empty() {
+    if peers.is_empty() {
         return Err(ChainSyncError::Network("No peers available".to_string()));
     }
 
-    // the peer to remove from the candidate list of peers
-    // this is so we don't have conflicting mutable and immutable borrows
-    let mut to_remove = None;
-
     for _ in 0..retries {
-        if let Some(to_remove) = to_remove {
-            peers_to_fetch_index_from.retain(|peer| peer.0 != to_remove);
-        };
+        let mut peers = peers.clone();
 
-        let (miner_address, top_peer) =
-            peers_to_fetch_index_from
-                .choose(&mut rand::thread_rng())
-                .ok_or(GossipError::Network("No peers available".to_string()))?;
+        while let Some((diff, mut peers_to_fetch_index_from)) = peers.pop_last() {
+            debug!("Peers with cumulative diff {:?}: {:?}", diff, peers.len());
+            peers_to_fetch_index_from.shuffle(&mut rand::thread_rng());
 
-        let should_remove = match api_client
-            .node_info(top_peer.address.api)
-            .await
-            .map_err(|network_error| GossipError::Network(network_error.to_string()))
-        {
-            Ok(info) => {
-                if info.is_syncing {
-                    info!(
-                        "Peer {} is syncing, skipping for block index fetch",
-                        &miner_address
-                    );
-
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(error) => {
-                error!(
-                    "Failed to fetch node info from peer {:?}: {:?}",
-                    miner_address, error
-                );
-                true
-            }
-        };
-
-        if should_remove {
-            // this is so we don't have conflicting mutable and immutable borrows
-            to_remove = Some(*miner_address);
-            continue;
-        }
-
-        match api_client
-            .get_block_index(
-                top_peer.address.api,
-                BlockIndexQuery {
-                    height: start,
-                    limit,
-                },
-            )
-            .await
-            .map_err(|network_error| ChainSyncError::Network(network_error.to_string()))
-        {
-            Ok(index) => {
+            for (mining_addr, peer) in &peers_to_fetch_index_from {
                 debug!(
-                    "Fetched block index from peer {:?}: {:?}",
-                    miner_address, index
+                    peer.address = ?peer.address.api,
+                    index.start = start,
+                    index.limit = limit,
+                    "Fetching block index from peer {:?}",
+                    mining_addr
                 );
 
-                // If the index is empty, try all other peers before returning empty
-                if index.is_empty() {
-                    debug!(
-                        "Peer {:?} returned an empty index, trying all other peers",
-                        miner_address
-                    );
-
-                    // Try all remaining peers
-                    for (other_miner_address, other_peer) in peers_to_fetch_index_from.iter() {
-                        if other_miner_address == miner_address {
-                            continue; // Skip the peer we just tried
-                        }
-
-                        debug!("Trying to fetch index from peer {:?}", other_miner_address);
-
-                        // Check if peer is syncing
-                        match api_client.node_info(other_peer.address.api).await {
-                            Ok(info) => {
-                                if info.is_syncing {
-                                    info!(
-                                        "Peer {} is syncing, skipping for block index fetch",
-                                        other_miner_address
-                                    );
-                                    continue;
-                                }
-                            }
-                            Err(error) => {
-                                error!(
-                                    "Failed to fetch node info from peer {:?}: {:?}",
-                                    other_miner_address, error
-                                );
-                                continue;
-                            }
-                        }
-
-                        match api_client
-                            .get_block_index(
-                                other_peer.address.api,
-                                BlockIndexQuery {
-                                    height: start,
-                                    limit,
-                                },
-                            )
-                            .await
-                        {
-                            Ok(other_index) => {
-                                if !other_index.is_empty() {
-                                    debug!(
-                                        "Peer {:?} returned a non-empty index: {:?}",
-                                        other_miner_address, other_index
-                                    );
-                                    return Ok(other_index);
-                                } else {
-                                    debug!(
-                                        "Peer {:?} also returned an empty index",
-                                        other_miner_address
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                error!(
-                                    "Failed to fetch a block index from peer {:?}: {:?}",
-                                    other_miner_address, error
-                                );
-                                continue;
-                            }
-                        }
+                match api_client
+                    .get_block_index(
+                        peer.address.api,
+                        BlockIndexQuery {
+                            height: start,
+                            limit,
+                        },
+                    )
+                    .await
+                {
+                    Ok(index) => {
+                        debug!(
+                            peer.address = ?peer.address.api,
+                            index.start = start,
+                            index.limit = limit,
+                            "Fetched block index from peer {:?}: {:?}",
+                            mining_addr, index
+                        );
+                        return Ok(index);
                     }
-
-                    // All peers returned empty indices, return empty
-                    debug!("All peers returned empty indices, returning empty list");
-                    return Ok(vec![]);
+                    Err(error) => {
+                        warn!(
+                            peer.address = ?peer.address.api,
+                            index.start = start,
+                            index.limit = limit,
+                            "Failed to fetch a block index from peer {:?}: {:?}",
+                            mining_addr, error
+                        );
+                    }
                 }
-
-                return Ok(index);
-            }
-            Err(error) => {
-                error!(
-                    "Failed to fetch block index from peer {:?}: {:?}",
-                    miner_address, error
-                );
-                continue;
             }
         }
     }
@@ -1504,6 +1465,65 @@ async fn estimate_canonical_height(
     }
 
     highest_trusted_peer_height
+}
+
+async fn synced_peers_sorted_by_cumulative_diff(
+    peer_list: &PeerList,
+    api_client: &impl ApiClient,
+    trusted_peers_only: bool,
+) -> ChainSyncResult<BTreeMap<U256, Vec<(Address, PeerListItem)>>> {
+    let peers = if trusted_peers_only {
+        peer_list.online_trusted_peers()
+    } else {
+        peer_list.top_active_peers(None, None)
+    };
+    if peers.is_empty() {
+        return Err(ChainSyncError::Network(
+            "No online peers available".to_string(),
+        ));
+    }
+
+    let peers_and_diffs_futures = peers.into_iter().map(|(addr, peer)| {
+        let api_client = api_client.clone();
+        async move {
+            match api_client.node_info(peer.address.api).await {
+                Ok(info) => {
+                    if !info.is_syncing {
+                        Ok((addr, peer, info.cumulative_difficulty))
+                    } else {
+                        Err(ChainSyncError::Network(format!(
+                            "Peer {addr:?} is syncing, skipping"
+                        )))
+                    }
+                }
+                Err(err) => Err(ChainSyncError::Network(format!(
+                    "Failed to fetch node info from peer {:?}: {}",
+                    addr, err
+                ))),
+            }
+        }
+    });
+
+    let mut peers_and_diffs = BTreeMap::new();
+    for res in futures::future::join_all(peers_and_diffs_futures).await {
+        match res {
+            Ok((addr, peer, diff)) => {
+                peers_and_diffs
+                    .entry(diff)
+                    .or_insert_with(Vec::new)
+                    .push((addr, peer));
+            }
+            Err(err) => warn!("{}", err),
+        }
+    }
+
+    if peers_and_diffs.is_empty() {
+        return Err(ChainSyncError::Network(
+            "No peers available after fetching cumulative difficulties".to_string(),
+        ));
+    }
+
+    Ok(peers_and_diffs)
 }
 
 #[cfg(test)]
@@ -1673,10 +1693,10 @@ mod tests {
                 debug!("Data requests: {:?}", data_requests);
                 assert_eq!(data_requests[0].height, 11);
                 assert_eq!(data_requests[1].height, 11);
-                assert_eq!(data_requests[0].limit, 10);
-                assert_eq!(data_requests[1].limit, 10);
+                assert_eq!(data_requests[0].limit, 50);
+                assert_eq!(data_requests[1].limit, 50);
                 assert_eq!(data_requests[2].height, 12);
-                assert_eq!(data_requests[2].limit, 10);
+                assert_eq!(data_requests[2].limit, 50);
             }
 
             // Check that the sync status has changed to synced
@@ -1852,6 +1872,8 @@ mod tests {
             node_config.sync_mode = SyncMode::Full;
             let config = Config::new(node_config);
 
+            let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
+
             let api_client_stub = ApiClientStub::new();
             api_client_stub.set_node_info_handler(move |_api| {
                 let info = NodeInfo {
@@ -1927,6 +1949,7 @@ mod tests {
                 &api_client_stub,
                 data_handler,
                 false,
+                retry_timeout,
             )
             .await?;
 
@@ -1975,6 +1998,7 @@ mod tests {
             let mut node_config = NodeConfig::testing();
             node_config.sync_mode = SyncMode::Full;
             let config = Config::new(node_config);
+            let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let api_client_stub = ApiClientStub::new();
             api_client_stub.set_node_info_handler(move |_api| {
@@ -2047,6 +2071,7 @@ mod tests {
                 &api_client_stub,
                 data_handler,
                 false,
+                retry_timeout,
             )
             .await?;
 

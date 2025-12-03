@@ -1,6 +1,5 @@
 use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
-
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
 use eyre::{ensure, Context as _};
@@ -15,7 +14,8 @@ use irys_actors::{
     cache_service::ChunkCacheService,
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
-    mempool_service::{MempoolService, MempoolServiceFacadeImpl, MempoolServiceMessage},
+    mempool_guard::MempoolReadGuard,
+    mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
     partition_mining_service::{
@@ -25,7 +25,7 @@ use irys_actors::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
-    BlockValidationTracker, DataSyncService, StorageModuleService,
+    BlockValidationTracker, DataSyncService, MempoolServiceMessageWithSpan, StorageModuleService,
 };
 use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
@@ -47,20 +47,20 @@ use irys_p2p::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_price_oracle::SingleOracle;
-use irys_reth_node_bridge::irys_reth::payload::ShadowTxStore;
 use irys_reth_node_bridge::node::{NodeProvider, RethNode, RethNodeHandle};
 pub use irys_reth_node_bridge::node::{RethNodeAddOns, RethNodeProvider};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_reward_curve::HalvingCurve;
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_types::chainspec::irys_chain_spec;
+use irys_types::BlockHash;
 use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
-    TokioServiceHandle, H256, U256,
+    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
-use irys_types::{BlockHash, EvmBlockHash};
+use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
 use irys_vdf::vdf::run_vdf_for_genesis_block;
 use irys_vdf::{
@@ -106,19 +106,19 @@ pub struct IrysNodeCtx {
     pub chunk_provider: Arc<ChunkProvider>,
     pub block_index_guard: BlockIndexReadGuard,
     pub block_tree_guard: BlockTreeReadGuard,
+    pub mempool_guard: MempoolReadGuard,
     pub vdf_steps_guard: VdfStateReadonly,
     pub service_senders: ServiceSenders,
     pub partition_controllers: Vec<PartitionMiningController>,
     pub packing_waiter: irys_actors::packing_service::PackingIdleWaiter,
     // Shutdown channels
-    pub reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
+    pub reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
     // Thread handles spawned by the start function
-    pub reth_thread_handle: Option<CloneableJoinHandle<()>>,
+    pub reth_thread_handle: Option<CloneableJoinHandle<ShutdownReason>>,
     pub block_producer_inner: Arc<irys_actors::BlockProducerInner>,
     stop_guard: StopGuard,
     pub peer_list: PeerList,
     pub sync_state: ChainSyncState,
-    pub shadow_tx_store: ShadowTxStore,
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
@@ -132,6 +132,7 @@ impl IrysNodeCtx {
     pub fn get_api_state(&self) -> ApiState {
         ApiState {
             mempool_service: self.service_senders.mempool.clone(),
+            mempool_guard: self.mempool_guard.clone(),
             chunk_provider: self.chunk_provider.clone(),
             peer_list: self.peer_list.clone(),
             db: self.db.clone(),
@@ -147,13 +148,28 @@ impl IrysNodeCtx {
         }
     }
 
-    pub async fn stop(self) {
-        info!("stop function called, shutting down...");
-        let _ = self.stop_mining();
-        debug!("Sending shutdown signal to reth thread");
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn stop(self, reason: ShutdownReason) {
+        info!("stop function called, shutting down due to: {}", reason);
+        if let Err(e) = self.stop_mining() {
+            error!("Failed to stop mining during shutdown: {:#}", e);
+        }
+        debug!(
+            "Sending shutdown signal to reth thread (reason: {})",
+            reason
+        );
         // Shutting down reth node will propagate to the main actor thread eventually
-        let _ = self.reth_shutdown_sender.send(()).await;
-        let _ = self.reth_thread_handle.unwrap().join();
+        if let Err(e) = self.reth_shutdown_sender.send(reason).await {
+            error!("Failed to send shutdown signal to reth thread: {}", e);
+        }
+        match self.reth_thread_handle.unwrap().join() {
+            Ok(reason) => {
+                info!("Reth thread stopped with reason: {}", reason);
+            }
+            Err(e) => {
+                error!("Reth thread panicked or failed: {:?}", e);
+            }
+        }
         debug!("Main actor thread and reth thread stopped");
         self.stop_guard.mark_stopped();
     }
@@ -243,7 +259,6 @@ async fn start_reth_node(
     config: Config,
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
-    shadow_tx_store: ShadowTxStore,
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
@@ -253,7 +268,6 @@ async fn start_reth_node(
         config.node_config.clone(),
         latest_block,
         random_ports,
-        shadow_tx_store.clone(),
         chunk_provider,
     )
     .in_current_span()
@@ -285,7 +299,8 @@ impl IrysNode {
         let http_listener = create_listener(
             format!(
                 "{}:{}",
-                &node_config.http.bind_ip, &node_config.http.bind_port
+                node_config.http.bind_ip(&node_config.network_defaults),
+                node_config.http.bind_port
             )
             .parse()
             .expect("A valid HTTP IP & port"),
@@ -293,7 +308,8 @@ impl IrysNode {
         let gossip_listener = create_listener(
             format!(
                 "{}:{}",
-                &node_config.gossip.bind_ip, &node_config.gossip.bind_port
+                node_config.gossip.bind_ip(&node_config.network_defaults),
+                node_config.gossip.bind_port
             )
             .parse()
             .expect("A valid HTTP IP & port"),
@@ -337,10 +353,9 @@ impl IrysNode {
     async fn get_or_create_genesis_info(
         &self,
         node_mode: &NodeMode,
-        evm_block_hash: EvmBlockHash,
         irys_db: &DatabaseProvider,
         block_index: &BlockIndex,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
+    ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
         info!(
             config.miner_address = ?self.config.node_config.miner_address(),
             "Starting Irys Node: {:?}", node_mode
@@ -351,14 +366,25 @@ impl IrysNode {
 
         if has_existing_data {
             // CASE 1: Load existing genesis block and commitments from database
-            return self.load_existing_genesis(irys_db, block_index);
+            let (block, commitments) = self.load_existing_genesis(irys_db, block_index);
+            let timestamp_secs = block.timestamp_secs().as_secs();
+            return Ok((
+                block,
+                commitments,
+                irys_chain_spec(
+                    self.config.consensus.chain_id,
+                    &self.config.consensus.reth,
+                    &self.config.consensus.hardforks,
+                    timestamp_secs,
+                )?,
+            ));
         }
 
         // CASE 2: No existing data - handle based on node mode
         match node_mode {
             NodeMode::Genesis => {
                 // Create a new genesis block for network initialization
-                self.create_new_genesis_block(evm_block_hash).await
+                self.create_new_genesis_block().await
             }
             NodeMode::Peer => {
                 let expected_genesis_hash = self
@@ -367,8 +393,21 @@ impl IrysNode {
                     .expected_genesis_hash
                     .expect("expected_genesis_hash must be configured for peer nodes");
                 // Fetch genesis data from trusted peer when joining network
-                self.fetch_genesis_from_trusted_peer(expected_genesis_hash)
-                    .await
+                let (block, commitments) = self
+                    .fetch_genesis_from_trusted_peer(expected_genesis_hash)
+                    .await;
+                let timestamp_secs = block.timestamp_secs().as_secs();
+
+                Ok((
+                    block,
+                    commitments,
+                    irys_chain_spec(
+                        self.config.consensus.chain_id,
+                        &self.config.consensus.reth,
+                        &self.config.consensus.hardforks,
+                        timestamp_secs,
+                    )?,
+                ))
             }
         }
     }
@@ -414,25 +453,10 @@ impl IrysNode {
 
     async fn create_new_genesis_block(
         &self,
-        evm_block_hash: EvmBlockHash,
-    ) -> (IrysBlockHeader, Vec<CommitmentTransaction>) {
-        let mut genesis_block = build_unsigned_irys_genesis_block(
-            &self.config.consensus.genesis,
-            evm_block_hash,
-            self.config.consensus.number_of_ingress_proofs_total,
-        );
-
-        // Generate genesis commitments from configuration
-        let commitments = get_genesis_commitments(&self.config).await;
-
-        // Calculate initial difficulty based on number of storage modules
-        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
-        let difficulty = calculate_initial_difficulty(&self.config.consensus, storage_module_count)
-            .expect("valid calculated initial difficulty");
-
+    ) -> eyre::Result<(IrysBlockHeader, Vec<CommitmentTransaction>, Arc<ChainSpec>)> {
         // Create timestamp for genesis block (prefer configured value if provided)
         let configured_ts = self.config.consensus.genesis.timestamp_millis;
-        let timestamp = if configured_ts != 0 {
+        let timestamp_millis = if configured_ts != 0 {
             configured_ts
         } else {
             SystemTime::now()
@@ -440,13 +464,43 @@ impl IrysNode {
                 .unwrap()
                 .as_millis()
         };
+
+        // Convert to seconds for reth
+        let timestamp_secs = Duration::from_millis(timestamp_millis.try_into()?).as_secs();
+
+        let reth_chain_spec = irys_chain_spec(
+            self.config.consensus.chain_id,
+            &self.config.consensus.reth,
+            &self.config.consensus.hardforks,
+            timestamp_secs,
+        )?;
+
+        // Get hardfork params for genesis block using its timestamp
+        let number_of_ingress_proofs_total = self
+            .config
+            .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(timestamp_secs));
+        let mut genesis_block = build_unsigned_irys_genesis_block(
+            &self.config.consensus.genesis,
+            reth_chain_spec.genesis_hash(),
+            number_of_ingress_proofs_total,
+        );
+
+        // Generate genesis commitments from configuration
+        let commitments = get_genesis_commitments(&self.config).await;
+
+        // Calculate initial difficulty based on number of storage modules
+        let storage_module_count = (commitments.len() - 1) as u64; // Subtract 1 for stake commitment
+        let difficulty =
+            calculate_initial_difficulty(&self.config.consensus, storage_module_count as f64)
+                .expect("valid calculated initial difficulty");
+
         genesis_block.diff = difficulty;
         // Prefer configured last_epoch_hash if provided (builder already set this, this ensures consistency)
         if self.config.consensus.genesis.last_epoch_hash != H256::zero() {
             genesis_block.last_epoch_hash = self.config.consensus.genesis.last_epoch_hash;
         }
-        genesis_block.timestamp = timestamp;
-        genesis_block.last_diff_timestamp = timestamp;
+        genesis_block.timestamp = UnixTimestampMs::from_millis(timestamp_millis);
+        genesis_block.last_diff_timestamp = UnixTimestampMs::from_millis(timestamp_millis);
 
         // Add commitment transactions to genesis block and get initial treasury
         let (_, initial_treasury) = add_genesis_commitments(&mut genesis_block, &self.config).await;
@@ -474,10 +528,10 @@ impl IrysNode {
         );
         info!("=====================================");
 
-        (genesis_block, commitments)
+        Ok((genesis_block, commitments, reth_chain_spec))
     }
 
-    #[tracing::instrument(skip_all, fields(expected_genesis_hash))]
+    #[tracing::instrument(level = "trace", skip_all, fields(expected_genesis_hash))]
     async fn fetch_genesis_from_trusted_peer(
         &self,
         expected_genesis_hash: H256,
@@ -537,6 +591,7 @@ impl IrysNode {
     ///
     /// # Returns
     /// * `eyre::Result<()>` - Success or error result of the database operations
+    #[tracing::instrument(level = "trace", skip_all)]
     fn persist_genesis_block_and_commitments(
         &self,
         genesis_block: &IrysBlockHeader,
@@ -581,6 +636,7 @@ impl IrysNode {
     }
 
     /// Initializes the node (genesis or non-genesis)
+    #[tracing::instrument(level = "trace", skip_all, fields(node.mode = ?self.config.node_config.node_mode))]
     pub async fn start(self) -> eyre::Result<IrysNodeCtx> {
         // Determine node startup mode
         let config = &self.config;
@@ -591,20 +647,11 @@ impl IrysNode {
         let mut block_index = BlockIndex::new(&config.node_config)
             .await
             .expect("initializing a new block index should be doable");
-        let reth_chainspec = irys_chain_spec(
-            config.consensus.reth.chain,
-            config.consensus.reth.genesis.clone(),
-        )?;
 
         // Gets or creates the genesis block and commitments regardless of node mode
-        let (genesis_block, genesis_commitments) = self
-            .get_or_create_genesis_info(
-                node_mode,
-                reth_chainspec.genesis_hash(),
-                &irys_db,
-                &block_index,
-            )
-            .await;
+        let (genesis_block, genesis_commitments, reth_chainspec) = self
+            .get_or_create_genesis_info(node_mode, &irys_db, &block_index)
+            .await?;
 
         // Capture the genesis hash for network consensus
         let genesis_hash = genesis_block.block_hash;
@@ -620,6 +667,24 @@ impl IrysNode {
             )?;
         }
 
+        #[cfg(feature = "nvidia")]
+        {
+            use irys_packing::cuda_config::{CUDAConfig, NvidiaGpuConfig};
+            let device_count =
+                NvidiaGpuConfig::get_device_count().map_err(|e| eyre::eyre!("{}", &e))?;
+            // only check GPU0, we can only use a single GPU right now.
+            let gpu_info = NvidiaGpuConfig::query_device(0).map_err(|e| eyre::eyre!("{}", &e))?;
+            if device_count > 1 {
+                warn!("Unable to use multiple GPUs right now - using device 0")
+            }
+            info!("Found 1 CUDA GPUs - {}", &gpu_info.device_name);
+            let gpu_config = CUDAConfig::from_device_default()?;
+            info!(
+                "Using blocks: {}, threads per block: {}",
+                &gpu_config.blocks, &gpu_config.threads_per_block
+            );
+        }
+
         // all async tasks will be run on a new tokio runtime
         let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -628,20 +693,20 @@ impl IrysNode {
 
         // Common node startup logic
         // There are a lot of cross dependencies between reth and irys components, the channels mediate the comms
-        let (reth_shutdown_sender, reth_shutdown_receiver) = tokio::sync::mpsc::channel::<()>(1);
+        let (reth_shutdown_sender, reth_shutdown_receiver) =
+            tokio::sync::mpsc::channel::<ShutdownReason>(1);
         let (main_actor_thread_shutdown_tx, main_actor_thread_shutdown_rx) =
-            tokio::sync::mpsc::channel::<()>(1);
-        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel(1);
+            tokio::sync::mpsc::channel::<ShutdownReason>(1);
+        let (vdf_shutdown_sender, vdf_shutdown_receiver) = mpsc::channel::<ShutdownReason>(1);
         let (reth_handle_sender, reth_handle_receiver) = oneshot::channel::<RethNode>();
         let (irys_node_ctx_tx, irys_node_ctx_rx) = oneshot::channel::<IrysNodeCtx>();
         let (service_set_tx, service_set_rx) = tokio::sync::oneshot::channel();
-        let shadow_tx_store = ShadowTxStore::new();
 
         let irys_provider = reth_provider::create_provider();
 
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
-
+        let task_executor = task_manager.executor();
         // vdf gets started here...
         // init the services
         let actor_main_thread_handle = Self::init_services_thread(
@@ -656,12 +721,11 @@ impl IrysNode {
             service_set_tx,
             irys_node_ctx_tx,
             &irys_provider,
-            task_manager.executor(),
+            task_executor.clone(),
             self.http_listener,
             irys_db,
             block_index,
             self.gossip_listener,
-            shadow_tx_store.clone(),
             tokio_runtime.handle().clone(),
         )?;
 
@@ -671,7 +735,6 @@ impl IrysNode {
             self.config.clone(),
             reth_shutdown_receiver,
             main_actor_thread_shutdown_tx,
-            shadow_tx_store,
             reth_handle_sender,
             actor_main_thread_handle,
             irys_provider.clone(),
@@ -693,11 +756,11 @@ impl IrysNode {
             &node_mode,
             &ctx.config.node_config.miner_address().to_base58(),
             ctx.reth_handle.network.peer_id(),
-            &node_config.http.bind_ip,
+            node_config.http.bind_ip(&node_config.network_defaults),
             &node_config.http.bind_port,
-            &node_config.gossip.bind_ip,
+            node_config.gossip.bind_ip(&node_config.network_defaults),
             &node_config.gossip.bind_port,
-            &node_config.reth.network.bind_ip,
+            node_config.reth.network.bind_ip(&node_config.network_defaults),
             &node_config.reth.network.bind_port,
 
         );
@@ -759,6 +822,8 @@ impl IrysNode {
         // spawn a task to periodically log system info, but not in tests
         #[cfg(not(test))]
         {
+            use irys_actors::MempoolServiceMessage;
+
             let block_index = ctx.block_index_guard.clone();
             let block_tree = ctx.block_tree_guard.clone();
             let peer_list = ctx.peer_list.clone();
@@ -770,10 +835,11 @@ impl IrysNode {
             let (tx, rx) = oneshot::channel();
             ctx.service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetState(tx))?;
+                .send(MempoolServiceMessage::GetState(tx).into())?;
             let mempool = rx.await?;
-
-            tokio::spawn(async move {
+            let config = ctx.config.clone();
+            // use executor so we get automatic termination when the node starts to shut down
+            task_executor.spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
 
                 loop {
@@ -793,13 +859,14 @@ impl IrysNode {
                     let pl_info = peer_list
                         .all_peers_sorted_by_score()
                         .into_iter()
-                        .map(|(_, i)| i);
+                        .map(|(_, i)| i)
+                        .collect::<Vec<_>>();
 
-                    let mempool = &mempool.read().await;
+                    let mempool_status = mempool.get_status(&config.node_config).await;
 
                     info!(
                     target = "node-state",
-                    "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, &mempool.pending_chunks.len(), &mempool.valid_submit_ledger_tx.len(), &mempool.pending_pledges.len()
+                    "Info:\n{:#?}\nPeer List: {:#?}\nMempool: pending_chunks: {}, pending_submit_txs: {}, pending_pledges: {}", &info, &pl_info, mempool_status.pending_chunks_count, mempool_status.data_tx_count, mempool_status.pending_pledges_count
                 )
                 }
             });
@@ -808,14 +875,15 @@ impl IrysNode {
         Ok(ctx)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     fn init_services_thread(
         config: Config,
         latest_block: Arc<IrysBlockHeader>,
         genesis_hash: H256,
-        reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-        mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<()>,
-        vdf_shutdown_sender: mpsc::Sender<()>,
-        vdf_shutdown_receiver: mpsc::Receiver<()>,
+        reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
+        mut main_actor_thread_shutdown_rx: tokio::sync::mpsc::Receiver<ShutdownReason>,
+        vdf_shutdown_sender: mpsc::Sender<ShutdownReason>,
+        vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         service_set_sender: oneshot::Sender<ServiceSet>,
         irys_node_ctx_tx: oneshot::Sender<IrysNodeCtx>,
@@ -825,7 +893,6 @@ impl IrysNode {
         irys_db: DatabaseProvider,
         block_index: BlockIndex,
         gossip_listener: TcpListener,
-        shadow_tx_store: ShadowTxStore,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<JoinHandle<()>, eyre::Error> {
         let span = tracing::Span::current();
@@ -860,7 +927,6 @@ impl IrysNode {
                                 http_listener,
                                 irys_db,
                                 gossip_listener,
-                                shadow_tx_store,
                                 runtime_handle,
                             )
                             .instrument(tracing::Span::current())
@@ -878,24 +944,32 @@ impl IrysNode {
                             let server_handle = actix_server.handle();
 
                             let server_stop_handle = tokio::spawn(async move {
-                                let _ = main_actor_thread_shutdown_rx.recv().await;
-                                info!("Main actor thread received shutdown signal");
+                                let shutdown_reason = main_actor_thread_shutdown_rx.recv().await;
+                                if let Some(reason) = &shutdown_reason {
+                                    info!("Main actor thread received shutdown signal: {}", reason);
+                                }
 
                                 debug!("Stopping API server");
                                 server_handle.stop(true).await;
                                 info!("API server stopped");
+
+                                shutdown_reason
                             });
 
                             actix_server.await.unwrap();
-                            server_stop_handle.await.unwrap();
+                            let shutdown_reason = server_stop_handle.await.unwrap();
 
                             match gossip_service_handle.stop().await {
                                 Ok(()) => info!("Gossip service stopped"),
                                 Err(e) => warn!("Gossip service is already stopped: {:?}", e),
                             }
 
-                            // Send shutdown signal
-                            vdf_shutdown_sender.send(()).await.unwrap();
+                            // Send shutdown signal - propagate the original cause
+                            if let Some(reason) = shutdown_reason {
+                                vdf_shutdown_sender.send(reason).await.unwrap();
+                            } else {
+                                warn!("No shutdown reason received, VDF will be stopped without reason");
+                            }
 
                             debug!("Waiting for VDF thread to finish");
                             // Wait for vdf thread to finish & save steps
@@ -910,11 +984,11 @@ impl IrysNode {
         Ok(actor_main_thread_handle)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.height = latest_block_height))]
     fn init_reth_thread(
         config: Config,
-        reth_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
-        main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<()>,
-        shadow_tx_store: ShadowTxStore,
+        reth_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
+        main_actor_thread_shutdown_tx: tokio::sync::mpsc::Sender<ShutdownReason>,
         reth_handle_sender: oneshot::Sender<RethNode>,
         actor_main_thread_handle: JoinHandle<()>,
         irys_provider: IrysRethProvider,
@@ -923,7 +997,7 @@ impl IrysNode {
         mut task_manager: TaskManager,
         tokio_runtime: Runtime,
         service_set: oneshot::Receiver<ServiceSet>,
-    ) -> eyre::Result<JoinHandle<()>> {
+    ) -> eyre::Result<JoinHandle<ShutdownReason>> {
         let span = tracing::Span::current();
         let span2 = span.clone();
 
@@ -943,7 +1017,6 @@ impl IrysNode {
                         config,
                         reth_handle_sender,
                         latest_block_height,
-                        shadow_tx_store,
                         Arc::new(mock_provider),
                     )
                     .in_current_span()
@@ -967,12 +1040,16 @@ impl IrysNode {
                         Ok(())
                     };
 
-                    let _res = run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver)
-                        .await
-                        .inspect_err(|e| error!("Reth thread error: {:?}", &e));
+                    let shutdown_reason = match run_until_ctrl_c_or_channel_message(future, reth_shutdown_receiver, "reth").await {
+                        Ok(reason) => reason,
+                        Err(e) => {
+                            error!("Reth thread error: {:?}", e);
+                            ShutdownReason::FatalError(e.to_string())
+                        }
+                    };
 
-                    debug!("Sending shutdown signal to the main actor thread");
-                    match main_actor_thread_shutdown_tx.try_send(()) {
+                    debug!("Sending shutdown signal to the main actor thread: {}", shutdown_reason);
+                    match main_actor_thread_shutdown_tx.try_send(shutdown_reason.clone()) {
                         Ok(()) => {}
                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                             warn!("Failed to send shutdown signal to main actor thread: channel full");
@@ -992,25 +1069,31 @@ impl IrysNode {
                         "Shutting down the rest of the reth jobs in case there are unfinished ones"
                     );
                     task_manager.graceful_shutdown();
-                    node_handle.node
+                    (node_handle.node, shutdown_reason)
                 };
 
-                let reth_node =
+                let (reth_node, shutdown_reason) =
                     tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal.in_current_span());
 
                 reth_node.provider.database.db.close();
                 reth_provider::cleanup_provider(&irys_provider);
-                info!("Reth thread finished");
+
+                info!("Reth thread finished with reason: {}", shutdown_reason);
+                if let Err(e) = irys_utils::telemetry::flush_telemetry() {
+                    error!("Unable to flush telemetry: {:?}", &e)
+                };
+                shutdown_reason
             })?;
 
         Ok(reth_thread_handler)
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height))]
     async fn init_services(
         config: &Config,
         genesis_hash: H256,
-        reth_shutdown_sender: tokio::sync::mpsc::Sender<()>,
-        vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<()>,
+        reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
+        vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
         block_index: Arc<RwLock<BlockIndex>>,
         latest_block: Arc<IrysBlockHeader>,
@@ -1019,7 +1102,6 @@ impl IrysNode {
         http_listener: TcpListener,
         irys_db: DatabaseProvider,
         gossip_listener: TcpListener,
-        shadow_tx_store: ShadowTxStore,
         runtime_handle: tokio::runtime::Handle,
     ) -> eyre::Result<(
         IrysNodeCtx,
@@ -1031,8 +1113,7 @@ impl IrysNode {
         // initialize the databases
         let (reth_node, reth_db) = init_reth_db(reth_handle_receiver).await?;
         debug!("Reth DB initialized");
-        let reth_node_adapter =
-            IrysRethNodeAdapter::new(reth_node.clone().into(), shadow_tx_store.clone()).await?;
+        let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into()).await?;
 
         // initialize packing service early
         let mut packing_service =
@@ -1091,7 +1172,7 @@ impl IrysNode {
         // TODO: Consider if starting the reth service should happen outside of init_services() instead of overwriting config here
         let mut node_config = config.node_config.clone();
         node_config.reth.network.peer_id = reth_peering.peer_id;
-        node_config.reth.network.bind_ip = reth_peering.peering_tcp_addr.ip().to_string();
+        node_config.reth.network.bind_ip = Some(reth_peering.peering_tcp_addr.ip().to_string());
         node_config.reth.network.bind_port = reth_peering.peering_tcp_addr.port();
 
         if node_config.reth.network.public_port == 0 {
@@ -1139,9 +1220,14 @@ impl IrysNode {
 
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let block_tree_sender = service_senders.block_tree.clone();
-        let _ = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
+        if let Err(e) = block_tree_sender.send(BlockTreeServiceMessage::GetBlockTreeReadGuard {
             response: oneshot_tx,
-        });
+        }) {
+            error!(
+                "Failed to send GetBlockTreeReadGuard message to block tree service: {}",
+                e
+            );
+        }
         let block_tree_guard = oneshot_rx
             .await
             .expect("to receive BlockTreeReadGuard response from GetBlockTreeReadGuard Message");
@@ -1152,6 +1238,7 @@ impl IrysNode {
             irys_db.clone(),
             receivers.chunk_cache,
             config.clone(),
+            service_senders.gossip_broadcast.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
@@ -1193,12 +1280,15 @@ impl IrysNode {
         let (tx, rx) = oneshot::channel();
         service_senders
             .mempool
-            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx).into())
             .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
 
         let mempool_state = rx
             .await
             .map_err(|_| eyre::eyre!("Failed to receive mempool state from mempool service"))?;
+
+        // Create the MempoolReadGuard for block discovery service
+        let mempool_guard = MempoolReadGuard::new(mempool_state.clone());
 
         // Create the MempoolPledgeProvider
         let mempool_pledge_provider = Arc::new(MempoolPledgeProvider::new(
@@ -1231,6 +1321,7 @@ impl IrysNode {
         let (validation_handle, validation_enabled) = ValidationService::spawn_service(
             block_index_guard.clone(),
             block_tree_guard.clone(),
+            mempool_guard.clone(),
             vdf_state_readonly.clone(),
             &config,
             &service_senders,
@@ -1255,6 +1346,7 @@ impl IrysNode {
             &service_senders,
             &block_index_guard,
             &block_tree_guard,
+            &mempool_guard,
             &vdf_state_readonly,
             Arc::clone(&reward_curve),
             receivers.block_discovery,
@@ -1306,7 +1398,6 @@ impl IrysNode {
             reth_node_adapter.clone(),
             receivers.block_producer,
             reth_node.provider.clone(),
-            shadow_tx_store.clone(),
             block_index,
             runtime_handle.clone(),
         );
@@ -1411,6 +1502,7 @@ impl IrysNode {
             chunk_provider: chunk_provider.clone(),
             block_index_guard: block_index_guard.clone(),
             vdf_steps_guard: vdf_state_readonly,
+            mempool_guard: mempool_guard.clone(),
             service_senders: service_senders.clone(),
             partition_controllers,
             packing_waiter: packing_handle.waiter(),
@@ -1421,7 +1513,6 @@ impl IrysNode {
             stop_guard: StopGuard::new(),
             peer_list: peer_list_guard.clone(),
             sync_state: sync_state.clone(),
-            shadow_tx_store,
             reth_node_adapter,
             block_producer_inner,
             block_pool,
@@ -1507,6 +1598,7 @@ impl IrysNode {
         let server = run_server(
             ApiState {
                 mempool_service: service_senders.mempool.clone(),
+                mempool_guard: mempool_guard.clone(),
                 chunk_provider: chunk_provider.clone(),
                 peer_list: peer_list_guard,
                 db: irys_db,
@@ -1552,9 +1644,10 @@ impl IrysNode {
     }
 
     #[expect(clippy::path_ends_with_ext, reason = "Core pinning logic")]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %latest_block.block_hash, block.height = %latest_block.height, custom.global_step_number = global_step_number))]
     fn init_vdf_thread(
         config: &Config,
-        vdf_shutdown_receiver: mpsc::Receiver<()>,
+        vdf_shutdown_receiver: mpsc::Receiver<ShutdownReason>,
         vdf_fast_forward_receiver: UnboundedReceiver<VdfStep>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
         latest_block: Arc<IrysBlockHeader>,
@@ -1575,13 +1668,12 @@ impl IrysNode {
             .is_some_and(|p| p.ends_with(".tmp"));
         let is_test_based_on_cfg_flag = cfg!(test);
         if is_test_based_on_cfg_flag && !is_test_based_on_base_dir {
-            error!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing")
+            panic!("VDF core pinning: cfg!(test) is true but the base_dir .tmp check is false - please make sure you are using a temporary directory for testing (This is because integration tests are not considered 'tests', and so the only way we can detect them to disable core pinning is using the base directory test are run from.)")
         }
         let span = tracing::Span::current();
 
         let vdf_thread_handler = std::thread::spawn({
             let vdf_config = config.vdf.clone();
-
             move || {
                 let _span = span.enter();
 
@@ -1695,7 +1787,6 @@ impl IrysNode {
         reth_node_adapter: IrysRethNodeAdapter,
         block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
-        shadow_tx_store: ShadowTxStore,
         block_index: Arc<RwLock<BlockIndex>>,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
@@ -1711,8 +1802,7 @@ impl IrysNode {
             service_senders: service_senders.clone(),
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),
             reth_provider,
-            shadow_tx_store,
-            beacon_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
+            consensus_engine_handle: reth_node_adapter.inner.beacon_engine_handle.clone(),
             block_index,
         });
 
@@ -1743,11 +1833,13 @@ impl IrysNode {
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    initial_direction_up,
                     poll_interval_ms,
                 } => SingleOracle::new_mock(
                     initial_price,
                     incremental_change,
                     smoothing_interval,
+                    initial_direction_up,
                     poll_interval_ms,
                 ),
                 OracleConfig::CoinMarketCap {
@@ -1780,6 +1872,7 @@ impl IrysNode {
         service_senders: &ServiceSenders,
         block_index_guard: &BlockIndexReadGuard,
         block_tree_guard: &BlockTreeReadGuard,
+        mempool_guard: &MempoolReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         reward_curve: Arc<HalvingCurve>,
         block_discovery_rx: UnboundedReceiver<BlockDiscoveryMessage>,
@@ -1788,6 +1881,7 @@ impl IrysNode {
         let block_discovery_inner = BlockDiscoveryServiceInner {
             block_index_guard: block_index_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
+            mempool_guard: mempool_guard.clone(),
             db: irys_db.clone(),
             config: config.clone(),
             vdf_steps_guard: vdf_steps_guard.clone(),
@@ -1929,7 +2023,7 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
     reth_rx: UnboundedReceiver<RethServiceMessage>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {
@@ -1953,6 +2047,7 @@ async fn init_reth_db(
     Ok((reth_node, reth_db))
 }
 
+#[tracing::instrument(level = "trace", skip_all)]
 fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
         open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir())?;
@@ -2021,6 +2116,8 @@ async fn stake_and_pledge(
     let has_pending_stake =
         pending_commitments.is_some_and(|commitments| commitments.stake.is_some());
 
+    let mut total_cost = U256::zero();
+
     // if we have a historic or pending stake, don't send another
     let is_staked = is_historically_staked || has_pending_stake;
     if !is_staked {
@@ -2033,8 +2130,13 @@ async fn stake_and_pledge(
         let mut stake_tx = CommitmentTransaction::new_stake(&config.consensus, latest_block_hash);
         signer.sign_commitment(&mut stake_tx)?;
 
+        total_cost += stake_tx.total_cost();
+
         post_commitment_tx(&stake_tx).await.unwrap();
-        debug!("Posted stake tx {:?}", &stake_tx.id);
+        debug!(
+            "Posted stake tx {:?} (value: {}, fee: {})",
+            &stake_tx.id, &stake_tx.value, &stake_tx.fee
+        );
         stake_tx.id
     } else {
         debug!("Local mining address {:?} is staked", &address);
@@ -2070,14 +2172,21 @@ async fn stake_and_pledge(
         signer.sign_commitment(&mut pledge_tx)?;
 
         post_commitment_tx(&pledge_tx).await.unwrap();
+        total_cost += pledge_tx.total_cost();
+
         debug!(
-            "Posted pledge tx {}/{} {:?}",
+            "Posted pledge tx {}/{} {:?} (value: {}, fee {})",
             idx + 1,
             to_pledge_count,
-            &pledge_tx.id
+            &pledge_tx.id,
+            &pledge_tx.value,
+            &pledge_tx.fee
         );
     }
-    debug!("Stake & Pledge check complete");
+    debug!(
+        "Stake & Pledge check complete - total cost: {}",
+        &total_cost
+    );
 
     Ok(())
 }

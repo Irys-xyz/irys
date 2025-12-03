@@ -286,7 +286,7 @@ impl ValidationCoordinator {
     }
 
     /// Calculate priority for a block
-    #[instrument(skip_all, fields(block.hash = %block.block_hash, block.height = %block.height))]
+    #[instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = %block.height))]
     pub(super) fn calculate_priority(&self, block: &IrysBlockHeader) -> BlockPriorityMeta {
         let block_tree = self.block_tree_guard.read();
         let block_hash = block.block_hash;
@@ -307,7 +307,7 @@ impl ValidationCoordinator {
     }
 
     /// Check if block extends canonical tip
-    #[instrument(skip_all, fields(%block_hash))]
+    #[instrument(level = "trace", skip_all, fields(block.hash = %block_hash))]
     fn is_canonical_extension(&self, block_hash: &BlockHash, block_tree: &BlockTree) -> bool {
         let (canonical_chain, _) = block_tree.get_canonical_chain();
         let canonical_tip = canonical_chain.last().unwrap().block_hash;
@@ -338,7 +338,7 @@ impl ValidationCoordinator {
     pub(super) async fn process_vdf(&mut self) -> Option<(BlockHash, VdfValidationResult)> {
         // Poll current VDF task
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
-            match result {
+            match &result {
                 VdfValidationResult::Valid => {
                     let block_hash = task.block.block_hash;
 
@@ -364,7 +364,8 @@ impl ValidationCoordinator {
                     let priority = self.calculate_priority(&task.block);
                     self.vdf_scheduler.pending.push(task, priority);
                 }
-                VdfValidationResult::Invalid(_) => {
+                VdfValidationResult::Invalid(error) => {
+                    tracing::error!(block.hash =? hash, "invalid vdf {error}");
                     // Invalid tasks are not re-queued
                 }
             }
@@ -380,7 +381,7 @@ impl ValidationCoordinator {
     }
 
     /// Reevaluate all priorities after reorg
-    #[instrument(skip_all)]
+    #[instrument(level = "trace", skip_all)]
     pub(super) fn reevaluate_priorities(&mut self) {
         info!("Reevaluating priorities after reorg");
 
@@ -545,7 +546,7 @@ mod tests {
         // 3. CanonicalExtension, height 10, 100 VDF steps
         // 4. Canonical, height 9, 1 VDF step
 
-        let items = vec![
+        let items = [
             (
                 h2.block_hash,
                 mkprio(&h2, BlockPriority::CanonicalExtension),

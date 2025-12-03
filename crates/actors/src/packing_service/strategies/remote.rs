@@ -5,7 +5,7 @@ use futures::StreamExt as _;
 use irys_domain::{ChunkType, StorageModule};
 use irys_types::{
     ii, partition::PartitionHash, partition_chunk_offset_ii, remote_packing::RemotePackingRequest,
-    Config, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
+    Address, Config, PartitionChunkOffset, PartitionChunkRange, RemotePackingConfig,
 };
 use reth::revm::primitives::bytes::{Bytes, BytesMut};
 use tokio::sync::Notify;
@@ -39,6 +39,7 @@ impl RemotePackingStrategy {
     }
 
     /// Process a stream of packed chunks from a remote service
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = range_start, chunk.range = ?current_chunk_range, partition.hash = %partition_hash))]
     async fn process_chunk_stream(
         &self,
         mut stream: impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Unpin,
@@ -48,7 +49,7 @@ impl RemotePackingStrategy {
         short_writes_before_sync: u32,
         storage_module_id: usize,
         partition_hash: PartitionHash,
-        mining_address: [u8; 20],
+        mining_address: Address,
     ) -> Result<u32, String> {
         let chunk_size = self.params.chunk_size;
         let buffer_size: usize = ((chunk_size as u64) * REMOTE_STREAM_BUFFER_MULTIPLIER)
@@ -75,7 +76,7 @@ impl RemotePackingStrategy {
                 &mining_address,
             );
 
-            if range_start % short_writes_before_sync == 0 {
+            if range_start.is_multiple_of(short_writes_before_sync) {
                 debug!("triggering sync");
                 crate::packing_service::sync_with_warning(
                     storage_module,
@@ -108,13 +109,14 @@ impl RemotePackingStrategy {
     }
 
     /// Try packing with a specific remote service
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = range_start, chunk.range_end = range_end, partition.hash = %partition_hash, remote.url = %remote.url))]
     async fn try_remote(
         &self,
         remote: &RemotePackingConfig,
         storage_module: &Arc<StorageModule>,
         range_start: u32,
         range_end: u32,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
@@ -140,7 +142,7 @@ impl RemotePackingStrategy {
 
         // Prepare request
         let request = RemotePackingRequest {
-            mining_address: mining_address.into(),
+            mining_address,
             partition_hash,
             chunk_range: current_chunk_range,
             chain_id: self.params.chain_id,
@@ -175,11 +177,12 @@ impl RemotePackingStrategy {
 
 #[async_trait]
 impl super::PackingStrategy for RemotePackingStrategy {
+    #[tracing::instrument(level = "trace", skip_all, fields(storage_module.id = storage_module_id, chunk.range_start = *chunk_range.0.start(), chunk.range_end = *chunk_range.0.end(), partition.hash = %partition_hash))]
     async fn pack(
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: [u8; 20],
+        mining_address: Address,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,
@@ -210,7 +213,10 @@ impl super::PackingStrategy for RemotePackingStrategy {
                     }
                 }
                 Err(e) => {
-                    error!("Remote packing failed: {}", e);
+                    error!(
+                        "Remote packing failed for storage_module {} partition_hash {}: {}",
+                        storage_module_id, partition_hash, e
+                    );
                     continue;
                 }
             }

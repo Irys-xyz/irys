@@ -3,7 +3,6 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
-use base58::FromBase58 as _;
 use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
@@ -11,9 +10,8 @@ use irys_types::{
     Address, DataLedger, U256,
 };
 use serde::{Deserialize, Serialize};
-use std::str::FromStr as _;
 
-use crate::ApiState;
+use crate::{utils::address::parse_address, ApiState};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -53,15 +51,25 @@ pub async fn get_price(
 
     match data_ledger {
         DataLedger::Publish => {
-            // Get the latest EMA for pricing calculations and the tip block
+            // Get the latest EMA for pricing calculations from the canonical chain
             let tree = state.block_tree.read();
-            let tip = tree.tip;
+            let (canonical, _) = tree.get_canonical_chain();
+            let last_block_entry = canonical
+                .last()
+                .ok_or_else(|| ErrorBadRequest("Empty canonical chain"))?;
             let ema = tree
-                .get_ema_snapshot(&tip)
+                .get_ema_snapshot(&last_block_entry.block_hash)
                 .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+            // Get the actual block to access its timestamp
+            let last_block = tree
+                .get_block(&last_block_entry.block_hash)
+                .ok_or_else(|| ErrorBadRequest("Block not found"))?;
+            // Convert block timestamp from millis to seconds for hardfork params
+            let latest_block_timestamp_secs = last_block.timestamp_secs();
+            drop(tree);
 
             // Calculate the actual epochs remaining for the next block based on height
-            let tip_height = tree.get_block(&tip).map(|b| b.height).unwrap_or(0);
+            let tip_height = last_block_entry.height;
             let next_block_height = tip_height + 1;
 
             let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
@@ -70,31 +78,56 @@ pub async fn get_price(
                 state.config.consensus.epoch.submit_ledger_epoch_length,
             );
 
-            drop(tree);
+            // Determine pricing EMA for public quotes with special handling in
+            // the last quarter of the adjustment interval.
+            // - Not in last quarter: use stable public pricing (2 intervals ago)
+            // - In last quarter: use the LOWER of the last two EMAs (more conservative in IRYS)
+            //   Note: lower USD price -> higher IRYS required
+            let price_adjustment_interval = state.config.consensus.ema.price_adjustment_interval;
+            let position_in_interval = next_block_height % price_adjustment_interval;
+            let last_quarter_start =
+                price_adjustment_interval - price_adjustment_interval.div_ceil(4);
+            let in_last_quarter = position_in_interval >= last_quarter_start;
+
+            let pricing_ema = if in_last_quarter {
+                if ema.ema_price_1_interval_ago.amount < ema.ema_price_2_intervals_ago.amount {
+                    ema.ema_price_1_interval_ago
+                } else {
+                    ema.ema_price_2_intervals_ago
+                }
+            } else {
+                ema.ema_for_public_pricing()
+            };
+
+            // Get hardfork params using the latest block's timestamp
+            let number_of_ingress_proofs_total = state
+                .config
+                .number_of_ingress_proofs_total_at(latest_block_timestamp_secs);
 
             // Calculate term fee using the dynamic epoch count
             let term_fee = calculate_term_fee(
                 bytes_to_store,
                 epochs_for_storage,
                 &state.config.consensus,
-                ema.ema_for_public_pricing(),
+                number_of_ingress_proofs_total,
+                pricing_ema,
             )
             .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
 
-            // Debug logging for fee calculation
             tracing::debug!(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
                 bytes_to_store,
                 term_fee,
                 state.config.consensus.immediate_tx_inclusion_reward_percent.amount,
-                state.config.consensus.number_of_ingress_proofs_total
+                number_of_ingress_proofs_total
             );
 
             // If the cost calculation fails, return 400 with the error text
             let total_perm_cost = calculate_perm_fee_from_config(
                 bytes_to_store,
                 &state.config.consensus,
-                ema.ema_for_public_pricing(),
+                number_of_ingress_proofs_total,
+                pricing_ema,
                 term_fee,
             )
             .map_err(|e| ErrorBadRequest(format!("{e:?}")))?;
@@ -135,25 +168,12 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
     }))
 }
 
-/// Parse and validate a user address from a string
-fn parse_user_address(address_str: &str) -> Result<Address, actix_web::Error> {
-    // try Base58 format first
-    if let Ok(decoded) = address_str.from_base58() {
-        if let Ok(arr) = TryInto::<[u8; 20]>::try_into(decoded.as_slice()) {
-            return Ok(Address::from(&arr));
-        }
-    }
-
-    // fall back to hex/EVM address format
-    Address::from_str(address_str).map_err(|_| ErrorBadRequest("Invalid address format"))
-}
-
 pub async fn get_pledge_price(
     path: Path<String>,
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
     let user_address_str = path.into_inner();
-    let user_address = parse_user_address(&user_address_str)?;
+    let user_address = parse_address(&user_address_str).map_err(actix_web::Error::from)?;
 
     // Use the MempoolPledgeProvider to get accurate pledge count
     let pledge_count = state
@@ -182,7 +202,7 @@ pub async fn get_unpledge_price(
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
     let user_address_str = path.into_inner();
-    let user_address = parse_user_address(&user_address_str)?;
+    let user_address = parse_address(&user_address_str).map_err(actix_web::Error::from)?;
 
     // Use the MempoolPledgeProvider to get accurate pledge count
     let pledge_count = state

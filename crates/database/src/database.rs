@@ -10,10 +10,12 @@ use crate::tables::{
 
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
+use irys_types::ingress::CachedIngressProof;
+use irys_types::irys::IrysSigner;
 use irys_types::{
     Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
-    MEGABYTE,
+    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, PeerListItem,
+    TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -26,6 +28,7 @@ use reth_db::{
     mdbx::{DatabaseArguments, MaxReadTransactionDuration},
     ClientVersion, DatabaseEnv, DatabaseError,
 };
+use reth_db_api::Database as _;
 use reth_node_metrics::recorder::install_prometheus_recorder;
 use tracing::{debug, warn};
 
@@ -71,17 +74,21 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
+    } else {
+        tracing::error!(block.hash = ?block.block_hash, target = "db::block_header", "poa chunk not present when writing the header");
     };
     let mut block_without_chunk = block.clone();
     block_without_chunk.poa.chunk = None;
     tx.put::<IrysBlockHeaders>(block.block_hash, block_without_chunk.into())?;
     Ok(())
 }
+
 /// Gets a [`IrysBlockHeader`] by it's [`BlockHash`]
 pub fn block_header_by_hash<T: DbTx>(
     tx: &T,
     block_hash: &BlockHash,
     include_chunk: bool,
+    // TODO: we should be typing these Results correctly (DatabaseError instead of eyre::Report)
 ) -> eyre::Result<Option<IrysBlockHeader>> {
     let mut block = tx
         .get::<IrysBlockHeaders>(*block_hash)?
@@ -90,6 +97,9 @@ pub fn block_header_by_hash<T: DbTx>(
     if include_chunk {
         if let Some(ref mut b) = block {
             b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
+            if b.poa.chunk.is_none() && b.height != 0 {
+                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
+            }
         }
     }
 
@@ -129,6 +139,28 @@ pub fn commitment_tx_by_txid<T: DbTx>(
         .map(CommitmentTransaction::from))
 }
 
+/// Confirms the data size of a cached data root entry after validating its rightmost chunk.
+///
+/// Updates the entry with the proven data size extracted from the last leaf's merkle proof.
+/// Returns `Ok(Some(entry))` if updated, `Ok(None)` if entry not found.
+pub fn confirm_data_size_for_data_root<T: DbTx + DbTxMut>(
+    tx: &T,
+    data_root: &H256,
+    data_size: u64,
+) -> eyre::Result<Option<CachedDataRoot>> {
+    // Access the current cached entry from the database
+    let result = tx.get::<CachedDataRoots>(*data_root)?;
+
+    if let Some(mut cached_data_root) = result {
+        cached_data_root.data_size = data_size;
+        cached_data_root.data_size_confirmed = true;
+        tx.put::<CachedDataRoots>(*data_root, cached_data_root.clone())?;
+        Ok(Some(cached_data_root))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Takes a [`DataTransactionHeader`] and caches its `data_root` and tx.id in a
 /// cache database table ([`CachedDataRoots`]). Tracks all the tx.ids' that share the same `data_root`.
 pub fn cache_data_root<T: DbTx + DbTxMut>(
@@ -146,6 +178,7 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
         Some(existing) => existing,
         None => CachedDataRoot {
             data_size: tx_header.data_size,
+            data_size_confirmed: false,
             txid_set: vec![tx_header.id],
             block_set: vec![],
             expiry_height: None,
@@ -157,6 +190,11 @@ pub fn cache_data_root<T: DbTx + DbTxMut>(
     // If the entry exists, update the timestamp and add the txid if necessary
     if !cached_data_root.txid_set.contains(&tx_header.id) {
         cached_data_root.txid_set.push(tx_header.id);
+    }
+
+    // If the data_size is not yet confirmed and the tx_headers data_size is larger than the one in the cache, update it
+    if cached_data_root.data_size < tx_header.data_size && !cached_data_root.data_size_confirmed {
+        cached_data_root.data_size = tx_header.data_size;
     }
 
     // If the entry exists and a block header reference was provided, add the block hash reference if necessary
@@ -327,6 +365,26 @@ pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     }
 }
 
+pub fn delete_ingress_proof<T: DbTxMut>(tx: &T, data_root: DataRoot) -> eyre::Result<bool> {
+    Ok(tx.delete::<IngressProofs>(data_root, None)?)
+}
+
+pub fn store_ingress_proof(
+    db: &DatabaseProvider,
+    ingress_proof: &IngressProof,
+    signer: &IrysSigner,
+) -> eyre::Result<()> {
+    Ok(db.update(|rw_tx| {
+        rw_tx.put::<IngressProofs>(
+            ingress_proof.data_root,
+            CompactCachedIngressProof(CachedIngressProof {
+                address: signer.address(),
+                proof: ingress_proof.clone(),
+            }),
+        )
+    })??)
+}
+
 pub fn walk_all<T: Table, TX: DbTx>(
     read_tx: &TX,
 ) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {
@@ -339,7 +397,7 @@ pub fn set_database_schema_version<T: DbTxMut>(tx: &T, version: u32) -> Result<(
     tx.put::<Metadata>(MetadataKey::DBSchemaVersion, version.to_le_bytes().to_vec())
 }
 
-pub fn database_schema_version<T: DbTx>(tx: &T) -> Result<Option<u32>, DatabaseError> {
+pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, DatabaseError> {
     if let Some(bytes) = tx.get::<Metadata>(MetadataKey::DBSchemaVersion)? {
         let arr: [u8; 4] = bytes.as_slice().try_into().map_err(|_| {
             DatabaseError::Other(
@@ -412,54 +470,4 @@ mod tests {
         assert_eq!(result2, block_header);
         Ok(())
     }
-
-    // #[test]
-    // fn insert_and_get_a_block() {
-    //     //let path = tempdir().unwrap();
-    //     let path = get_data_dir();
-    //     println!("TempDir: {:?}", path);
-
-    //     let mut block_header = IrysBlockHeader::new();
-    //     block_header.block_hash.0[0] = 1;
-    //     let db = open_or_create_db(path).unwrap();
-
-    //     // Write a Block
-    //     {
-    //         let result = insert_block(&db, &block_header);
-    //         println!("result: {:?}", result);
-    //         assert_matches!(result, Ok(_));
-    //     }
-
-    //     // Read a Block
-    //     {
-    //         let result = block_by_hash(&db, block_header.block_hash);
-    //         assert_eq!(result, Ok(Some(block_header)));
-    //         println!("result: {:?}", result.unwrap().unwrap());
-    //     }
-    // }
-
-    // #[test]
-    // fn insert_and_get_tx() {
-    //     //let path = tempdir().unwrap();
-    //     let path = get_data_dir();
-    //     println!("TempDir: {:?}", path);
-
-    //     let mut tx = DataTransactionHeader::default();
-    //     tx.id.0[0] = 2;
-    //     let db = open_or_create_db(path).unwrap();
-
-    //     // Write a Tx
-    //     {
-    //         let result = insert_tx(&db, &tx);
-    //         println!("result: {:?}", result);
-    //         assert_matches!(result, Ok(_));
-    //     }
-
-    //     // Read a Tx
-    //     {
-    //         let result = tx_by_txid(&db, &tx.id);
-    //         assert_eq!(result, Ok(Some(tx)));
-    //         println!("result: {:?}", result.unwrap().unwrap());
-    //     }
-    // }
 }

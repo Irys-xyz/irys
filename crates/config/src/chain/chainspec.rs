@@ -1,7 +1,7 @@
 use alloy_primitives::B256;
 use irys_types::{
     partition::PartitionHash, DataTransactionLedger, GenesisConfig, H256List, IrysBlockHeader,
-    IrysBlockHeaderV1, IrysSignature, PoaData, VDFLimiterInfo, H256, U256,
+    IrysBlockHeaderV1, IrysSignature, PoaData, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 
 pub fn build_unsigned_irys_genesis_block(
@@ -16,7 +16,7 @@ pub fn build_unsigned_irys_genesis_block(
         diff: U256::from(0),
         cumulative_diff: U256::from(0),
         solution_hash: H256::zero(),
-        last_diff_timestamp: 0,
+        last_diff_timestamp: UnixTimestampMs::from_millis(0),
         previous_solution_hash: H256::zero(),
         last_epoch_hash: config.last_epoch_hash,
         chunk_hash: H256::zero(),
@@ -33,7 +33,7 @@ pub fn build_unsigned_irys_genesis_block(
         reward_address: config.reward_address,
         reward_amount: U256::from(0),
         miner_address: config.miner_address,
-        timestamp: config.timestamp_millis,
+        timestamp: UnixTimestampMs::from_millis(config.timestamp_millis),
         system_ledgers: vec![],
         data_ledgers: vec![
             DataTransactionLedger {

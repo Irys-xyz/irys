@@ -164,20 +164,22 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     // Verify final balances
     let user1_final = U256::from_be_bytes(
         node.get_balance(user1_address, final_block.evm_block_hash)
+            .await
             .to_be_bytes(),
     );
     let user2_final = U256::from_be_bytes(
         node.get_balance(user2_address, final_block.evm_block_hash)
+            .await
             .to_be_bytes(),
     );
 
     // User1: pays total_cost but gets perm_fee refunded
     let user1_expected = initial_balance
-        .saturating_sub(tx1.header.total_cost())
-        .saturating_add(tx1_perm_fee);
+        .saturating_sub(tx1.header.total_cost().into())
+        .saturating_add(tx1_perm_fee.into());
 
     // User2: pays full total_cost (no refund for promoted tx)
-    let user2_expected = initial_balance.saturating_sub(tx2.header.total_cost());
+    let user2_expected = initial_balance.saturating_sub(tx2.header.total_cost().into());
 
     assert_eq!(
         user1_final, user1_expected,

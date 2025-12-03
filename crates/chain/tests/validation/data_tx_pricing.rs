@@ -1,17 +1,29 @@
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
-use crate::validation::unpledge_partition::gossip_data_tx_to_node;
+use crate::utils::{
+    assert_validation_error, gossip_data_tx_to_node, read_block_from_state, solution_context,
+    BlockValidationOutcome, IrysNodeTest,
+};
 use irys_actors::{
-    async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage, shadow_tx_generator::PublishLedgerWithTxs,
+    async_trait,
+    block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
+    block_tree_service::BlockTreeServiceMessage,
+    block_validation::{PreValidationError, ValidationError},
+    shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
+use irys_database::tables::IngressProofs as IngressProofsTable;
+use irys_database::walk_all;
 use irys_domain::ChainState;
-use irys_types::storage_pricing::Amount;
+use irys_types::storage_pricing::{
+    calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
+};
+use irys_types::IngressProofsList;
 use irys_types::{
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    U256,
+    OracleConfig, UnixTimestamp, U256,
 };
+use reth_db::Database as _;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 // Helper function to send a block directly to the block tree service for validation
@@ -95,8 +107,8 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        price_info.term_fee,
-        Some(insufficient_perm_fee), // Insufficient perm_fee!
+        price_info.term_fee.into(),
+        Some(insufficient_perm_fee.into()), // Insufficient perm_fee!
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
@@ -123,8 +135,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 price_oracle: genesis_block_prod.price_oracle.clone(),
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
-                shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
-                beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
+                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
             }),
         },
@@ -140,7 +151,11 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with insufficient perm_fee should be rejected",
+    );
 
     genesis_node.stop().await;
 
@@ -211,8 +226,8 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        wrong_term_fee,            // Insufficient term fee
-        Some(price_info.perm_fee), // Correct perm fee for parent EMA
+        wrong_term_fee.into(),            // Insufficient term fee
+        Some(price_info.perm_fee.into()), // Correct perm fee for parent EMA
     )?;
     let malicious_tx = test_signer.sign_transaction(malicious_tx)?;
 
@@ -239,8 +254,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
                 price_oracle: genesis_block_prod.price_oracle.clone(),
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
-                shadow_tx_store: genesis_block_prod.shadow_tx_store.clone(),
-                beacon_engine_handle: genesis_block_prod.beacon_engine_handle.clone(),
+                consensus_engine_handle: genesis_block_prod.consensus_engine_handle.clone(),
                 block_index: genesis_block_prod.block_index.clone(),
             }),
         },
@@ -256,7 +270,11 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
     send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(outcome, BlockValidationOutcome::Discarded);
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        "block with insufficient term_fee should be rejected",
+    );
 
     genesis_node.stop().await;
 
@@ -318,6 +336,299 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
     ));
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+// Ensure that we don't validate the perm fee on a tx that gets promoted on a
+// different block than it was initially included.
+//
+// The test deliberately proomotes the tx in a future EMA interval, meaning that
+// future price validations will always be invalid
+#[test_log::test(tokio::test)]
+async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+    // Configure network with short EMA interval and ever-increasing mock oracle
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Set EMA interval to 2 blocks for quick price changes
+    let price_adjustment_interval = 2_u64;
+    genesis_config
+        .consensus
+        .get_mut()
+        .ema
+        .price_adjustment_interval = price_adjustment_interval;
+
+    // Configure mock oracle with ever-increasing prices
+    genesis_config.oracles = vec![OracleConfig::Mock {
+        initial_price: Amount::token(dec!(1.0)).expect("valid token amount"),
+        incremental_change: Amount::token(dec!(0.01)).expect("valid token amount"),
+        smoothing_interval: 1000, // Ensures continuous increase for 1000 blocks
+        poll_interval_ms: 100,
+        initial_direction_up: false,
+    }];
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_two_ema_intervals(2).await?;
+    let block = genesis_node
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .await?;
+
+    // Create a data transaction with pricing at current height (height 6)
+    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    let data_size = data.len() as u64;
+
+    let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
+
+    // Calculate expected fees using hardfork params from config to match validation behavior
+    let number_of_ingress_proofs_total = genesis_node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
+        price_before_the_interval.ema_for_public_pricing(),
+    )?;
+
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
+        price_before_the_interval.ema_for_public_pricing(),
+        expected_term_fee,
+    )?;
+
+    let tx = test_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::Publish,
+        expected_term_fee.into(),
+        Some(expected_perm_fee.amount.into()),
+    )?;
+    let tx = test_signer.sign_transaction(tx)?;
+
+    // Post ONLY the transaction header (no chunks yet)
+    genesis_node.post_data_tx_raw(&tx.header).await;
+
+    let submit_block = genesis_node.mine_block().await?;
+    let submit_ledger = &submit_block.data_ledgers[DataLedger::Submit];
+    assert!(
+        submit_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in submit ledger"
+    );
+
+    // Capture EMA snapshot at the time of submit (height 7)
+    let submit_ema_snapshot = genesis_node
+        .get_ema_snapshot(&submit_block.block_hash)
+        .expect("EMA snapshot for submit block must exist");
+    let submit_ema_price = submit_ema_snapshot.ema_for_public_pricing();
+
+    // Mine blocks to forward EMA
+    genesis_node.mine_blocks(3).await?;
+
+    // NOW upload the chunks after the block was mined
+    genesis_node.upload_chunks(&tx).await?;
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
+    let promote_block = genesis_node.mine_block().await?;
+
+    let publish_ledger = &promote_block.data_ledgers[DataLedger::Publish];
+    assert!(
+        publish_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in publish ledger after promotion"
+    );
+
+    // Capture EMA snapshot at the time of promotion
+    let promote_ema_snapshot = genesis_node
+        .get_ema_snapshot(&promote_block.block_hash)
+        .expect("EMA snapshot for promote block must exist");
+    let promote_ema_price = promote_ema_snapshot.ema_for_public_pricing();
+
+    // Verify that EMA has increased between submit and promotion
+    assert!(
+        promote_ema_price < submit_ema_price,
+        "EMA price should have decreased from submit (height {}, price {:?}) to promotion (height {}, price {:?})",
+        submit_block.height,
+        submit_ema_price,
+        promote_block.height,
+        promote_ema_price
+    );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+// Test that ensures we validate the price data fields of a data tx that gets
+// promoted in the same block that it was submitted in.
+// This is done by crafting a tx with invalid price fields -
+// if we skip validation then the block won't be rejected.
+#[test_log::test(tokio::test)]
+async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()>
+{
+    // Configure network with short EMA interval and ever-increasing mock oracle
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Set EMA interval to 2 blocks for quick price changes
+    let price_adjustment_interval = 2_u64;
+    genesis_config
+        .consensus
+        .get_mut()
+        .ema
+        .price_adjustment_interval = price_adjustment_interval;
+
+    // Configure mock oracle with ever-increasing prices
+    genesis_config.oracles = vec![OracleConfig::Mock {
+        initial_price: Amount::token(dec!(1.0)).expect("valid token amount"),
+        incremental_change: Amount::token(dec!(0.01)).expect("valid token amount"),
+        smoothing_interval: 1000, // Ensures continuous increase for 1000 blocks
+        poll_interval_ms: 100,
+        initial_direction_up: false,
+    }];
+
+    let test_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer]);
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_two_ema_intervals(2).await?;
+    let block = genesis_node
+        .ema_mine_until_next_in_last_quarter(price_adjustment_interval)
+        .await?;
+
+    // Create a data transaction with pricing at current height (height 6)
+    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    let data_size = data.len() as u64;
+
+    let price_before_the_interval = genesis_node.get_ema_snapshot(&block.block_hash).unwrap();
+
+    // Calculate expected fees using hardfork params from config to match validation behavior
+    let number_of_ingress_proofs_total = genesis_node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+    let expected_term_fee = calculate_term_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
+        price_before_the_interval.ema_for_public_pricing(),
+    )?
+    .checked_div(U256::from(2))
+    .unwrap();
+
+    let expected_perm_fee = calculate_perm_fee_from_config(
+        data_size,
+        &genesis_node.node_ctx.config.consensus,
+        number_of_ingress_proofs_total,
+        price_before_the_interval.ema_for_public_pricing(),
+        expected_term_fee,
+    )?;
+
+    let tx = test_signer.create_transaction_with_fees(
+        data,
+        genesis_node.get_anchor().await?,
+        DataLedger::Publish,
+        expected_term_fee.into(),
+        Some((expected_perm_fee.amount).into()),
+    )?;
+    let tx = test_signer.sign_transaction(tx)?;
+
+    // Gossip ONLY the transaction header (no chunks yet) via mempool service
+    gossip_data_tx_to_node(&genesis_node, &tx.header).await?;
+
+    // Upload chunks via public API and wait for ingress proofs to be generated
+    genesis_node.upload_chunks(&tx).await?;
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], 20)
+        .await?;
+
+    // Build an EvilBlockProducer that force-includes the tx in both ledgers
+    // Collect proofs for this tx from the DB
+    let proofs_list = {
+        let ro_tx = genesis_node
+            .node_ctx
+            .db
+            .as_ref()
+            .tx()
+            .expect("create mdbx read tx");
+        let mut proofs = Vec::new();
+        for (root, cached) in walk_all::<IngressProofsTable, _>(&ro_tx).expect("walk proofs") {
+            if root == tx.header.data_root {
+                proofs.push(cached.proof.clone());
+            }
+        }
+        IngressProofsList(proofs)
+    };
+
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub data_tx: DataTransactionHeader,
+        pub proofs: IngressProofsList,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: vec![],
+                commitment_txs_to_bill: vec![],
+                submit_txs: vec![self.data_tx.clone()],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![self.data_tx.clone()],
+                    proofs: Some(self.proofs.clone()),
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
+        }
+    }
+
+    let block_prod_strategy = EvilBlockProdStrategy {
+        data_tx: tx.header.clone(),
+        proofs: proofs_list,
+        prod: ProductionStrategy {
+            inner: genesis_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (promote_block, _adjustment_stats, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Validate by sending block directly to the block tree
+    send_block_to_block_tree(&genesis_node.node_ctx, promote_block.clone(), vec![]).await?;
+
+    // Expect the block to be rejected for insufficient perm_fee during prevalidation
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &promote_block.block_hash).await;
+    assert_validation_error(
+        outcome,
+        |e| {
+            matches!(
+                e,
+                ValidationError::PreValidation(PreValidationError::InsufficientPermFee { .. })
+            )
+        },
+        "block with insufficient perm_fee should be rejected",
+    );
 
     genesis_node.stop().await;
     Ok(())

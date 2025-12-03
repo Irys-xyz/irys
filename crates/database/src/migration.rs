@@ -148,6 +148,7 @@ mod tests {
             // CachedDataRoots (non-dupsort)
             let cdr = CachedDataRoot {
                 data_size: 1,
+                data_size_confirmed: true,
                 txid_set: vec![tx_id],
                 block_set: vec![block_hash],
                 expiry_height: None,

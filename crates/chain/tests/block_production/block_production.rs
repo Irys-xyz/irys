@@ -19,7 +19,7 @@ use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestCont
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    H256,
+    UnixTimestampMs, H256,
 };
 use reth::payload::EthBuiltPayload;
 use reth::rpc::types::TransactionTrait as _;
@@ -35,8 +35,8 @@ use tokio::time::sleep;
 use tracing::info;
 
 use crate::utils::{
-    mine_block, mine_block_and_wait_for_validation, new_stake_tx, read_block_from_state,
-    solution_context, AddTxError, BlockValidationOutcome, IrysNodeTest,
+    new_stake_tx, read_block_from_state, solution_context, AddTxError, BlockValidationOutcome,
+    IrysNodeTest,
 };
 
 // EVM test constants
@@ -80,7 +80,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .post_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
@@ -128,7 +128,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         });
 
     // The balance should decrease by the total cost plus block producer reward
-    let expected_spent = U256::from_le_bytes(tx.header.total_cost().to_le_bytes());
+    let expected_spent = U256::from_le_bytes(tx.header.total_cost().get().to_le_bytes());
 
     let actual_spent = TEST_USER_BALANCE_IRYS - signer_balance;
 
@@ -282,7 +282,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _, outcome) = mine_block_and_wait_for_validation(&node.node_ctx).await?;
+    let (block, _, outcome) = node.mine_block_and_wait_for_validation().await?;
     assert_eq!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
@@ -338,7 +338,10 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     )]);
     let node = IrysNodeTest::new_genesis(config).start().await;
     let reth_context = node.node_ctx.reth_node_adapter.clone();
-    let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
+    let _recipient_init_balance = reth_context
+        .rpc
+        .get_balance(recipient.address(), None)
+        .await?;
 
     let evm_tx_req = TransactionRequest {
         to: Some(TxKind::Call(recipient.address())),
@@ -363,7 +366,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .post_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = mine_block(&node.node_ctx).await?.unwrap();
+    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
 
     // Get the transaction hashes from the block in order
@@ -433,11 +436,17 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await?;
 
     // Verify recipient received the transfer
-    let recipient_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
+    let recipient_balance = reth_context
+        .rpc
+        .get_balance(recipient.address(), None)
+        .await?;
     assert_eq!(recipient_balance, EVM_TEST_TRANSFER_AMOUNT); // The transferred amount
 
     // Get account1's final balance after all transactions
-    let final_balance = reth_context.rpc.get_balance(account1.address(), None)?;
+    let final_balance = reth_context
+        .rpc
+        .get_balance(account1.address(), None)
+        .await?;
 
     // Calculate how much account1 actually spent
     // actual_spent = initial_balance - final_balance
@@ -448,7 +457,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     // 1. The total storage cost (term_fee + perm_fee if any)
     // 2. The gas costs for the EVM transaction
     // 3. The transfer amount
-    let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().to_le_bytes());
+    let storage_fees = U256::from_le_bytes(irys_tx.header.total_cost().get().to_le_bytes());
     let gas_costs = U256::from(EVM_GAS_LIMIT as u128 * EVM_GAS_PRICE);
 
     let expected_spent = storage_fees + gas_costs + EVM_TEST_TRANSFER_AMOUNT;
@@ -473,7 +482,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
     let mut prev_ts: Option<u128> = None;
     let reward_address = node.node_ctx.config.node_config.reward_address;
-    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
+    let mut _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
 
     for _ in 0..3 {
         // mine a single block
@@ -490,7 +499,7 @@ async fn heavy_rewards_get_calculated_correctly() -> eyre::Result<()> {
 
         // update baseline timestamp and ensure the next block gets a later one
         prev_ts = Some(new_ts);
-        _init_balance = reth_context.rpc.get_balance(reward_address, None)?;
+        _init_balance = reth_context.rpc.get_balance(reward_address, None).await?;
         sleep(Duration::from_millis(1_500)).await;
     }
 
@@ -535,8 +544,11 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify that the transaction was rejected due to insufficient funds
     match tx_result {
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            info!("Transaction correctly rejected due to insufficient funds");
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            info!(
+                "Transaction {} correctly rejected due to insufficient funds",
+                tx_id
+            );
         }
         Ok(_) => panic!("Expected transaction to be rejected due to insufficient funds"),
         Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
@@ -626,8 +638,11 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
 
     // Verify that the transaction was rejected due to insufficient funds
     match tx_result {
-        Err(AddTxError::TxIngress(TxIngressError::Unfunded)) => {
-            info!("Transaction correctly rejected due to insufficient funds (nonexistent account)");
+        Err(AddTxError::TxIngress(TxIngressError::Unfunded(tx_id))) => {
+            info!(
+                "Transaction {} correctly rejected due to insufficient funds (nonexistent account)",
+                tx_id
+            );
         }
         Ok(_) => panic!("Expected transaction to be rejected due to insufficient funds"),
         Err(other_error) => panic!("Expected Unfunded error, got: {:?}", other_error),
@@ -1065,7 +1080,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        let expected_stake_amount = stake_tx.deref().value.into();
+        let expected_stake_amount: U256 = stake_tx.deref().value.into();
         assert_eq!(
             bd.amount, expected_stake_amount,
             "Stake amount should be fee + stake_fee.amount"
@@ -1079,7 +1094,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Fourth transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.address());
-        let expected_pledge_amount = consensus_config.pledge_base_value.amount.into();
+        let expected_pledge_amount: U256 = consensus_config.pledge_base_value.amount.into();
         assert_eq!(
             bd.amount, expected_pledge_amount,
             "Pledge amount should be fee + pledge_fee.amount"
@@ -1117,9 +1132,12 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
                 irys_types::storage_pricing::phantoms::CostPerChunk,
                 irys_types::storage_pricing::phantoms::Irys,
             )>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
+        ) -> Result<
+            (EthBuiltPayload, irys_types::U256),
+            irys_actors::block_producer::BlockProductionError,
+        > {
             // Tamper the EVM payload by reversing submit tx order (keeps PoA untouched)
             let mut tampered_mempool = mempool.clone();
             if tampered_mempool.submit_txs.len() >= 2 {
@@ -1325,8 +1343,8 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         data,
         genesis_node.get_anchor().await?,
         DataLedger::Publish,
-        price_info.term_fee,
-        Some(price_info.perm_fee),
+        price_info.term_fee.into(),
+        Some(price_info.perm_fee.into()),
     )?;
     let malicious_tx = poor_user_signer.sign_transaction(malicious_tx)?;
 
@@ -1443,7 +1461,7 @@ async fn heavy_test_block_tree_pruning() -> eyre::Result<()> {
     // Configure a node with specified block_tree_depth
     let config = NodeConfig::testing().with_consensus(|c| {
         c.block_tree_depth = block_tree_depth;
-        c.mempool.anchor_expiry_depth = 2;
+        c.mempool.tx_anchor_expiry_depth = 2;
         c.block_migration_depth = 2;
     });
 
@@ -1533,9 +1551,12 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
                 irys_types::storage_pricing::phantoms::CostPerChunk,
                 irys_types::storage_pricing::phantoms::Irys,
             )>,
-            timestamp_ms: u128,
+            timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, irys_types::U256)> {
+        ) -> Result<
+            (EthBuiltPayload, irys_types::U256),
+            irys_actors::block_producer::BlockProductionError,
+        > {
             // Deliberately use an incorrect solution hash (all zeros)
             // This should cause the block to be rejected during validation
             let invalid_solution_hash = H256::zero();

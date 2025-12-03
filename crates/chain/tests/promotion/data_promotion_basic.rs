@@ -7,6 +7,7 @@ use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
 use irys_actors::MempoolServiceMessage;
 use irys_testing_utils::initialize_tracing;
+use irys_types::ingress::generate_ingress_proof;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
@@ -67,8 +68,8 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 node.get_anchor().await?,
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .unwrap();
         let tx = signer.sign_transaction(tx).unwrap();
@@ -262,7 +263,7 @@ async fn heavy_data_promotion_test() -> eyre::Result<()> {
     )
     .await;
 
-    node.node_ctx.stop().await;
+    node.stop().await;
 
     Ok(())
 }
@@ -320,8 +321,8 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
             .create_publish_transaction(
                 data,
                 blk5.block_hash, // anchor
-                price_info.perm_fee,
-                price_info.term_fee,
+                price_info.perm_fee.into(),
+                price_info.term_fee.into(),
             )
             .map_err(AddTxError::CreateTx)?;
 
@@ -337,10 +338,7 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(
-            data_tx.header.clone(),
-            tx,
-        ))
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(data_tx.header.clone(), tx).into())
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
     let _ = rx.await?;
@@ -375,6 +373,116 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
         .mine_blocks(config.consensus_config().block_migration_depth as usize + 1)
         .await?;
     // ..and now it should be promoted!
+    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
+    assert!(is_promoted);
+
+    // Wind down test
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+#[actix_web::test]
+async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
+    std::env::set_var(
+        "RUST_LOG",
+        "debug,storage::db=off,irys_domain::models::block_tree=off,actix_web=off,engine=off,trie=off,pruner=off,irys_actors::reth_service=off,provider=off,hyper=off,reqwest=off,irys_vdf=off,irys_actors::cache_service=off,irys_p2p=off,irys_actors::mining=off,irys_efficient_sampling=off,reth::cli=off,payload_builder=off",
+    );
+    initialize_tracing();
+
+    let seconds_to_wait = 30;
+
+    let config = NodeConfig::testing()
+        .with_consensus(|consensus| {
+            consensus.chunk_size = 32;
+            consensus.num_partitions_per_slot = 1;
+            consensus.epoch.num_blocks_in_epoch = 3;
+            consensus.block_migration_depth = 1;
+            consensus.mempool.tx_anchor_expiry_depth = 3;
+            consensus.mempool.ingress_proof_anchor_expiry_depth = 5;
+            consensus.hardforks.frontier.number_of_ingress_proofs_total = 1;
+        })
+        .with_genesis_peer_discovery_timeout(1000);
+
+    let genesis_signer = config.signer();
+
+    // Start the genesis node and wait for packing
+    let genesis_node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // mine some blocks
+    genesis_node.mine_blocks(5).await?;
+    // let blk5 = genesis_node.get_block_by_height(5).await?;
+
+    let chunks = vec![[10; 32], [20; 32], [30; 32]];
+    let mut data: Vec<u8> = Vec::new();
+    for chunk in &chunks {
+        data.extend_from_slice(chunk);
+    }
+
+    // Get price from the API
+    let price_info = genesis_node
+        .get_data_price(irys_types::DataLedger::Publish, data.len() as u64)
+        .await
+        .expect("Failed to get price");
+
+    let data_tx = genesis_signer.create_publish_transaction(
+        data.clone(),
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let data_tx = genesis_signer.sign_transaction(data_tx)?;
+
+    genesis_node.post_data_tx_raw(&data_tx.header).await;
+
+    genesis_node
+        .wait_for_mempool(data_tx.header.id, seconds_to_wait)
+        .await?;
+
+    // now we generate an ingress proof anchored to the genesis block
+    // this should be too old, and should be rejected by the API.
+    let too_old_ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        data_tx.header.data_root,
+        chunks.iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        genesis_node.get_block_by_height(0).await?.block_hash,
+    )?;
+
+    // ensure we are past the 5-block anchor depth for ingress proofs
+    genesis_node
+        .mine_blocks(6 - genesis_node.get_canonical_chain_height().await as usize)
+        .await?;
+
+    // submit
+    let resp = genesis_node
+        .ingest_ingress_proof(too_old_ingress_proof.clone())
+        .await;
+
+    // TODO proper error typing
+    assert!(resp.is_err_and(|e| e.to_string().starts_with("Invalid anchor")));
+
+    // now we submit an ingress proof with a newer anchor:
+    let new_ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        data_tx.header.data_root,
+        chunks.iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        genesis_node.get_anchor().await?,
+    )?;
+
+    // submit - should be accepted
+    let resp = genesis_node
+        .ingest_ingress_proof(new_ingress_proof.clone())
+        .await;
+
+    // TODO proper error typing
+    assert!(resp.is_ok());
+
+    // the ingress proof should be able to promote a tx
+    genesis_node.mine_block().await?;
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
     assert!(is_promoted);
 

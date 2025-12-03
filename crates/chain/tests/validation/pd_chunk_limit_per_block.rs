@@ -123,10 +123,10 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
 
     // Check that peer node rejected the block
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
-        outcome,
-        BlockValidationOutcome::Discarded,
-        "Peer node should have rejected the block containing 80 PD chunks (exceeds limit of 10)"
+    assert!(
+        matches!(outcome, BlockValidationOutcome::Discarded(_)),
+        "Peer node should have rejected the block containing 80 PD chunks (exceeds limit of 10), got: {:?}",
+        outcome
     );
 
     // Cleanup

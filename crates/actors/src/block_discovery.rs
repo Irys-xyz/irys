@@ -2,9 +2,10 @@ use crate::{
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{prevalidate_block, PreValidationError},
     services::ServiceSenders,
-    MempoolServiceMessage,
+    MempoolServiceMessage, MempoolServiceMessageWithSpan,
 };
 
+use crate::mempool_guard::MempoolReadGuard;
 use async_trait::async_trait;
 use futures::{future::BoxFuture, FutureExt as _};
 use irys_database::{
@@ -18,20 +19,17 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle,
+    IrysTransactionId, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{
-    sync::{
-        mpsc::{self, error::SendError, UnboundedSender},
-        oneshot::{self, error::RecvError},
-    },
-    time::timeout,
+use std::{collections::HashMap, sync::Arc};
+use tokio::sync::{
+    mpsc::{self, error::SendError, UnboundedSender},
+    oneshot::{self, error::RecvError},
 };
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, trace, warn, Instrument as _};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockDiscoveryError {
@@ -54,6 +52,18 @@ pub enum BlockDiscoveryError {
     InvalidCommitmentTransaction(String),
     #[error("Invalid data ledgers length: expected {0} ledgers, got {1}")]
     InvalidDataLedgersLength(u32, usize),
+    #[error("Anchor {anchor} for {item_type:?} is unknown/not part of this block's fork")]
+    InvalidAnchor {
+        item_type: AnchorItemType,
+        anchor: BlockHash,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AnchorItemType {
+    DataTransaction { tx_id: H256 },
+    IngressProof { promotion_target_id: H256 },
+    SystemTransaction { tx_id: H256 },
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -125,6 +135,8 @@ pub struct BlockDiscoveryServiceInner {
     pub block_index_guard: BlockIndexReadGuard,
     /// Read only view of the block_tree
     pub block_tree_guard: BlockTreeReadGuard,
+    /// Read only view of the mempool state
+    pub mempool_guard: MempoolReadGuard,
     /// Reference to the global config
     pub config: Config,
     /// The block reward curve
@@ -146,7 +158,7 @@ pub struct BlockDiscoveryService {
 }
 
 impl BlockDiscoveryService {
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_discovery")]
     pub fn spawn_service(
         inner: Arc<BlockDiscoveryServiceInner>,
         rx: mpsc::UnboundedReceiver<BlockDiscoveryMessage>,
@@ -178,7 +190,7 @@ impl BlockDiscoveryService {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn start(mut self) -> eyre::Result<()> {
         info!("Starting block discovery service");
 
@@ -210,10 +222,12 @@ impl BlockDiscoveryService {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
+                let block_hash = irys_block_header.block_hash;
+                let block_height = irys_block_header.height;
                 let result = self
                     .inner
                     .clone()
@@ -221,7 +235,12 @@ impl BlockDiscoveryService {
                     .await;
                 if let Some(sender) = sender {
                     if let Err(e) = sender.send(result) {
-                        tracing::error!("sender error: {:?}", e);
+                        tracing::error!(
+                            "Block discovery sender error for block {} (height {}): {:?}",
+                            block_hash,
+                            block_height,
+                            e
+                        );
                     };
                 }
             }
@@ -242,6 +261,7 @@ pub enum BlockDiscoveryMessage {
 }
 
 impl BlockDiscoveryServiceInner {
+    #[tracing::instrument(level = "trace", skip_all, fields(block.height = %block.height, block.hash = %block.block_hash))]
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
@@ -260,13 +280,21 @@ impl BlockDiscoveryServiceInner {
         let epoch_config = self.config.consensus.epoch.clone();
         let block_tree_sender = self.service_senders.block_tree.clone();
         let mempool_sender = self.service_senders.mempool.clone();
+        let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
+
+        let is_epoch_block =
+            new_block_header.height > 0 && new_block_header.height.is_multiple_of(blocks_in_epoch);
 
         debug!(
             block.height = ?new_block_header.height,
+            block.hash = %new_block_header.block_hash,
             block.global_step_counter = new_block_header.vdf_limiter_info.global_step_number,
             block.output = ?new_block_header.vdf_limiter_info.output,
             block.prev_output = ?new_block_header.vdf_limiter_info.prev_output,
-            "\nPre Validating block"
+            "\nPre Validating block height {} hash {} (epoch block? {})",
+            new_block_header.height,
+            new_block_header.block_hash,
+            is_epoch_block
         );
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
@@ -277,11 +305,9 @@ impl BlockDiscoveryServiceInner {
         let previous_block_header = {
             let (tx_prev, rx_prev) = oneshot::channel();
             mempool_sender
-                .send(MempoolServiceMessage::GetBlockHeader(
-                    parent_block_hash,
-                    false,
-                    tx_prev,
-                ))
+                .send(
+                    MempoolServiceMessage::GetBlockHeader(parent_block_hash, false, tx_prev).into(),
+                )
                 .map_err(|channel_error| {
                     BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
                 })?;
@@ -323,10 +349,7 @@ impl BlockDiscoveryServiceInner {
 
         let (tx, rx) = oneshot::channel();
         mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                submit_tx_ids_to_check.clone(),
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetDataTxs(submit_tx_ids_to_check.clone(), tx).into())
             .map_err(|channel_error| {
                 BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
             })?;
@@ -375,10 +398,7 @@ impl BlockDiscoveryServiceInner {
 
         let (tx, rx) = oneshot::channel();
         mempool
-            .send(MempoolServiceMessage::GetDataTxs(
-                publish_tx_ids_to_check.clone(),
-                tx,
-            ))
+            .send(MempoolServiceMessage::GetDataTxs(publish_tx_ids_to_check.clone(), tx).into())
             .map_err(|channel_error| {
                 BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
             })?;
@@ -437,19 +457,30 @@ impl BlockDiscoveryServiceInner {
         let mut commitments: Vec<CommitmentTransaction> = Vec::new();
         if let Some(commitment_ledger) = commitment_ledger {
             debug!(
-                "incoming block commitment txids, height {}\n{:#?}",
-                new_block_header.height, commitment_ledger
+                "incoming block commitment txids, height {} hash {}\n{:#?}",
+                new_block_header.height, new_block_header.block_hash, commitment_ledger
             );
             // TODO: we can't get these from the database
             // if we can, something has gone wrong!
-            match get_commitment_tx_in_parallel(&commitment_ledger.tx_ids.0, &mempool_sender, &db)
-                .await
+            match get_commitment_tx_in_parallel(
+                &commitment_ledger.tx_ids.0,
+                &self.mempool_guard,
+                &db,
+            )
+            .await
             {
                 Ok(tx) => {
                     commitments = tx;
                 }
                 Err(e) => {
-                    error!("Failed to collect commitment transactions: {:?}", e);
+                    error!(
+                        "Failed to collect commitment transactions for block {} (height {}): {:?}. Missing {} tx(s): {:?}",
+                        new_block_header.block_hash,
+                        new_block_header.height,
+                        e,
+                        commitment_ledger.tx_ids.0.len(),
+                        commitment_ledger.tx_ids.0
+                    );
                     return Err(BlockDiscoveryError::MissingTransactions(
                         commitment_ledger.tx_ids.0.clone(),
                     ));
@@ -465,64 +496,191 @@ impl BlockDiscoveryServiceInner {
             new_block_header.get_data_ledger_tx_ids()
         );
 
+        //====================================
+        // Anchor validation
+        //------------------------------------
+
         // Walk the this blocks ancestors up to the anchor depth checking to see if any of the transactions
         // have already been included in a recent parent.
         let block_height = new_block_header.height;
 
-        let anchor_expiry_depth = mempool_config.anchor_expiry_depth as u64;
-        let min_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
-        let mut parent_block = previous_block_header.clone();
+        let anchor_expiry_depth = mempool_config.tx_anchor_expiry_depth as u64;
+        let min_tx_anchor_height = block_height.saturating_sub(anchor_expiry_depth);
+        let min_ingress_proof_anchor_height =
+            block_height.saturating_sub(mempool_config.ingress_proof_anchor_expiry_depth.into());
 
         let binding = new_block_header.get_data_ledger_tx_ids();
         let incoming_data_tx_ids = binding.get(&DataLedger::Submit);
 
-        if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
-            while parent_block.height >= min_anchor_height {
-                // Check to see if any data txids appeared in prior blocks
-                let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+        // TODO: we can remove cloning (here and in the loop)
+        // by extracting out just the metadata we need (height, hash, data ledger tx ids)
+        let mut parent_block = previous_block_header.clone();
 
-                // Compare each ledger type between current and parent blocks
-                if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
-                    // Check for intersection between current and parent txids for this ledger
-                    for txid in incoming_data_tx_ids {
-                        if parent_txids.contains(txid) {
-                            return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
+        // set of valid anchor block hashes for TRANSACTIONS
+        // computed from the block tree & database
+        // short vecs are probably faster than HashSet
+        let mut valid_tx_anchor_blocks = vec![];
+        let bt_finished_height = {
+            // block for block_tree
+            // explicit drop(block_tree) isn't good enough for the compiler
+            let block_tree = block_tree_guard.read();
+            if let Some(incoming_data_tx_ids) = incoming_data_tx_ids {
+                while parent_block.height >= min_tx_anchor_height {
+                    // Check to see if any data txids appeared in prior blocks
+                    let parent_data_tx_ids = parent_block.get_data_ledger_tx_ids();
+
+                    // Compare each ledger type between current and parent blocks
+                    if let Some(parent_txids) = parent_data_tx_ids.get(&DataLedger::Submit) {
+                        // Check for intersection between current and parent txids for this ledger
+                        for txid in incoming_data_tx_ids {
+                            if parent_txids.contains(txid) {
+                                return Err(BlockDiscoveryError::DuplicateTransaction(*txid));
+                            }
                         }
                     }
-                }
+                    valid_tx_anchor_blocks.push(parent_block.block_hash);
 
-                if parent_block.height == 0 {
-                    break;
-                }
-
-                // Continue the loop - get the next parent block
-                // Get the next parent block and own it
-                let previous_block_header = match db.view_eyre(|tx| {
-                    block_header_by_hash(tx, &parent_block.previous_block_hash, false)
-                }) {
-                    Ok(Some(header)) => header,
-                    Ok(None) => break,
-                    Err(e) => {
-                        return Err(BlockDiscoveryError::InternalError(
-                            BlockDiscoveryInternalError::DatabaseError(e),
-                        ))
+                    if parent_block.height == 0 {
+                        break;
                     }
-                };
 
-                parent_block = previous_block_header; // Move instead of borrow
+                    // Continue the loop - get the next parent block from the block tree
+                    let previous_block_header = match block_tree
+                        .get_block(&parent_block.previous_block_hash)
+                    {
+                        Some(header) => header.clone(),
+                        None =>
+                        // fall back to the database
+                        {
+                            match db.view_eyre(|tx| {
+                                block_header_by_hash(tx, &parent_block.previous_block_hash, false)
+                            }) {
+                                Ok(Some(header)) => header,
+                                Ok(None) => {
+                                    return Err(BlockDiscoveryError::PreviousBlockNotFound {
+                                        previous_block_hash: parent_block.previous_block_hash,
+                                    });
+                                }
+                                Err(e) => {
+                                    return Err(BlockDiscoveryError::InternalError(
+                                        BlockDiscoveryInternalError::DatabaseError(e),
+                                    ))
+                                }
+                            }
+                        }
+                    };
+
+                    parent_block = previous_block_header; // Move instead of borrow
+                }
+            }
+            parent_block.height
+        };
+
+        let mut valid_ingress_anchor_blocks = valid_tx_anchor_blocks.clone();
+
+        // get any remaining valid_ingress_anchor_block hashes from the block index
+        // we do not need the full block headers, so we use the block index
+        {
+            // how many blocks do we need the block index to get to `min_ingress_proof_anchor_height`?
+            let remaining = bt_finished_height.saturating_sub(min_ingress_proof_anchor_height);
+            debug!(target = "preval-anchor", "min ingress proof anchor height {min_ingress_proof_anchor_height} block_height {} block_hash {} block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash);
+
+            // get from the block index
+            let block_index = self.block_index_guard.read();
+            // this is the last block header we got from the above loop
+            // we use this to ensure that
+            let last_bt_safe_parent_height = parent_block.height.checked_sub(1);
+            for height in min_ingress_proof_anchor_height..bt_finished_height {
+                // these block index assertions should always be true, which is why we panic (we enforce that the block tree must at least go to the boundary for migration in Config::validate)
+                let block_index_item =
+                    block_index
+                        .get_item(height)
+                        .unwrap_or_else(|| panic!("Internal critical assertion failed: Unable to get entry for height {height} from block index\nDEBUG: min ingress proof anchor height {min_ingress_proof_anchor_height} validating block: height {}, hash {} - block tree finished height {bt_finished_height} remaining blocks to fetch as anchors {remaining}", &new_block_header.height, &new_block_header.block_hash));
+
+                if last_bt_safe_parent_height.is_some_and(|s| s == height)
+                    && block_index_item.block_hash != parent_block.previous_block_hash
+                {
+                    // this indicates some sort of block index corruption
+                    panic!("Internal critical assertion failed: block height: {} hash: {} doesn't match block_index height: {} hash: {}", &parent_block.height - 1, &parent_block.previous_block_hash, &height, &block_index_item.block_hash)
+                }
+                valid_ingress_anchor_blocks.push(block_index_item.block_hash);
+            }
+        }
+        trace!(
+            "Valid ingress proof anchors for {}: {:?}",
+            &new_block_header.block_hash,
+            &valid_ingress_anchor_blocks
+        );
+
+        // validate anchors for submit, publish, commitments, and ingress proofs
+        // (in this context, it means that anchors must be part of the fork/chain that the currently validating block is on)
+        // all txs (commitment, data) use the same anchor
+        // ingress proofs have a different, oftentimes longer, anchor
+
+        // check anchors for submit ledger
+        for tx in submit_txs.iter() {
+            if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+                return Err(BlockDiscoveryError::InvalidAnchor {
+                    item_type: AnchorItemType::DataTransaction { tx_id: tx.id },
+                    anchor: tx.anchor,
+                });
             }
         }
 
-        let (parent_ema_snapshot, parent_epoch_snapshot) = {
+        // for commitments, only validate if we're not an epoch block
+        // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
+        if !is_epoch_block {
+            for tx in commitments.iter() {
+                if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+                    return Err(BlockDiscoveryError::InvalidAnchor {
+                        item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
+                        anchor: tx.anchor,
+                    });
+                }
+            }
+        }
+
+        // and for ingress proofs
+        for tx_header in publish_txs.iter() {
+            let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
+                BlockDiscoveryError::BlockValidationError(PreValidationError::IngressProofsMissing)
+            })?;
+            // Validate the anchors
+            for proof in tx_proofs.iter() {
+                if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
+                    return Err(BlockDiscoveryError::InvalidAnchor {
+                        item_type: AnchorItemType::IngressProof {
+                            promotion_target_id: tx_header.id,
+                        },
+                        anchor: proof.anchor,
+                    });
+                }
+            }
+        }
+
+        let (parent_ema_snapshot, parent_epoch_snapshot, parent_meta) = {
             let read = block_tree_guard.read();
-            let ema_snapshot = read
-                .get_ema_snapshot(&parent_block_hash)
-                .expect("parent block to be in block tree");
+
+            let parent_block = read.blocks.get(&parent_block_hash).unwrap_or_else(|| {
+                panic!(
+                    "parent block {} should be in the block tree",
+                    &parent_block_hash
+                )
+            });
+
+            let ema_snapshot = parent_block.ema_snapshot.clone();
             // FIXME: Does this need to be for the current block if it's an epoch block?
-            let epoch_snapshot = read
-                .get_epoch_snapshot(&parent_block_hash)
-                .expect("parent block to be in block_tree");
-            (ema_snapshot, epoch_snapshot)
+            let epoch_snapshot = parent_block.epoch_snapshot.clone();
+
+            (
+                ema_snapshot,
+                epoch_snapshot,
+                (
+                    parent_block.chain_state,
+                    parent_block.children.clone(),
+                    parent_block.timestamp,
+                ),
+            )
         };
 
         let validation_result = prevalidate_block(
@@ -543,21 +701,29 @@ impl BlockDiscoveryServiceInner {
                 all_txs.extend_from_slice(&publish_txs);
 
                 // Check if we've reached the end of an epoch and should finalize commitments
-                let blocks_in_epoch = epoch_config.num_blocks_in_epoch;
-                let is_epoch_block = block_height > 0 && block_height % blocks_in_epoch == 0;
 
                 let arc_commitment_txs = Arc::new(commitments);
 
                 let (epoch_snapshot, mut parent_commitment_snapshot) = {
                     let read = block_tree_guard.read();
-                    let epoch_snapshot = read
-                        .get_epoch_snapshot(&parent_block_hash)
-                        .expect("parent blocks epoch_snapshot should be retrievable");
-                    let parent_commitment_snapshot = read
-                        .get_commitment_snapshot(&parent_block_hash)
-                        .expect("parent block to be in block_tree")
-                        .as_ref()
-                        .clone();
+                    let parent_block = read.blocks.get(&parent_block_hash).unwrap_or_else(|| {
+                        panic!(
+                            "Parent block {} should be in the block tree!\nDEBUG: block tree tip height: {}, child block: {} {}, parent meta:\n {:?}",
+                            &parent_block_hash,
+                            &read
+                                .blocks
+                                .get(&read.tip)
+                                .expect("Tip block not found")
+                                .block
+                                .height,
+                                &new_block_header.block_hash,
+                                &new_block_header.height,
+                                &parent_meta
+                        )
+                    });
+                    let epoch_snapshot = parent_block.epoch_snapshot.clone();
+                    let parent_commitment_snapshot =
+                        parent_block.commitment_snapshot.as_ref().clone();
                     (epoch_snapshot, parent_commitment_snapshot)
                 };
 
@@ -572,7 +738,8 @@ impl BlockDiscoveryServiceInner {
                         .eq(arc_commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
-                                "Epoch block commitment tx for block height: {block_height}\nexpected: {:#?}\nactual: {:#?}",
+                                "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
+                                new_block_header.block_hash,
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
                                 arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
@@ -678,82 +845,66 @@ impl BlockDiscoveryServiceInner {
                     "sending block to bus: block height {:?}",
                     &new_block_header.height
                 );
+                let block_hash_for_log = new_block_header.block_hash;
+                let block_height_for_log = new_block_header.height;
                 if let Err(error) =
                     gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
                 {
-                    tracing::error!("Failed to send gossip message: {}", error);
+                    tracing::error!(
+                        "Failed to send gossip message for block {} (height {}): {}",
+                        block_hash_for_log,
+                        block_height_for_log,
+                        error
+                    );
                 }
 
                 Ok(())
             }
             Err(err) => {
-                tracing::error!("Block validation error {:?}", err);
+                tracing::error!(
+                    "Block validation error for block {} (height {}): {:?}",
+                    new_block_header.block_hash,
+                    new_block_header.height,
+                    err
+                );
                 Err(BlockDiscoveryError::BlockValidationError(err))
             }
         }
     }
 }
 
-/// Get all commitment transactions from the mempool and database
-pub async fn get_commitment_tx_in_parallel(
+/// Query database for commitment transactions by IDs
+async fn query_commitment_txs_from_db(
     commitment_tx_ids: &[IrysTransactionId],
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
+) -> eyre::Result<HashMap<IrysTransactionId, CommitmentTransaction>> {
+    let db_ref = db.clone();
+    let tx_ids = commitment_tx_ids.to_vec();
+
+    tokio::task::spawn_blocking(move || {
+        let db_tx = db_ref.tx()?;
+        let mut results = HashMap::new();
+        for tx_id in &tx_ids {
+            if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
+                results.insert(*tx_id, header);
+            }
+        }
+        Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
+    })
+    .await
+    .map_err(|e| eyre::eyre!("Database task join error: {}", e))?
+}
+
+/// Merge commitment transactions from mempool and database, returning ordered vec
+fn merge_commitment_tx_results(
+    commitment_tx_ids: &[IrysTransactionId],
+    mempool_map: HashMap<IrysTransactionId, CommitmentTransaction>,
+    db_map: HashMap<IrysTransactionId, CommitmentTransaction>,
 ) -> eyre::Result<Vec<CommitmentTransaction>> {
-    let tx_ids_clone = commitment_tx_ids;
-
-    // Set up a function to query the mempool for commitment transactions
-    let mempool_future = {
-        let tx_ids = tx_ids_clone;
-        async move {
-            let (tx, rx) = oneshot::channel();
-
-            match mempool_sender.send(MempoolServiceMessage::GetCommitmentTxs {
-                commitment_tx_ids: tx_ids.to_vec(),
-                response: tx,
-            }) {
-                Ok(()) => {
-                    // Message was sent successfully, wait for response with timeout
-                    let result = timeout(Duration::from_secs(5), rx)
-                    .await
-                    .map_err(|_| eyre::eyre!("Mempool request timed out after 5 seconds - service may be unresponsive"))?
-                    .map_err(|e| eyre::eyre!("Mempool response channel closed: {}", e))?;
-
-                    Ok(result)
-                }
-                Err(_) => {
-                    // Channel is closed - either no receiver was ever created or it was dropped
-                    Err(eyre::eyre!("Mempool service is not available (channel closed - service may not be running)"))
-                }
-            }
-        }
-    };
-
-    // Set up a function to query the database for commitment transactions
-    let db_future = {
-        let tx_ids = commitment_tx_ids;
-        let db_ref = db.clone();
-        async move {
-            let db_tx = db_ref.tx()?;
-            let mut results = HashMap::new();
-            for tx_id in tx_ids {
-                if let Some(header) = commitment_tx_by_txid(&db_tx, tx_id)? {
-                    results.insert(*tx_id, header);
-                }
-            }
-            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(results)
-        }
-    };
-
-    // Query mempool and database in parallel
-    let (mempool_results, db_results) = tokio::join!(mempool_future, db_future);
-    let mempool_map = mempool_results?;
-    let db_map = db_results?;
-
-    // Combine results, preferring mempool
     let mut headers = Vec::with_capacity(commitment_tx_ids.len());
     let mut missing = Vec::new();
 
+    // Combine results, preferring mempool over database
     for tx_id in commitment_tx_ids {
         if let Some(header) = mempool_map.get(tx_id) {
             headers.push(header.clone());
@@ -771,10 +922,33 @@ pub async fn get_commitment_tx_in_parallel(
     }
 }
 
+/// Get all commitment transactions from the mempool and database using direct read guard access.
+pub async fn get_commitment_tx_in_parallel(
+    commitment_tx_ids: &[IrysTransactionId],
+    mempool_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<Vec<CommitmentTransaction>> {
+    let mempool_future = {
+        let guard = mempool_guard.clone();
+        let tx_ids = commitment_tx_ids.to_vec();
+        async move {
+            let mempool_map = guard.get_commitment_txs(&tx_ids).await;
+            Ok::<HashMap<IrysTransactionId, CommitmentTransaction>, eyre::Report>(mempool_map)
+        }
+    };
+
+    let (mempool_result, db_result) = tokio::join!(
+        mempool_future,
+        query_commitment_txs_from_db(commitment_tx_ids, db)
+    );
+
+    merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
+}
+
 /// Get all data transactions from the mempool and database
 pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessage>,
+    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<DataTransactionHeader>> {
     get_data_tx_in_parallel_inner(
@@ -783,7 +957,7 @@ pub async fn get_data_tx_in_parallel(
             let sender = mempool_sender.clone();
             async move {
                 let (tx, rx) = oneshot::channel();
-                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx))?;
+                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx).into())?;
                 Ok(rx.await?)
             }
             .boxed()
@@ -795,6 +969,7 @@ pub async fn get_data_tx_in_parallel(
 
 /// Get all data transactions from the mempool and database
 /// with a custom get_data_txs function (this is used by the mempool)
+#[tracing::instrument(level = "trace", skip_all, fields(tx.count = data_tx_ids.len()))]
 pub async fn get_data_tx_in_parallel_inner<F>(
     data_tx_ids: Vec<IrysTransactionId>,
     get_data_txs: F,
@@ -852,12 +1027,14 @@ where
     let db_map = db_results?;
 
     debug!(
-        "mempool_results:\n {:?}",
-        mempool_map.iter().map(|x| x.0).collect::<Vec<_>>()
+        mempool_count = mempool_map.len(),
+        db_count = db_map.len(),
+        "Query results retrieved"
     );
-    debug!(
-        "db_results:\n {:?}",
-        db_map.iter().map(|x| x.0).collect::<Vec<_>>()
+    trace!(
+        mempool_keys = ?mempool_map.keys().collect::<Vec<_>>(),
+        db_keys = ?db_map.keys().collect::<Vec<_>>(),
+        "Detailed query results"
     );
 
     // Combine results, preferring mempool

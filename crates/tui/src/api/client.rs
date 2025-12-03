@@ -50,7 +50,7 @@ impl ApiClient {
         // between responsiveness and avoiding false negatives on slow networks.
         let client = ClientBuilder::new()
             .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(1))
+            .connect_timeout(Duration::from_secs(timeout_secs))
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(Duration::from_secs(60))
             .build()
@@ -59,7 +59,7 @@ impl ApiClient {
         Ok(Self { client })
     }
 
-    #[instrument(skip(self, cancel_token), fields(endpoint = %endpoint))]
+    #[instrument(skip_all, fields(endpoint = %endpoint))]
     async fn get_with_cancellation<T>(
         &self,
         url: &str,
@@ -177,7 +177,8 @@ impl ApiClient {
             .await
         {
             Ok(info) => Ok(info),
-            Err(_) => {
+            Err(e) => {
+                debug!("Failed to fetch /v1/info from {}: {}", node_url, e);
                 // Fallback: Try without /v1 prefix for older/remote nodes
                 self.get_with_cancellation_without_version(node_url, "/info", Some(cancel_token))
                     .await

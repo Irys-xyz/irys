@@ -102,6 +102,7 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn tick(&self) {
         // Check to see if any of the storage modules are ready to be flushed to disk
         let storage_modules = {
@@ -112,13 +113,16 @@ impl StorageModuleServiceInner {
         for sm in storage_modules.iter() {
             if sm.last_pending_write().elapsed() > Duration::from_secs(5) {
                 if let Err(e) = sm.force_sync_pending_chunks() {
-                    error!("Couldn't flush pending chunks: {}", e);
+                    error!(
+                        "Couldn't flush pending chunks for storage_module {}: {}",
+                        sm.id, e
+                    );
                 }
             }
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn handle_partition_assignments_update(
         &mut self,
         storage_module_info_update: Arc<Vec<StorageModuleInfo>>,
@@ -404,8 +408,8 @@ impl StorageModuleServiceInner {
                     },
                 ) {
                     error!(
-                        "Failed to send migration request for block {}: {}",
-                        block_height, e
+                        "Failed to send migration request for block {} (height {}): {}",
+                        block_hash, block_height, e
                     );
                     return Err(eyre!(
                         "Unable to index storage module chunks do to mpsc send failure: {}",
@@ -416,8 +420,8 @@ impl StorageModuleServiceInner {
                 // We await responses so we only perform one migration at a time
                 if let Err(e) = rx.await {
                     error!(
-                        "Failed to receive migration response for block {}: {}",
-                        block_height, e
+                        "Failed to receive migration response for block {} (height {}): {}",
+                        block_hash, block_height, e
                     );
                 }
             }
@@ -439,6 +443,7 @@ impl StorageModuleServiceInner {
         Ok(())
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     fn clear_assignment_if_outdated(
         &self,
         module: &Arc<StorageModule>,
@@ -561,6 +566,7 @@ impl StorageModuleServiceInner {
 
     /// Validates that a storage module's partition assignment matches the on-disk parameters.
     /// Reports an error if there's a mismatch.
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn validate_packing_params(
         &self,
         module: &StorageModule,
@@ -643,6 +649,7 @@ impl StorageModuleServiceInner {
 /// mpsc style service wrapper for the Storage Module Service
 impl StorageModuleService {
     /// Spawn a new StorageModule service
+    #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_storage_module")]
     pub fn spawn_service(
         rx: UnboundedReceiver<StorageModuleServiceMessage>,
         storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
@@ -686,6 +693,7 @@ impl StorageModuleService {
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all, err)]
     async fn start(mut self) -> eyre::Result<()> {
         tracing::info!("starting StorageModule Service");
 

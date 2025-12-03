@@ -1,7 +1,7 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Address,
-    Base64, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
-    IngressProof, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256, U256,
+    Base64, BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
+    IngressProof, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -48,8 +48,8 @@ impl IrysSigner {
 
         // TODO: These should be calculated from some pricing params passed in
         // as a parameter
-        transaction.header.perm_fee = Some(U256::from(1));
-        transaction.header.term_fee = U256::from(1);
+        transaction.header.perm_fee = Some(BoundedFee::from(1_u64));
+        transaction.header.term_fee = BoundedFee::from(1_u64);
 
         transaction.header.anchor = anchor;
 
@@ -77,12 +77,12 @@ impl IrysSigner {
         data: Vec<u8>,
         anchor: H256,
         ledger: DataLedger,
-        term_fee: U256,
-        perm_fee: Option<U256>,
+        term_fee: BoundedFee,
+        perm_fee: Option<BoundedFee>,
     ) -> Result<DataTransaction> {
         let mut transaction = self.create_transaction(data, anchor)?;
 
-        // Set the provided fees directly as U256
+        // Set the provided fees
         transaction.header.ledger_id = ledger as u32;
         transaction.header.term_fee = term_fee;
         transaction.header.perm_fee = perm_fee;
@@ -95,8 +95,8 @@ impl IrysSigner {
         &self,
         data: Vec<u8>,
         anchor: H256,
-        perm_price: U256,
-        term_price: U256,
+        perm_price: BoundedFee,
+        term_price: BoundedFee,
     ) -> Result<DataTransaction> {
         self.create_transaction_with_fees(
             data,

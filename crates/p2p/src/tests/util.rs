@@ -43,7 +43,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, warn, Span};
+use tracing::{debug, info, warn, Span};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
@@ -920,6 +920,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         service_senders,
     ));
 
+    info!("Created GossipDataHandler stub");
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         block_pool: block_pool_stub,
@@ -932,4 +933,53 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
     })
+}
+
+pub(crate) async fn data_handler_with_stubbed_pool<T: ApiClient>(
+    peer_list_guard: &PeerList,
+    api_client_stub: T,
+    sync_state: ChainSyncState,
+    block_pool: Arc<BlockPool<BlockDiscoveryStub, MempoolStub>>,
+) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
+    let (service_senders, _service_receivers) =
+        irys_actors::test_helpers::build_test_service_senders();
+    let gossip_tx = service_senders.gossip_broadcast.clone();
+    let mempool_stub = MempoolStub::new(gossip_tx);
+    let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
+    let execution_payload_cache =
+        ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
+
+    info!("Created GossipDataHandler stub");
+    Arc::new(GossipDataHandler {
+        mempool: mempool_stub,
+        block_pool,
+        cache: Arc::new(GossipCache::new()),
+        api_client: api_client_stub,
+        gossip_client: GossipClient::new(Duration::from_millis(100000), Address::repeat_byte(2)),
+        peer_list: peer_list_guard.clone(),
+        sync_state,
+        span: Span::current(),
+        execution_payload_cache,
+        data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+    })
+}
+
+pub(crate) async fn wait_for_block(
+    sync_state: &ChainSyncState,
+    block_height: usize,
+    timeout: Duration,
+) {
+    let start = tokio::time::Instant::now();
+    loop {
+        let highest_block = sync_state.highest_processed_block();
+        if highest_block >= block_height {
+            break;
+        }
+
+        if tokio::time::Instant::now().duration_since(start) > timeout {
+            panic!("Timeout waiting for block at height {}", block_height);
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

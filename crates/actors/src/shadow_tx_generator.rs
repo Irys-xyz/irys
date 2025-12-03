@@ -9,8 +9,8 @@ use irys_types::{
         Amount,
     },
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    Address, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysBlockHeader, H256, U256,
+    Address, BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader,
+    IngressProofsList, IrysBlockHeader, UnixTimestamp, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -19,7 +19,7 @@ use crate::block_producer::ledger_expiry::LedgerExpiryBalanceDelta;
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
 
 /// Structure holding publish ledger transactions with their proofs
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PublishLedgerWithTxs {
     pub txs: Vec<DataTransactionHeader>,
     pub proofs: Option<IngressProofsList>,
@@ -151,6 +151,7 @@ impl Iterator for ShadowTxGenerator<'_> {
 }
 
 impl<'a> ShadowTxGenerator<'a> {
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a Address,
@@ -223,7 +224,13 @@ impl<'a> ShadowTxGenerator<'a> {
             .into_iter();
 
         // Initialize publish ledger iterator with aggregated ingress proof rewards
-        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(publish_ledger, config)?;
+        // Use parent block's timestamp for hardfork params (convert millis to seconds)
+        let parent_block_timestamp_secs = parent_block.timestamp_secs();
+        let aggregated_rewards = Self::accumulate_ingress_rewards_for_init(
+            publish_ledger,
+            config,
+            parent_block_timestamp_secs,
+        )?;
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
             generator.create_publish_shadow_txs(aggregated_rewards)?
         } else {
@@ -264,6 +271,7 @@ impl<'a> ShadowTxGenerator<'a> {
     }
 
     // Static helper methods for initialization
+    #[tracing::instrument(level = "trace", skip_all, err)]
     fn create_expired_ledger_shadow_txs(
         &self,
         balance_delta: &LedgerExpiryBalanceDelta,
@@ -315,6 +323,7 @@ impl<'a> ShadowTxGenerator<'a> {
     fn accumulate_ingress_rewards_for_init(
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
+        timestamp_secs: UnixTimestamp,
     ) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
         let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
 
@@ -330,6 +339,11 @@ impl<'a> ShadowTxGenerator<'a> {
             return Ok(BTreeMap::new());
         }
 
+        // Get ingress proof params for this timestamp
+        let number_of_ingress_proofs_total = config
+            .hardforks
+            .number_of_ingress_proofs_total_at(timestamp_secs);
+
         // Process all transactions (MUST BE SORTED)
         for (index, tx) in publish_ledger.txs.iter().enumerate() {
             // CRITICAL: All publish ledger txs MUST have perm_fee
@@ -338,11 +352,16 @@ impl<'a> ShadowTxGenerator<'a> {
                 .ok_or_else(|| eyre::eyre!("publish ledger tx missing perm_fee {}", tx.id))?;
 
             // Calculate fee distribution using PublishFeeCharges
-            let publish_charges = PublishFeeCharges::new(perm_fee, tx.term_fee, config)?;
+            let publish_charges = PublishFeeCharges::new(
+                perm_fee,
+                tx.term_fee,
+                config,
+                number_of_ingress_proofs_total,
+            )?;
 
             // Get all the ingress proofs for the transaction
-            let start_index = index * config.number_of_ingress_proofs_total as usize;
-            let end_index = start_index + config.number_of_ingress_proofs_total as usize;
+            let start_index = index * number_of_ingress_proofs_total as usize;
+            let end_index = start_index + number_of_ingress_proofs_total as usize;
             let ingress_proofs = &proofs[start_index..end_index];
 
             // Get fee charges for all ingress proofs
@@ -475,7 +494,7 @@ impl<'a> ShadowTxGenerator<'a> {
         // The block producer reward (5% of term_fee) is paid separately via transaction_fee
         let treasury_amount = term_charges
             .term_fee_treasury
-            .saturating_add(tx.perm_fee.unwrap_or(U256::zero()));
+            .saturating_add(tx.perm_fee.unwrap_or(BoundedFee::zero()).get());
 
         Ok(ShadowMetadata {
             shadow_tx: ShadowTransaction::new_v1(
@@ -504,9 +523,22 @@ impl<'a> ShadowTxGenerator<'a> {
         let term_charges = TermFeeCharges::new(tx.term_fee, self.config)?;
 
         // Construct perm fee charges if applicable
+        // Use parent block's timestamp for hardfork params (convert millis to seconds)
+        let parent_block_timestamp_secs = self.parent_block.timestamp_secs();
+        let number_of_ingress_proofs_total = self
+            .config
+            .hardforks
+            .number_of_ingress_proofs_total_at(parent_block_timestamp_secs);
         let perm_charges = tx
             .perm_fee
-            .map(|perm_fee| PublishFeeCharges::new(perm_fee, tx.term_fee, self.config))
+            .map(|perm_fee| {
+                PublishFeeCharges::new(
+                    perm_fee,
+                    tx.term_fee,
+                    self.config,
+                    number_of_ingress_proofs_total,
+                )
+            })
             .transpose()?;
 
         // Create shadow transaction
@@ -746,11 +778,11 @@ impl RollingHash {
 mod tests {
     use super::*;
     use irys_types::ingress::IngressProofV1;
-    use irys_types::CommitmentType;
     use irys_types::{
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
         IrysBlockHeader, IrysSignature, Signature, H256,
     };
+    use irys_types::{BlockHash, CommitmentType};
     use itertools::Itertools as _;
 
     fn create_test_commitment(
@@ -785,30 +817,38 @@ mod tests {
         let actual_perm_fee = perm_fee.unwrap_or_else(|| {
             // If no perm_fee specified, calculate minimum required for ingress proofs
             let config = ConsensusConfig::testing();
+            let number_of_ingress_proofs_total = config
+                .hardforks
+                .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let ingress_reward_per_proof = (term_fee
                 * config.immediate_tx_inclusion_reward_percent.amount)
                 / U256::from(10000);
             let total_ingress_reward =
-                ingress_reward_per_proof * U256::from(config.number_of_ingress_proofs_total);
+                ingress_reward_per_proof * U256::from(number_of_ingress_proofs_total);
             U256::from(1000000) + total_ingress_reward
         });
 
         let tx = signer
-            .create_publish_transaction(data, anchor, actual_perm_fee, term_fee)
+            .create_publish_transaction(data, anchor, actual_perm_fee.into(), term_fee.into())
             .expect("Failed to create publish transaction");
 
         // Modify the header to reflect the original perm_fee intent
         let mut header = tx.header;
-        header.perm_fee = perm_fee;
+        header.perm_fee = perm_fee.map(Into::into);
         header
     }
 
-    fn create_test_ingress_proof(signer: &IrysSigner, data_root: H256) -> IngressProof {
+    fn create_test_ingress_proof(
+        signer: &IrysSigner,
+        data_root: H256,
+        anchor: BlockHash,
+    ) -> IngressProof {
         let mut proof = IngressProof::V1(IngressProofV1 {
             signature: Default::default(),
             data_root,
             proof: H256::from([12_u8; 32]),
             chain_id: 1_u64,
+            anchor,
         });
 
         signer
@@ -1048,7 +1088,7 @@ mod tests {
         };
 
         // Calculate expected values
-        let term_charges = TermFeeCharges::new(term_fee, &config).unwrap();
+        let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Create expected shadow transactions directly
         let expected_shadow_txs: Vec<ShadowMetadata> = vec![
@@ -1150,7 +1190,8 @@ mod tests {
     #[test]
     fn test_one_publish_tx_with_aggregated_proofs() {
         let mut config = ConsensusConfig::testing();
-        config.number_of_ingress_proofs_total = 4;
+        // Use custom hardfork params with 4 proofs for this test
+        config.hardforks.frontier.number_of_ingress_proofs_total = 4;
         let parent_block = IrysBlockHeader::new_mock_header();
 
         // Calculate proper fees for publish transaction
@@ -1173,10 +1214,26 @@ mod tests {
 
         // Create 4 proofs - signer2 has 2 proofs to test aggregation
         let proofs = vec![
-            create_test_ingress_proof(&proof_signer1, H256::from([10_u8; 32])),
-            create_test_ingress_proof(&proof_signer2, H256::from([11_u8; 32])),
-            create_test_ingress_proof(&proof_signer3, H256::from([12_u8; 32])),
-            create_test_ingress_proof(&proof_signer2, H256::from([13_u8; 32])), // Extra proof for signer2
+            create_test_ingress_proof(
+                &proof_signer1,
+                H256::from([10_u8; 32]),
+                H256::from([14_u8; 32]),
+            ),
+            create_test_ingress_proof(
+                &proof_signer2,
+                H256::from([11_u8; 32]),
+                H256::from([15_u8; 32]),
+            ),
+            create_test_ingress_proof(
+                &proof_signer3,
+                H256::from([12_u8; 32]),
+                H256::from([16_u8; 32]),
+            ),
+            create_test_ingress_proof(
+                &proof_signer2,
+                H256::from([13_u8; 32]),
+                H256::from([17_u8; 32]),
+            ), // Extra proof for signer2
         ];
 
         let block_height = 101;
@@ -1189,10 +1246,17 @@ mod tests {
         };
 
         // Calculate expected values
-        let term_charges = TermFeeCharges::new(term_fee, &config).unwrap();
+        let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Since perm_fee was calculated with 4 proofs in mind
-        let publish_charges = PublishFeeCharges::new(perm_fee, term_fee, &config).unwrap();
+        let number_of_ingress_proofs_total = 4; // matches config.hardforks.frontier.number_of_ingress_proofs_total
+        let publish_charges = PublishFeeCharges::new(
+            perm_fee.into(),
+            term_fee.into(),
+            &config,
+            number_of_ingress_proofs_total,
+        )
+        .unwrap();
 
         // Calculate individual ingress rewards (4 proofs total)
         let base_reward_per_proof = publish_charges.ingress_proof_reward / U256::from(4);

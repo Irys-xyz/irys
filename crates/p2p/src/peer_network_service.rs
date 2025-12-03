@@ -8,9 +8,9 @@ use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     build_user_agent, Address, AnnouncementFinishedMessage, Config, DatabaseProvider,
-    GossipDataRequest, HandshakeMessage, PeerAddress, PeerFilterMode, PeerListItem,
-    PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse, RejectedResponse,
-    RethPeerInfo, TokioServiceHandle, VersionRequest,
+    GossipDataRequest, HandshakeMessage, NetworkConfigWithDefaults as _, PeerAddress,
+    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
+    PeerResponse, RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -116,21 +116,33 @@ fn build_peer_address(config: &Config) -> PeerAddress {
     PeerAddress {
         gossip: format!(
             "{}:{}",
-            config.node_config.gossip.public_ip, config.node_config.gossip.public_port
+            config
+                .node_config
+                .gossip
+                .public_ip(&config.node_config.network_defaults),
+            config.node_config.gossip.public_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
         api: format!(
             "{}:{}",
-            config.node_config.http.public_ip, config.node_config.http.public_port
+            config
+                .node_config
+                .http
+                .public_ip(&config.node_config.network_defaults),
+            config.node_config.http.public_port
         )
         .parse()
         .expect("valid SocketAddr expected"),
         execution: RethPeerInfo {
             peering_tcp_addr: format!(
                 "{}:{}",
-                &config.node_config.reth.network.public_ip,
-                &config.node_config.reth.network.public_port
+                config
+                    .node_config
+                    .reth
+                    .network
+                    .public_ip(&config.node_config.network_defaults),
+                config.node_config.reth.network.public_port
             )
             .parse()
             .expect("valid SocketAddr expected"),
@@ -353,14 +365,21 @@ where
                     }
                     Ok(false) => {
                         debug!("Peer {:?} is offline", mining_addr);
-                        inner_clone.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
+                        inner_clone.decrease_peer_score(
+                            &mining_addr,
+                            ScoreDecreaseReason::Offline("Health check returned false".to_string()),
+                        );
                     }
                     Err(GossipClientError::HealthCheck(url, status)) => {
-                        debug!(
-                            "Peer {:?}{} healthcheck failed with status {}",
+                        let message = format!(
+                            "Peer {:?} ({}) health check failed with status {}",
                             mining_addr, url, status
                         );
-                        inner_clone.decrease_peer_score(&mining_addr, ScoreDecreaseReason::Offline);
+                        debug!("{message}");
+                        inner_clone.decrease_peer_score(
+                            &mining_addr,
+                            ScoreDecreaseReason::NetworkError(message),
+                        );
                     }
                     Err(err) => {
                         error!(
@@ -407,7 +426,7 @@ where
         });
     }
 
-    #[instrument(skip(self, handshake), fields(peer.api_address = ?handshake.api_address))]
+    #[instrument(skip_all, fields(peer.api_address = ?handshake.api_address))]
     async fn handle_handshake_request(&self, handshake: HandshakeMessage) {
         let task = {
             let mut state = self.inner.state.lock().await;
@@ -721,6 +740,30 @@ where
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} has gossip disabled",
                                         address
+                                    )),
+                                ));
+                            }
+                            RejectionReason::InvalidData => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} reported invalid data for request {:?}",
+                                        peer.0, data_request
+                                    )),
+                                ));
+                            }
+                            RejectionReason::RateLimited => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} rate limited the request {:?}",
+                                        peer.0, data_request
+                                    )),
+                                ));
+                            }
+                            RejectionReason::UnableToVerifyOrigin => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} unable to verify our origin of request {:?}",
+                                        peer.0, data_request
                                     )),
                                 ));
                             }
@@ -1248,9 +1291,9 @@ mod tests {
             false,
             None,
         );
-        peer1.reputation_score.increase();
-        peer1.reputation_score.increase();
-        peer2.reputation_score.increase();
+        peer1.reputation_score.increase_online();
+        peer1.reputation_score.increase_online();
+        peer2.reputation_score.increase_online();
         peer_list.add_or_update_peer(mining_addr1, peer1.clone(), true);
         peer_list.add_or_update_peer(mining_addr2, peer2.clone(), true);
         peer_list.add_or_update_peer(mining_addr3, peer3, true);
@@ -1659,7 +1702,7 @@ mod tests {
         );
         peer_list.add_or_update_peer(mining_addr, peer.clone(), false);
         assert!(peer_list.temporary_peers().contains(&mining_addr));
-        peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData);
+        peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));
         assert!(!peer_list.temporary_peers().contains(&mining_addr));
         peer_list.add_or_update_peer(mining_addr, peer, false);
         assert!(peer_list.temporary_peers().contains(&mining_addr));

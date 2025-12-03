@@ -31,18 +31,9 @@ impl MempoolPledgeProvider {
         commitment_type_filter: impl Fn(&CommitmentType) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
-        let mempool = self.mempool_state.read().await;
-
-        mempool
-            .valid_commitment_tx
-            .get(user_address)
-            .map(|txs| {
-                txs.iter()
-                    .filter(|tx| commitment_type_filter(&tx.commitment_type))
-                    .filter(|tx| seen_ids.insert(tx.id))
-                    .count() as u64
-            })
-            .unwrap_or(0)
+        self.mempool_state
+            .count_mempool_commitments(user_address, commitment_type_filter, seen_ids)
+            .await
     }
 }
 

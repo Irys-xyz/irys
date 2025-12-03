@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
-use crate::utils::{read_block_from_state, solution_context, BlockValidationOutcome, IrysNodeTest};
+use crate::utils::{
+    assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
+};
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
+use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
@@ -19,7 +22,7 @@ async fn gossip_commitment_to_node(
 ) -> eyre::Result<()> {
     let (resp_tx, resp_rx) = oneshot::channel();
     node.node_ctx.service_senders.mempool.send(
-        MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx),
+        MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment.clone(), resp_tx).into(),
     )?;
 
     match resp_rx.await {
@@ -151,10 +154,18 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     )
     .await?;
     let genesis_outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         genesis_outcome,
-        BlockValidationOutcome::Discarded,
-        "genesis node should discard block with unstake commitment when peer has active pledges"
+        |e| {
+            matches!(
+                e,
+                ValidationError::CommitmentSnapshotRejected {
+                    status: irys_domain::CommitmentSnapshotStatus::HasActivePledges,
+                    ..
+                }
+            )
+        },
+        "Expected CommitmentSnapshotRejected with HasActivePledges status",
     );
 
     // Send block to peer node for validation
@@ -166,10 +177,18 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     )
     .await?;
     let peer_outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         peer_outcome,
-        BlockValidationOutcome::Discarded,
-        "peer node should also discard the block with invalid unstake"
+        |e| {
+            matches!(
+                e,
+                ValidationError::CommitmentSnapshotRejected {
+                    status: irys_domain::CommitmentSnapshotStatus::HasActivePledges,
+                    ..
+                }
+            )
+        },
+        "Expected CommitmentSnapshotRejected with HasActivePledges status",
     );
 
     peer_node.stop().await;
@@ -233,7 +252,9 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     // Verify the user has balance but no stake
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
-    let balance = genesis_node.get_balance(never_staked_addr, head_block.evm_block_hash);
+    let balance = genesis_node
+        .get_balance(never_staked_addr, head_block.evm_block_hash)
+        .await;
     eyre::ensure!(
         balance > irys_types::U256::from(0_u64),
         "user must have balance (was funded in genesis)"
@@ -285,10 +306,18 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     )
     .await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    assert_eq!(
+    assert_validation_error(
         outcome,
-        BlockValidationOutcome::Discarded,
-        "node should discard block with unstake commitment for user that was never staked"
+        |e| {
+            matches!(
+                e,
+                ValidationError::CommitmentSnapshotRejected {
+                    status: irys_domain::CommitmentSnapshotStatus::Unstaked,
+                    ..
+                }
+            )
+        },
+        "Expected CommitmentSnapshotRejected with Unstaked status",
     );
 
     genesis_node.stop().await;

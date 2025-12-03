@@ -40,6 +40,13 @@ pub const TERABYTE: usize = GIGABYTE * 1024;
 )]
 pub struct PartitionChunkOffset(pub u32);
 
+/// Allow conversion from RelativeChunkOffset to PartitionChunkOffset for some calculations
+impl From<PartitionChunkOffset> for RelativeChunkOffset {
+    fn from(offset: PartitionChunkOffset) -> Self {
+        Self::from(offset.0 as i32)
+    }
+}
+
 #[macro_export]
 macro_rules! partition_chunk_offset_ii {
     ($start:expr, $end:expr) => {
@@ -495,10 +502,6 @@ pub fn split_interval(
     let start = interval.start();
     let end = interval.end();
 
-    #[expect(
-        clippy::comparison_chain,
-        reason = "Proposed match chain is less readable"
-    )]
     if start > end {
         return Err(eyre::eyre!("Invalid interval bounds: [{}, {}]", start, end));
     } else if start == end {

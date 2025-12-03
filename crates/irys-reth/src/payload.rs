@@ -29,8 +29,8 @@
 //! builder respects mempool ordering while still honoring the PD limit.
 
 use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
+use crate::IrysPayloadBuilderAttributes;
 use alloy_consensus::Transaction as _;
-use lru::LruCache;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -38,7 +38,7 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
-use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes, PayloadId};
+use reth_payload_builder::EthBuiltPayload;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
@@ -50,8 +50,7 @@ use reth_transaction_pool::{
 use revm_primitives::FixedBytes;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Instant,
 };
 
@@ -59,59 +58,6 @@ use reth_ethereum_payload_builder::{default_ethereum_payload, EthereumBuilderCon
 
 type BestTransactionsIter =
     Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;
-
-/// Thread-safe store for shadow transactions indexed by payload ID.
-#[derive(Debug, Clone)]
-pub struct ShadowTxStore {
-    inner: Arc<Mutex<LruCache<DeterministicShadowTxKey, (Vec<EthPooledTransaction>, Instant)>>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct DeterministicShadowTxKey(PayloadId);
-
-impl DeterministicShadowTxKey {
-    pub fn new(payload_id: PayloadId) -> Self {
-        Self(payload_id)
-    }
-}
-
-impl ShadowTxStore {
-    /// Create a new shadow transaction store with LRU cache capacity of 50.
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(50).expect("50 is non-zero"),
-            ))),
-        }
-    }
-
-    /// Set shadow transactions for a specific payload ID.
-    pub fn set_shadow_txs(
-        &self,
-        key: DeterministicShadowTxKey,
-        shadow_txs: Vec<EthPooledTransaction>,
-    ) {
-        let timestamp = Instant::now();
-        let mut store = self.inner.lock().unwrap();
-        store.put(key, (shadow_txs, timestamp));
-    }
-
-    /// Returns the shadow transactions for `payload_id`, or an empty list if none are registered.
-    pub fn shadow_txs(&self, payload_id: PayloadId) -> (Vec<EthPooledTransaction>, Instant) {
-        let key = DeterministicShadowTxKey::new(payload_id);
-        let mut store = self.inner.lock().unwrap();
-        if let Some((shadow_txs, timestamp)) = store.get(&key) {
-            return (shadow_txs.clone(), *timestamp);
-        }
-        (Vec::new(), Instant::now())
-    }
-}
-
-impl Default for ShadowTxStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 /// Ethereum payload builder
 #[derive(Debug, Clone)]
@@ -124,8 +70,6 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     evm_config: EvmConfig,
     /// Payload builder configuration.
     builder_config: EthereumBuilderConfig,
-    /// Shadow txs don't live inside the tx pool, so they need to be handled separately.
-    shadow_tx_store: ShadowTxStore,
     /// Maximum number of PD chunks that can be included in a single block.
     max_pd_chunks_per_block: u64,
 }
@@ -329,7 +273,6 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         pool: Pool,
         evm_config: EvmConfig,
         builder_config: EthereumBuilderConfig,
-        shadow_tx_store: ShadowTxStore,
         max_pd_chunks_per_block: u64,
     ) -> Self {
         Self {
@@ -337,17 +280,8 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             pool,
             evm_config,
             builder_config,
-            shadow_tx_store,
             max_pd_chunks_per_block,
         }
-    }
-
-    pub fn shadow_tx_store(&self) -> &ShadowTxStore {
-        &self.shadow_tx_store
-    }
-
-    pub fn shadow_tx_store_cloned(&self) -> ShadowTxStore {
-        self.shadow_tx_store.clone()
     }
 }
 
@@ -358,18 +292,20 @@ where
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
     Pool: TransactionPool<Transaction = EthPooledTransaction>,
 {
+    /// Creates a combined transaction iterator with shadow transactions first, then pool transactions.
+    ///
+    /// Shadow transactions are passed directly from the payload attributes.
     pub fn best_transactions_with_attributes(
         &self,
         attributes: BestTransactionsAttributes,
-        payload_id: PayloadId,
+        shadow_txs: Vec<EthPooledTransaction>,
     ) -> BestTransactionsIter {
-        // Get shadow transactions from the store
-        let (shadow_txs, timestamp) = self.shadow_tx_store.shadow_txs(payload_id);
+        let timestamp = Instant::now();
 
         // Get pool transactions iterator
         let pool_txs = self.pool.best_transactions_with_attributes(attributes);
 
-        // Create combined iterator
+        // Create combined iterator with shadow txs from attributes
         Box::new(CombinedTransactionIterator::new(
             timestamp,
             shadow_txs,
@@ -386,21 +322,43 @@ where
     Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
     Pool: TransactionPool<Transaction = EthPooledTransaction>,
 {
-    type Attributes = EthPayloadBuilderAttributes;
+    type Attributes = IrysPayloadBuilderAttributes;
     type BuiltPayload = EthBuiltPayload;
 
     fn try_build(
         &self,
-        args: BuildArguments<EthPayloadBuilderAttributes, EthBuiltPayload>,
+        args: BuildArguments<IrysPayloadBuilderAttributes, EthBuiltPayload>,
     ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
-        let payload_id = args.config.attributes.payload_id();
+        // Extract shadow transactions from attributes
+        let shadow_txs = args.config.attributes.shadow_txs.clone();
+
+        // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
+        let BuildArguments {
+            cached_reads,
+            config,
+            cancel,
+            best_payload,
+        } = args;
+        let PayloadConfig {
+            parent_header,
+            attributes,
+        } = config;
+        let eth_args = BuildArguments {
+            cached_reads,
+            config: PayloadConfig {
+                parent_header,
+                attributes: attributes.inner,
+            },
+            cancel,
+            best_payload,
+        };
         let result = default_ethereum_payload(
             self.evm_config.clone(),
             self.client.clone(),
             self.pool.clone(),
             self.builder_config.clone(),
-            args,
-            |attributes| self.best_transactions_with_attributes(attributes, payload_id),
+            eth_args,
+            |attributes| self.best_transactions_with_attributes(attributes, shadow_txs.clone()),
         )?;
         Ok(result)
     }
@@ -420,8 +378,19 @@ where
         &self,
         config: PayloadConfig<Self::Attributes>,
     ) -> Result<EthBuiltPayload, PayloadBuilderError> {
-        let payload_id = config.attributes.payload_id();
-        let args = BuildArguments::new(Default::default(), config, Default::default(), None);
+        // Extract shadow transactions from attributes
+        let shadow_txs = config.attributes.shadow_txs.clone();
+
+        // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
+        let PayloadConfig {
+            parent_header,
+            attributes,
+        } = config;
+        let eth_config = PayloadConfig {
+            parent_header,
+            attributes: attributes.inner,
+        };
+        let args = BuildArguments::new(Default::default(), eth_config, Default::default(), None);
 
         default_ethereum_payload(
             self.evm_config.clone(),
@@ -429,7 +398,7 @@ where
             self.pool.clone(),
             self.builder_config.clone(),
             args,
-            |attributes| self.best_transactions_with_attributes(attributes, payload_id),
+            |attributes| self.best_transactions_with_attributes(attributes, shadow_txs.clone()),
         )?
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
@@ -447,25 +416,6 @@ mod tests {
     use reth_primitives_traits::SignedTransaction;
     use reth_transaction_pool::{test_utils::TransactionGenerator, PoolTransaction as _};
     use std::collections::VecDeque;
-
-    #[test]
-    fn shadow_tx_store_returns_inserted_transactions() {
-        let store = ShadowTxStore::new();
-        let payload_id = PayloadId::new([5; 8]);
-
-        let mut generator = TransactionGenerator::with_num_signers(StdRng::seed_from_u64(33), 1);
-        generator.set_base_fee(1);
-        generator.set_gas_limit(210_000);
-        let tx = normal_pooled_transaction(&mut generator, 0);
-
-        store.set_shadow_txs(DeterministicShadowTxKey::new(payload_id), vec![tx.clone()]);
-
-        let (retrieved, _) = store.shadow_txs(payload_id);
-        assert_eq!(retrieved, vec![tx]);
-
-        let (missing, _) = store.shadow_txs(PayloadId::new([6; 8]));
-        assert!(missing.is_empty());
-    }
 
     fn pd_pooled_transaction(
         generator: &mut TransactionGenerator<StdRng>,

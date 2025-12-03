@@ -8,7 +8,7 @@ use irys_actors::{
 use irys_types::{
     block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats, IrysBlockHeader,
 };
-use irys_types::{NodeConfig, H256, U256};
+use irys_types::{NodeConfig, UnixTimestampMs, H256, U256};
 use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -22,7 +22,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
     // ------------------------------------------------------------------
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
-        pub invalid_timestamp: u128,
+        pub invalid_timestamp: UnixTimestampMs,
     }
 
     #[async_trait::async_trait]
@@ -34,10 +34,8 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         fn block_reward(
             &self,
             prev_block_header: &IrysBlockHeader,
-            _current_timestamp: u128,
         ) -> eyre::Result<Amount<irys_types::storage_pricing::phantoms::Irys>> {
-            self.prod
-                .block_reward(prev_block_header, self.invalid_timestamp)
+            self.prod.block_reward(prev_block_header)
         }
 
         async fn create_evm_block(
@@ -50,9 +48,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                 irys_types::storage_pricing::phantoms::CostPerChunk,
                 irys_types::storage_pricing::phantoms::Irys,
             )>,
-            _timestamp_ms: u128,
+            _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
-        ) -> eyre::Result<(EthBuiltPayload, U256)> {
+        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        {
             self.prod
                 .create_evm_block(
                     prev_block_header,
@@ -71,7 +70,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             solution: &SolutionContext,
             prev_block_header: &IrysBlockHeader,
             mempool_bundle: irys_actors::block_producer::MempoolTxsBundle,
-            _current_timestamp: u128,
+            _current_timestamp: UnixTimestampMs,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
             eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
             ema_calculation: irys_domain::ExponentialMarketAvgCalculation,
@@ -118,7 +117,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             prod: ProductionStrategy {
                 inner: genesis_node.node_ctx.block_producer_inner.clone(),
             },
-            invalid_timestamp: future_timestamp,
+            invalid_timestamp: UnixTimestampMs::from_millis(future_timestamp),
         }
     };
 

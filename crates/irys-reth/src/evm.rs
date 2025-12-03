@@ -1,6 +1,9 @@
 // Standard library imports
 use core::convert::Infallible;
 
+use alloy_rpc_types_engine::ExecutionData;
+use either::Either;
+
 use alloy_consensus::{Block, Header};
 use alloy_dyn_abi::DynSolValue;
 use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
@@ -8,12 +11,12 @@ use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnState
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
 use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, Log, LogData, U256};
+use std::sync::LazyLock;
 
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
 use reth::revm::context::result::ExecutionResult;
 use reth::revm::context::TxEnv;
-use reth::revm::either::Either;
 use reth::revm::primitives::hardfork::SpecId;
 use reth::revm::{Inspector, State};
 use reth_ethereum_primitives::Receipt;
@@ -21,17 +24,22 @@ use reth_evm::block::{BlockExecutorFactory, BlockExecutorFor, CommitChanges};
 use reth_evm::eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthEvmContext};
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
 use reth_evm::precompiles::PrecompilesMap;
-use reth_evm::{ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes};
+use reth_evm::{
+    ConfigureEngineEvm, ConfigureEvm, EthEvmFactory, EvmEnv, EvmFactory, NextBlockEnvAttributes,
+};
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 
+// External crate imports - Revm
 use revm::context::result::{EVMError, HaltReason, InvalidTransaction, Output};
-use revm::context::{BlockEnv, Cfg as _, CfgEnv, ContextTr as _};
+use revm::context::{BlockEnv, CfgEnv, ContextTr as _};
+use revm::handler::EthFrame;
 use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
-use std::sync::LazyLock;
 use tracing::{trace, warn};
+
+// External crate imports - Other
 
 use super::*;
 use crate::precompiles::pd::context::PdContext;
@@ -47,8 +55,8 @@ mod constants {
     pub(super) const SHADOW_TX_GAS_REFUNDED: u64 = 0;
 }
 
-/// Magic account used to store PD base fee per chunk in its balance field.
-/// This is set by a dedicated shadow transaction and read during PD fee charging.
+/// Account address used to store the PD base fee per chunk in EVM state.
+/// The balance of this account represents the current PD base fee.
 pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
     LazyLock::new(|| Address::from_word(keccak256("irys_pd_base_fee_account")));
 
@@ -127,6 +135,28 @@ where
 
     fn evm(&self) -> &Self::Evm {
         self.inner.evm()
+    }
+
+    fn execute_transaction_without_commit(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<
+        revm::context_interface::result::ExecResultAndState<
+            ExecutionResult<<Self::Evm as Evm>::HaltReason>,
+        >,
+        BlockExecutionError,
+    > {
+        self.inner.execute_transaction_without_commit(tx)
+    }
+
+    fn commit_transaction(
+        &mut self,
+        result: revm::context_interface::result::ExecResultAndState<
+            ExecutionResult<<Self::Evm as Evm>::HaltReason>,
+        >,
+        tx: impl ExecutableTx<Self>,
+    ) -> Result<u64, BlockExecutionError> {
+        self.inner.commit_transaction(result, tx)
     }
 }
 
@@ -241,9 +271,32 @@ where
 /// Irys EVM configuration that integrates shadow transaction support.
 #[derive(Debug, Clone)]
 pub struct IrysEvmConfig {
-    pub inner: EthEvmConfig<EthEvmFactory>,
+    pub inner: EthEvmConfig<ChainSpec, EthEvmFactory>,
     pub executor_factory: IrysBlockExecutorFactory,
     pub assembler: IrysBlockAssembler,
+}
+
+impl ConfigureEngineEvm<ExecutionData> for IrysEvmConfig {
+    fn evm_env_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<reth_evm::EvmEnvFor<Self>, Self::Error> {
+        self.inner.evm_env_for_payload(payload)
+    }
+
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a ExecutionData,
+    ) -> Result<reth_evm::ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.inner.context_for_payload(payload)
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &ExecutionData,
+    ) -> Result<impl reth_evm::ExecutableTxIterator<Self>, Self::Error> {
+        self.inner.tx_iterator_for_payload(payload)
+    }
 }
 
 impl ConfigureEvm for IrysEvmConfig {
@@ -261,7 +314,7 @@ impl ConfigureEvm for IrysEvmConfig {
         &self.assembler
     }
 
-    fn evm_env(&self, header: &Header) -> EvmEnv {
+    fn evm_env(&self, header: &Header) -> Result<EvmEnv, Infallible> {
         self.inner.evm_env(header)
     }
 
@@ -276,7 +329,7 @@ impl ConfigureEvm for IrysEvmConfig {
     fn context_for_block<'a>(
         &self,
         block: &'a SealedBlock<alloy_consensus::Block<TransactionSigned>>,
-    ) -> EthBlockExecutionCtx<'a> {
+    ) -> Result<EthBlockExecutionCtx<'a>, Infallible> {
         self.inner.context_for_block(block)
     }
 
@@ -284,7 +337,7 @@ impl ConfigureEvm for IrysEvmConfig {
         &self,
         parent: &SealedHeader,
         attributes: Self::NextBlockEnvCtx,
-    ) -> EthBlockExecutionCtx<'_> {
+    ) -> Result<EthBlockExecutionCtx<'_>, Infallible> {
         self.inner.context_for_next_block(parent, attributes)
     }
 }
@@ -315,6 +368,7 @@ impl EvmFactory for IrysEvmFactory {
     type Error<DBError: core::error::Error + Send + Sync + 'static> = EVMError<DBError>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PrecompilesMap;
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
@@ -406,6 +460,7 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
         I,
         EthInstructions<EthInterpreter, EthEvmContext<DB>>,
         PRECOMPILE,
+        EthFrame,
     >,
     inspect: bool,
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
@@ -424,6 +479,7 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             I,
             EthInstructions<EthInterpreter, EthEvmContext<DB>>,
             PRECOMPILE,
+            EthFrame,
         >,
         inspect: bool,
         context: PdContext,
@@ -439,8 +495,13 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     /// Consumes self and return the inner EVM instance.
     pub fn into_inner(
         self,
-    ) -> RevmEvm<EthEvmContext<DB>, I, EthInstructions<EthInterpreter, EthEvmContext<DB>>, PRECOMPILE>
-    {
+    ) -> RevmEvm<
+        EthEvmContext<DB>,
+        I,
+        EthInstructions<EthInterpreter, EthEvmContext<DB>>,
+        PRECOMPILE,
+        EthFrame,
+    > {
         self.inner
     }
 
@@ -487,6 +548,7 @@ where
     type Error = EVMError<DB::Error>;
     type HaltReason = HaltReason;
     type Spec = SpecId;
+    type BlockEnv = BlockEnv;
     type Precompiles = PRECOMPILE;
     type Inspector = I;
 
@@ -592,8 +654,7 @@ where
             self.inner.ctx.journaled_state.checkpoint_commit();
 
             let res = if self.inspect {
-                self.inner.set_tx(tx);
-                self.inner.inspect_replay()
+                self.inner.inspect_tx(tx)
             } else {
                 self.inner.transact(tx)
             }?;
@@ -602,8 +663,7 @@ where
         }
 
         if self.inspect {
-            self.inner.set_tx(tx);
-            self.inner.inspect_replay()
+            self.inner.inspect_tx(tx)
         } else {
             self.inner.transact(tx)
         }
@@ -705,6 +765,22 @@ where
 
     fn inspector_mut(&mut self) -> &mut Self::Inspector {
         &mut self.inner.inspector
+    }
+
+    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
+        (
+            &self.inner.ctx.journaled_state.database,
+            &self.inner.inspector,
+            &self.inner.precompiles,
+        )
+    }
+
+    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
+        (
+            &mut self.inner.ctx.journaled_state.database,
+            &mut self.inner.inspector,
+            &mut self.inner.precompiles,
+        )
     }
 }
 
@@ -847,7 +923,7 @@ where
 
         let result_state = ResultAndState {
             result: execution_result,
-            state: std::mem::take(&mut self.state),
+            state: std::mem::take(&mut self.state).into_iter().collect(),
         };
 
         // HACK so that inspecting using trace returns a valid frame
@@ -856,7 +932,7 @@ where
             // create the initial frame
             let mut frame = revm::handler::execution::create_init_frame(
                 &tx,
-                self.ctx().cfg().spec(),
+                None, // No precompiled bytecode for shadow transactions
                 tx.gas_limit,
             );
 
@@ -871,11 +947,13 @@ where
             let mut frame_result =
                 revm::handler::FrameResult::Call(revm::interpreter::CallOutcome {
                     result: InterpreterResult {
-                        result: revm::interpreter::InstructionResult::Continue,
+                        result: revm::interpreter::InstructionResult::Return,
                         output: Bytes::new(),
                         gas: revm::interpreter::Gas::new(0),
                     },
                     memory_offset: Default::default(),
+                    was_precompile_called: false,
+                    precompile_call_logs: Vec::new(),
                 });
 
             // inject the valid frame as the frame result
@@ -890,6 +968,15 @@ where
         Ok(Either::Left(result_state))
     }
 
+    /// Reads the current PD base fee per chunk from the EVM state.
+    /// The fee is stored as the balance of the PD_BASE_FEE_ACCOUNT.
+    pub fn read_pd_base_fee_per_chunk(&mut self) -> U256 {
+        match self.load_account(*PD_BASE_FEE_ACCOUNT) {
+            Ok(Some(acc)) => acc.info.balance,
+            _ => U256::ZERO,
+        }
+    }
+
     /// Loads an account from the underlying state, or the database if there are no preexisting changes.
     /// NOTE: you MUST commit an account change before calling `load_account` for the same account, otherwise you will not get the latest version.
     /// TODO: improve this ^, and make this function responsible for account _creation_, i.e if an account doesn't exist, we use `Account::new_not_existing()`, instead of deferring this to the caller.
@@ -902,7 +989,7 @@ where
         };
 
         let ctx = self.ctx_mut();
-        let db = ctx.db();
+        let db = ctx.db_mut();
         Ok(db
             .basic(address)
             .map_err(<Self as Evm>::Error::Database)?
@@ -1111,7 +1198,7 @@ where
             Ok((account, false))
         } else {
             // Create new account
-            let mut account = Account::new_not_existing();
+            let mut account = Account::new_not_existing(0);
 
             account.info.balance = fee;
 
@@ -1122,15 +1209,6 @@ where
             );
 
             Ok((account, true))
-        }
-    }
-
-    /// Reads the PD base fee per chunk from the dedicated EVM account's balance.
-    /// Returns 0 if the account does not exist.
-    fn read_pd_base_fee_per_chunk(&mut self) -> U256 {
-        match self.load_account(*PD_BASE_FEE_ACCOUNT) {
-            Ok(Some(acc)) => acc.info.balance,
-            _ => U256::ZERO,
         }
     }
 
@@ -1258,7 +1336,7 @@ where
                         acc
                     } else {
                         existed = false;
-                        Account::new_not_existing()
+                        Account::new_not_existing(0)
                     };
                     account.info.balance = update.per_chunk;
 
@@ -1317,7 +1395,7 @@ where
             account
         } else {
             // Create a new account with the incremented balance
-            let mut account = Account::new_not_existing();
+            let mut account = Account::new_not_existing(0);
             account.info.balance = balance_increment.amount;
 
             tracing::debug!(
@@ -1553,7 +1631,7 @@ mod tests {
     async fn evm_pd_header_tx_charges_fees(#[case] transfer_value: u64) -> eyre::Result<()> {
         // Spin up a single node and set PD base fee via shadow transaction
         let ctx = TestContext::new().await?;
-        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+        let (mut node, ctx) = ctx.get_single_node()?;
 
         let payer = ctx.normal_signer.address();
         let beneficiary = ctx.block_producer_a.address();
@@ -1570,7 +1648,7 @@ mod tests {
         // Priority fee ignored for PdBaseFeeUpdate (no payer address)
         let pd_fee_update_signed =
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
+        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
 
         // Capture initial balances and nonce
         let payer_initial = get_balance(&node.inner, payer);
@@ -1616,7 +1694,7 @@ mod tests {
             .await?;
 
         // Mine a block including the PD-header tx
-        let payload = advance_block(&mut node, &shadow_tx_store, vec![]).await?;
+        let payload = advance_block(&mut node, vec![]).await?;
 
         // Query the receipt to get actual gas used
         let receipt = node
@@ -1711,7 +1789,7 @@ mod tests {
 
         // Spin up a single node and set PD base fee
         let ctx = TestContext::new().await?;
-        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+        let (mut node, ctx) = ctx.get_single_node()?;
 
         let payer = ctx.normal_signer.address();
 
@@ -1726,7 +1804,7 @@ mod tests {
         );
         let pd_fee_update_signed =
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
+        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
 
         // Capture pre-simulation state
         let balance_before = get_balance(&node.inner, payer);
@@ -1813,7 +1891,7 @@ mod tests {
     async fn test_pd_tx_failed_execution_still_charges_fees() -> eyre::Result<()> {
         // Spin up a single node and set PD base fee
         let ctx = TestContext::new().await?;
-        let ((mut node, shadow_tx_store), ctx) = ctx.get_single_node()?;
+        let (mut node, ctx) = ctx.get_single_node()?;
 
         let payer = ctx.normal_signer.address();
         let beneficiary = ctx.block_producer_a.address();
@@ -1830,7 +1908,7 @@ mod tests {
         );
         let pd_fee_update_signed =
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        advance_block(&mut node, &shadow_tx_store, vec![pd_fee_update_signed]).await?;
+        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
 
         // Capture initial state
         let payer_initial_balance = get_balance(&node.inner, payer);
@@ -1879,7 +1957,7 @@ mod tests {
             .await?;
 
         // Mine block including the transaction
-        let payload = advance_block(&mut node, &shadow_tx_store, vec![]).await?;
+        let payload = advance_block(&mut node, vec![]).await?;
 
         // Query the receipt
         let receipt = node

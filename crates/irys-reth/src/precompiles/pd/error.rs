@@ -1,6 +1,7 @@
 //! Error types for the PD precompile.
 
 use revm::precompile::PrecompileError;
+use std::borrow::Cow;
 use thiserror::Error;
 
 /// Errors that can occur during PD precompile execution.
@@ -66,6 +67,6 @@ pub enum PdPrecompileError {
 
 impl From<PdPrecompileError> for PrecompileError {
     fn from(e: PdPrecompileError) -> Self {
-        Self::Other(format!("PD precompile: {}", e))
+        Self::Other(Cow::Owned(format!("PD precompile: {}", e)))
     }
 }

@@ -1,4 +1,4 @@
-use crate::chainspec::IrysHardforksInConfig;
+use crate::hardfork_config::{FrontierParams, IrysHardforkConfig};
 use crate::serde_utils;
 use crate::{
     storage_pricing::{
@@ -10,12 +10,11 @@ use crate::{
     },
     H256,
 };
+use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
-use alloy_genesis::{Genesis, GenesisAccount};
-use alloy_primitives::Address;
+use alloy_genesis::GenesisAccount;
+use alloy_primitives::{Address, U256};
 use eyre::Result;
-use reth::rpc::types::serde_helpers::OtherFields;
-use reth_chainspec::Chain;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -32,8 +31,8 @@ pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
     pub chain_id: u64,
 
-    /// Reth chain spec for the reth genesis
-    pub reth: RethChainSpec,
+    /// Reth-specific configuration
+    pub reth: IrysRethConfig,
 
     /// Settings for the transaction memory pool
     pub mempool: MempoolConsensusConfig,
@@ -90,10 +89,10 @@ pub struct ConsensusConfig {
     /// Number of chunks that make up a single partition
     pub num_chunks_in_partition: u64,
 
-    /// Number of chunks that can be recalled in a single operation
+    /// Number of chunks that can be recalled in each partition by a mining step
     pub num_chunks_in_recall_range: u64,
 
-    /// Number of partitions in each storage slot
+    /// Number of replica partitions in each storage slot
     pub num_partitions_per_slot: u64,
 
     /// Number of iterations for entropy packing algorithm
@@ -105,13 +104,8 @@ pub struct ConsensusConfig {
     /// Configuration for Exponential Moving Average price calculations
     pub ema: EmaConfig,
 
-    /// Minimum number of replicas required for data to be considered permanently stored
-    /// Higher values increase data durability but require more network resources
-    pub number_of_ingress_proofs_total: u64,
-
-    /// Minimum number of proofs from miners assigned to store the associated data
-    /// required for data to be promoted
-    pub number_of_ingress_proofs_from_assignees: u64,
+    /// Hardfork configuration with parameters for each fork.
+    pub hardforks: IrysHardforkConfig,
 
     /// Enable full ingress proof verification against actual chunks during block validation.
     /// When enabled, nodes will reconstruct the data_root from locally available chunks and
@@ -124,14 +118,14 @@ pub struct ConsensusConfig {
     /// Determines long-term storage pricing and incentives
     pub safe_minimum_number_of_years: u64,
 
-    /// Fee required for staking operations in Irys tokens
+    /// Fee required to stake a mining address in Irys tokens
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
     )]
     pub stake_value: Amount<Irys>,
 
-    /// Base fee required for pledging operations in Irys tokens
+    /// Base fee required for pledging a partition in Irys tokens
     #[serde(
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
@@ -173,6 +167,7 @@ pub struct ConsensusConfig {
         deserialize_with = "serde_utils::u128_millis_from_u64",
         serialize_with = "serde_utils::u128_millis_to_u64"
     )]
+    /// Tolerance for future block timestamps due to clock drift (ms)
     pub max_future_timestamp_drift_millis: u128,
 
     /// Configuration for Programmable Data (PD) transactions
@@ -206,6 +201,9 @@ pub enum ConsensusOptions {
     /// Use predefined testing consensus parameters
     Testing,
 
+    /// Use predefined mainnet consensus parameters
+    Mainnet,
+
     /// Use custom consensus parameters defined elsewhere
     Custom(ConsensusConfig),
 }
@@ -216,7 +214,7 @@ impl ConsensusOptions {
         accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
     ) {
         let config = self.get_mut();
-        config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
+        config.reth.extend_accounts(accounts);
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -235,17 +233,40 @@ pub struct BlockRewardConfig {
         deserialize_with = "serde_utils::token_amount",
         serialize_with = "serde_utils::serializes_token_amount"
     )]
+    /// The total number of tokens emitted by inflation
     pub inflation_cap: Amount<Irys>,
+    /// The number of seconds in each emission half life, determines inflation curve
     pub half_life_secs: u64,
 }
 
+/// # Reth Configuration
+///
+/// Minimal configuration needed for reth integration.
+/// The full `alloy_genesis::Genesis` is constructed at runtime from these fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RethChainSpec {
-    /// The type of chain.
-    pub chain: Chain,
-    /// Genesis block.
-    pub genesis: Genesis,
+pub struct IrysRethConfig {
+    /// Gas limit for genesis block (defaults to Ethereum 30M)
+    #[serde(default = "default_gas_limit")]
+    pub gas_limit: u64,
+
+    /// Initial account allocations (address -> balance/code/storage)
+    #[serde(default)]
+    pub alloc: BTreeMap<Address, GenesisAccount>,
+}
+
+fn default_gas_limit() -> u64 {
+    ETHEREUM_BLOCK_GAS_LIMIT_30M
+}
+
+impl IrysRethConfig {
+    /// Extend the genesis allocations with additional accounts
+    pub fn extend_accounts(
+        &mut self,
+        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
+    ) {
+        self.alloc.extend(accounts);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,10 +319,10 @@ pub struct EpochConfig {
     /// Number of blocks in a single epoch
     pub num_blocks_in_epoch: u64,
 
-    /// Number of epochs between ledger submissions
+    /// Number of epochs before a submit ledger partition expires
     pub submit_ledger_epoch_length: u64,
 
-    /// Optional configuration for capacity partitioning
+    /// Optional configuration for capacity provisioning at genesis
     pub num_capacity_partitions: Option<u64>,
 }
 
@@ -403,7 +424,11 @@ pub struct MempoolConsensusConfig {
 
     /// The number of blocks a given anchor (tx or block hash) is valid for.
     /// The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
-    pub anchor_expiry_depth: u8,
+    pub tx_anchor_expiry_depth: u8,
+
+    /// The number of blocks a given anchor (tx or block hash) is valid for.
+    /// The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
+    pub ingress_proof_anchor_expiry_depth: u16,
 
     /// Fee required for commitment transactions (stake, unstake, pledge, unpledge)
     pub commitment_fee: u64,
@@ -441,6 +466,170 @@ impl ConsensusConfig {
         let cost_per_chunk_per_epoch = cost_per_chunk_per_year / Decimal::from(epochs_per_year);
 
         Amount::token(cost_per_chunk_per_epoch)
+    }
+
+    pub fn mainnet() -> Self {
+        const IRYS_MAINNET_CHAIN_ID: u64 = 3282;
+        const IRYS_BLOCK_TIME: u64 = 12;
+
+        // block reward params
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
+        const INFLATION_CAP: u128 = 1_300_000_000;
+
+        Self {
+            chain_id: IRYS_MAINNET_CHAIN_ID,
+            // The annual cost in USD for storing 1GB of data on the Irys network Used as the foundation for calculating storage fees
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
+            // Annual rate at which storage costs are expected to decrease Accounts for technological improvements making storage cheaper over time
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(), // 1%
+            // Target number of years data should be preserved on the network Determines long-term storage pricing and incentives
+            safe_minimum_number_of_years: 200,
+            // Size of each data chunk in bytes
+            chunk_size: 256 * 1024, // 256KiB
+            // Defines the number of confirmations before a block is migrated to the index
+            block_migration_depth: 6,
+            // Number of blocks to retain in the block tree from chain head
+            block_tree_depth: 100,
+            // Configures how mining difficulty changes over time to maintain target block times
+            difficulty_adjustment: DifficultyAdjustmentConfig {
+                // Target time between blocks in seconds
+                block_time: IRYS_BLOCK_TIME,
+                // Number of blocks between difficulty adjustments
+                difficulty_adjustment_interval: 2000,
+                // Maximum factor by which difficulty can increase in a single adjustment
+                max_difficulty_adjustment_factor: dec!(4),
+                // Minimum factor by which difficulty can decrease in a single adjustment
+                min_difficulty_adjustment_factor: dec!(0.25),
+            },
+            // Configures inflation parameters
+            block_reward_config: BlockRewardConfig {
+                // The total number of tokens emitted by inflation
+                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
+                // The number of seconds in each emission half life, determines inflation curve
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
+            },
+            // Reth config
+            reth: IrysRethConfig {
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                alloc: {
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        Address::from_slice(
+                            hex::decode("3f0b21c8641c8cB28A9381fEa4F619B8d11dD35c")
+                                .unwrap()
+                                .as_slice(),
+                        ),
+                        GenesisAccount {
+                            // 10 billion IRYS
+                            balance: U256::from(10 * 1_000_000_000_u128)
+                                * U256::from(1_000_000_000_000_000_000_u128),
+                            ..Default::default()
+                        },
+                    );
+                    map
+                },
+            },
+            genesis: GenesisConfig {
+                // The timestamp in milliseconds used for the genesis block
+                timestamp_millis: 1763749823171,
+                // Address that signs the genesis block
+                miner_address: Address::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
+                    .unwrap(), // todo()
+                // Address that receives the genesis block reward
+                reward_address: Address::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
+                    .unwrap(), // todo()
+                // The initial last_epoch_hash used by the genesis block
+                last_epoch_hash: H256::from_base58("4eiVupeZoaBgxyDMacRHnvbbzodLRTEcGUG3yjXpAE4i"),
+                // The initial VDF seed used by the genesis block Must be explicitly set for deterministic VDF output at genesis.
+                vdf_seed: H256::from_base58("3peqVpX6VF8GjEsSeFk6XPN19bSn7fQbjgT6PJMkpzDo"),
+                // The initial next VDF seed used after the first reset boundary. If not set in config, defaults to the same value as vdf_seed
+                vdf_next_seed: None,
+                // The initial price of the Irys token at genesis in USD Sets the baseline for all future pricing calculations
+                genesis_price: Amount::token(dec!(0.15)).expect("valid token amount"),
+            },
+            mempool: MempoolConsensusConfig {
+                // Maximum number of data transactions that can be included in a single block
+                max_data_txs_per_block: 100,
+                // Maximum number of commitment transactions allowed in a single block
+                max_commitment_txs_per_block: 100,
+                // The number of blocks a given anchor (tx or block hash) is valid for. The anchor must be included within the last X blocks otherwise the transaction it anchors will drop.
+                tx_anchor_expiry_depth: 20,
+                // The number of blocks a given anchor (tx or block hash) is valid for. The anchor must be included within the last X blocks otherwise the ingress proof it anchors will drop.
+                ingress_proof_anchor_expiry_depth: 200,
+                // Fee required for commitment transactions (stake, unstake, pledge, unpledge)
+                commitment_fee: 62500000000000000,
+            },
+            epoch: EpochConfig {
+                // Scaling factor for the capacity projection curve Affects how network capacity is calculated and projected
+                capacity_scalar: 100,
+                // Number of blocks in a single epoch
+                num_blocks_in_epoch: 60_u64.div_ceil(IRYS_BLOCK_TIME) * 60 * 24, // Number of blocks in a day (7,200)
+                // Number of epochs before a submit ledger partition expires
+                submit_ledger_epoch_length: 5,
+                // Optional configuration for capacity provisioning at genesis
+                num_capacity_partitions: None,
+            },
+            // Number of blocks between EMA price recalculations Lower values make prices more responsive, higher values provide more stability
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            // Defines the acceptable range of token price fluctuation between consecutive blocks This helps prevent price manipulation and ensures price stability
+            token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            // Settings for the time-delay proof mechanism used in consensus.
+            vdf: VdfConsensusConfig {
+                // Reset VDF every ~50 blocks (50 blocks × 12 steps/block = 600 global steps)
+                // With 12s target block time, this resets approximately every 10 minutes
+                reset_frequency: 50 * 12,
+                // Number of checkpoints to include in each VDF step
+                num_checkpoints_in_vdf_step: 25,
+                // Minimum number of steps to store in FIFO VecDeque to allow for network forks
+                // num_chunks_in_partition / num_chunks_in_recall_range + some safety buffer for forks
+                max_allowed_vdf_fork_steps: 190_000,
+                // Target number of SHA-256 operations per second for the VDF
+                sha_1s_difficulty: 13_000_000,
+            },
+            // Number of chunks that make up a single partition
+            num_chunks_in_partition: 75_534_400, //  ~20 TB,
+            // Number of chunks that can be recalled in each partition by a mining step
+            num_chunks_in_recall_range: 400,
+            // Number of replica partitions in each storage slot
+            num_partitions_per_slot: 10,
+            // Number of iterations for Matrix (entropy) packing algorithm
+            entropy_packing_iterations: 1_000_000,
+            // Toggles full ingress proof validation on or off
+            enable_full_ingress_proof_validation: false,
+            // Fee required to stake a mining address in Irys tokens
+            stake_value: Amount::token(dec!(400_000)).expect("valid token amount"),
+            // Base fee required for pledging a partition in Irys tokens
+            pledge_base_value: Amount::token(dec!(14_000)).expect("valid token amount"),
+            // Decay rate for pledge fees - subsequent pledges become cheaper
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            // Percentage of the storage fee used to reward the miner for inclusion
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
+            // Minimum term fee in USD that must be paid for term storage If calculated fee is below this threshold, it will be rounded up
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum,
+            // Tolerance for future block timestamps due to clock drift (ms)
+            max_future_timestamp_drift_millis: 15_000,
+            // Expected genesis block hash (when joining existing networks)
+            expected_genesis_hash: Some(H256::from_base58(
+                "2Pgf5vJvvFifTnyJy9gTg31Yba2HFh2hC6imqsmJqdF7",
+            )),
+            programmable_data: ProgrammableDataConfig {
+                cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
+                base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
+                max_pd_chunks_per_block: 7_500,
+            },
+            // Hardfork configuration - mainnet values
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 10,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None, // Disabled on mainnet
+            },
+        }
     }
 
     pub fn testing() -> Self {
@@ -481,7 +670,6 @@ impl ConsensusConfig {
 
     pub fn testnet() -> Self {
         const DEFAULT_BLOCK_TIME: u64 = 12;
-        const IRYS_TESTNET_CHAIN_ID: u64 = 1270;
 
         // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
@@ -492,8 +680,6 @@ impl ConsensusConfig {
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
             decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
             safe_minimum_number_of_years: 200,
-            number_of_ingress_proofs_total: 1,
-            number_of_ingress_proofs_from_assignees: 0,
             genesis: GenesisConfig {
                 timestamp_millis: 0,
                 miner_address: Address::ZERO,
@@ -518,7 +704,8 @@ impl ConsensusConfig {
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                anchor_expiry_depth: 20,
+                tx_anchor_expiry_depth: 20,
+                ingress_proof_anchor_expiry_depth: 200,
                 commitment_fee: 100,
             },
             vdf: VdfConsensusConfig {
@@ -548,68 +735,33 @@ impl ConsensusConfig {
             ema: EmaConfig {
                 price_adjustment_interval: 10,
             },
-            reth: RethChainSpec {
-                chain: Chain::from_id(IRYS_TESTNET_CHAIN_ID),
-                genesis: Genesis {
-                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                    config: alloy_genesis::ChainConfig {
-                        chain_id: IRYS_TESTNET_CHAIN_ID,
-                        homestead_block: None,
-                        dao_fork_block: None,
-                        dao_fork_support: false,
-                        eip150_block: None,
-                        eip155_block: None,
-                        eip158_block: None,
-                        byzantium_block: None,
-                        constantinople_block: None,
-                        petersburg_block: None,
-                        istanbul_block: None,
-                        muir_glacier_block: None,
-                        berlin_block: None,
-                        london_block: None,
-                        arrow_glacier_block: None,
-                        gray_glacier_block: None,
-                        merge_netsplit_block: None,
-                        shanghai_time: None,
-                        cancun_time: None,
-                        prague_time: None,
-                        osaka_time: None,
-                        terminal_total_difficulty: None,
-                        terminal_total_difficulty_passed: true,
-                        ethash: None,
-                        clique: None,
-                        parlia: None,
-                        extra_fields: OtherFields::new(IrysHardforksInConfig {}.into()),
-                        deposit_contract_address: None,
-                        blob_schedule: BTreeMap::new(),
-                    },
-                    alloc: {
-                        let mut map = BTreeMap::new();
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map.insert(
-                            Address::from_slice(
-                                hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
-                                    .unwrap()
-                                    .as_slice(),
-                            ),
-                            GenesisAccount {
-                                balance: alloy_primitives::U256::from(99999000000000000000000_u128),
-                                ..Default::default()
-                            },
-                        );
-                        map
-                    },
-                    ..Default::default()
+            reth: IrysRethConfig {
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                alloc: {
+                    let mut map = BTreeMap::new();
+                    map.insert(
+                        Address::from_slice(
+                            hex::decode("64f1a2829e0e698c18e7792d6e74f67d89aa0a32")
+                                .unwrap()
+                                .as_slice(),
+                        ),
+                        GenesisAccount {
+                            balance: U256::from(99999000000000000000000_u128),
+                            ..Default::default()
+                        },
+                    );
+                    map.insert(
+                        Address::from_slice(
+                            hex::decode("A93225CBf141438629f1bd906A31a1c5401CE924")
+                                .unwrap()
+                                .as_slice(),
+                        ),
+                        GenesisAccount {
+                            balance: U256::from(99999000000000000000000_u128),
+                            ..Default::default()
+                        },
+                    );
+                    map
                 },
             },
             block_reward_config: BlockRewardConfig {
@@ -625,6 +777,14 @@ impl ConsensusConfig {
                 cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
                 base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
                 max_pd_chunks_per_block: 7_500,
+            },
+            // Hardfork configuration - testnet uses 1 proof for easier testing
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None, // Can be enabled for testnet experiments
             },
         }
     }

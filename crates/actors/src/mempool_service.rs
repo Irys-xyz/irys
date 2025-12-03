@@ -18,8 +18,8 @@ use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
 use eyre::{eyre, OptionExt as _};
-use futures::future::BoxFuture;
 use futures::FutureExt as _;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
     cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
@@ -32,10 +32,9 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
-use irys_types::CommitmentType;
 use irys_types::{
-    app_state::DatabaseProvider, Config, IrysBlockHeader, IrysTransactionCommon, IrysTransactionId,
-    H256, U256,
+    app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
+    IrysTransactionId, NodeConfig, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -46,31 +45,34 @@ use irys_types::{
     Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
+use irys_types::{BlockHash, CommitmentType};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
 use reth::tasks::shutdown::Shutdown;
 use reth::tasks::TaskExecutor;
 use reth_db::cursor::*;
-use reth_db::{Database as _, DatabaseError};
 use std::collections::BTreeMap;
 use std::fmt::Display;
 use std::fs;
 use std::io::Write as _;
 use std::num::NonZeroUsize;
 use std::pin::pin;
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
-use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock};
-use tracing::{debug, error, info, instrument, trace, warn, Instrument as _};
+use tokio::sync::{broadcast, mpsc::UnboundedReceiver, oneshot, RwLock, Semaphore};
+use tokio::time::MissedTickBehavior;
+use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span};
 
 /// Public helper to validate that a commitment transaction is sufficiently funded.
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
 /// covers the total cost (value + fee) of the transaction.
 #[inline]
-pub fn validate_funding(
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+pub async fn validate_funding(
     reth_adapter: &IrysRethNodeAdapter,
     commitment_tx: &irys_types::CommitmentTransaction,
     parent_evm_block_id: Option<BlockId>,
@@ -79,6 +81,7 @@ pub fn validate_funding(
     let balance: irys_types::U256 = reth_adapter
         .rpc
         .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
+        .await
         .map_err(|e| {
             tracing::error!(
                 tx.id = %commitment_tx.id,
@@ -102,7 +105,7 @@ pub fn validate_funding(
             tx.signer = %commitment_tx.signer,
             "Insufficient balance for commitment tx"
         );
-        return Err(TxIngressError::Unfunded);
+        return Err(TxIngressError::Unfunded(commitment_tx.id));
     }
 
     tracing::debug!(
@@ -122,7 +125,8 @@ pub fn validate_funding(
 ///   transactions - this will validate against the current canonical tip)
 /// - value must match the commitment type rules
 #[inline]
-pub fn validate_commitment_transaction(
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+pub async fn validate_commitment_transaction(
     reth_adapter: &IrysRethNodeAdapter,
     consensus: &irys_types::ConsensusConfig,
     commitment_tx: &irys_types::CommitmentTransaction,
@@ -145,15 +149,17 @@ pub fn validate_commitment_transaction(
     })?;
 
     // Funding
-    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id).map_err(|e| {
-        warn!(
-            tx.id = ?commitment_tx.id,
-            tx.signer = ?commitment_tx.signer,
-            tx.error = ?e,
-            "Commitment tx funding validation failed"
-        );
-        e
-    })?;
+    validate_funding(reth_adapter, commitment_tx, parent_evm_block_id)
+        .await
+        .map_err(|e| {
+            warn!(
+                tx.id = ?commitment_tx.id,
+                tx.signer = ?commitment_tx.signer,
+                tx.error = ?e,
+                "Commitment tx funding validation failed"
+            );
+            e
+        })?;
 
     // Value
     commitment_tx.validate_value(consensus).map_err(|e| {
@@ -183,7 +189,21 @@ pub struct Inner {
     pub storage_modules_guard: StorageModulesReadGuard,
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
-    pub stake_and_pledge_whitelist: HashSet<Address>,
+    message_handler_semaphore: Arc<Semaphore>,
+}
+
+pub struct MempoolServiceMessageWithSpan {
+    pub message: MempoolServiceMessage,
+    pub span: Span,
+}
+
+impl From<MempoolServiceMessage> for MempoolServiceMessageWithSpan {
+    fn from(value: MempoolServiceMessage) -> Self {
+        Self {
+            message: value,
+            span: Span::current(),
+        }
+    }
 }
 
 /// Messages that the Mempool Service handler supports
@@ -231,10 +251,9 @@ pub enum MempoolServiceMessage {
         DataTransactionHeader,
         oneshot::Sender<Result<(), TxIngressError>>,
     ),
-    /// Return filtered list of candidate txns
-    /// Filtering based on funding status etc based on the provided EVM block ID
-    /// If `None` is provided, the latest canonical block is used
-    GetBestMempoolTxs(Option<BlockId>, oneshot::Sender<eyre::Result<MempoolTxs>>),
+    /// Return filtered list of candidate txns for the provided Irys block hash
+    GetBestMempoolTxs(BlockHash, oneshot::Sender<eyre::Result<MempoolTxs>>),
+    // todo update the test utils to use the read guard instead. Then this can be deleted
     /// Retrieves a list of CommitmentTransactions based on the provided tx ids
     GetCommitmentTxs {
         commitment_tx_ids: Vec<IrysTransactionId>,
@@ -251,187 +270,173 @@ pub enum MempoolServiceMessage {
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
     UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
-    GetStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
+    CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
 }
 
 impl Inner {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     /// handle inbound MempoolServiceMessage and send oneshot responses where required to do so
-    pub fn handle_message<'a>(
-        &'a mut self,
-        msg: MempoolServiceMessage,
-    ) -> BoxFuture<'a, eyre::Result<()>> {
-        Box::pin(async move {
-            match msg {
-                MempoolServiceMessage::GetDataTxs(txs, response) => {
-                    let response_message = self.handle_get_data_tx_message(txs).await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::BlockConfirmed(block) => {
-                    let _unused_response_message = self.handle_block_confirmed_message(block).await;
-                }
-                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
-                    let response_message = self
-                        .handle_ingress_commitment_tx_message_api(commitment_tx)
-                        .await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
-                    let response_message = self
-                        .handle_ingress_commitment_tx_message_gossip(commitment_tx)
-                        .await;
-                    if let Err(e) = response.send(response_message) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestChunk(chunk, response) => {
-                    let response_value: Result<(), ChunkIngressError> =
-                        self.handle_chunk_ingress_message(chunk).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!(
-                            "handle_chunk_ingress_message response.send() error: {:?}",
-                            e
-                        );
-                    };
-                }
-                MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
-                    let result = self.handle_chunk_ingress_message(chunk).await;
-                    if let Err(e) = result {
-                        tracing::error!("handle_chunk_ingress_message error: {:?}", e);
-                    }
-                }
-                MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
-                    let response_value = self.handle_get_best_mempool_txs(block_id).await;
-                    // Return selected transactions grouped by type
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetCommitmentTxs {
-                    commitment_tx_ids,
-                    response,
-                } => {
-                    let response_value = self
-                        .handle_get_commitment_tx_message(commitment_tx_ids)
-                        .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::DataTxExists(txid, response) => {
-                    let response_value = self.handle_data_tx_exists_message(txid).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
-                    let response_value = self
-                        .handle_get_block_header_message(hash, include_chunk)
-                        .await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::CommitmentTxExists(txid, response) => {
-                    let response_value = self.handle_commitment_tx_exists_message(txid).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message_api(tx).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
-                    let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-
-                MempoolServiceMessage::GetState(response) => {
-                    if let Err(e) = response
-                        .send(Arc::clone(&self.mempool_state))
-                        .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
-                    {
-                        tracing::error!("response.send() error: {:?}", e);
-                    }
-                }
-                MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
-                    let response_value = self.handle_ingest_ingress_proof(ingress_proof);
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
-                    let response_value = self.remove_from_blacklists(tx_ids).await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetMempoolStatus(response) => {
-                    let response_value = self.handle_get_mempool_status().await;
-                    if let Err(e) = response.send(response_value) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
-                    self.stake_and_pledge_whitelist.extend(new_entries);
-                    if let Err(e) = response.send(()) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
-                }
-                MempoolServiceMessage::GetStakeAndPledgeWhitelist(tx) => {
-                    let whitelist = self.stake_and_pledge_whitelist.clone();
-                    if let Err(e) = tx.send(whitelist) {
-                        tracing::error!("response.send() error: {:?}", e);
-                    };
+    pub async fn handle_message(&self, msg: MempoolServiceMessage) -> eyre::Result<()> {
+        match msg {
+            MempoolServiceMessage::GetDataTxs(txs, response) => {
+                let response_message = self.handle_get_data_tx_message(txs).await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::BlockConfirmed(block) => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
+                if let Err(e) = self.handle_block_confirmed_message(block).await {
+                    tracing::error!(
+                        "Failed to handle block confirmed message for block {} (height {}): {:#}",
+                        block_hash,
+                        block_height,
+                        e
+                    );
                 }
             }
-            Ok(())
-        })
-    }
+            MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, response) => {
+                let response_message = self
+                    .handle_ingress_commitment_tx_message_api(commitment_tx)
+                    .await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, response) => {
+                let response_message = self
+                    .handle_ingress_commitment_tx_message_gossip(commitment_tx)
+                    .await;
+                if let Err(e) = response.send(response_message) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestChunk(chunk, response) => {
+                let response_value: Result<(), ChunkIngressError> =
+                    self.handle_chunk_ingress_message(chunk).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!(
+                        "handle_chunk_ingress_message response.send() error: {:?}",
+                        e
+                    );
+                };
+            }
+            MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
+                let result = self.handle_chunk_ingress_message(chunk).await;
+                if let Err(e) = result {
+                    tracing::error!("handle_chunk_ingress_message error: {:?}", e);
+                }
+            }
+            MempoolServiceMessage::GetBestMempoolTxs(block_id, response) => {
+                let response_value = self.handle_get_best_mempool_txs(block_id).await;
+                // Return selected transactions grouped by type
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetCommitmentTxs {
+                commitment_tx_ids,
+                response,
+            } => {
+                let response_value = self
+                    .handle_get_commitment_tx_message(commitment_tx_ids)
+                    .await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::DataTxExists(txid, response) => {
+                let response_value = self.handle_data_tx_exists_message(txid).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetBlockHeader(hash, include_chunk, response) => {
+                let response_value = self
+                    .handle_get_block_header_message(hash, include_chunk)
+                    .await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::CommitmentTxExists(txid, response) => {
+                let response_value = self.handle_commitment_tx_exists_message(txid).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestDataTxFromApi(tx, response) => {
+                let response_value = self.handle_data_tx_ingress_message_api(tx).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::IngestDataTxFromGossip(tx, response) => {
+                let response_value = self.handle_data_tx_ingress_message_gossip(tx).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
 
-    async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
-        let state = self.mempool_state.read().await;
-
-        // Calculate total data size
-        let data_tx_total_size: u64 = state
-            .valid_submit_ledger_tx
-            .values()
-            .map(|tx| tx.data_size)
-            .sum();
-
-        let mempool_config = &self.config.node_config.consensus_config().mempool;
-
-        Ok(MempoolStatus {
-            data_tx_count: state.valid_submit_ledger_tx.len(),
-            commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
-            pending_chunks_count: state.pending_chunks.len(),
-            pending_pledges_count: state.pending_pledges.len(),
-            recent_valid_tx_count: state.recent_valid_tx.len(),
-            recent_invalid_tx_count: state.recent_invalid_tx.len(),
-            data_tx_total_size,
-            config: mempool_config.clone(),
-        })
-    }
-
-    async fn remove_from_blacklists(&mut self, tx_ids: Vec<H256>) {
-        let mut state = self.mempool_state.write().await;
-        for tx_id in tx_ids {
-            state.recent_invalid_tx.pop(&tx_id);
+            MempoolServiceMessage::GetState(response) => {
+                if let Err(e) = response
+                    .send(self.mempool_state.clone())
+                    .inspect_err(|e| tracing::error!("response.send() error: {:?}", e))
+                {
+                    tracing::error!("response.send() error: {:?}", e);
+                }
+            }
+            MempoolServiceMessage::IngestIngressProof(ingress_proof, response) => {
+                let response_value = self.handle_ingest_ingress_proof(ingress_proof);
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::RemoveFromBlacklist(tx_ids, response) => {
+                let response_value = self.remove_from_blacklists(tx_ids).await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetMempoolStatus(response) => {
+                let response_value = self.handle_get_mempool_status().await;
+                if let Err(e) = response.send(response_value) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_entries, response) => {
+                self.extend_stake_and_pledge_whitelist(new_entries).await;
+                if let Err(e) = response.send(()) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx) => {
+                let whitelist = self.get_stake_and_pledge_whitelist_cloned().await;
+                if let Err(e) = tx.send(whitelist) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
         }
+        Ok(())
     }
 
-    #[instrument(skip_all)]
+    #[tracing::instrument(level = "trace", skip_all)]
+    async fn handle_get_mempool_status(&self) -> Result<MempoolStatus, TxReadError> {
+        Ok(self
+            .mempool_state
+            .get_status(&self.config.node_config)
+            .await)
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.count = tx_ids.len()))]
+    async fn remove_from_blacklists(&self, tx_ids: Vec<H256>) {
+        self.mempool_state.remove_blacklisted_txids(&tx_ids).await;
+    }
+
+    #[instrument(level = "trace", skip_all)]
     pub async fn validate_anchor_for_inclusion(
         &self,
         min_anchor_height: u64,
@@ -440,7 +445,21 @@ impl Inner {
     ) -> eyre::Result<bool> {
         let tx_id = tx.id();
         let anchor = tx.anchor();
-        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+        // ingress proof anchors must be canonical for inclusion
+        let anchor_height = match self.get_anchor_height(anchor, true).map_err(|e| {
+            TxIngressError::DatabaseError(format!(
+                "Error getting anchor height for {}: {}",
+                anchor, e
+            ))
+        })? {
+            Some(height) => height,
+            None => {
+                self.mempool_state
+                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
+                    .await;
+                return Err(TxIngressError::InvalidAnchor(anchor).into());
+            }
+        };
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
@@ -458,10 +477,45 @@ impl Inner {
         }
     }
 
-    #[instrument(skip(self), fields(parent_block.id = ?parent_evm_block_id), err)]
+    #[instrument(skip_all)]
+    pub fn validate_ingress_proof_anchor_for_inclusion(
+        &self,
+        min_anchor_height: u64,
+        ingress_proof: &IngressProof,
+    ) -> eyre::Result<bool> {
+        let anchor = ingress_proof.anchor;
+        let anchor_height = match self.get_anchor_height(anchor, true).map_err(|e| {
+            TxIngressError::DatabaseError(format!(
+                "Error getting anchor height for {}: {}",
+                anchor, e
+            ))
+        })? {
+            Some(height) => height,
+            None => {
+                // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+                return Ok(false);
+            }
+        };
+
+        // these have to be inclusive so we handle txs near height 0 correctly
+        let new_enough = anchor_height >= min_anchor_height;
+
+        // note: we don't need old_enough as we're part of the block header
+        // so there's no need to go through the mempool
+        // let old_enough: bool = anchor_height <= max_anchor_height;
+        if new_enough {
+            Ok(true)
+        } else {
+            // TODO: recover the signer's address here? (or compute an ID)
+            warn!("ingress proof data_root {} signature {:?} anchor {anchor} has height {anchor_height}, which is too old compared to min height {min_anchor_height}", &ingress_proof.data_root, &ingress_proof.signature);
+            Ok(false)
+        }
+    }
+
+    #[instrument(skip(self), fields(block.parent_block_hash = ?parent_block_hash), err)]
     async fn handle_get_best_mempool_txs(
-        &mut self,
-        parent_evm_block_id: Option<BlockId>,
+        &self,
+        parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
         let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
@@ -478,101 +532,86 @@ impl Inner {
             .try_into()
             .expect("max_commitment_txs_per_block to fit into usize");
 
-        let current_height = self.get_latest_block_height()?;
+        let (
+            canonical,
+            parent_block_height,
+            parent_evm_block_id,
+            commitment_snapshot,
+            epoch_snapshot,
+            ema_snapshot,
+            block_timestamp_secs,
+        ) = {
+            let tree = self.block_tree_read_guard.read();
+
+            // Get the canonical chain for use in get_publish_txs_and_proofs
+            let (canonical, _) = tree.get_canonical_chain();
+
+            eyre::ensure!(
+                // todo if you change this to .last() instead of .any() then some poor fork tests start braeking
+                canonical.iter().any(|entry| entry.block_hash == parent_block_hash),
+                "Provided parent_block_hash {:?} is not on the canonical chain. Canonical tip: {:?}",
+                parent_block_hash,
+                canonical.last().map(|entry| entry.block_hash)
+            );
+
+            let block = tree
+                .get_block(&parent_block_hash)
+                .ok_or_eyre(format!("Block not found: {:?}", parent_block_hash))?;
+
+            // Extract only the data we need before the tree guard is dropped
+            let block_height = block.height;
+            let evm_block_id = Some(BlockId::Hash(block.evm_block_hash.into()));
+            // Get the parent block's timestamp (millis) and convert to seconds for hardfork params
+            let block_timestamp_secs = block.timestamp_secs();
+
+            let ema_snapshot = tree
+                .get_ema_snapshot(&parent_block_hash)
+                .ok_or_else(|| eyre!("EMA snapshot not found for block {:?}", parent_block_hash))?;
+            let epoch_snapshot = tree.get_epoch_snapshot(&parent_block_hash).ok_or_else(|| {
+                eyre!("Epoch snapshot not found for block {:?}", parent_block_hash)
+            })?;
+            let commitment_snapshot =
+                tree.get_commitment_snapshot(&parent_block_hash)
+                    .map_err(|e| {
+                        eyre!(
+                            "Failed to get commitment snapshot for block {:?}: {}",
+                            parent_block_hash,
+                            e
+                        )
+                    })?;
+
+            (
+                canonical,
+                block_height,
+                evm_block_id,
+                commitment_snapshot,
+                epoch_snapshot,
+                ema_snapshot,
+                block_timestamp_secs,
+            )
+        };
+
+        let current_height = parent_block_height;
+        let next_block_height = parent_block_height + 1;
+        // Use parent block's timestamp for hardfork params (seconds since epoch)
+        let current_timestamp = block_timestamp_secs;
         let min_anchor_height = current_height.saturating_sub(
-            (self.config.consensus.mempool.anchor_expiry_depth as u64)
+            (self.config.consensus.mempool.tx_anchor_expiry_depth as u64)
                 .saturating_sub(self.config.consensus.block_migration_depth as u64),
         );
 
         let max_anchor_height =
             current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
 
-        debug!("Anchor bounds for inclusion @ {current_height}: >= {min_anchor_height}, <= {max_anchor_height}");
-
-        // Helper function that verifies transaction funding and tracks cumulative fees
-        // Returns true if the transaction can be funded based on current account balance
-        // and previously included transactions in this block
-        let mut check_funding = |tx: &dyn IrysTransactionCommon| -> bool {
-            let signer = tx.signer();
-
-            // Skip transactions from addresses with previously unfunded transactions
-            // This ensures we don't include any transactions (including pledges) from
-            // addresses that couldn't afford their stake commitments
-            if unfunded_address.contains(&signer) {
-                return false;
-            }
-
-            let fee = tx.total_cost();
-            let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
-
-            // Calculate total required balance including previously selected transactions
-
-            // get balance state for the block we're building off of
-            let balance: U256 = self
-                .reth_node_adapter
-                .rpc
-                .get_balance_irys(signer, parent_evm_block_id);
-
-            let has_funds = balance >= current_spent + fee;
-
-            // Track fees for this address regardless of whether this specific transaction is included
-            fees_spent_per_address
-                .entry(signer)
-                .and_modify(|val| *val += fee)
-                .or_insert(fee);
-
-            // If transaction cannot be funded, mark the entire address as unfunded
-            // Since stakes are processed before pledges, this prevents inclusion of
-            // pledge commitments when their associated stake commitment is unfunded
-            if !has_funds {
-                debug!(
-                    tx.signer = ?signer,
-                    account.balance = ?balance,
-                    "Transaction funding check failed"
-                );
-                unfunded_address.insert(signer);
-                return false;
-            }
-
-            has_funds
-        };
-
-        // Get all necessary snapshots and canonical chain info in a single read operation
-        let (canonical, last_block, commitment_snapshot, epoch_snapshot, ema_snapshot) = {
-            let tree = self.block_tree_read_guard.read();
-            let (canonical, _) = tree.get_canonical_chain();
-            let last_block = canonical
-                .last()
-                .ok_or_eyre("Empty canonical chain")?
-                .clone();
-
-            // Get all snapshots for the tip block
-            let ema_snapshot = tree
-                .get_ema_snapshot(&last_block.block_hash)
-                .ok_or_else(|| eyre!("EMA snapshot not found for tip block"))?;
-            let epoch_snapshot = tree
-                .get_epoch_snapshot(&last_block.block_hash)
-                .ok_or_else(|| eyre!("Epoch snapshot not found for tip block"))?;
-            let commitment_snapshot = tree
-                .get_commitment_snapshot(&last_block.block_hash)
-                .map_err(|e| eyre!("Failed to get commitment snapshot: {}", e))?;
-
-            (
-                canonical,
-                last_block,
-                commitment_snapshot,
-                epoch_snapshot,
-                ema_snapshot,
-            )
-        };
+        let mut balances: HashMap<Address, U256> = HashMap::new();
 
         info!(
-            chain.head_height = last_block.height,
-            chain.head_hash = ?last_block.block_hash,
-            chain.canonical_length = canonical.len(),
+            block.height = parent_block_height,
+            block.hash = ?parent_block_hash,
             "Starting mempool transaction selection"
         );
 
+        // Collect confirmed commitment transactions from canonical chain to avoid duplicates
         for entry in canonical.iter() {
             let commitment_tx_ids = entry.system_ledgers.get(&SystemLedger::Commitment);
             if let Some(commitment_tx_ids) = commitment_tx_ids {
@@ -582,18 +621,20 @@ impl Inner {
             }
         }
 
-        // Process commitments in the mempool in priority order
-        let mempool_state_guard = mempool_state.read().await;
-
         // Collect all stake and pledge commitments from mempool
-        let mut sorted_commitments = mempool_state_guard
-            .valid_commitment_tx
-            .values()
-            .flat_map(|txs| txs.iter().cloned())
-            .collect::<Vec<_>>();
+        let mut sorted_commitments = mempool_state.sorted_commitments().await;
 
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
+
+        balances.extend(
+            fetch_balances_for_transactions(
+                &self.reth_node_adapter,
+                parent_evm_block_id,
+                &sorted_commitments,
+            )
+            .await,
+        );
 
         // Process sorted commitments
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
@@ -615,7 +656,9 @@ impl Inner {
                 &self.config.consensus,
                 tx,
                 parent_evm_block_id,
-            ) {
+            )
+            .await
+            {
                 tracing::warn!(tx.error = ?error, "rejecting commitment tx");
                 continue;
             }
@@ -624,6 +667,15 @@ impl Inner {
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, tx)
                 .await?
             {
+                debug!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer,
+                    tx.commitment_type = ?tx.commitment_type,
+                    tx.anchor = ?tx.anchor,
+                    min_anchor_height = min_anchor_height,
+                    max_anchor_height = max_anchor_height,
+                    "Not promoting commitment tx - anchor validation failed"
+                );
                 continue;
             }
 
@@ -638,6 +690,12 @@ impl Inner {
                 );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.signer = ?tx.signer,
+                        tx.commitment_type = ?tx.commitment_type,
+                        "Not promoting commitment tx - signer already staked"
+                    );
                     continue;
                 }
             }
@@ -657,6 +715,37 @@ impl Inner {
                 }
             }
 
+            trace!(
+                tx.id = ?tx.id,
+                tx.signer = ?tx.signer(),
+                tx.fee = ?tx.total_cost(),
+                "Checking funding for commitment transaction"
+            );
+            if check_funding(
+                tx,
+                &balances,
+                &mut unfunded_address,
+                &mut fees_spent_per_address,
+            ) {
+                trace!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.selected_count = commitment_tx.len() + 1,
+                    tx.max_commitments = max_commitments,
+                    "Commitment transaction passed funding check"
+                );
+            } else {
+                trace!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.fee = ?tx.total_cost(),
+                    tx.validation_failed_reason = "insufficient_funds",
+                    "Data transaction failed funding check"
+                );
+                continue;
+            }
+
             debug!(
                 tx.id = ?tx.id,
                 tx.commitment_type = ?tx.commitment_type,
@@ -666,6 +755,7 @@ impl Inner {
                 tx.max_commitments = max_commitments,
                 "Adding commitment transaction to block"
             );
+
             commitment_tx.push(tx.clone());
 
             // if we have reached the maximum allowed number of commitment txs per block
@@ -674,7 +764,6 @@ impl Inner {
                 break;
             }
         }
-        drop(mempool_state_guard);
 
         // Log commitment selection summary
         if !commitment_tx.is_empty() {
@@ -719,12 +808,21 @@ impl Inner {
             .try_into()
             .expect("max_data_txs_per_block to fit into usize");
 
+        balances.extend(
+            fetch_balances_for_transactions(
+                &self.reth_node_adapter,
+                parent_evm_block_id,
+                &submit_ledger_txs,
+            )
+            .await,
+        );
+
         // Select data transactions in fee-priority order, respecting funding limits
         // and maximum transaction count per block
         for tx in submit_ledger_txs {
             // Validate fees based on ledger type
             let Ok(ledger) = irys_types::DataLedger::try_from(tx.ledger_id) else {
-                trace!(
+                debug!(
                     tx.id = ?tx.id,
                     tx.ledger_id = tx.ledger_id,
                     "Skipping tx: invalid ledger ID"
@@ -734,10 +832,18 @@ impl Inner {
             match ledger {
                 irys_types::DataLedger::Publish => {
                     // For Publish ledger, validate both term and perm fees
-                    // Calculate expected fees based on current EMA
-                    let Ok(expected_term_fee) =
-                        self.calculate_term_storage_fee(tx.data_size, &ema_snapshot)
-                    else {
+                    // Calculate expected fees based on current EMA for the next block height
+                    let Ok(expected_term_fee) = self.calculate_term_storage_fee(
+                        tx.data_size,
+                        &ema_snapshot,
+                        next_block_height,
+                        current_timestamp,
+                    ) else {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.data_size = tx.data_size,
+                            "Failed to calculate term fee"
+                        );
                         continue;
                     };
 
@@ -745,13 +851,19 @@ impl Inner {
                         tx.data_size,
                         expected_term_fee,
                         &ema_snapshot,
+                        current_timestamp,
                     ) else {
+                        debug!(
+                            tx.id = ?tx.id,
+                            tx.data_size = tx.data_size,
+                            "Failed to calculate perm fee"
+                        );
                         continue;
                     };
 
                     // Validate term fee
                     if tx.term_fee < expected_term_fee {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.actual_term_fee = ?tx.term_fee,
                             tx.expected_term_fee = ?expected_term_fee,
@@ -772,7 +884,7 @@ impl Inner {
                         continue;
                     };
                     if perm_fee < expected_perm_fee.amount {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.actual_perm_fee = ?perm_fee,
                             tx.expected_perm_fee = ?expected_perm_fee.amount,
@@ -785,7 +897,7 @@ impl Inner {
                     if TermFeeCharges::new(tx.term_fee, &self.config.node_config.consensus_config())
                         .is_err()
                     {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.term_fee = ?tx.term_fee,
                             "Skipping Publish tx: invalid term fee structure"
@@ -793,14 +905,18 @@ impl Inner {
                         continue;
                     }
 
+                    let number_of_ingress_proofs_total = self
+                        .config
+                        .number_of_ingress_proofs_total_at(current_timestamp);
                     if PublishFeeCharges::new(
                         perm_fee,
                         tx.term_fee,
                         &self.config.node_config.consensus_config(),
+                        number_of_ingress_proofs_total,
                     )
                     .is_err()
                     {
-                        trace!(
+                        debug!(
                             tx.id = ?tx.id,
                             tx.perm_fee = ?perm_fee,
                             tx.term_fee = ?tx.term_fee,
@@ -811,6 +927,12 @@ impl Inner {
                 }
                 irys_types::DataLedger::Submit => {
                     // todo: add to list of invalid txs because we don't support Submit txs
+                    debug!(
+                        tx.id = ?tx.id,
+                        tx.signer = ?tx.signer(),
+                        "Not promoting data tx - Submit ledger not eligible for promotion"
+                    );
+                    continue;
                 }
             }
 
@@ -818,6 +940,14 @@ impl Inner {
                 .validate_anchor_for_inclusion(min_anchor_height, max_anchor_height, &tx)
                 .await?
             {
+                debug!(
+                    tx.id = ?tx.id,
+                    tx.signer = ?tx.signer(),
+                    tx.anchor = ?tx.anchor,
+                    min_anchor_height = min_anchor_height,
+                    max_anchor_height = max_anchor_height,
+                    "Not promoting data tx - anchor validation failed"
+                );
                 continue;
             }
 
@@ -827,7 +957,12 @@ impl Inner {
                 tx.fee = ?tx.total_cost(),
                 "Checking funding for data transaction"
             );
-            if check_funding(&tx) {
+            if check_funding(
+                &tx,
+                &balances,
+                &mut unfunded_address,
+                &mut fees_spent_per_address,
+            ) {
                 trace!(
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer(),
@@ -853,7 +988,7 @@ impl Inner {
 
         // note: publish txs are sorted internally by the get_publish_txs_and_proofs fn
         let publish_txs_and_proofs = self
-            .get_publish_txs_and_proofs(&canonical, &submit_tx)
+            .get_publish_txs_and_proofs(&canonical, &submit_tx, current_height, current_timestamp)
             .await?;
 
         // Calculate total fees and log final summary
@@ -908,43 +1043,57 @@ impl Inner {
         })
     }
 
+    #[tracing::instrument(level = "trace", skip_all, fields(canonical.len = canonical.len(), submit_tx.count = submit_tx.len()))]
     pub async fn get_publish_txs_and_proofs(
         &self,
         canonical: &[BlockTreeEntry],
         submit_tx: &[DataTransactionHeader],
+        current_height: u64,
+        current_timestamp: UnixTimestamp,
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
 
+        // only max anchor age is constrained for ingress proofs
+        let min_ingress_proof_anchor_height = current_height.saturating_sub(
+            self.config
+                .consensus
+                .mempool
+                .ingress_proof_anchor_expiry_depth as u64,
+        );
+
         {
-            let read_tx = self
+            let publish_txids = self
                 .irys_db
-                .tx()
+                .view_eyre(|tx| {
+                    let mut read_cursor = tx
+                        .new_cursor::<IngressProofs>()
+                        .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
+
+                    let walker = read_cursor
+                        .walk(None)
+                        .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
+
+                    let ingress_proofs =
+                        walker.collect::<Result<HashMap<_, _>, _>>().map_err(|e| {
+                            eyre!("Failed to collect ingress proofs from database: {}", e)
+                        })?;
+
+                    let mut publish_txids: Vec<H256> = Vec::new();
+
+                    // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
+                    for data_root in ingress_proofs.keys() {
+                        let cached_data_root =
+                            cached_data_root_by_data_root(tx, *data_root).unwrap();
+                        if let Some(cached_data_root) = cached_data_root {
+                            let txids = cached_data_root.txid_set;
+                            trace!(tx.ids = ?txids, "Publish candidates");
+                            publish_txids.extend(txids)
+                        }
+                    }
+                    Ok(publish_txids)
+                })
                 .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
-
-            let mut read_cursor = read_tx
-                .new_cursor::<IngressProofs>()
-                .map_err(|e| eyre!("Failed to create DB read cursor: {}", e))?;
-
-            let walker = read_cursor
-                .walk(None)
-                .map_err(|e| eyre!("Failed to create DB read cursor walker: {}", e))?;
-
-            let ingress_proofs = walker
-                .collect::<Result<HashMap<_, _>, _>>()
-                .map_err(|e| eyre!("Failed to collect ingress proofs from database: {}", e))?;
-
-            let mut publish_txids: Vec<H256> = Vec::new();
-
-            // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
-            for data_root in ingress_proofs.keys() {
-                let cached_data_root = cached_data_root_by_data_root(&read_tx, *data_root).unwrap();
-                if let Some(cached_data_root) = cached_data_root {
-                    let txids = cached_data_root.txid_set;
-                    debug!(tx.ids = ?txids, "Publish candidates");
-                    publish_txids.extend(txids)
-                }
-            }
 
             // Loop through all the pending tx to see which haven't been promoted
             let txs = self.handle_get_data_tx_message(publish_txids.clone()).await;
@@ -974,7 +1123,6 @@ impl Inner {
                 acc.extend(v.data_ledgers[&DataLedger::Submit].0.clone());
                 acc
             });
-            let ro_tx = self.irys_db.tx()?;
 
             for tx_header in &tx_headers {
                 debug!(
@@ -986,8 +1134,9 @@ impl Inner {
                 if is_promoted {
                     // If it's promoted skip it
                     warn!(
-                        "Publish candidate {} is already promoted? {}",
-                        &tx_header.id, &is_promoted
+                        tx.id = ?tx_header.id,
+                        tx.promoted_height = ?tx_header.promoted_height,
+                        "Publish candidate is already promoted"
                     );
                     continue;
                 }
@@ -999,11 +1148,16 @@ impl Inner {
                     // check for single-block promotion
                     if !submit_tx.iter().any(|tx| tx.id == tx_header.id) {
                         // check database
-                        if tx_header_by_txid(&ro_tx, &tx_header.id)?.is_none() {
+                        if self
+                            .irys_db
+                            .view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?
+                            .is_none()
+                        {
                             // no previous inclusion
                             warn!(
-                                "Unable to find previous submit inclusion for publish candidate {}",
-                                &tx_header.id
+                                tx.id = ?tx_header.id,
+                                tx.data_root = ?tx_header.data_root,
+                                "Unable to find previous submit inclusion for publish candidate"
                             );
                             continue;
                         }
@@ -1013,7 +1167,17 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = ingress_proofs_by_data_root(&read_tx, tx_header.data_root)?;
+                let all_proofs = self
+                    .irys_db
+                    .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
+                    .into_iter()
+                    .filter(|(_root, cached_proof)| {
+                        let expired = self
+                            .is_ingress_proof_expired(&cached_proof.proof)
+                            .expired_or_invalid;
+                        !expired
+                    })
+                    .collect::<Vec<_>>();
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1026,10 +1190,11 @@ impl Inner {
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
-                let proofs_per_tx = std::cmp::min(
-                    self.config.consensus.number_of_ingress_proofs_total as usize,
-                    total_miners,
-                );
+                let number_of_ingress_proofs_total = self
+                    .config
+                    .number_of_ingress_proofs_total_at(current_timestamp);
+                let proofs_per_tx =
+                    std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
 
                 if all_proofs.len() < proofs_per_tx {
                     info!(
@@ -1041,11 +1206,21 @@ impl Inner {
                     continue;
                 }
 
-                // Convert to IngressProof vector for assignment checking
-                let all_tx_proofs: Vec<IngressProof> = all_proofs
-                    .iter()
-                    .map(|(_, proof_entry)| proof_entry.proof.clone())
-                    .collect();
+                let mut all_tx_proofs: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
+
+                //filter all these ingress proofs by their anchor validity
+                for (_hash, proof) in all_proofs {
+                    let proof = proof.0.proof;
+                    // validate the anchor is still valid
+                    let anchor_is_valid = self.validate_ingress_proof_anchor_for_inclusion(
+                        min_ingress_proof_anchor_height,
+                        &proof,
+                    )?;
+                    if anchor_is_valid {
+                        all_tx_proofs.push(proof)
+                    }
+                    // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
+                }
 
                 // Get assigned and unassigned proofs using the existing utility function
                 let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
@@ -1069,10 +1244,10 @@ impl Inner {
                 };
 
                 // Calculate expected assigned proofs, clamping to available miners
-                let mut expected_assigned_proofs =
-                    self.config
-                        .consensus
-                        .number_of_ingress_proofs_from_assignees as usize;
+                let number_of_ingress_proofs_from_assignees = self
+                    .config
+                    .number_of_ingress_proofs_from_assignees_at(current_timestamp);
+                let mut expected_assigned_proofs = number_of_ingress_proofs_from_assignees as usize;
 
                 if assigned_miners < expected_assigned_proofs {
                     warn!(
@@ -1110,8 +1285,7 @@ impl Inner {
 
                 // First, add assigned proofs up to the total network limit
                 // Use all available assigned proofs, but don't exceed the network total
-                let total_network_limit =
-                    self.config.consensus.number_of_ingress_proofs_total as usize;
+                let total_network_limit = number_of_ingress_proofs_total as usize;
                 let assigned_to_use = std::cmp::min(assigned_proofs.len(), total_network_limit);
                 final_proofs.extend_from_slice(&assigned_proofs[..assigned_to_use]);
 
@@ -1123,14 +1297,12 @@ impl Inner {
                 }
 
                 // Final check - do we have enough total proofs?
-                if final_proofs.len()
-                    < self.config.consensus.number_of_ingress_proofs_total as usize
-                {
+                if final_proofs.len() < number_of_ingress_proofs_total as usize {
                     info!(
                             "Not promoting tx {} - insufficient total proofs after assignment filtering (got {} wanted {})",
                             &tx_header.id,
                             final_proofs.len(),
-                            self.config.consensus.number_of_ingress_proofs_total
+                            number_of_ingress_proofs_total
                         );
                     continue;
                 }
@@ -1165,7 +1337,7 @@ impl Inner {
 
     /// return block header from mempool, if found
     /// TODO: we can remove this function and replace call sites with direct use of a block tree guard
-    #[expect(clippy::unused_async)]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_hash, include_chunk = include_chunk))]
     pub async fn handle_get_block_header_message(
         &self,
         block_hash: H256,
@@ -1183,38 +1355,58 @@ impl Inner {
     }
 
     // Resolves an anchor (block hash) to it's height
-    pub async fn get_anchor_height(
-        &self,
-        tx_id: IrysTransactionId,
-        anchor: H256,
-    ) -> Result<u64, TxIngressError> {
-        // check the mempool, then block tree, then DB
-        Ok(
-            if let Some(height) = {
-                // in a block so rust doesn't complain about it being held across an await point
-                // I suspect if let Some desugars to something that lint doesn't like
-                let guard = self.block_tree_read_guard.read();
-                guard.get_block(&anchor).map(|h| h.height)
-            } {
-                height
-            } else if let Some(hdr) = {
-                let read_tx = self.read_tx().map_err(|_| TxIngressError::DatabaseError)?;
-                irys_database::block_header_by_hash(&read_tx, &anchor, false)
-                    .map_err(|_| TxIngressError::DatabaseError)?
-            } {
-                hdr.height
-            } else {
-                Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
-                return Err(TxIngressError::InvalidAnchor);
-            },
+    // if it couldn't find the anchor, returns None
+    // set canonical to true to enforce that the anchor must be part of the current canonical chain
+    #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
+    pub fn get_anchor_height(&self, anchor: H256, canonical: bool) -> eyre::Result<Option<u64>> {
+        Self::get_anchor_height_static(
+            &self.block_tree_read_guard,
+            &self.irys_db,
+            anchor,
+            canonical,
         )
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(anchor = %anchor, canonical = canonical))]
+    pub fn get_anchor_height_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+        irys_db: &DatabaseProvider,
+        anchor: H256,
+        canonical: bool,
+    ) -> eyre::Result<Option<u64>> {
+        // check the block tree, then DB
+        if let Some(height) = {
+            // in a block so rust doesn't complain about it being held across an await point
+            // I suspect if let Some desugars to something that lint doesn't like
+            let guard = block_tree_read_guard.read();
+            if canonical {
+                guard
+                    .get_canonical_chain()
+                    .0
+                    .iter()
+                    .find(|b| b.block_hash == anchor)
+                    .map(|b| b.height)
+            } else {
+                guard.get_block(&anchor).map(|h| h.height)
+            }
+        } {
+            Ok(Some(height))
+        } else if let Some(hdr) =
+            irys_db.view_eyre(|tx| irys_database::block_header_by_hash(tx, &anchor, false))?
+        {
+            Ok(Some(hdr.height))
+        } else {
+            // Self::mark_tx_as_invalid(self.mempool_state.write().await, tx_id, "Unknown anchor");
+            // return Err(TxIngressError::InvalidAnchor);
+            Ok(None)
+        }
     }
 
     // Helper to validate anchor
     // this takes in an IrysTransaction and validates the anchor
     // if the anchor is valid, returns anchor block height
-    #[instrument(skip_all, fields(tx.id = %tx.id(), anchor = %tx.anchor()))]
-    pub async fn validate_anchor(
+    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id(), anchor = %tx.anchor()))]
+    pub async fn validate_tx_anchor(
         &self,
         tx: &impl IrysTransactionCommon,
     ) -> Result<u64, TxIngressError> {
@@ -1223,12 +1415,29 @@ impl Inner {
 
         let latest_height = self.get_latest_block_height()?;
 
-        let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+        // let anchor_height = self.get_anchor_height(tx_id, anchor).await?;
+
+        let anchor_height = match self
+            .get_anchor_height(anchor, false /* does not need to be canonical */)
+            .map_err(|e| {
+                TxIngressError::DatabaseError(format!(
+                    "Error getting anchor height for {}: {}",
+                    anchor, e
+                ))
+            })? {
+            Some(height) => height,
+            None => {
+                self.mempool_state
+                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
+                    .await;
+                return Err(TxIngressError::InvalidAnchor(anchor));
+            }
+        };
 
         // is this anchor too old?
 
-        let min_anchor_height =
-            latest_height.saturating_sub(self.config.consensus.mempool.anchor_expiry_depth as u64);
+        let min_anchor_height = latest_height
+            .saturating_sub(self.config.consensus.mempool.tx_anchor_expiry_depth as u64);
 
         let too_old = anchor_height < min_anchor_height;
 
@@ -1236,25 +1445,25 @@ impl Inner {
             debug!("valid block hash anchor for tx ");
             return Ok(anchor_height);
         } else {
-            Self::mark_tx_as_invalid(
-                self.mempool_state.write().await,
+            self.mempool_state.mark_tx_as_invalid(
                 tx_id,
                 format!(
-                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height}"
-                ),
-            );
+                    "Invalid anchor value for tx {tx_id} - anchor {anchor}@{anchor_height} is too old ({anchor_height}<{min_anchor_height})"
+                )
+            ).await;
 
-            return Err(TxIngressError::InvalidAnchor);
+            return Err(TxIngressError::InvalidAnchor(anchor));
         }
     }
 
+    #[tracing::instrument(level = "trace", skip_all)]
     pub async fn persist_mempool_to_disk(&self) -> eyre::Result<()> {
         let base_path = self.config.node_config.mempool_dir();
 
         let commitment_tx_path = base_path.join("commitment_tx");
         fs::create_dir_all(commitment_tx_path.clone())
             .expect("to create the mempool/commitment_tx dir");
-        let commitment_hash_map = self.get_all_commitment_tx().await;
+        let commitment_hash_map = self.mempool_state.get_all_commitment_tx().await;
         for tx in commitment_hash_map.values() {
             // Create a filepath for this transaction
             let tx_path = commitment_tx_path.join(format!("{}.json", tx.id));
@@ -1297,7 +1506,8 @@ impl Inner {
         Ok(())
     }
 
-    pub async fn restore_mempool_from_disk(&mut self) {
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn restore_mempool_from_disk(&self) {
         let recovered =
             RecoveredMempoolState::load_from_disk(&self.config.node_config.mempool_dir(), true)
                 .await;
@@ -1332,38 +1542,18 @@ impl Inner {
             }
         }
 
-        self.wipe_blacklists().await;
-    }
-
-    // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
-    // right now this only wipes `recent_invalid_tx`
-    pub async fn wipe_blacklists(&mut self) {
-        let mut write = self.mempool_state.write().await;
-        write.recent_invalid_tx.clear();
-        write.recent_invalid_payload_fingerprints.clear();
-    }
-
-    /// Helper that opens a read-only database transaction from the Irys mempool state.
-    ///
-    /// Returns a `Tx<RO>` handle if successful, or a `ChunkIngressError::DatabaseError`
-    /// if the transaction could not be created. Logs an error if the transaction fails.
-    pub fn read_tx(
-        &self,
-    ) -> Result<irys_database::reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>, DatabaseError> {
-        self.irys_db
-            .tx()
-            .inspect_err(|e| error!("database error reading tx: {:?}", e))
+        self.mempool_state.wipe_blacklists().await;
     }
 
     // Helper to verify signature
-    #[instrument(skip_all, fields(tx.id = %tx.id()))]
+    #[instrument(level = "trace", skip_all, fields(tx.id = ?tx.id()))]
     pub async fn validate_signature<
         T: irys_types::versioning::Signable
             + IrysTransactionCommon
             + std::fmt::Debug
             + serde::Serialize,
     >(
-        &mut self,
+        &self,
         tx: &T,
     ) -> Result<(), TxIngressError> {
         if tx.is_signature_valid() {
@@ -1378,11 +1568,11 @@ impl Inner {
             // signing preimage (prehash). This avoids poisoning legitimate transactions that
             // share the same signature bytes but differ in signed content.
             let fingerprint = tx.fingerprint();
+
             self.mempool_state
-                .write()
-                .await
-                .recent_invalid_payload_fingerprints
-                .put(fingerprint, ());
+                .mark_fingerprint_as_invalid(fingerprint)
+                .await;
+
             warn!(
                 "Tx {} signature is invalid (fingerprint {:?})",
                 &tx.id(),
@@ -1397,25 +1587,20 @@ impl Inner {
                     &e, &tx
                 ))
             );
-            Err(TxIngressError::InvalidSignature)
+            Err(TxIngressError::InvalidSignature(tx.signer()))
         }
-    }
-
-    /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
-    pub fn mark_tx_as_invalid(
-        mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState>,
-        tx_id: IrysTransactionId,
-        err_reason: impl ToString,
-    ) {
-        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
-        // let mut state: tokio::sync::RwLockWriteGuard<'_, MempoolState> = self.mempool_state.write().await;
-        state.recent_invalid_tx.put(tx_id, ());
-        state.recent_valid_tx.pop(&tx_id);
     }
 
     // Helper to get the canonical chain and latest height
     fn get_latest_block_height(&self) -> Result<u64, TxIngressError> {
-        let canon_chain = self.block_tree_read_guard.read().get_canonical_chain();
+        Self::get_latest_block_height_static(&self.block_tree_read_guard)
+    }
+
+    pub fn get_latest_block_height_static(
+        block_tree_read_guard: &BlockTreeReadGuard,
+    ) -> Result<u64, TxIngressError> {
+        // TODO: `get_canonical_chain` clones the entire canonical chain, we can make do with a ref here
+        let canon_chain = block_tree_read_guard.read().get_canonical_chain();
         let latest = canon_chain.0.last().ok_or(TxIngressError::Other(
             "unable to get canonical chain from block tree".to_owned(),
         ))?;
@@ -1425,56 +1610,723 @@ impl Inner {
 
     /// Calculate the expected protocol fee for permanent storage
     /// This includes base network fee + ingress proof rewards
-    #[tracing::instrument(err)]
+    #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn calculate_perm_storage_fee(
         &self,
         bytes_to_store: u64,
         term_fee: U256,
         ema: &Arc<irys_domain::EmaSnapshot>,
+        timestamp_secs: UnixTimestamp,
     ) -> Result<Amount<(NetworkFee, Irys)>, TxIngressError> {
         // Calculate total perm fee including ingress proof rewards
-        let total_perm_fee =
-            calculate_perm_storage_total_fee(bytes_to_store, term_fee, ema, &self.config)
-                .map_err(TxIngressError::other_display)?;
+        let total_perm_fee = calculate_perm_storage_total_fee(
+            bytes_to_store,
+            term_fee,
+            ema,
+            &self.config,
+            timestamp_secs,
+        )
+        .map_err(TxIngressError::other_display)?;
 
         Ok(total_perm_fee)
     }
 
     /// Calculate the expected term fee for temporary storage
     /// This matches the calculation in the pricing API and uses dynamic epoch count
+    #[tracing::instrument(level = "trace", skip_all, fields(bytes_to_store = bytes_to_store, block_height = block_height))]
     pub fn calculate_term_storage_fee(
         &self,
         bytes_to_store: u64,
         ema: &Arc<irys_domain::EmaSnapshot>,
+        block_height: u64,
+        timestamp: UnixTimestamp,
     ) -> Result<U256, TxIngressError> {
-        // Get the latest block height to calculate next block's expires
-        let latest_height = self.get_latest_block_height()?;
-        let next_block_height = latest_height + 1;
-
-        // Calculate expires for the next block using the shared utility
+        // Calculate expires for the specified block height using the shared utility
         let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            next_block_height,
+            block_height,
             self.config.consensus.epoch.num_blocks_in_epoch,
             self.config.consensus.epoch.submit_ledger_epoch_length,
         );
 
         // Calculate term fee using the storage pricing module
+        let number_of_ingress_proofs_total =
+            self.config.number_of_ingress_proofs_total_at(timestamp);
         calculate_term_fee(
             bytes_to_store,
             epochs_for_storage,
             &self.config.consensus,
+            number_of_ingress_proofs_total,
             ema.ema_for_public_pricing(),
         )
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
+
+    async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+        self.mempool_state
+            .extend_stake_and_pledge_whitelist(new_entries)
+            .await;
+    }
+
+    async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+        self.mempool_state
+            .get_stake_and_pledge_whitelist_cloned()
+            .await
+    }
 }
 
-pub type AtomicMempoolState = Arc<RwLock<MempoolState>>;
+/// Promotion readiness evaluation outcomes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotionStatus {
+    AlreadyPromoted,
+    MissingSubmitInclusion,
+    InsufficientProofs,
+    Ready,
+}
+
+/// Mempool state. All methods on this structure are quick utility methods. No function acquires
+/// more than one lock, and no function makes a call to any other function of the
+/// AtomicMempoolState structure, eliminating the possibility of deadlocks. Although this structure
+/// has private read and write methods, these should not be used outside the AtomicMempoolState
+/// under any condition.
+#[derive(Debug, Clone)]
+pub struct AtomicMempoolState(Arc<RwLock<MempoolState>>);
+
+impl AtomicMempoolState {
+    pub fn new(inner: MempoolState) -> Self {
+        Self(Arc::new(RwLock::new(inner)))
+    }
+
+    pub async fn remove_blacklisted_txids(&self, tx_ids: &[H256]) {
+        let mut state = self.write().await;
+        for tx_id in tx_ids {
+            state.recent_invalid_tx.pop(tx_id);
+        }
+    }
+
+    /// Marks a given tx as invalid, adding it's ID to `recent_invalid_tx` and removing it from `recent_valid_tx`
+    pub async fn mark_tx_as_invalid(&self, tx_id: IrysTransactionId, err_reason: impl ToString) {
+        let state = &mut self.write().await;
+        warn!("Tx {} is invalid: {:?}", &tx_id, &err_reason.to_string());
+        state.recent_invalid_tx.put(tx_id, ());
+        state.recent_valid_tx.pop(&tx_id);
+    }
+
+    pub async fn sorted_commitments(&self) -> Vec<CommitmentTransaction> {
+        let mempool_state_guard = self.read().await;
+
+        mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter().cloned())
+            .collect::<Vec<_>>()
+    }
+
+    /// Get specific commitment transactions by their IDs from the mempool
+    ///
+    /// This searches both:
+    /// - `valid_commitment_tx`: Validated commitment transactions organized by address
+    /// - `pending_pledges`: Out-of-order pledge transactions waiting for dependencies
+    ///
+    /// Returns a HashMap containing only the requested transactions that were found.
+    ///
+    /// Complexity: O(n + m) where n is the number of requested IDs and m is the total
+    /// number of transactions in the mempool.
+    #[must_use]
+    pub async fn get_commitment_txs(
+        &self,
+        commitment_tx_ids: &[IrysTransactionId],
+    ) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+        const PRESUMED_PLEDGES_PER_ACCOUNT: usize = 4;
+        let mempool_state_guard = self.read().await;
+
+        // Build lookup map of ALL transactions in mempool - O(m)
+        let mut all_txs = HashMap::with_capacity(
+            mempool_state_guard.valid_commitment_tx.len()
+                + mempool_state_guard.pending_pledges.len() * PRESUMED_PLEDGES_PER_ACCOUNT,
+        );
+
+        // Collect from valid_commitment_tx
+        for txs in mempool_state_guard.valid_commitment_tx.values() {
+            for tx in txs {
+                all_txs.insert(tx.id, tx);
+            }
+        }
+
+        // Collect from pending_pledges
+        for (_, inner_cache) in mempool_state_guard.pending_pledges.iter() {
+            for (id, tx) in inner_cache.iter() {
+                all_txs.insert(*id, tx);
+            }
+        }
+
+        // Lookup requested transactions - O(n)
+        commitment_tx_ids
+            .iter()
+            .filter_map(|tx_id| all_txs.get(tx_id).map(|tx| (*tx_id, (*tx).clone())))
+            .collect()
+    }
+
+    // wipes all the "blacklists", primarily used after trying to restore the mempool from disk so that validation errors then (i.e if we have a saved tx that uses an anchor from some blocks that we forgot we when restarted) don't affect block validation
+    // right now this only wipes `recent_invalid_tx`
+    pub async fn wipe_blacklists(&self) {
+        let mut write = self.write().await;
+        write.recent_invalid_tx.clear();
+        write.recent_invalid_payload_fingerprints.clear();
+    }
+
+    pub async fn get_status(&self, config: &NodeConfig) -> MempoolStatus {
+        let state = self.read().await;
+
+        // Calculate total data size
+        let data_tx_total_size: u64 = state
+            .valid_submit_ledger_tx
+            .values()
+            .map(|tx| tx.data_size)
+            .sum();
+
+        let mempool_config = &config.consensus_config().mempool;
+
+        // Calculate capacity utilization
+        let data_tx_capacity_pct = if state.max_submit_txs > 0 {
+            (state.valid_submit_ledger_tx.len() as f64 / state.max_submit_txs as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let commitment_address_capacity_pct = if state.max_commitment_addresses > 0 {
+            (state.valid_commitment_tx.len() as f64 / state.max_commitment_addresses as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Log capacity warnings
+        if data_tx_capacity_pct > 90.0 {
+            warn!(
+                mempool.data_tx_capacity = data_tx_capacity_pct,
+                mempool.data_tx_count = state.valid_submit_ledger_tx.len(),
+                mempool.data_tx_max = state.max_submit_txs,
+                "Data tx mempool approaching capacity"
+            );
+        }
+
+        if commitment_address_capacity_pct > 90.0 {
+            warn!(
+                mempool.commitment_address_capacity = commitment_address_capacity_pct,
+                mempool.commitment_address_count = state.valid_commitment_tx.len(),
+                mempool.commitment_address_max = state.max_commitment_addresses,
+                "Commitment address mempool approaching capacity"
+            );
+        }
+
+        debug!(
+            mempool.data_tx_capacity = data_tx_capacity_pct,
+            mempool.commitment_address_capacity = commitment_address_capacity_pct,
+            "Mempool capacity utilization"
+        );
+
+        MempoolStatus {
+            data_tx_count: state.valid_submit_ledger_tx.len(),
+            commitment_tx_count: state.valid_commitment_tx.values().map(Vec::len).sum(),
+            pending_chunks_count: state.pending_chunks.len(),
+            pending_pledges_count: state.pending_pledges.len(),
+            recent_valid_tx_count: state.recent_valid_tx.len(),
+            recent_invalid_tx_count: state.recent_invalid_tx.len(),
+            data_tx_total_size,
+            config: mempool_config.clone(),
+            data_tx_capacity_pct,
+            commitment_address_capacity_pct,
+        }
+    }
+
+    pub async fn mark_fingerprint_as_invalid(&self, fingerprint: H256) {
+        self.0
+            .write()
+            .await
+            .recent_invalid_payload_fingerprints
+            .put(fingerprint, ());
+    }
+
+    pub async fn is_a_recent_invalid_fingerprint(&self, fingerprint: &H256) -> bool {
+        self.0
+            .read()
+            .await
+            .recent_invalid_payload_fingerprints
+            .contains(fingerprint)
+    }
+
+    pub async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+        let mut state = self.write().await;
+        state.stake_and_pledge_whitelist.extend(new_entries);
+    }
+
+    pub async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+        let state = self.read().await;
+        state.stake_and_pledge_whitelist.clone()
+    }
+
+    pub async fn valid_submit_ledger_tx_cloned(
+        &self,
+        tx_id: &H256,
+    ) -> Option<DataTransactionHeader> {
+        self.0
+            .read()
+            .await
+            .valid_submit_ledger_tx
+            .get(tx_id)
+            .cloned()
+    }
+
+    pub async fn all_valid_submit_ledgers_cloned(&self) -> BTreeMap<H256, DataTransactionHeader> {
+        self.read().await.valid_submit_ledger_tx.clone()
+    }
+
+    /// For confirmed blocks, we log warnings but don't fail if mempool is full
+    pub async fn bounded_insert_data_tx(&self, header: DataTransactionHeader) {
+        let mut mempool_guard = self.write().await;
+        if let Err(e) = mempool_guard.bounded_insert_data_tx(header.clone()) {
+            warn!(
+                tx.id = ?header.id,
+                error = ?e,
+                "Failed to insert confirmed promoted tx into mempool (likely at capacity)"
+            );
+        }
+        mempool_guard.recent_valid_tx.put(header.id, ());
+    }
+
+    pub async fn is_a_recent_valid_chunk(&self, chunk_path_hash: &ChunkPathHash) -> bool {
+        let mempool_state_guard = self.read().await;
+        mempool_state_guard
+            .recent_valid_chunks
+            .contains(chunk_path_hash)
+    }
+
+    pub async fn count_mempool_commitments(
+        &self,
+        user_address: &Address,
+        commitment_type_filter: impl Fn(&CommitmentType) -> bool,
+        seen_ids: &mut HashSet<H256>,
+    ) -> u64 {
+        let mempool = self.read().await;
+
+        mempool
+            .valid_commitment_tx
+            .get(user_address)
+            .map(|txs| {
+                txs.iter()
+                    .filter(|tx| commitment_type_filter(&tx.commitment_type))
+                    .filter(|tx| seen_ids.insert(tx.id))
+                    .count() as u64
+            })
+            .unwrap_or(0)
+    }
+
+    pub async fn put_chunk(&self, chunk: UnpackedChunk, preheader_chunks_per_item: usize) {
+        let mempool_state_write_guard = &mut self.write().await;
+        if let Some(chunks_map) = mempool_state_write_guard
+            .pending_chunks
+            .get_mut(&chunk.data_root)
+        {
+            chunks_map.put(chunk.tx_offset, chunk.clone());
+        } else {
+            // If there's no entry for this data_root yet, create one
+            // TODO: rework LRU logic to separate LRU/map https://github.com/Irys-xyz/irys/issues/632
+            let mut new_lru_cache = LruCache::new(
+                NonZeroUsize::new(preheader_chunks_per_item)
+                    .expect("expected valid NonZeroUsize::new"),
+            );
+            new_lru_cache.put(chunk.tx_offset, chunk.clone());
+            mempool_state_write_guard
+                .pending_chunks
+                .put(chunk.data_root, new_lru_cache);
+        }
+    }
+
+    pub async fn record_recent_valid_chunk(&self, chunk_path_hash: ChunkPathHash) {
+        let mut mempool_state_guard = self.write().await;
+        mempool_state_guard
+            .recent_valid_chunks
+            .put(chunk_path_hash, ());
+    }
+
+    /// Inserts tx into the mempool and marks it as recently valid.
+    /// Uses bounded insertion which may evict lowest-fee transactions when at capacity.
+    pub async fn insert_tx_and_mark_valid(
+        &self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        let mut guard = self.write().await;
+        guard.bounded_insert_data_tx(tx.clone())?;
+        guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
+    }
+
+    pub async fn all_valid_commitment_txs_cloned(
+        &self,
+    ) -> BTreeMap<Address, Vec<CommitmentTransaction>> {
+        self.read().await.valid_commitment_tx.clone()
+    }
+
+    pub async fn all_valid_submit_ledger_ids(&self) -> Vec<H256> {
+        let state = self.read().await;
+        state
+            .valid_submit_ledger_tx
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
+    pub async fn all_valid_commitment_ledger_addresses(&self) -> Vec<Address> {
+        let state = self.read().await;
+        state
+            .valid_commitment_tx
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()
+    }
+
+    pub async fn valid_commitment_txs_cloned(
+        &self,
+        address: &Address,
+    ) -> Option<Vec<CommitmentTransaction>> {
+        self.0
+            .read()
+            .await
+            .valid_commitment_tx
+            .get(address)
+            .cloned()
+    }
+
+    pub async fn remove_valid_submit_ledger_tx(&self, tx_id: &H256) {
+        let mut state = self.write().await;
+        state.valid_submit_ledger_tx.remove(tx_id);
+    }
+
+    pub async fn pop_pending_chunks_cache(
+        &self,
+        data_root: &DataRoot,
+    ) -> Option<LruCache<TxChunkOffset, UnpackedChunk>> {
+        self.write().await.pending_chunks.pop(data_root)
+    }
+
+    /// Removes a commitment transaction with the specified transaction ID from the valid_commitment_tx map
+    /// Returns true if the transaction was found and removed, false otherwise
+    pub async fn remove_commitment_tx(&self, txid: &H256) -> bool {
+        self.remove_commitment_txs([*txid]).await
+    }
+
+    /// Removes commitment transactions with the specified transaction IDs from the valid_commitment_tx map
+    /// Returns true if any transactions were found and removed, false otherwise
+    pub async fn remove_commitment_txs(&self, txids: impl IntoIterator<Item = H256>) -> bool {
+        let mut found = false;
+        let txids_set: HashSet<H256> = txids.into_iter().collect();
+        let mut mempool_state_guard = self.write().await;
+
+        // Remove all txids from recent_valid_tx cache
+        for txid in &txids_set {
+            mempool_state_guard.recent_valid_tx.pop(txid);
+        }
+
+        // Create a vector of addresses to update to avoid borrowing issues
+        let addresses_to_check: Vec<Address> = mempool_state_guard
+            .valid_commitment_tx
+            .keys()
+            .copied()
+            .collect();
+
+        for address in addresses_to_check {
+            if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
+                // Remove all transactions that match any of the txids
+                let original_len = transactions.len();
+                transactions.retain(|tx| !txids_set.contains(&tx.id));
+
+                if transactions.len() < original_len {
+                    found = true;
+                }
+
+                // If the vector is now empty, remove the entry
+                if transactions.is_empty() {
+                    mempool_state_guard.valid_commitment_tx.remove(&address);
+                }
+            }
+        }
+
+        found
+    }
+
+    pub async fn take_all_valid_txs(
+        &self,
+    ) -> (
+        BTreeMap<H256, DataTransactionHeader>,
+        BTreeMap<Address, Vec<CommitmentTransaction>>,
+    ) {
+        let mut state = self.write().await;
+        state.recent_valid_tx.clear();
+        (
+            std::mem::take(&mut state.valid_submit_ledger_tx),
+            std::mem::take(&mut state.valid_commitment_tx),
+        )
+    }
+
+    pub async fn remove_transactions_from_pending_valid_pool(&self, submit_tx_ids: &[H256]) {
+        let mut guard = self.write().await;
+        for txid in submit_tx_ids {
+            guard.valid_submit_ledger_tx.remove(txid);
+            guard.recent_valid_tx.pop(txid);
+        }
+    }
+
+    pub async fn update_submit_transaction(&self, tx: DataTransactionHeader) {
+        self.0
+            .write()
+            .await
+            .valid_submit_ledger_tx
+            .entry(tx.id)
+            .and_modify(|t| *t = tx);
+    }
+
+    pub async fn clear_promoted_height(&self, txid: H256) -> bool {
+        let mut cleared = false;
+        let mut state = self.write().await;
+        if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
+            header.promoted_height = None;
+            state.recent_valid_tx.put(txid, ());
+            tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
+            cleared = true;
+        }
+        cleared
+    }
+
+    pub async fn put_recent_invalid(&self, tx_id: H256) {
+        self.write().await.recent_invalid_tx.put(tx_id, ());
+    }
+
+    pub async fn mempool_data_tx_status(&self, txid: &H256) -> Option<TxKnownStatus> {
+        let mempool_state_guard = self.read().await;
+
+        // #[expect(clippy::if_same_then_else, reason = "readability")]
+        if mempool_state_guard
+            .valid_submit_ledger_tx
+            .contains_key(txid)
+        {
+            Some(TxKnownStatus::Valid)
+        } else if mempool_state_guard.recent_valid_tx.contains(txid) {
+            Some(TxKnownStatus::ValidSeen)
+        } else if mempool_state_guard.recent_invalid_tx.contains(txid) {
+            // Still has it, just invalid
+            Some(TxKnownStatus::InvalidSeen)
+        } else {
+            None
+        }
+    }
+
+    pub async fn mempool_commitment_tx_status(
+        &self,
+        commitment_tx_id: &H256,
+    ) -> Option<TxKnownStatus> {
+        let mempool_state_guard = self.read().await;
+
+        #[expect(clippy::if_same_then_else, reason = "readability")]
+        if mempool_state_guard
+            .recent_valid_tx
+            .contains(commitment_tx_id)
+        {
+            Some(TxKnownStatus::ValidSeen)
+        } else if mempool_state_guard
+            .recent_invalid_tx
+            .contains(commitment_tx_id)
+        {
+            // Still has it, just invalid
+            Some(TxKnownStatus::InvalidSeen)
+            // Get any CommitmentTransactions from the valid commitments Map
+        } else if mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter())
+            .any(|tx| &tx.id == commitment_tx_id)
+        {
+            Some(TxKnownStatus::Valid)
+        }
+        // Get any CommitmentTransactions from the pending commitments LRU cache
+        else if mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .any(|(id, _tx)| id == commitment_tx_id)
+        {
+            Some(TxKnownStatus::Valid)
+        } else {
+            None
+        }
+    }
+
+    pub async fn is_address_in_a_whitelist(&self, address: &Address) -> bool {
+        let read_guard = self.read().await;
+        let whitelist = &read_guard.stake_and_pledge_whitelist;
+        whitelist.is_empty() || whitelist.contains(address)
+    }
+
+    /// Returns true if the commitment tx is already known in the mempool caches/maps.
+    pub async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: Address) -> bool {
+        let guard = self.read().await;
+        // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
+        if guard.recent_valid_tx.contains(tx_id) {
+            return true;
+        }
+        if guard
+            .valid_commitment_tx
+            .get(&signer)
+            .is_some_and(|txs| txs.iter().any(|c| c.id == *tx_id))
+        {
+            return true;
+        }
+        false
+    }
+
+    /// should really only be called by persist_mempool_to_disk, all other scenarios need a more
+    /// subtle filtering of commitment state, recently confirmed? pending? valid? etc.
+    pub async fn get_all_commitment_tx(&self) -> HashMap<IrysTransactionId, CommitmentTransaction> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the commitment transactions
+        let mempool_state_guard = self.read().await;
+
+        // Get any CommitmentTransactions from the valid commitments
+        mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter())
+            .for_each(|tx| {
+                hash_map.insert(tx.id, tx.clone());
+            });
+
+        // Get any CommitmentTransactions from the pending commitments
+        mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .for_each(|(tx_id, tx)| {
+                hash_map.insert(*tx_id, tx.clone());
+            });
+
+        hash_map
+    }
+
+    pub async fn pop_pending_pledges_for_signer(
+        &self,
+        signer: &Address,
+    ) -> Option<LruCache<IrysTransactionId, CommitmentTransaction>> {
+        self.write().await.pending_pledges.pop(signer)
+    }
+
+    /// Caches an unstaked pledge in the two-level LRU structure.
+    pub async fn cache_unstaked_pledge(
+        &self,
+        tx: &CommitmentTransaction,
+        max_pending_pledge_items: usize,
+    ) {
+        let mut guard = self.write().await;
+        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer) {
+            // Address already exists in cache - add this pledge transaction to its lru cache
+            pledges_cache.put(tx.id, tx.clone());
+        } else {
+            // First pledge from this address - create a new nested lru cache
+            let mut new_address_cache =
+                LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
+
+            // Add the pledge transaction to the new lru cache for the address
+            new_address_cache.put(tx.id, tx.clone());
+
+            // Add the address cache to the primary lru cache
+            guard.pending_pledges.put(tx.signer, new_address_cache);
+        }
+    }
+
+    /// Inserts a commitment into the mempool valid map and marks it as recently valid.
+    /// Uses bounded insertion which may evict transactions when limits are exceeded.
+    async fn insert_commitment_and_mark_valid(
+        &self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let mut guard = self.write().await;
+        guard.bounded_insert_commitment_tx(tx)?;
+        guard.recent_valid_tx.put(tx.id, ());
+        Ok(())
+    }
+
+    async fn is_there_a_pledge_for_unstaked_address(&self, signer: &Address) -> bool {
+        // For unstaked addresses, check for pending stake transactions
+        let mempool_state_guard = self.read().await;
+        // Get pending transactions for this address
+        if let Some(pending) = mempool_state_guard.valid_commitment_tx.get(signer) {
+            // Check if there's at least one pending stake transaction
+            if pending
+                .iter()
+                .any(|c| c.commitment_type == CommitmentType::Stake)
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    async fn all_commitment_transactions(&self) -> HashMap<H256, CommitmentTransaction> {
+        let mut hash_map = HashMap::new();
+
+        // first flat_map all the commitment transactions
+        let mempool_state_guard = self.read().await;
+
+        // TODO: what the heck is this, this needs to be optimised at least a little bit
+
+        // Get any CommitmentTransactions from the valid commitments Map
+        mempool_state_guard
+            .valid_commitment_tx
+            .values()
+            .flat_map(|txs| txs.iter())
+            .for_each(|tx| {
+                hash_map.insert(tx.id, tx.clone());
+            });
+
+        // Get any CommitmentTransactions from the pending commitments LRU cache
+        mempool_state_guard
+            .pending_pledges
+            .iter()
+            .flat_map(|(_, inner)| inner.iter())
+            .for_each(|(tx_id, tx)| {
+                hash_map.insert(*tx_id, tx.clone());
+            });
+
+        hash_map
+    }
+
+    /// Do not call this function from anywhere outside AtomicMempoolState
+    #[instrument(skip_all)]
+    async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, MempoolState> {
+        tokio::time::timeout(Duration::from_secs(10), self.0.read()).await.unwrap_or_else(|elapsed| {
+            error!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock");
+            panic!("Timed out waiting for mempool read lock after 10s: {elapsed}, possibly due to a deadlock")
+        })
+    }
+
+    /// Do not call this function from anywhere outside AtomicMempoolState
+    #[instrument(skip_all)]
+    async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, MempoolState> {
+        tokio::time::timeout(Duration::from_secs(10), self.0.write()).await.unwrap_or_else(|elapsed| {
+            error!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock");
+            panic!("Timed out waiting for mempool write lock after: {elapsed}, possibly due to a deadlock")
+        })
+    }
+}
+
 #[derive(Debug)]
 pub struct MempoolState {
-    /// valid submit txs
+    /// bounded map with manual capacity enforcement
     pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
+    pub max_submit_txs: usize,
+    /// bounded map with manual capacity enforcement
     pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
+    pub max_commitment_addresses: usize,
+    pub max_commitments_per_address: usize,
     /// The miner's signer instance, used to sign ingress proofs
     pub recent_invalid_tx: LruCache<H256, ()>,
     /// Tracks recent invalid payload fingerprints (e.g., keccak(prehash + signature)) for signature-invalid payloads
@@ -1487,16 +2339,23 @@ pub struct MempoolState {
     /// LRU caches for out of order gossip data
     pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    pub stake_and_pledge_whitelist: HashSet<Address>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
-pub fn create_state(config: &MempoolConfig) -> MempoolState {
+pub fn create_state(
+    config: &MempoolConfig,
+    stake_and_pledge_whitelist: &[Address],
+) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
     MempoolState {
         valid_submit_ledger_tx: BTreeMap::new(),
+        max_submit_txs: config.max_valid_submit_txs,
         valid_commitment_tx: BTreeMap::new(),
+        max_commitment_addresses: config.max_valid_commitment_addresses,
+        max_commitments_per_address: config.max_commitments_per_address,
         recent_invalid_tx: LruCache::new(NonZeroUsize::new(config.max_invalid_items).unwrap()),
         recent_invalid_payload_fingerprints: LruCache::new(
             NonZeroUsize::new(config.max_invalid_items).unwrap(),
@@ -1505,6 +2364,166 @@ pub fn create_state(config: &MempoolConfig) -> MempoolState {
         recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
         pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
+        stake_and_pledge_whitelist: HashSet::from_iter(stake_and_pledge_whitelist.iter().copied()),
+    }
+}
+
+impl MempoolState {
+    /// Insert data tx with bounds enforcement.
+    /// Evicts lowest fee tx if at capacity.
+    /// Returns error only if capacity is exceeded and no transaction can be evicted.
+    pub fn bounded_insert_data_tx(
+        &mut self,
+        tx: DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        use std::collections::btree_map::Entry;
+        // If tx already exists we still update it.
+        // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
+        if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx.id) {
+            value.insert(tx);
+            return Ok(());
+        }
+
+        // If at capacity, evict lowest fee tx
+        if self.valid_submit_ledger_tx.len() >= self.max_submit_txs {
+            if let Some((evict_id, evicted_fee)) = self.find_lowest_fee_data_tx() {
+                let new_fee = tx.user_fee();
+                // Only evict if new tx has higher fee
+                if new_fee <= evicted_fee {
+                    warn!(
+                        new.tx_id = ?tx.id,
+                        new.fee = ?new_fee,
+                        lowest.fee = ?evicted_fee,
+                        "Rejecting lower-fee tx: mempool full"
+                    );
+                    return Err(TxIngressError::MempoolFull(
+                        "Mempool full and new transaction fee too low".to_string(),
+                    ));
+                }
+
+                self.valid_submit_ledger_tx.remove(&evict_id);
+                warn!(
+                    evicted.tx_id = ?evict_id,
+                    evicted.fee = ?evicted_fee,
+                    new.tx_id = ?tx.id,
+                    new.fee = ?new_fee,
+                    "Mempool full: evicted lowest fee data tx"
+                );
+            } else {
+                return Err(TxIngressError::MempoolFull(
+                    "Mempool full and no evictable data tx found".to_string(),
+                ));
+            }
+        }
+
+        self.valid_submit_ledger_tx.insert(tx.id, tx);
+        Ok(())
+    }
+
+    /// Find lowest fee data transaction for eviction.
+    /// Returns (tx_id, fee) tuple.
+    fn find_lowest_fee_data_tx(&self) -> Option<(H256, BoundedFee)> {
+        self.valid_submit_ledger_tx
+            .iter()
+            .min_by_key(|(_, tx)| tx.user_fee())
+            .map(|(id, tx)| (*id, tx.user_fee()))
+    }
+
+    /// Insert commitment tx with bounds enforcement.
+    /// Enforces per-address limit and global address limit.
+    /// Rejects new commitments when per-address limit is exceeded (preserves existing commitments).
+    /// Evicts lowest-value addresses when global address limit is exceeded.
+    pub fn bounded_insert_commitment_tx(
+        &mut self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let address = tx.signer;
+
+        // Check for duplicate tx.id - if already exists, just return Ok()
+        if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
+            if existing_txs.iter().any(|t| t.id == tx.id) {
+                return Ok(()); // Duplicate, already have this commitment
+            }
+        }
+
+        // Check if we need to create a new address entry
+        let address_exists = self.valid_commitment_tx.contains_key(&address);
+
+        // If address doesn't exist and we're at global address limit, evict lowest value address
+        if !address_exists && self.valid_commitment_tx.len() >= self.max_commitment_addresses {
+            if let Some((evict_address, evict_total_value)) = self.find_lowest_value_address() {
+                let new_value = tx.total_cost();
+
+                // Only evict if new commitment has higher value than the address being evicted
+                if new_value <= evict_total_value {
+                    warn!(
+                        new.address = ?address,
+                        new.value = ?new_value,
+                        evict.address = ?evict_address,
+                        evict.total_value = ?evict_total_value,
+                        "Rejecting new commitment: value not higher than lowest existing address"
+                    );
+                    return Err(TxIngressError::MempoolFull(format!(
+                        "Mempool address limit reached. New commitment value {} not higher than lowest address value {}",
+                        new_value,
+                        evict_total_value
+                    )));
+                }
+
+                let evicted_txs = self.valid_commitment_tx.remove(&evict_address);
+                warn!(
+                    evicted.address = ?evict_address,
+                    evicted.total_value = ?evict_total_value,
+                    evicted.count = ?evicted_txs.as_ref().map(std::vec::Vec::len),
+                    new.address = ?address,
+                    new.value = ?new_value,
+                    "Mempool address limit reached: evicted lowest value address"
+                );
+            } else {
+                return Err(TxIngressError::MempoolFull(
+                    "Mempool address limit reached and no evictable address found".to_string(),
+                ));
+            }
+        }
+
+        // Get or create vec for this address
+        let txs = self.valid_commitment_tx.entry(address).or_default();
+
+        // Check if address vec is at capacity - reject new commitment rather than evicting old ones
+        // This preserves the stake/pledge lifecycle and prevents breaking protocol invariants
+        if txs.len() >= self.max_commitments_per_address {
+            warn!(
+                address = ?address,
+                current_count = txs.len(),
+                max_allowed = self.max_commitments_per_address,
+                new.tx_id = ?tx.id,
+                "Address commitment pool full: rejecting new commitment"
+            );
+            return Err(TxIngressError::MempoolFull(format!(
+                "Address {} has reached maximum commitments limit ({}/{})",
+                address,
+                txs.len(),
+                self.max_commitments_per_address
+            )));
+        }
+
+        txs.push(tx.clone());
+        Ok(())
+    }
+
+    /// Find address with lowest total commitment value for eviction.
+    /// Returns (Address, total_value) tuple.
+    fn find_lowest_value_address(&self) -> Option<(Address, U256)> {
+        self.valid_commitment_tx
+            .iter()
+            .map(|(addr, txs)| {
+                let total = txs
+                    .iter()
+                    .map(irys_types::CommitmentTransaction::total_cost)
+                    .fold(U256::zero(), irys_types::U256::saturating_add);
+                (*addr, total)
+            })
+            .min_by_key(|(_, total)| *total)
     }
 }
 
@@ -1538,29 +2557,35 @@ impl TxReadError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TxIngressError {
     /// The transaction's signature is invalid
-    #[error("Transaction signature is invalid")]
-    InvalidSignature,
+    #[error("Transaction signature is invalid for address {0}")]
+    InvalidSignature(Address),
     /// The account does not have enough tokens to fund this transaction
-    #[error("Account has insufficient funds for this transaction")]
-    Unfunded,
+    #[error("Account has insufficient funds for transaction {0}")]
+    Unfunded(H256),
     /// This transaction id is already in the cache
     #[error("Transaction already exists in cache")]
     Skipped,
     /// Invalid anchor value (unknown or too old)
-    #[error("Anchor is either unknown or has expired")]
-    InvalidAnchor,
+    #[error("Anchor {0} is either unknown or has expired")]
+    InvalidAnchor(H256),
     /// Invalid ledger type specified in transaction
     #[error("Invalid or unsupported ledger ID: {0}")]
     InvalidLedger(u32),
     /// Some database error occurred
-    #[error("Database operation failed")]
-    DatabaseError,
+    #[error("Database operation failed: {0}")]
+    DatabaseError(String),
     /// The service is uninitialized
     #[error("Mempool service is not initialized")]
     ServiceUninitialized,
+    /// Mempool is at capacity and cannot accept new transactions
+    #[error("Mempool is at capacity: {0}")]
+    MempoolFull(String),
     /// Catch-all variant for other errors.
     #[error("Transaction ingress error: {0}")]
     Other(String),
+    /// Transaction has encountered a fee calculation issue
+    #[error("Transaction misaligned funds: {0}")]
+    FundMisalignment(String),
     /// Commitment transaction validation error
     #[error("Commitment validation failed: {0}")]
     CommitmentValidationError(#[from] CommitmentValidationError),
@@ -1593,11 +2618,14 @@ pub enum IngressProofError {
     #[error("Ingress proof signature is invalid")]
     InvalidSignature,
     /// There was a database error storing the proof
-    #[error("Database error")]
-    DatabaseError,
+    #[error("Database error: {0}")]
+    DatabaseError(String),
     /// The proof does not come from a staked address
     #[error("Unstaked address")]
     UnstakedAddress,
+    /// The ingress proof is anchored to an unknown/expired anchor
+    #[error("Invalid anchor: {0}")]
+    InvalidAnchor(BlockHash),
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
@@ -1607,10 +2635,10 @@ pub enum IngressProofError {
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
+    msg_rx: UnboundedReceiver<MempoolServiceMessageWithSpan>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,                // reorg broadcast receiver
     block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
-    inner: Inner,
+    inner: Arc<Inner>,
 }
 
 impl Default for MempoolService {
@@ -1626,7 +2654,7 @@ impl MempoolService {
         reth_node_adapter: IrysRethNodeAdapter,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<MempoolServiceMessage>,
+        rx: UnboundedReceiver<MempoolServiceMessageWithSpan>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
@@ -1635,22 +2663,24 @@ impl MempoolService {
 
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let block_tree_read_guard = block_tree_read_guard.clone();
-        let config = config.clone();
-        let mempool_config = &config.mempool;
-        let mempool_state = create_state(mempool_config);
-        let storage_modules_guard = storage_modules_guard;
-        let service_senders = service_senders.clone();
-        let reorg_rx = service_senders.subscribe_reorgs();
-        let block_migrated_rx = service_senders.subscribe_block_migrated();
         let initial_stake_and_pledge_whitelist = config
             .node_config
             .initial_stake_and_pledge_whitelist
             .clone();
+        let block_tree_read_guard = block_tree_read_guard.clone();
+        let config = config.clone();
+        let mempool_config = &config.mempool;
+        let max_concurrent_mempool_tasks = mempool_config.max_concurrent_mempool_tasks;
+        let mempool_state = create_state(mempool_config, &initial_stake_and_pledge_whitelist);
+        let storage_modules_guard = storage_modules_guard;
+        let service_senders = service_senders.clone();
+        let reorg_rx = service_senders.subscribe_reorgs();
+        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
+        let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
             async move {
-                let mempool_state = Arc::new(RwLock::new(mempool_state));
+                let mempool_state = AtomicMempoolState::new(mempool_state);
                 let pledge_provider = MempoolPledgeProvider::new(
                     mempool_state.clone(),
                     block_tree_read_guard.clone(),
@@ -1664,7 +2694,7 @@ impl MempoolService {
                     msg_rx: rx,
                     reorg_rx,
                     block_migrated_rx,
-                    inner: Inner {
+                    inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
                         exec: TaskExecutor::current(),
@@ -1674,11 +2704,13 @@ impl MempoolService {
                         service_senders,
                         storage_modules_guard,
                         pledge_provider,
-                        stake_and_pledge_whitelist,
-                    },
+                        message_handler_semaphore: Arc::new(Semaphore::new(
+                            max_concurrent_mempool_tasks,
+                        )),
+                    }),
                 };
                 mempool_service
-                    .start()
+                    .start(handle_for_inner)
                     .await
                     .expect("Mempool service encountered an irrecoverable error")
             }
@@ -1692,7 +2724,7 @@ impl MempoolService {
         })
     }
 
-    async fn start(mut self) -> eyre::Result<()> {
+    async fn start(mut self, runtime_handle: tokio::runtime::Handle) -> eyre::Result<()> {
         tracing::info!("starting Mempool service");
 
         self.inner.restore_mempool_from_disk().await;
@@ -1704,10 +2736,73 @@ impl MempoolService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            self.inner.handle_message(msg).await?;
+                            let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+                            let _enter = span.enter();
+
+                            // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
+                            let semaphore = self.inner.message_handler_semaphore.clone();
+                            match semaphore.try_acquire_owned() {
+                                Ok(permit) => {
+                                    let inner = Arc::clone(&self.inner);
+                                    let msg_type = format!("{:?}", msg);
+                                    // Permit acquired immediately
+                                    runtime_handle.spawn(async move {
+                                        let _permit = permit; // Hold until task completes
+                                        let task_info = format!("Mempool message handler for {}", msg_type);
+                                        if let Err(err) = wait_with_progress(
+                                            inner.handle_message(msg),
+                                            20,
+                                            &task_info,
+                                        ).in_current_span().await {
+                                            error!("Error handling mempool message {}: {:?}", msg_type, err);
+                                        }
+                                    }.in_current_span());
+                                }
+                                Err(e) => {
+                                    match e {
+                                        tokio::sync::TryAcquireError::Closed => {
+                                            error!("Mempool message handler semaphore closed");
+                                            break;
+                                        }
+                                        tokio::sync::TryAcquireError::NoPermits => {
+                                            warn!("Mempool message handler semaphore at capacity, waiting for permit");
+                                        }
+                                    }
+                                    // No permits available, will wait
+                                    let inner = Arc::clone(&self.inner);
+                                    let semaphore = inner.message_handler_semaphore.clone();
+                                    let msg_type = format!("{:?}", msg);
+                                    // Wait a minute before crashing out
+                                    match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
+                                        Ok(permit_result) => {
+                                            match permit_result {
+                                                Ok(permit) => {
+                                                    runtime_handle.spawn(async move {
+                                                        let _permit = permit; // Hold until task completes
+                                                        let task_info = format!("Mempool message handler for {}", msg_type);
+                                                        if let Err(err) = wait_with_progress(
+                                                            inner.handle_message(msg),
+                                                            20,
+                                                            &task_info,
+                                                        ).in_current_span().await {
+                                                            error!("Error handling mempool message {}: {:?}", msg_type, err);
+                                                        }
+                                                    }.in_current_span());
+                                                }
+                                                Err(err) => {
+                                                    error!("Failed to acquire mempool message handler permit: {:?}", err);
+                                                }
+                                            }
+                                        }
+                                        Err(_) => {
+                                            error!("Timed out waiting for mempool message handler permit");
+                                        }
+                                    }
+                                }
+                            }
                         }
                         None => {
-                            tracing::warn!("receiver channel closed");
+                            warn!("receiver channel closed");
                             break;
                         }
                     }
@@ -1737,11 +2832,33 @@ impl MempoolService {
         }
 
         tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
-        while let Ok(msg) = self.msg_rx.try_recv() {
-            self.inner.handle_message(msg).await?;
+
+        // Process remaining messages with timeout
+        let process_remaining = async {
+            while let Ok(msg) = self.msg_rx.try_recv() {
+                let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+                self.inner.handle_message(msg).instrument(span).await?;
+            }
+            Ok::<(), eyre::Error>(())
+        };
+
+        match tokio::time::timeout(Duration::from_secs(10), process_remaining).await {
+            Ok(Ok(())) => tracing::debug!("Processed remaining messages successfully"),
+            Ok(Err(e)) => tracing::error!("Error processing remaining messages: {:?}", e),
+            Err(_) => tracing::warn!("Timeout processing remaining messages, continuing shutdown"),
         }
 
-        self.inner.persist_mempool_to_disk().await?;
+        // Persist to disk with timeout
+        match tokio::time::timeout(
+            Duration::from_secs(10),
+            self.inner.persist_mempool_to_disk(),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::debug!("Persisted mempool to disk successfully"),
+            Ok(Err(e)) => tracing::error!("Error persisting mempool to disk: {:?}", e),
+            Err(_) => tracing::warn!("Timeout persisting mempool to disk, continuing shutdown"),
+        }
 
         tracing::info!("shutting down Mempool service");
         Ok(())
@@ -1765,5 +2882,398 @@ pub fn handle_broadcast_recv<T>(
             }
             None
         }
+    }
+}
+
+async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
+    reth_adapter: &IrysRethNodeAdapter,
+    block_id: Option<BlockId>,
+    txs: &[T],
+) -> HashMap<Address, U256> {
+    let signers: Vec<Address> = txs
+        .iter()
+        .map(irys_types::IrysTransactionCommon::signer)
+        .collect();
+    reth_adapter
+        .reth_node
+        .rpc
+        .get_balances_irys(&signers, block_id)
+        .await
+}
+
+// Helper function that verifies transaction funding and tracks cumulative fees
+// Returns true if the transaction can be funded based on current account balance
+// and previously included transactions in this block
+fn check_funding<T: IrysTransactionCommon>(
+    tx: &T,
+    balances: &HashMap<Address, U256>,
+    unfunded_address: &mut HashSet<Address>,
+    fees_spent_per_address: &mut HashMap<Address, U256>,
+) -> bool {
+    let signer = tx.signer();
+
+    // Skip transactions from addresses with previously unfunded transactions
+    // This ensures we don't include any transactions (including pledges) from
+    // addresses that couldn't afford their stake commitments
+    if unfunded_address.contains(&signer) {
+        return false;
+    }
+
+    let fee = tx.total_cost();
+    let current_spent = *fees_spent_per_address.get(&signer).unwrap_or(&U256::zero());
+
+    // Calculate total required balance including previously selected transactions
+
+    // get balance state for the block we're building off of
+    let balance = balances.get(&signer).copied().unwrap_or_else(U256::zero);
+
+    let has_funds = balance >= current_spent + fee;
+
+    // Track fees for this address regardless of whether this specific transaction is included
+    fees_spent_per_address
+        .entry(signer)
+        .and_modify(|val| *val += fee)
+        .or_insert(fee);
+
+    // If transaction cannot be funded, mark the entire address as unfunded
+    // Since stakes are processed before pledges, this prevents inclusion of
+    // pledge commitments when their associated stake commitment is unfunded
+    if !has_funds {
+        debug!(
+        tx.signer = ?signer,
+        account.balance = ?balance,
+        "Transaction funding check failed"
+        );
+        unfunded_address.insert(signer);
+        return false;
+    }
+
+    has_funds
+}
+
+/// Waits for `fut` to finish while printing every `n_secs`.
+async fn wait_with_progress<F, T>(fut: F, n_secs: u64, task_info: &str) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let span = Span::current();
+    let fut = fut.instrument(Span::current());
+    tokio::pin!(fut);
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(n_secs));
+    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    // Don't do an immediate tick
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let _ = span.enter();
+                warn!("Task {task_info} takes too long to complete, possible deadlock detected...");
+            }
+            res = &mut fut => {
+                break res;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounded_mempool_tests {
+    use super::*;
+    use irys_types::{
+        CommitmentTransactionV1, CommitmentType, DataLedger, DataTransactionHeaderV1, IrysSignature,
+    };
+
+    // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    /// Creates a test data transaction with specified fee
+    fn create_test_data_tx(fee: u64) -> DataTransactionHeader {
+        DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            id: H256::random(),
+            anchor: H256::zero(),
+            signer: Address::random(),
+            data_root: H256::random(),
+            data_size: 1024,
+            header_size: 0,
+            term_fee: U256::from(fee).into(),
+            perm_fee: Some(U256::from(100).into()),
+            ledger_id: DataLedger::Publish as u32,
+            bundle_format: Some(0),
+            promoted_height: None,
+            signature: IrysSignature::default(),
+            chain_id: 1,
+        })
+    }
+
+    /// Creates a test commitment transaction with specified signer and value
+    fn create_test_commitment_tx(signer: Address, value: u64) -> CommitmentTransaction {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
+            id: H256::random(), // Random ID for testing
+            anchor: H256::zero(),
+            signer,
+            signature: IrysSignature::default(),
+            fee: 100,
+            value: U256::from(value),
+            commitment_type: CommitmentType::Stake,
+            chain_id: 1,
+        })
+    }
+
+    /// Creates a test mempool state with specified capacities
+    fn create_test_mempool_state(
+        max_data: usize,
+        max_addresses: usize,
+        max_per_address: usize,
+    ) -> MempoolState {
+        MempoolState {
+            valid_submit_ledger_tx: BTreeMap::new(),
+            max_submit_txs: max_data,
+            valid_commitment_tx: BTreeMap::new(),
+            max_commitment_addresses: max_addresses,
+            max_commitments_per_address: max_per_address,
+            recent_invalid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            pending_chunks: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            stake_and_pledge_whitelist: HashSet::new(),
+        }
+    }
+
+    // ========================================================================
+    // Data Transaction Capacity Tests
+    // ========================================================================
+
+    #[test]
+    fn test_data_tx_evicts_lowest_fee_when_full() {
+        // Setup: Fill mempool to capacity with 3 txs
+        let mut state = create_test_mempool_state(3, 10, 10);
+
+        let tx1 = create_test_data_tx(100); // Lowest fee - should be evicted
+        let tx2 = create_test_data_tx(200);
+        let tx3 = create_test_data_tx(300);
+        let tx_new = create_test_data_tx(250); // Higher than lowest
+
+        state.bounded_insert_data_tx(tx1.clone()).unwrap();
+        state.bounded_insert_data_tx(tx2.clone()).unwrap();
+        state.bounded_insert_data_tx(tx3.clone()).unwrap();
+
+        assert_eq!(state.valid_submit_ledger_tx.len(), 3);
+
+        // Act: Insert new tx with fee 250 (should evict tx1 with fee 100)
+        let result = state.bounded_insert_data_tx(tx_new.clone());
+
+        // Assert: Insertion succeeded
+        assert!(result.is_ok(), "Should successfully evict lowest fee tx");
+
+        // Assert: Mempool still at capacity
+        assert_eq!(state.valid_submit_ledger_tx.len(), 3);
+
+        // Assert: Lowest fee tx evicted
+        assert!(!state.valid_submit_ledger_tx.contains_key(&tx1.id));
+
+        // Assert: New tx inserted
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx_new.id));
+
+        // Assert: Other txs preserved
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx2.id));
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx3.id));
+    }
+
+    #[test]
+    fn test_data_tx_rejects_lower_fee_when_full() {
+        // Setup: Fill mempool to capacity
+        let mut state = create_test_mempool_state(3, 10, 10);
+
+        let tx1 = create_test_data_tx(100);
+        let tx2 = create_test_data_tx(200);
+        let tx3 = create_test_data_tx(300);
+        let tx_low_fee = create_test_data_tx(50); // Lower than all existing
+
+        state.bounded_insert_data_tx(tx1.clone()).unwrap();
+        state.bounded_insert_data_tx(tx2.clone()).unwrap();
+        state.bounded_insert_data_tx(tx3.clone()).unwrap();
+
+        // Act: Try to insert tx with lower fee than all existing
+        let result = state.bounded_insert_data_tx(tx_low_fee.clone());
+
+        // Assert: Insertion rejected
+        assert!(matches!(result, Err(TxIngressError::MempoolFull(_))));
+
+        // Assert: Mempool unchanged
+        assert_eq!(state.valid_submit_ledger_tx.len(), 3);
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx1.id));
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx2.id));
+        assert!(state.valid_submit_ledger_tx.contains_key(&tx3.id));
+        assert!(!state.valid_submit_ledger_tx.contains_key(&tx_low_fee.id));
+    }
+
+    // ========================================================================
+    // Commitment Transaction Per-Address Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_commitment_tx_rejects_when_address_limit_reached() {
+        // Setup: Create state with max 3 commitments per address
+        let mut state = create_test_mempool_state(10, 10, 3);
+
+        let address = Address::random();
+        let tx1 = create_test_commitment_tx(address, 100);
+        let tx2 = create_test_commitment_tx(address, 200);
+        let tx3 = create_test_commitment_tx(address, 300);
+        let tx4 = create_test_commitment_tx(address, 400); // Should be rejected
+
+        // Act: Insert 3 commitments (fill address limit)
+        state.bounded_insert_commitment_tx(&tx1).unwrap();
+        state.bounded_insert_commitment_tx(&tx2).unwrap();
+        state.bounded_insert_commitment_tx(&tx3).unwrap();
+
+        // Assert: 3 commitments stored
+        assert_eq!(state.valid_commitment_tx.get(&address).unwrap().len(), 3);
+
+        // Act: Try to insert 4th commitment for same address
+        let result = state.bounded_insert_commitment_tx(&tx4);
+
+        // Assert: Rejected with MempoolFull error
+        assert!(matches!(result, Err(TxIngressError::MempoolFull(_))));
+
+        // Assert: Original 3 commitments preserved (no eviction)
+        let txs = state.valid_commitment_tx.get(&address).unwrap();
+        assert_eq!(txs.len(), 3);
+        assert!(txs.iter().any(|t| t.id == tx1.id));
+        assert!(txs.iter().any(|t| t.id == tx2.id));
+        assert!(txs.iter().any(|t| t.id == tx3.id));
+        assert!(!txs.iter().any(|t| t.id == tx4.id));
+    }
+
+    #[test]
+    fn test_commitment_tx_different_addresses_independent_limits() {
+        // Setup: Max 2 commitments per address
+        let mut state = create_test_mempool_state(10, 10, 2);
+
+        let addr_a = Address::random();
+        let addr_b = Address::random();
+
+        let tx_a1 = create_test_commitment_tx(addr_a, 100);
+        let tx_a2 = create_test_commitment_tx(addr_a, 200);
+        let tx_a3 = create_test_commitment_tx(addr_a, 300);
+
+        let tx_b1 = create_test_commitment_tx(addr_b, 100);
+        let tx_b2 = create_test_commitment_tx(addr_b, 200);
+        let tx_b3 = create_test_commitment_tx(addr_b, 300);
+
+        // Act: Fill both addresses to limit
+        state.bounded_insert_commitment_tx(&tx_a1).unwrap();
+        state.bounded_insert_commitment_tx(&tx_a2).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b1).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b2).unwrap();
+
+        // Assert: Both addresses have 2 commitments
+        assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
+        assert_eq!(state.valid_commitment_tx.get(&addr_b).unwrap().len(), 2);
+
+        // Act: Try to add 3rd to each address
+        let result_a3 = state.bounded_insert_commitment_tx(&tx_a3);
+        let result_b3 = state.bounded_insert_commitment_tx(&tx_b3);
+
+        // Assert: Both rejected independently
+        assert!(matches!(result_a3, Err(TxIngressError::MempoolFull(_))));
+        assert!(matches!(result_b3, Err(TxIngressError::MempoolFull(_))));
+
+        // Assert: Limits still at 2 per address
+        assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
+        assert_eq!(state.valid_commitment_tx.get(&addr_b).unwrap().len(), 2);
+    }
+
+    // ========================================================================
+    // Commitment Transaction Global Address Limit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_commitment_tx_evicts_lowest_value_address_when_global_limit_reached() {
+        // Setup: Max 3 addresses globally
+        let mut state = create_test_mempool_state(10, 3, 10);
+
+        let addr_a = Address::random();
+        let addr_b = Address::random();
+        let addr_c = Address::random();
+        let addr_d = Address::random();
+
+        // Create commitments with different total values per address
+        let tx_a = create_test_commitment_tx(addr_a, 100); // Lowest total value
+        let tx_b1 = create_test_commitment_tx(addr_b, 200);
+        let tx_b2 = create_test_commitment_tx(addr_b, 300); // Total: 500
+        let tx_c = create_test_commitment_tx(addr_c, 300);
+        let tx_d = create_test_commitment_tx(addr_d, 200); // Should evict addr_a
+
+        // Act: Fill 3 addresses
+        state.bounded_insert_commitment_tx(&tx_a).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b1).unwrap();
+        state.bounded_insert_commitment_tx(&tx_b2).unwrap();
+        state.bounded_insert_commitment_tx(&tx_c).unwrap();
+
+        assert_eq!(state.valid_commitment_tx.len(), 3); // 3 addresses
+
+        // Act: Insert commitment for 4th address (should evict addr_a with lowest value)
+        let result = state.bounded_insert_commitment_tx(&tx_d);
+
+        // Assert: Insertion succeeded
+        assert!(result.is_ok());
+
+        // Assert: Still 3 addresses total
+        assert_eq!(state.valid_commitment_tx.len(), 3);
+
+        // Assert: Lowest value address (addr_a) evicted
+        assert!(!state.valid_commitment_tx.contains_key(&addr_a));
+
+        // Assert: New address inserted
+        assert!(state.valid_commitment_tx.contains_key(&addr_d));
+
+        // Assert: Other addresses preserved
+        assert!(state.valid_commitment_tx.contains_key(&addr_b));
+        assert!(state.valid_commitment_tx.contains_key(&addr_c));
+
+        // Assert: addr_b still has both commitments
+        assert_eq!(state.valid_commitment_tx.get(&addr_b).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_commitment_tx_updates_existing_address_no_global_limit_check() {
+        // Setup: Fill global address limit
+        let mut state = create_test_mempool_state(10, 3, 10);
+
+        let addr_a = Address::random();
+        let addr_b = Address::random();
+        let addr_c = Address::random();
+
+        state
+            .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_a, 100))
+            .unwrap();
+        state
+            .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_b, 200))
+            .unwrap();
+        state
+            .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_c, 300))
+            .unwrap();
+
+        assert_eq!(state.valid_commitment_tx.len(), 3);
+
+        // Act: Add another commitment to existing address
+        let tx_a2 = create_test_commitment_tx(addr_a, 150);
+        let result = state.bounded_insert_commitment_tx(&tx_a2);
+
+        // Assert: Succeeds without triggering global limit check
+        assert!(result.is_ok());
+
+        // Assert: Still 3 addresses
+        assert_eq!(state.valid_commitment_tx.len(), 3);
+
+        // Assert: Address A now has 2 commitments
+        assert_eq!(state.valid_commitment_tx.get(&addr_a).unwrap().len(), 2);
     }
 }

@@ -100,7 +100,7 @@ impl TermLedger {
         }
 
         let expiry_height = epoch_height - self.epoch_length * self.num_blocks_in_epoch;
-        tracing::error!("Calculated expiry_height={}", expiry_height);
+        tracing::info!("Calculated expiry_height={}", expiry_height);
 
         // Collect indices of slots to expire
         for (slot_index, slot) in self.slots.iter().enumerate() {

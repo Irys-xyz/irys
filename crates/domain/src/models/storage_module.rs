@@ -42,11 +42,11 @@ use eyre::{ensure, eyre, Context as _, OptionExt as _, Result};
 use irys_database::{
     db::IrysDatabaseExt as _,
     submodule::{
-        add_data_path_hash_to_offset_index, add_full_data_path, add_full_tx_path,
-        add_start_offset_to_data_root_index, add_tx_path_hash_to_offset_index,
-        clear_submodule_database, create_or_open_submodule_db, get_data_path_by_offset,
-        get_data_size_by_data_root, get_start_offsets_by_data_root, get_tx_path_by_offset,
-        set_data_size_for_data_root, tables::RelativeStartOffsets,
+        add_data_path_hash_to_offset_index, add_data_root_info, add_full_data_path,
+        add_full_tx_path, add_tx_path_hash_to_offset_index, clear_submodule_database,
+        create_or_open_submodule_db, get_data_path_by_offset, get_data_root_infos_for_data_root,
+        get_tx_path_by_offset,
+        tables::{DataRootInfo, DataRootInfos},
     },
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
@@ -55,9 +55,9 @@ use irys_types::{
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
     partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
-    DataLedger, DataRoot, LedgerChunkOffset, LedgerChunkRange, PackedChunk, PartitionChunkOffset,
-    PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset, TxChunkOffset, TxPath,
-    UnpackedChunk, H256,
+    DataLedger, DataRoot, DataTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
+    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset,
+    TxChunkOffset, TxPath, UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
@@ -350,10 +350,9 @@ impl StorageModule {
                 })?;
 
             // Initially just mark the global intervals as Uninitialized for this submodules interval
-            let _ = global_intervals.insert_merge_touching_if_values_equal(
-                submodule_interval,
-                ChunkType::Uninitialized,
-            );
+            global_intervals
+                .insert_merge_touching_if_values_equal(submodule_interval, ChunkType::Uninitialized)
+                .map_err(|e| eyre::eyre!("Failed to insert submodule interval: {:?}", e))?;
         }
 
         // TODO: if there are any gaps, or the range doesn't cover a full module range panic
@@ -971,10 +970,9 @@ impl StorageModule {
     /// Returns error if chunk range doesn't overlap with storage module range.
     pub fn index_transaction_data(
         &self,
+        data_tx: &DataTransactionHeader,
         tx_path: &TxPath,
-        data_root: DataRoot,
         chunk_range: LedgerChunkRange,
-        data_size: u64,
     ) -> eyre::Result<()> {
         let storage_range = self.get_storage_module_ledger_offsets()?;
         let tx_path_hash = H256::from(hash_sha256(tx_path).unwrap());
@@ -985,23 +983,26 @@ impl StorageModule {
 
         // Compute the partition relative overlapping chunk range
         let partition_overlap = self.make_range_partition_relative(overlap)?;
-        // Compute the Partition relative offset
-        let relative_offset =
+        // Compute the Partition relative start offset
+        let start_offset =
             RelativeChunkOffset::from(self.make_offset_partition_relative(chunk_range.start())?);
 
         for (interval, submodule) in self.submodules.overlapping(partition_overlap) {
-            let _ = submodule.db.update(|tx| -> eyre::Result<()> {
+            submodule.db.update_eyre(|tx| -> eyre::Result<()> {
                 // Because each submodule index receives a copy of the path, we need to clone it
                 add_full_tx_path(tx, tx_path_hash, tx_path.clone())?;
-                set_data_size_for_data_root(tx, data_root, data_size)?;
                 if let Some(range) = interval.intersection(&partition_overlap) {
                     // Add the tx_path_hash to every offset in the intersecting range
                     for offset in *range.start()..=*range.end() {
                         let part_offset = PartitionChunkOffset::from(offset);
                         add_tx_path_hash_to_offset_index(tx, part_offset, Some(tx_path_hash))?;
                     }
-                    // Also update the start offset by data_root index
-                    add_start_offset_to_data_root_index(tx, data_root, relative_offset)?;
+                    // Add the DataRootInfo to the Infos for this data_root
+                    let info = DataRootInfo {
+                        start_offset,
+                        data_size: data_tx.data_size,
+                    };
+                    add_data_root_info(tx, data_tx.data_root, &info)?;
                 }
                 Ok(())
             })?;
@@ -1020,11 +1021,12 @@ impl StorageModule {
         let res = self.submodules.get_key_value_at_point(partition_offset);
 
         if let Ok((_interval, submodule)) = res {
-            submodule.db.update(|tx| -> eyre::Result<()> {
+            submodule.db.update_eyre(|tx| -> eyre::Result<()> {
                 add_full_data_path(tx, data_path_hash, data_path)?;
                 add_data_path_hash_to_offset_index(tx, partition_offset, Some(data_path_hash))?;
                 Ok(())
-            })?
+            })?;
+            Ok(())
         } else {
             Err(eyre::eyre!(
                 "No submodule found for Partition Offset {:?}",
@@ -1037,23 +1039,58 @@ impl StorageModule {
         &self,
         chunk: &UnpackedChunk,
     ) -> eyre::Result<Vec<PartitionChunkOffset>> {
-        let start_offsets = self.collect_start_offsets(chunk.data_root)?;
+        let data_root_infos = self.collect_data_root_infos(chunk.data_root)?;
 
-        if start_offsets.0.is_empty() {
+        if data_root_infos.0.is_empty() {
             debug!("Chunks data_root not found in storage module");
             return Ok(Vec::new());
         }
 
         let intervals = self.intervals.read().unwrap();
+        let chunk_size = self.config.consensus.chunk_size;
+        let num_chunks_in_partition = self.config.consensus.num_chunks_in_partition;
 
-        Ok(start_offsets
+        // The data_root_infos contain all the start_offsets and data_sizes for this chunks data_root
+        // what we need to do is find all the ones where the chunks tx_offset fits within the data_size
+        // for the data_root at that offset.
+        Ok(data_root_infos
             .0
             .iter()
-            .map(|offset| PartitionChunkOffset::from(*offset + (*chunk.tx_offset as i32)))
-            .filter(|partition_offset| {
-                intervals
-                    .get_at_point(*partition_offset)
-                    .is_some_and(|s| *s == ChunkType::Entropy)
+            .filter_map(|info| {
+                // Check if the chunk's tx_offset + start offset exceeds the data_size for the data root
+                let tx_offset: u32 = chunk.tx_offset.into();
+                let chunk_byte_offset: u64 = tx_offset as u64 * chunk_size;
+
+                if chunk_byte_offset >= info.data_size {
+                    // Skip any chunks that go past the data_size (don't error, just filter out)
+                    warn!("Skipping chunk with tx_offset {:?} for data_root {:?} with start_offset {:?} because the tx_offset is larger than the data_size {:?}",tx_offset, chunk.data_root, info.start_offset, info.data_size );
+                    None
+                } else {
+                    // Calculate the relative partition offset, this can sometimes be negative if the
+                    // data_root overlaps two partitions
+                    let relative_offset = info.start_offset + tx_offset as i32;
+
+                    // Only include a writeable offset for a partition if it has a >= 0
+                    // partition relative offset
+                    if relative_offset.0 >= 0
+                        && (relative_offset.0 as u64) < num_chunks_in_partition
+                    {
+                        // Convert the partition relative offset to a proper PartitionChunkOffset
+                        let partition_offset = PartitionChunkOffset::from(relative_offset.0 as u32);
+
+                        // Check if this offset is in an Entropy interval
+                        if intervals
+                            .get_at_point(partition_offset)
+                            .is_some_and(|s| *s == ChunkType::Entropy)
+                        {
+                            Some(partition_offset)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
             })
             .collect())
     }
@@ -1064,9 +1101,9 @@ impl StorageModule {
         let data_path_hash = UnpackedChunk::hash_data_path(data_path);
 
         // Get all the places this chunks data_root starts in the partition
-        let start_offsets = self.collect_start_offsets(chunk.data_root)?;
+        let data_root_infos = self.collect_data_root_infos(chunk.data_root)?;
 
-        if start_offsets.0.is_empty() {
+        if data_root_infos.0.is_empty() {
             return Err(eyre::eyre!("Chunks data_root not found in storage module"));
         }
 
@@ -1075,9 +1112,30 @@ impl StorageModule {
         let mut pending_offsets = vec![];
 
         // Scan all potential locations and categorize them
-        for start_offset in start_offsets.0 {
+        for info in data_root_infos.0 {
             let partition_offset =
-                PartitionChunkOffset::from(start_offset + (*chunk.tx_offset as i32));
+                PartitionChunkOffset::from(info.start_offset + (*chunk.tx_offset as i32));
+
+            // Calculate the number of chunks the data tx paid for
+            let data_size_in_chunks =
+                (info.data_size.div_ceil(self.config.consensus.chunk_size)) as i32;
+
+            // Calculate the last valid chunk offset for this data transaction.
+            // Convert data_size (bytes) to chunk count, then add to start_offset to get the
+            // exclusive end boundary. Subtract 1 to convert from count to the inclusive
+            // last offset.
+            // Example: 3-chunk tx starting at offset 5 reserves offsets [5,6,7]
+            //   → start=5, chunks=3, end_boundary=8, last_offset=7
+            let last_chunk_offset = (info.start_offset.0 + data_size_in_chunks)
+                .saturating_sub(1)
+                .into();
+
+            // Check to see if the offset being written is past the end of what was paid for
+            if partition_offset > last_chunk_offset {
+                // Skips writing to any partition chunk offsets that exceed the data_size
+                // amount of chunks paid for by the data transaction
+                continue;
+            }
 
             // Check if there's an entropy chunk in the intervals map at this location and collect if present
             let intervals = self.intervals.read().unwrap();
@@ -1139,19 +1197,25 @@ impl StorageModule {
         Ok(())
     }
 
-    /// Internal helper function to find all the RelativeStartOffsets for a data_root
-    /// in this StorageModule
-    pub fn collect_start_offsets(&self, data_root: DataRoot) -> eyre::Result<RelativeStartOffsets> {
-        let mut offsets = RelativeStartOffsets::default();
+    /// Aggregates DataRootInfo entries for a data_root across all submodules.
+    ///
+    /// Returns a combined DataRootInfoList containing all start_offsets and data_sizes
+    /// for this data_root found in any submodule's database.
+    ///
+    /// # Returns
+    /// * `Ok(DataRootInfoList)` - Combined DataRootInfo List (may be empty if not found)
+    /// * `Err` - If any database read fails
+    pub fn collect_data_root_infos(&self, data_root: DataRoot) -> eyre::Result<DataRootInfos> {
+        let mut data_root_info_list = DataRootInfos::default();
         for (_, submodule) in self.submodules.iter() {
-            if let Some(rel_offsets) = submodule
+            if let Ok(Some(submodule_index)) = submodule
                 .db
-                .view(|tx| get_start_offsets_by_data_root(tx, data_root))??
+                .view(|tx| get_data_root_infos_for_data_root(tx, data_root))?
             {
-                offsets.0.extend(rel_offsets.0);
+                data_root_info_list.0.extend(submodule_index.0);
             }
         }
-        Ok(offsets)
+        Ok(data_root_info_list)
     }
 
     pub fn generate_full_chunk_ledger_offset(
@@ -1184,6 +1248,7 @@ impl StorageModule {
                 let tx_path = get_tx_path_by_offset(tx, partition_offset)?
                     .ok_or(eyre::eyre!("Unable to find a chunk with that tx_path"))?;
 
+                // Extract the data_root form the tx_path leaf node
                 let path_buff = Base64::from(tx_path);
                 let proof = get_leaf_proof(&path_buff)?;
                 let data_root = proof
@@ -1191,10 +1256,33 @@ impl StorageModule {
                     .map(H256::from)
                     .ok_or_eyre("Unable to parse data_root from tx_path")?;
 
-                let data_size = get_data_size_by_data_root(tx, data_root)?.ok_or(eyre!(
-                    "Unable to get data_size for data_root {}",
-                    &data_root
-                ))?;
+                // Retrieve all DataRootInfo entries for this data_root from the database.
+                // Each entry contains a start_offset and the data_size paid for in the tx that provided the data_root
+                let mut data_root_infos = get_data_root_infos_for_data_root(tx, data_root)
+                    .expect("Database read should succeed")
+                    .expect("there should be at least one start_offset for any data_root stored in the submodule");
+
+                // Sort DataRootInfo entries by start_offset to enable binary search.
+                // Multiple entries can exist for the same data_root it is posted by multiple transactions
+                // but each will have a unique start_offset in the storage module
+                data_root_infos.0.sort_unstable();
+
+                // Binary search to find the DataRootInfo entry that contains our partition_offset.
+                // partition_point returns the index of the first element where start_offset >= partition_offset
+                // (which we -1 from to find the last element with a start_offset < then partition offset)
+                // which means our target DataRootInfo is at this index (or doesn't exist if index is out of bounds).
+                let index = data_root_infos
+                    .0
+                    .partition_point(|info| info.start_offset <= partition_offset.into()).saturating_sub(1);
+
+                // Extract the data_size from the located DataRootInfo.
+                // If the index is valid, we've found the correct funding transaction's data_size.
+                // If not, the partition_offset doesn't belong to any known DataRootInfo entry.
+                let data_size = if index < data_root_infos.0.len() {
+                    data_root_infos.0[index].data_size
+                } else {
+                    return Err(eyre!("could not find DataRootInfo for partition_offset"));
+                };
 
                 let data_path = get_data_path_by_offset(tx, partition_offset)?
                     .ok_or(eyre::eyre!("Unable to find a chunk for that data_path"))?;
@@ -1252,7 +1340,7 @@ impl StorageModule {
         fetch_from_db: S,
     ) -> eyre::Result<R>
     where
-        S: FnOnce(&reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>) -> eyre::Result<R>,
+        S: FnOnce(&mut reth_db::mdbx::tx::Tx<reth_db::mdbx::RO>) -> eyre::Result<R>,
     {
         let (_, submodule) = self.get_submodule_for_offset(chunk_offset)?;
         submodule.db.view(fetch_from_db)?
@@ -1533,12 +1621,12 @@ impl StorageModule {
 impl Drop for StorageModule {
     fn drop(&mut self) {
         info!("Syncing SM {} to disk...", &self.id);
-        let _ = self.force_sync_pending_chunks().inspect_err(|e| {
+        if let Err(e) = self.force_sync_pending_chunks() {
             error!(
                 "Unable to sync writes while dropping SM {} - {:?}",
                 &self.id, &e
-            )
-        });
+            );
+        }
     }
 }
 
@@ -1749,7 +1837,7 @@ mod tests {
     use irys_testing_utils::{chunk_bytes_gen, utils::setup_tracing_and_temp_dir};
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition_chunk_offset_ii, ConsensusConfig,
-        NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, H256,
+        DataTransactionHeaderV1, NodeConfig, SimpleRNG, StorageSyncConfig, TxChunkOffset, H256,
     };
     use nodit::interval::ii;
 
@@ -2208,14 +2296,21 @@ mod tests {
         let tx_path = vec![5, 6, 7, 8];
         let data_root = H256::zero();
         let data_size = chunk_data.len() as u64;
+
         // Pack the storage module
         storage_module.pack_with_zeros();
 
-        let _ = storage_module.index_transaction_data(
-            &tx_path,
+        // Create a dummy data tx header to provide the data_size and data_root
+        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
             data_root,
-            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
             data_size,
+            ..Default::default()
+        });
+
+        let _ = storage_module.index_transaction_data(
+            &data_tx,
+            &tx_path,
+            LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
         );
 
         let chunk = UnpackedChunk {
@@ -2528,10 +2623,9 @@ mod tests {
             )?;
 
             let _ = storage_module.index_transaction_data(
+                &tx.header,
                 &tx_path,
-                tx.header.data_root,
                 LedgerChunkRange(ledger_chunk_offset_ii!(0, 0)),
-                tx.header.data_size,
             );
 
             for chunk in tx.data_chunks()? {

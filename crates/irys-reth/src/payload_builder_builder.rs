@@ -1,10 +1,8 @@
 //! Payload component configuration for the Ethereum node.
-//! Original impl: [here](https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19)
+//! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19
 
 use reth_chainspec::{EthChainSpec as _, EthereumHardforks};
-use reth_ethereum_engine_primitives::{
-    EthBuiltPayload, EthPayloadAttributes, EthPayloadBuilderAttributes,
-};
+use reth_ethereum_engine_primitives::EthBuiltPayload;
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;
@@ -14,12 +12,11 @@ use reth_node_builder::{
 };
 use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 
-use crate::payload::ShadowTxStore;
+use crate::{IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 
 /// A basic ethereum payload service.
 #[derive(Clone, Debug)]
 pub struct IrysPayloadBuilderBuilder {
-    pub shadow_tx_store: ShadowTxStore,
     pub max_pd_chunks_per_block: u64,
 }
 
@@ -34,8 +31,8 @@ where
         > + 'static,
     Types::Payload: PayloadTypes<
         BuiltPayload = EthBuiltPayload,
-        PayloadAttributes = EthPayloadAttributes,
-        PayloadBuilderAttributes = EthPayloadBuilderAttributes,
+        PayloadAttributes = IrysPayloadAttributes,
+        PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
     >,
 {
     type PayloadBuilder = crate::payload::IrysPayloadBuilder<Pool, Node::Provider, Evm>;
@@ -55,7 +52,6 @@ where
             pool,
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
-            self.shadow_tx_store,
             self.max_pd_chunks_per_block,
         ))
     }

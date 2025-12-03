@@ -57,7 +57,7 @@ pub fn run_vdf<B: BlockProvider>(
     initial_reset_seed: H256,
     mut fast_forward_receiver: UnboundedReceiver<VdfStep>,
     is_mining_enabled: Arc<AtomicBool>,
-    mut shutdown_listener: Receiver<()>,
+    mut shutdown_listener: Receiver<irys_types::ShutdownReason>,
     broadcast_mining_service: impl MiningBroadcaster,
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
@@ -78,10 +78,10 @@ pub fn run_vdf<B: BlockProvider>(
     let vdf_reset_frequency = config.reset_frequency as u64;
 
     loop {
-        if shutdown_listener.try_recv().is_ok() {
-            tracing::info!("VDF loop shutdown signal received");
+        if let Ok(reason) = shutdown_listener.try_recv() {
+            tracing::info!("VDF loop shutdown signal received: {}", reason);
             break;
-        };
+        }
 
         // check for VDF fast forward step
         while let Ok(proposed_ff_step) = fast_forward_receiver.try_recv() {
@@ -131,7 +131,7 @@ pub fn run_vdf<B: BlockProvider>(
         // If the next step is a reset step, we need to be sure that the canonical chain tip
         // is higher than the previous reset step. Otherwise, we'll end up applying a reset seed
         // that belongs to the previous reset range
-        let is_too_far_ahead = (global_step_number + 1) % vdf_reset_frequency == 0
+        let is_too_far_ahead = (global_step_number + 1).is_multiple_of(vdf_reset_frequency)
             && global_step_number + 1 > canonical_global_step_number + vdf_reset_frequency;
 
         // if mining disabled, wait 200ms and continue loop i.e. check again
@@ -199,7 +199,7 @@ pub fn process_reset(
     reset_frequency: u64,
     reset_seed: H256,
 ) -> H256 {
-    if global_step_number % reset_frequency == 0 {
+    if global_step_number.is_multiple_of(reset_frequency) {
         info!(
             "Reset seed {:?} applied to step {}",
             reset_seed, global_step_number
@@ -329,7 +329,7 @@ mod tests {
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<irys_types::ShutdownReason>(1);
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -381,7 +381,7 @@ mod tests {
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % config.vdf.reset_frequency as u64 == 0 {
+        if step_num > 0 && (step_num - 1).is_multiple_of(config.vdf.reset_frequency as u64) {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
@@ -421,7 +421,10 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx.send(()).await.unwrap();
+        shutdown_tx
+            .send(irys_types::ShutdownReason::TestComplete)
+            .await
+            .unwrap();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();
@@ -447,7 +450,7 @@ mod tests {
         let vdf_state = mocked_vdf_service(&config);
         let vdf_steps_guard = VdfStateReadonly::new(vdf_state.clone());
 
-        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<irys_types::ShutdownReason>(1);
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
@@ -491,7 +494,7 @@ mod tests {
 
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
-        if step_num > 0 && (step_num - 1) % config.vdf.reset_frequency as u64 == 0 {
+        if step_num > 0 && (step_num - 1).is_multiple_of(config.vdf.reset_frequency as u64) {
             seed = apply_reset_seed(seed, reset_seed);
         }
         vdf_sha(
@@ -531,7 +534,10 @@ mod tests {
         );
 
         // Send shutdown signal
-        shutdown_tx.send(()).await.unwrap();
+        shutdown_tx
+            .send(irys_types::ShutdownReason::TestComplete)
+            .await
+            .unwrap();
 
         // Wait for vdf thread to finish
         vdf_thread_handler.join().unwrap();

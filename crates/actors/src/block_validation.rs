@@ -3,6 +3,7 @@ use crate::pd_base_fee::compute_base_fee_per_chunk;
 use crate::{
     block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
     block_producer::ledger_expiry,
+    mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
     packing_service::{UnpackingPriority, UnpackingRequest},
     services::ServiceSenders,
@@ -29,13 +30,14 @@ use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
 use irys_types::u256_from_le_bytes as hash_to_number;
 use irys_types::CommitmentType;
+use irys_types::UnixTimestampMs;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, Address, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    validate_path, Address, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    PoaData, H256, U256,
+    PoaData, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{BlockHash, LedgerChunkRange};
@@ -58,7 +60,7 @@ use std::{
 use thiserror::Error;
 use tracing::{debug, error, info, warn, Instrument as _};
 
-#[derive(Debug, PartialEq, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PreValidationError {
     #[error("Failed to get block bounds: {0}")]
     BlockBoundsLookupError(String),
@@ -77,7 +79,10 @@ pub enum PreValidationError {
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
-    LastDiffTimestampMismatch { expected: u128, got: u128 },
+    LastDiffTimestampMismatch {
+        expected: UnixTimestampMs,
+        got: UnixTimestampMs,
+    },
     #[error("Invalid ledger id {ledger_id}")]
     LedgerIdInvalid { ledger_id: u32 },
     #[error("Invalid merkle proof: {0}")]
@@ -224,7 +229,107 @@ pub enum PreValidationError {
     InvalidEpochSnapshot { error: String },
 }
 
+/// Validation error type that covers all block validation failures.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ValidationError {
+    /// Pre-validation error (consensus parameter validation)
+    #[error("Pre-validation failed: {0}")]
+    PreValidation(#[from] PreValidationError),
+
+    /// Validation was cancelled due to block tree state changes
+    #[error("Validation cancelled: {reason}")]
+    ValidationCancelled { reason: String },
+
+    /// A validation task panicked unexpectedly
+    #[error("Validation task panicked: {task}: {details}")]
+    TaskPanicked { task: String, details: String },
+
+    /// VDF validation failed
+    #[error("VDF validation failed: {0}")]
+    VdfValidationFailed(String),
+
+    /// Seed data validation failed
+    #[error("Seed data invalid: {0}")]
+    SeedDataInvalid(String),
+
+    /// Execution layer (Reth) validation failed
+    #[error("Execution layer validation failed: {0}")]
+    ExecutionLayerFailed(String),
+
+    /// Recall range validation failed
+    #[error("Recall range validation failed: {0}")]
+    RecallRangeInvalid(String),
+
+    /// Shadow transaction validation failed
+    #[error("Shadow transaction validation failed: {0}")]
+    ShadowTransactionInvalid(String),
+
+    /// Failed to fetch commitment transactions from mempool or database
+    #[error("Failed to fetch commitment transactions: {0}")]
+    CommitmentTransactionFetchFailed(String),
+
+    /// Commitment transaction has invalid value (stake/pledge/unpledge amount)
+    #[error("Commitment transaction {tx_id} at position {position} has invalid value: {reason}")]
+    CommitmentValueInvalid {
+        tx_id: H256,
+        position: usize,
+        reason: String,
+    },
+
+    /// Commitment ordering validation failed
+    #[error("Commitment ordering validation failed: {0}")]
+    CommitmentOrderingFailed(String),
+
+    /// Commitment snapshot validation rejected the commitment
+    #[error("Commitment {tx_id} rejected by snapshot validation with status {status:?}")]
+    CommitmentSnapshotRejected {
+        tx_id: H256,
+        status: CommitmentSnapshotStatus,
+    },
+
+    /// Unpledge commitment targets partition not owned by signer
+    #[error("Unpledge commitment {tx_id} targets partition {partition_hash} not owned by signer {signer}")]
+    UnpledgePartitionNotOwned {
+        tx_id: H256,
+        partition_hash: H256,
+        signer: Address,
+    },
+
+    /// Parent commitment snapshot not found
+    #[error("Parent commitment snapshot missing for block {block_hash}")]
+    ParentCommitmentSnapshotMissing { block_hash: H256 },
+
+    /// Parent epoch snapshot not found
+    #[error("Parent epoch snapshot missing for block {block_hash}")]
+    ParentEpochSnapshotMissing { block_hash: H256 },
+
+    /// Parent block not found in block tree
+    #[error("Parent block {block_hash} not found in block tree")]
+    ParentBlockMissing { block_hash: H256 },
+
+    /// Epoch block commitment mismatch
+    #[error("Epoch block commitment mismatch at position {position}")]
+    EpochCommitmentMismatch { position: usize },
+
+    /// Epoch block contains extra commitment
+    #[error("Epoch block contains extra commitment at position {position}")]
+    EpochExtraCommitment { position: usize },
+
+    /// Epoch block missing expected commitment
+    #[error("Epoch block missing expected commitment at position {position}")]
+    EpochMissingCommitment { position: usize },
+
+    /// Commitment transaction in wrong order
+    #[error("Commitment transaction at position {position} in wrong order")]
+    CommitmentWrongOrder { position: usize },
+
+    /// Generic validation error for edge cases
+    #[error("Validation failed: {0}")]
+    Other(String),
+}
+
 /// Full pre-validation steps for a block
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
 pub async fn prevalidate_block(
     block: IrysBlockHeader,
     previous_block: IrysBlockHeader,
@@ -272,8 +377,8 @@ pub async fn prevalidate_block(
 
     // Check block timestamp drift
     timestamp_is_valid(
-        block.timestamp,
-        previous_block.timestamp,
+        block.timestamp.as_millis(),
+        previous_block.timestamp.as_millis(),
         config.consensus.max_future_timestamp_drift_millis,
     )?;
 
@@ -394,14 +499,17 @@ pub async fn prevalidate_block(
         return Err(PreValidationError::EmaMismatch);
     }
 
-    // Check valid curve price
+    let target_block_time_seconds = config.consensus.difficulty_adjustment.block_time;
+
+    // Use height * target_block_time for consistent reward curve positioning
+    let previous_block_seconds = (previous_block.height() * target_block_time_seconds) as u128;
+    let current_block_seconds = previous_block_seconds + target_block_time_seconds as u128;
+
     let reward = reward_curve
-        .reward_between(
-            // adjust ms to sec
-            previous_block.timestamp.saturating_div(1000),
-            block.timestamp.saturating_div(1000),
-        )
+        .reward_between(previous_block_seconds, current_block_seconds)
         .map_err(|e| PreValidationError::RewardCurveError(e.to_string()))?;
+
+    // Check valid curve price
     if reward.amount != block.reward_amount {
         return Err(PreValidationError::RewardMismatch {
             got: block.reward_amount,
@@ -520,7 +628,7 @@ pub fn last_diff_timestamp_is_valid(
     difficulty_config: &DifficultyAdjustmentConfig,
 ) -> Result<(), PreValidationError> {
     let blocks_between_adjustments = difficulty_config.difficulty_adjustment_interval;
-    let expected = if block.height % blocks_between_adjustments == 0 {
+    let expected = if block.height.is_multiple_of(blocks_between_adjustments) {
         block.timestamp
     } else {
         previous_block.last_diff_timestamp
@@ -764,7 +872,7 @@ pub fn get_recall_range(
 }
 
 /// Returns Ok if the provided `PoA` is valid, Err otherwise
-#[tracing::instrument(skip_all, fields(
+#[tracing::instrument(level = "trace", skip_all, fields(
     block.miner_address = ?miner_address,
     poa.chunk_offset = ?poa.partition_chunk_offset,
     poa.partition_hash = ?poa.partition_hash,
@@ -831,20 +939,21 @@ pub fn poa_is_valid(
         )
         .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
-        if !(tx_path_result.left_bound..=tx_path_result.right_bound)
+        if !(tx_path_result.min_byte_range..=tx_path_result.max_byte_range)
             .contains(&(block_chunk_offset * (config.chunk_size as u128)))
         {
             return Err(PreValidationError::PoAChunkOffsetOutOfTxBounds);
         }
 
         let tx_chunk_offset =
-            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.left_bound;
+            block_chunk_offset * (config.chunk_size as u128) - tx_path_result.min_byte_range;
 
         // data_path validation
         let data_path_result = validate_path(tx_path_result.leaf_hash, &data_path, tx_chunk_offset)
             .map_err(|e| PreValidationError::MerkleProofInvalid(e.to_string()))?;
 
-        if !(data_path_result.left_bound..=data_path_result.right_bound).contains(&tx_chunk_offset)
+        if !(data_path_result.min_byte_range..=data_path_result.max_byte_range)
+            .contains(&tx_chunk_offset)
         {
             return Err(PreValidationError::PoAChunkOffsetOutOfDataChunksBounds);
         }
@@ -867,7 +976,7 @@ pub fn poa_is_valid(
         let (poa_chunk_pad_trimmed, _) = poa_chunk.split_at(
             (config
                 .chunk_size
-                .min((data_path_result.right_bound - data_path_result.left_bound) as u64))
+                .min((data_path_result.max_byte_range - data_path_result.min_byte_range) as u64))
                 as usize,
         );
 
@@ -909,9 +1018,11 @@ pub fn poa_is_valid(
 /// Validates that the shadow transactions in the EVM block match the expected shadow transactions
 /// generated from the Irys block data. This is a pure validation function with no side effects.
 /// Returns the ExecutionData on success to avoid re-fetching it for reth submission.
-pub async fn reth_block_is_valid(
+#[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
+pub async fn shadow_transactions_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     parent_block: &IrysBlockHeader,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
@@ -925,6 +1036,7 @@ pub async fn reth_block_is_valid(
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
         .wait_for_payload(&block.evm_block_hash)
+        .in_current_span()
         .await
         .ok_or_eyre("reth execution payload never arrived")?;
 
@@ -989,7 +1101,7 @@ pub async fn reth_block_is_valid(
     // ensure the execution payload timestamp matches the block timestamp
     // truncated to full seconds
     let payload_timestamp: u128 = payload_v3.timestamp().into();
-    let block_timestamp_sec = block.timestamp / 1000;
+    let block_timestamp_sec: u128 = block.timestamp_secs().as_secs().into();
     ensure!(
         payload_timestamp == block_timestamp_sec,
         "EVM payload timestamp {payload_timestamp} does not match block timestamp {block_timestamp_sec}"
@@ -1079,6 +1191,7 @@ pub async fn reth_block_is_valid(
     let expected_txs = generate_expected_shadow_transactions_from_db(
         config,
         service_senders,
+        mempool_guard,
         block,
         db,
         parent_block,
@@ -1142,7 +1255,7 @@ fn extract_leading_shadow_txs(
 
 /// Submits the EVM payload to reth for execution layer validation.
 /// This should only be called after all consensus layer validations have passed.
-#[tracing::instrument(skip_all, err, fields(
+#[tracing::instrument(level = "trace", skip_all, err, fields(
     block.hash = %block.block_hash,
     block.height = %block.height,
     block.evm_block_hash = %block.evm_block_hash
@@ -1201,10 +1314,11 @@ pub async fn submit_payload_to_reth(
 }
 
 /// Generates expected shadow transactions by looking up required data from the mempool or database
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 async fn generate_expected_shadow_transactions_from_db(
     config: &Config,
     service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     parent_block: &IrysBlockHeader,
@@ -1216,7 +1330,7 @@ async fn generate_expected_shadow_transactions_from_db(
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up commitment txs
-    let commitment_txs = extract_commitment_txs(config, service_senders, block, db).await?;
+    let commitment_txs = extract_commitment_txs(config, mempool_guard, block, db).await?;
 
     // Lookup data txs
     let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
@@ -1229,7 +1343,9 @@ async fn generate_expected_shadow_transactions_from_db(
     let initial_treasury_balance = parent_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let expired_ledger_fees = if is_epoch_block {
         ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -1316,11 +1432,13 @@ async fn generate_expected_shadow_transactions_from_db(
 
 async fn extract_commitment_txs(
     config: &Config,
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
 ) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let commitment_txs = if is_epoch_block {
         // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
         vec![]
@@ -1332,8 +1450,7 @@ async fn extract_commitment_txs(
                     "only commitment ledger supported"
                 );
 
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, &service_senders.mempool, db)
-                    .await?
+                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db).await?
             }
             [] => {
                 // this is valid as we can have a block that contains 0 system ledgers
@@ -1380,12 +1497,15 @@ async fn extract_publish_ledger_with_txs(
 }
 
 /// Validates  the actual shadow transactions match the expected ones
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 fn validate_shadow_transactions_match(
     actual: impl Iterator<Item = eyre::Result<ShadowTransaction>>,
     expected: impl Iterator<Item = ShadowTransaction>,
     block_header: &IrysBlockHeader,
 ) -> eyre::Result<()> {
+    // Verify solution hash matches the block
+    let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
+
     // Validate each expected shadow transaction
     for (idx, data) in actual.zip_longest(expected).enumerate() {
         let EitherOrBoth::Both(actual, expected) = data else {
@@ -1402,14 +1522,12 @@ fn validate_shadow_transactions_match(
             solution_hash,
         } = &actual
         {
-            // Verify solution hash matches the block
-            let expected_hash: FixedBytes<32> = block_header.solution_hash.into();
             if *solution_hash != expected_hash {
                 eyre::bail!(
                     "Invalid solution hash reference in shadow transaction at idx {}. Expected {:?}, got {:?}",
                     idx,
-                    block_header.solution_hash,
-                    solution_hash
+                    H256::from(*expected_hash),
+                    H256::from(**solution_hash)
                 );
             }
         }
@@ -1445,7 +1563,10 @@ pub fn is_seed_data_valid(
             "Seed data is invalid. Expected: {:?}, got: {:?}",
             expected_seed_data, vdf_info
         );
-        ValidationResult::Invalid
+        ValidationResult::Invalid(ValidationError::SeedDataInvalid(format!(
+            "Expected: {:?}, got: {:?}",
+            expected_seed_data, vdf_info
+        )))
     }
 }
 
@@ -1453,14 +1574,14 @@ pub fn is_seed_data_valid(
 /// according to the same priority rules used by the mempool:
 /// 1. Stakes first (sorted by fee, highest first)
 /// 2. Then pledges (sorted by pledge_count_before_executing ascending, then by fee descending)
-#[tracing::instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
+#[tracing::instrument(level = "trace", skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
-    service_senders: &ServiceSenders,
+    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
-) -> eyre::Result<()> {
+) -> Result<(), ValidationError> {
     // Extract commitment transaction IDs from the block
     let block_tx_ids = block
         .system_ledgers
@@ -1470,8 +1591,9 @@ pub async fn commitment_txs_are_valid(
         .unwrap_or_else(|| &[]);
 
     // Fetch all actual commitment transactions from the block
-    let actual_commitments =
-        get_commitment_tx_in_parallel(block_tx_ids, &service_senders.mempool, db).await?;
+    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db)
+        .await
+        .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
 
     // Validate that all commitment transactions have correct values
     for (idx, tx) in actual_commitments.iter().enumerate() {
@@ -1480,23 +1602,32 @@ pub async fn commitment_txs_are_valid(
                 "Commitment transaction {} at position {} has invalid value: {}",
                 tx.id, idx, e
             );
-            eyre::eyre!("Invalid commitment transaction value: {}", e)
+            ValidationError::CommitmentValueInvalid {
+                tx_id: tx.id,
+                position: idx,
+                reason: e.to_string(),
+            }
         })?;
     }
 
     let (parent_commitment_snapshot, parent_epoch_snapshot) = {
         let read = block_tree_guard.read();
-        let commitment_snapshot = read.get_commitment_snapshot(&block.previous_block_hash)?;
+        let commitment_snapshot = read
+            .get_commitment_snapshot(&block.previous_block_hash)
+            .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
         let epoch_snapshot = read
             .get_epoch_snapshot(&block.previous_block_hash)
-            .ok_or_eyre(format!(
-                "Parent epoch snapshot missing for block {}",
-                block.previous_block_hash
-            ))?;
+            .ok_or_else(|| ValidationError::ParentEpochSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
         (commitment_snapshot, epoch_snapshot)
     };
 
-    let is_epoch_block = block.height % config.consensus.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         debug!(
@@ -1515,27 +1646,27 @@ pub async fn commitment_txs_are_valid(
         {
             match pair {
                 EitherOrBoth::Both(actual, expected) => {
-                    ensure!(
-                        actual == expected,
-                        "Epoch block commitment mismatch at position {}. Expected: {:?}, Got: {:?}",
-                        idx,
-                        expected,
-                        actual
-                    );
+                    if actual != expected {
+                        error!(
+                            "Epoch block commitment mismatch at position {}. Expected: {:?}, Got: {:?}",
+                            idx, expected, actual
+                        );
+                        return Err(ValidationError::EpochCommitmentMismatch { position: idx });
+                    }
                 }
                 EitherOrBoth::Left(actual) => {
                     error!(
                         "Extra commitment in epoch block at position {}: {:?}",
                         idx, actual
                     );
-                    eyre::bail!("Epoch block contains extra commitment transaction");
+                    return Err(ValidationError::EpochExtraCommitment { position: idx });
                 }
                 EitherOrBoth::Right(expected) => {
                     error!(
                         "Missing commitment in epoch block at position {}: {:?}",
                         idx, expected
                     );
-                    eyre::bail!("Epoch block missing expected commitment transaction");
+                    return Err(ValidationError::EpochMissingCommitment { position: idx });
                 }
             }
         }
@@ -1556,23 +1687,22 @@ pub async fn commitment_txs_are_valid(
                 .partition_assignments
                 .get_assignment(partition_hash)
                 .map(|assignment| assignment.miner_address);
-            ensure!(
-                owner == Some(tx.signer),
-                "Unpledge commitment {} targets partition {} not owned by signer {} (owner {:?})",
-                tx.id,
-                partition_hash,
-                tx.signer,
-                owner
-            );
+            if owner != Some(tx.signer) {
+                return Err(ValidationError::UnpledgePartitionNotOwned {
+                    tx_id: tx.id,
+                    partition_hash,
+                    signer: tx.signer,
+                });
+            }
         }
 
         let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
-        ensure!(
-            status == CommitmentSnapshotStatus::Accepted,
-            "Commitment {} rejected by snapshot validation with status {:?}",
-            tx.id,
-            status
-        );
+        if status != CommitmentSnapshotStatus::Accepted {
+            return Err(ValidationError::CommitmentSnapshotRejected {
+                tx_id: tx.id,
+                status,
+            });
+        }
     }
 
     // Regular block validation: check priority ordering for stake and pledge commitments
@@ -1604,17 +1734,23 @@ pub async fn commitment_txs_are_valid(
     {
         match pair {
             EitherOrBoth::Both(actual, expected) => {
-                ensure!(
-                    actual.id == expected.id,
-                    "Commitment transaction at position {} in wrong order. Expected: {}, Got: {}",
-                    idx,
-                    expected.id,
-                    actual.id
-                );
+                if actual.id != expected.id {
+                    error!(
+                        "Commitment transaction at position {} in wrong order. Expected: {}, Got: {}",
+                        idx, expected.id, actual.id
+                    );
+                    return Err(ValidationError::CommitmentWrongOrder { position: idx });
+                }
             }
             _ => {
                 // This should never happen since we're comparing the same filtered set
-                eyre::bail!("Internal error: commitment ordering validation mismatch");
+                error!(
+                    "Internal error: commitment ordering validation mismatch for block {} (height {})",
+                    block.block_hash, block.height
+                );
+                return Err(ValidationError::CommitmentOrderingFailed(
+                    format!("Internal error: commitment ordering validation mismatch for block {} (height {})", block.block_hash, block.height),
+                ));
             }
         }
     }
@@ -1630,10 +1766,13 @@ pub fn calculate_perm_storage_total_fee(
     term_fee: U256,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
+    timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<Amount<(NetworkFee, Irys)>> {
+    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     calculate_perm_fee_from_config(
         bytes_to_store,
         &config.consensus,
+        number_of_ingress_proofs_total,
         ema_snapshot.ema_for_public_pricing(),
         term_fee,
     )
@@ -1646,11 +1785,14 @@ pub fn calculate_term_storage_base_network_fee(
     epochs_for_storage: u64,
     ema_snapshot: &EmaSnapshot,
     config: &Config,
+    timestamp_secs: UnixTimestamp,
 ) -> eyre::Result<U256> {
+    let number_of_ingress_proofs_total = config.number_of_ingress_proofs_total_at(timestamp_secs);
     irys_types::storage_pricing::calculate_term_fee(
         bytes_to_store,
         epochs_for_storage,
         &config.consensus,
+        number_of_ingress_proofs_total,
         ema_snapshot.ema_for_public_pricing(),
     )
 }
@@ -1663,7 +1805,7 @@ pub fn calculate_term_storage_base_network_fee(
 /// - Publish ledger transactions must have valid ingress proofs
 /// - All transactions must meet minimum fee requirements
 /// - Fee structures must be valid for proper reward distribution
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(level = "trace", skip_all, err)]
 pub async fn data_txs_are_valid(
     config: &Config,
     service_senders: &ServiceSenders,
@@ -1720,9 +1862,9 @@ pub async fn data_txs_are_valid(
         .map(|(tx, ledger_current)| {
             let state = if same_block_promotions.contains(&tx.id) {
                 TxInclusionState::Found {
-                    ledger_current: DataLedger::Publish,
-                    ledger_historical: DataLedger::Submit,
-                    block_hash: block.block_hash,
+                    // Same block promotion: both ledgers are in the current block
+                    ledger_current: (DataLedger::Publish, block.block_hash),
+                    ledger_historical: (DataLedger::Submit, block.block_hash),
                 }
             } else {
                 TxInclusionState::Searching { ledger_current }
@@ -1735,7 +1877,7 @@ pub async fn data_txs_are_valid(
     get_previous_tx_inclusions(
         &mut txs_to_check,
         block,
-        config.consensus.mempool.anchor_expiry_depth as u64,
+        config.consensus.mempool.tx_anchor_expiry_depth as u64,
         service_senders,
         db,
     )
@@ -1746,9 +1888,83 @@ pub async fn data_txs_are_valid(
         error: e.to_string(),
     })?;
 
+    let validate_price = |tx: &&DataTransactionHeader| {
+        // Calculate expected fees based on data size using block's EMA
+        // Calculate term fee first as it's needed for perm fee calculation
+        // Calculate epochs for storage using the same method as mempool
+        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
+            block.height,
+            config.consensus.epoch.num_blocks_in_epoch,
+            config.consensus.epoch.submit_ledger_epoch_length,
+        );
+
+        // Convert block timestamp from millis to seconds for hardfork params
+        let timestamp_secs = block.timestamp_secs();
+        let expected_term_fee = calculate_term_storage_base_network_fee(
+            tx.data_size,
+            epochs_for_storage,
+            &block_ema,
+            config,
+            timestamp_secs,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+        let expected_perm_fee = calculate_perm_storage_total_fee(
+            tx.data_size,
+            expected_term_fee,
+            &block_ema,
+            config,
+            timestamp_secs,
+        )
+        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
+
+        // Validate perm_fee is at least the expected amount
+        let actual_perm_fee = tx.perm_fee.unwrap_or(BoundedFee::zero());
+        if actual_perm_fee < expected_perm_fee.amount {
+            return Err(PreValidationError::InsufficientPermFee {
+                tx_id: tx.id,
+                expected: expected_perm_fee.amount,
+                actual: actual_perm_fee.get(),
+            });
+        }
+
+        // Validate term_fee is at least the expected amount
+        let actual_term_fee = tx.term_fee;
+        if actual_term_fee < expected_term_fee {
+            return Err(PreValidationError::InsufficientTermFee {
+                tx_id: tx.id,
+                expected: expected_term_fee,
+                actual: actual_term_fee.get(),
+            });
+        }
+
+        // Validate fee distribution structures can be created successfully
+        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
+        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
+            PreValidationError::InvalidTermFeeStructure {
+                tx_id: tx.id,
+                reason: e.to_string(),
+            }
+        })?;
+
+        let number_of_ingress_proofs_total =
+            config.number_of_ingress_proofs_total_at(timestamp_secs);
+        PublishFeeCharges::new(
+            actual_perm_fee,
+            actual_term_fee,
+            &config.consensus,
+            number_of_ingress_proofs_total,
+        )
+        .map_err(|e| PreValidationError::InvalidPermFeeStructure {
+            tx_id: tx.id,
+            reason: e.to_string(),
+        })?;
+        Ok(())
+    };
+
     // Step 4: Validate based on ledger rules
     for (tx, past_inclusion) in txs_to_check.values() {
         match past_inclusion {
+            // no past inclusions
             TxInclusionState::Searching { ledger_current } => {
                 match ledger_current {
                     DataLedger::Publish => {
@@ -1764,17 +1980,38 @@ pub async fn data_txs_are_valid(
                     }
                     DataLedger::Submit => {
                         // Submit tx with no past inclusion - VALID (new transaction)
+                        validate_price(tx)?;
+
+                        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+                        // (they're waiting for proofs to arrive)
+                        if tx.promoted_height.is_some() {
+                            // TODO: This should be a hard error, but the test infrastructure currently
+                            // creates transactions with ingress proofs that get placed in Submit ledger.
+                            // This needs to be fixed in the block production logic to properly place
+                            // transactions with proofs in the Publish ledger.
+                            tracing::error!(
+                                "Transaction {} in Submit ledger should not have a promoted_height",
+                                tx.id
+                            );
+                        }
+
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
                 }
             }
             TxInclusionState::Found {
-                ledger_current,
-                ledger_historical,
-                block_hash,
+                ledger_current: (ledger_current, current_block_hash),
+                ledger_historical: (ledger_historical, historical_block_hash),
             } => {
                 match (ledger_current, ledger_historical) {
                     (DataLedger::Publish, DataLedger::Submit) => {
+                        if current_block_hash == historical_block_hash
+                            && current_block_hash == &block.block_hash
+                        {
+                            // tx was included & promoted within the same block
+                            validate_price(tx)?;
+                        }
+
                         // OK: Transaction promoted from past Submit to current Publish
                         debug!(
                             "Transaction {} promoted from past Submit to current Publish ledger",
@@ -1784,7 +2021,7 @@ pub async fn data_txs_are_valid(
                     (DataLedger::Publish, DataLedger::Publish) => {
                         return Err(PreValidationError::PublishTxAlreadyIncluded {
                             tx_id: tx.id,
-                            block_hash: *block_hash,
+                            block_hash: *historical_block_hash,
                         });
                     }
                     (DataLedger::Submit, _) => {
@@ -1792,7 +2029,7 @@ pub async fn data_txs_are_valid(
                         return Err(PreValidationError::SubmitTxAlreadyIncluded {
                             tx_id: tx.id,
                             ledger: *ledger_historical,
-                            block_hash: *block_hash,
+                            block_hash: *historical_block_hash,
                         });
                     }
                 }
@@ -1808,13 +2045,13 @@ pub async fn data_txs_are_valid(
         }
     }
 
-    // Step 5: Validate all transactions (including same-block promotions)
-    let all_txs = publish_txs
-        .iter()
-        .map(|tx| (tx, DataLedger::Publish))
-        .chain(submit_txs.iter().map(|tx| (tx, DataLedger::Submit)));
+    // Step 5: Validate all SUBMIT tx (including same-block promotions)
+    let all_txs = publish_txs.iter().map(|tx| (tx, DataLedger::Submit));
 
+    // DO NOT INCLUDE ANY LOGIC OTHER THAN PRICING VALIDATION HERE
+    // IT ONLY RUNS FOR NON-PROMOTED TXS
     for (tx, current_ledger) in all_txs {
+        debug_assert_eq!(current_ledger, DataLedger::Submit);
         // All data transactions must have ledger_id set to Publish
         // TODO: support other term ledgers here
         if tx.ledger_id != DataLedger::Publish as u32 {
@@ -1825,80 +2062,17 @@ pub async fn data_txs_are_valid(
             });
         }
 
-        // Calculate expected fees based on data size using block's EMA
-        // Calculate term fee first as it's needed for perm fee calculation
-        // Calculate epochs for storage using the same method as mempool
-        let epochs_for_storage = irys_types::ledger_expiry::calculate_submit_ledger_expiry(
-            block.height,
-            config.consensus.epoch.num_blocks_in_epoch,
-            config.consensus.epoch.submit_ledger_epoch_length,
-        );
-
-        let expected_term_fee = calculate_term_storage_base_network_fee(
-            tx.data_size,
-            epochs_for_storage,
-            &block_ema,
-            config,
-        )
-        .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-        let expected_perm_fee =
-            calculate_perm_storage_total_fee(tx.data_size, expected_term_fee, &block_ema, config)
-                .map_err(|e| PreValidationError::FeeCalculationFailed(e.to_string()))?;
-
-        // Validate perm_fee is at least the expected amount
-        let actual_perm_fee = tx.perm_fee.unwrap_or(U256::zero());
-        if actual_perm_fee < expected_perm_fee.amount {
-            return Err(PreValidationError::InsufficientPermFee {
-                tx_id: tx.id,
-                expected: expected_perm_fee.amount,
-                actual: actual_perm_fee,
-            });
-        }
-
-        // Validate term_fee is at least the expected amount
-        let actual_term_fee = tx.term_fee;
-        if actual_term_fee < expected_term_fee {
-            return Err(PreValidationError::InsufficientTermFee {
-                tx_id: tx.id,
-                expected: expected_term_fee,
-                actual: actual_term_fee,
-            });
-        }
-
-        // Validate fee distribution structures can be created successfully
-        // This ensures fees can be properly distributed to block producers, ingress proof providers, etc.
-        TermFeeCharges::new(actual_term_fee, &config.consensus).map_err(|e| {
-            PreValidationError::InvalidTermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            }
-        })?;
-
-        PublishFeeCharges::new(actual_perm_fee, actual_term_fee, &config.consensus).map_err(
-            |e| PreValidationError::InvalidPermFeeStructure {
-                tx_id: tx.id,
-                reason: e.to_string(),
-            },
-        )?;
-
-        match current_ledger {
-            DataLedger::Publish => {
-                // no special publish-ledger-only asserts here
-            }
-            DataLedger::Submit => {
-                // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
-                // (they're waiting for proofs to arrive)
-                if tx.promoted_height.is_some() {
-                    // TODO: This should be a hard error, but the test infrastructure currently
-                    // creates transactions with ingress proofs that get placed in Submit ledger.
-                    // This needs to be fixed in the block production logic to properly place
-                    // transactions with proofs in the Publish ledger.
-                    tracing::warn!(
-                        "Transaction {} in Submit ledger should not have a promoted_height",
-                        tx.id
-                    );
-                }
-            }
+        // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
+        // (they're waiting for proofs to arrive)
+        if tx.promoted_height.is_some() {
+            // TODO: This should be a hard error, but the test infrastructure currently
+            // creates transactions with ingress proofs that get placed in Submit ledger.
+            // This needs to be fixed in the block production logic to properly place
+            // transactions with proofs in the Publish ledger.
+            tracing::warn!(
+                "Transaction {} in Submit ledger should not have a promoted_height",
+                tx.id
+            );
         }
     }
 
@@ -1923,10 +2097,11 @@ pub async fn data_txs_are_valid(
 
             // Take the smallest value, the configured proof count or the number
             // of staked miners that can produce a valid proof.
-            let proofs_per_tx = std::cmp::min(
-                config.consensus.number_of_ingress_proofs_total as usize,
-                total_miners,
-            );
+            let timestamp_secs = block.timestamp_secs();
+            let number_of_ingress_proofs_total =
+                config.number_of_ingress_proofs_total_at(timestamp_secs);
+            let proofs_per_tx =
+                std::cmp::min(number_of_ingress_proofs_total as usize, total_miners);
             publish_txs.len() * proofs_per_tx
         };
 
@@ -1957,8 +2132,9 @@ pub async fn data_txs_are_valid(
             )
             .await?;
 
+            let timestamp_secs = block.timestamp_secs();
             let mut expected_assigned_proofs =
-                config.consensus.number_of_ingress_proofs_from_assignees as usize;
+                config.number_of_ingress_proofs_from_assignees_at(timestamp_secs) as usize;
 
             // While the protocol can require X number of assigned proofs, if there
             // is less than that many assigned to the slot, it still needs to function.
@@ -2094,7 +2270,10 @@ pub async fn data_txs_are_valid(
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
                                 .mempool
-                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
+                                .send(
+                                    crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx)
+                                        .into(),
+                                )
                                 .is_err()
                             {
                                 return Err(PreValidationError::ValidationServiceUnreachable);
@@ -2151,7 +2330,10 @@ pub async fn data_txs_are_valid(
                             )
                             .map_err(|e| {
                                 PreValidationError::DatabaseError {
-                                    error: e.to_string(),
+                                    error: format!(
+                                        "Failed to fetch chunk for tx {} (data_root: {:?}, chunk_offset: {}): {}",
+                                        tx_header.id, tx_header.data_root, tx_chunk_offset, e
+                                    ),
                                 }
                             })?;
 
@@ -2199,9 +2381,12 @@ pub async fn data_txs_are_valid(
                 }
             }
 
-            if tx_proofs.len() != config.consensus.number_of_ingress_proofs_total as usize {
+            let timestamp_secs = block.timestamp_secs();
+            let number_of_ingress_proofs_total =
+                config.number_of_ingress_proofs_total_at(timestamp_secs);
+            if tx_proofs.len() != number_of_ingress_proofs_total as usize {
                 return Err(PreValidationError::IngressProofCountMismatch {
-                    expected: config.consensus.number_of_ingress_proofs_total as usize,
+                    expected: number_of_ingress_proofs_total as usize,
                     actual: tx_proofs.len(),
                 });
             }
@@ -2305,17 +2490,20 @@ enum TxInclusionState {
     Searching {
         ledger_current: DataLedger,
     },
+    // Track block hashes for both current and historical ledgers
+    // so we can emit precise errors and diagnostics.
+    // ledger_current.1 is the hash of the block under validation.
+    // ledger_historical.1 is the hash of the block where the prior inclusion was found.
     Found {
-        ledger_current: DataLedger,
-        ledger_historical: DataLedger,
-        block_hash: BlockHash,
+        ledger_current: (DataLedger, BlockHash),
+        ledger_historical: (DataLedger, BlockHash),
     },
     Duplicate {
         ledger_historical: (DataLedger, BlockHash),
     },
 }
 
-#[tracing::instrument(skip_all, fields(block.hash = ?block_under_validation.block_hash))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = ?block_under_validation.block_hash))]
 async fn get_previous_tx_inclusions(
     tx_ids: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
     block_under_validation: &IrysBlockHeader,
@@ -2355,7 +2543,12 @@ async fn get_previous_tx_inclusions(
                 // don't process the states for a block we're putting under full validation
                 return Ok(());
             }
-            process_block_ledgers_with_states(&header.data_ledgers, header.block_hash, tx_ids)
+            process_block_ledgers_with_states(
+                &header.data_ledgers,
+                header.block_hash,
+                block_under_validation.block_hash,
+                tx_ids,
+            )
         };
         // Move to the parent block and continue the traversal backwards
         block = match block_tree_guard.get_block(&block.0) {
@@ -2397,7 +2590,8 @@ async fn get_previous_tx_inclusions(
 /// Returns true if all transactions have been found
 fn process_block_ledgers_with_states(
     ledgers: &[DataTransactionLedger],
-    block_hash: BlockHash,
+    historical_block_hash: BlockHash,
+    current_block_hash: BlockHash,
     tx_states: &mut HashMap<H256, (&DataTransactionHeader, TxInclusionState)>,
 ) -> eyre::Result<()> {
     for ledger in ledgers {
@@ -2410,15 +2604,14 @@ fn process_block_ledgers_with_states(
                     TxInclusionState::Searching { ledger_current } => {
                         // First time finding this transaction
                         *state = TxInclusionState::Found {
-                            ledger_current: *ledger_current,
-                            ledger_historical: ledger_type,
-                            block_hash,
+                            ledger_current: (*ledger_current, current_block_hash),
+                            ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
                     TxInclusionState::Found { .. } => {
                         // Transaction already found once, this is a duplicate
                         *state = TxInclusionState::Duplicate {
-                            ledger_historical: (ledger_type, block_hash),
+                            ledger_historical: (ledger_type, historical_block_hash),
                         };
                     }
                     TxInclusionState::Duplicate { .. } => {
@@ -2438,7 +2631,7 @@ async fn mempool_block_retriever(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
+        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx).into())
         .expect("MempoolServiceMessage should be delivered");
     rx.await.expect("mempool service message should succeed")
 }
@@ -2476,15 +2669,22 @@ where
             .view(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
             .expect("creating a read tx should succeed")
             .expect("db query should succeed")
-            .expect("CachedDataRoot should be found for data_root")
+            .unwrap_or_else(|| {
+                panic!(
+                    "CachedDataRoot should be found for data_root {} (tx_id {})",
+                    tx_header.data_root, tx_header.id
+                )
+            })
             .block_set;
 
         //  b) Get the submit ledger offset intervals for each of the blocks
         let mut block_ranges = Vec::new();
         for block_hash in block_hashes.iter() {
-            let block_range =
-                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await;
-            block_ranges.push(block_range);
+            if let Some(block_range) =
+                get_ledger_range(block_hash, mempool_block_retriever.clone(), db).await
+            {
+                block_ranges.push(block_range);
+            }
         }
 
         //  c) Get the slots the proof address is assigned to store
@@ -2532,25 +2732,25 @@ async fn get_ledger_range<F, Fut>(
     hash: &H256,
     mempool_block_retriever: F,
     db: &DatabaseProvider,
-) -> LedgerChunkRange
+) -> Option<LedgerChunkRange>
 where
     F: Fn(H256) -> Fut + Clone, // Changed to Fn and added Clone
     Fut: Future<Output = Option<IrysBlockHeader>>,
 {
-    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await;
+    let block = get_block_by_hash(hash, mempool_block_retriever.clone(), db).await?;
     let prev_block_hash = block.previous_block_hash;
 
     if block.height == 0 {
-        LedgerChunkRange(ii(
+        Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(0),
             LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        ))
+        )))
     } else {
-        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await;
-        LedgerChunkRange(ii(
+        let prev_block = get_block_by_hash(&prev_block_hash, mempool_block_retriever, db).await?;
+        Some(LedgerChunkRange(ii(
             LedgerChunkOffset::from(prev_block.data_ledgers[DataLedger::Submit].total_chunks),
             LedgerChunkOffset::from(block.data_ledgers[DataLedger::Submit].total_chunks - 1),
-        ))
+        )))
     }
 }
 
@@ -2558,7 +2758,7 @@ async fn get_block_by_hash<F, Fut>(
     hash: &H256,
     mempool_block_retriever: F,
     db: &DatabaseProvider,
-) -> IrysBlockHeader
+) -> Option<IrysBlockHeader>
 where
     F: FnOnce(H256) -> Fut, // This can stay FnOnce since it's only called once per invocation
     Fut: Future<Output = Option<IrysBlockHeader>>,
@@ -2567,12 +2767,11 @@ where
 
     // Return the block if we found it in the mempool, otherwise get it from the db
     if let Some(block) = block {
-        block
+        Some(block)
     } else {
         db.view(|tx| block_header_by_hash(tx, hash, false))
             .expect("creating a read tx should succeed")
             .expect("creating a read tx should succeed")
-            .expect("db query should succeed")
     }
 }
 
@@ -2863,12 +3062,15 @@ mod tests {
         );
 
         // Now let's try to rotate the seeds when no rotation is needed by increasing the
-        // reset frequency
+        // reset frequency - this makes the previously calculated seeds invalid
         let large_reset_frequency = 100;
         let is_valid = is_seed_data_valid(&header_2, &parent_header, large_reset_frequency);
         assert!(
-            matches!(is_valid, ValidationResult::Invalid),
-            "Seed data should still be valid"
+            matches!(
+                is_valid,
+                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+            ),
+            "Seed data should be invalid due to wrong reset frequency"
         );
 
         // Now let's try to set some random seeds that are not valid
@@ -2877,8 +3079,11 @@ mod tests {
         let is_valid = is_seed_data_valid(&header_2, &parent_header, reset_frequency);
 
         assert!(
-            matches!(is_valid, ValidationResult::Invalid),
-            "Seed data should be invalid"
+            matches!(
+                is_valid,
+                ValidationResult::Invalid(ValidationError::SeedDataInvalid(_))
+            ),
+            "Seed data should be invalid with random seeds"
         );
     }
 
@@ -2948,7 +3153,7 @@ mod tests {
             previous_cumulative_diff: U256::from(4000),
             miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
-            timestamp: 1000,
+            timestamp: UnixTimestampMs::from_millis(1000),
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
@@ -3207,7 +3412,7 @@ mod tests {
             previous_cumulative_diff: U256::from(4000),
             miner_address: context.miner_address,
             signature: Signature::test_signature().into(),
-            timestamp: 1000,
+            timestamp: UnixTimestampMs::from_millis(1000),
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
@@ -3420,11 +3625,11 @@ mod tests {
     fn last_diff_timestamp_no_adjustment_ok() {
         let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 1;
-        prev.last_diff_timestamp = 1000;
+        prev.last_diff_timestamp = UnixTimestampMs::from_millis(1000);
 
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 2;
-        block.timestamp = 1500;
+        block.timestamp = UnixTimestampMs::from_millis(1500);
         block.last_diff_timestamp = prev.last_diff_timestamp;
 
         let mut config = ConsensusConfig::testing();
@@ -3439,11 +3644,11 @@ mod tests {
     fn last_diff_timestamp_adjustment_ok() {
         let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 9;
-        prev.last_diff_timestamp = 1000;
+        prev.last_diff_timestamp = UnixTimestampMs::from_millis(1000);
 
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 10;
-        block.timestamp = 2000;
+        block.timestamp = UnixTimestampMs::from_millis(2000);
         block.last_diff_timestamp = block.timestamp;
 
         let mut config = ConsensusConfig::testing();
@@ -3458,12 +3663,12 @@ mod tests {
     fn last_diff_timestamp_incorrect_fails() {
         let mut prev = IrysBlockHeader::new_mock_header();
         prev.height = 1;
-        prev.last_diff_timestamp = 1000;
+        prev.last_diff_timestamp = UnixTimestampMs::from_millis(1000);
 
         let mut block = IrysBlockHeader::new_mock_header();
         block.height = 2;
-        block.timestamp = 1500;
-        block.last_diff_timestamp = 999;
+        block.timestamp = UnixTimestampMs::from_millis(1500);
+        block.last_diff_timestamp = UnixTimestampMs::from_millis(999);
 
         let mut config = ConsensusConfig::testing();
         config.difficulty_adjustment.difficulty_adjustment_interval = 10;

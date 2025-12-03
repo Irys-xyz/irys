@@ -53,9 +53,9 @@ pub struct BlockTree {
 pub struct BlockMetadata {
     // todo: wrap into Arc to avoid expensive clones
     pub block: IrysBlockHeader,
-    chain_state: ChainState,
-    timestamp: SystemTime,
-    children: HashSet<H256>,
+    pub chain_state: ChainState,
+    pub timestamp: SystemTime,
+    pub children: HashSet<H256>,
     pub epoch_snapshot: Arc<EpochSnapshot>,
     pub commitment_snapshot: Arc<CommitmentSnapshot>,
     pub ema_snapshot: Arc<EmaSnapshot>,
@@ -228,7 +228,8 @@ impl BlockTree {
         let tx = db
             .tx()
             .map_err(|e| eyre::eyre!("failed to open db tx for restore_from_db: {}", e))?;
-        let start_block = block_header_by_hash(&tx, &start_block_hash, false)
+        // note: we need the poa chunk so that it's available in the tree for gossip purposes
+        let start_block = block_header_by_hash(&tx, &start_block_hash, true)
             .map_err(|e| eyre::eyre!("db error loading start block {}: {}", start_block_hash, e))?
             .ok_or_else(|| {
                 eyre::eyre!("start block header not found for hash {}", start_block_hash)
@@ -255,6 +256,7 @@ impl BlockTree {
         let mut commitment_snapshot: CommitmentSnapshot =
             build_current_commitment_snapshot_from_index(
                 block_index_guard.clone(),
+                start_block_hash,
                 arc_epoch_snapshot.clone(),
                 db.clone(),
                 consensus_config,
@@ -272,7 +274,8 @@ impl BlockTree {
                 })?
                 .block_hash
         };
-        let latest_block = block_header_by_hash(&tx, &latest_block_hash, false)
+        // note: we need the poa chunk so that it's available in the tree for gossip purposes
+        let latest_block = block_header_by_hash(&tx, &latest_block_hash, true)
             .map_err(|e| eyre::eyre!("db error loading latest block {}: {}", latest_block_hash, e))?
             .ok_or_else(|| {
                 eyre::eyre!(
@@ -317,7 +320,8 @@ impl BlockTree {
                 block_index.get_item(block_height).unwrap().block_hash
             };
 
-            let block = block_header_by_hash(&tx, &block_hash, false)
+            // note: we need the poa chunk so that it's available in the tree for gossip purposes
+            let block = block_header_by_hash(&tx, &block_hash, true)
                 .unwrap()
                 .unwrap();
 
@@ -343,7 +347,9 @@ impl BlockTree {
                 // Mid-epoch blocks: accumulate new commitment transactions into the existing
                 // commitment snapshot without triggering epoch state transitions
                 for commitment_tx in &commitment_txs {
-                    commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
+                    let _status =
+                        commitment_snapshot.add_commitment(commitment_tx, &epoch_snapshot);
+                    // TODO: we should be asserting the status here... should it always be `Accepted`??
                 }
 
                 epoch_snapshot
@@ -428,8 +434,8 @@ impl BlockTree {
             .insert(hash);
 
         debug!(
-            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}",
-            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash()
+            "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}, ema_snapshot_hash: {}",
+            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &ema_snapshot.get_hash()
         );
 
         if block.cumulative_diff > self.max_cumulative_difficulty.0 {
@@ -974,7 +980,7 @@ impl BlockTree {
             let prev_hash = prev_block.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
-                "\u{001b}[32mget_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}\u{001b}[0m",
+                "get_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}",
                 prev_entry.chain_state, prev_hash, prev_entry.block.height
             );
             match prev_entry.chain_state {
@@ -1145,17 +1151,27 @@ impl BlockTree {
                         for child in children {
                             if let Some(child_entry) = self.blocks.get(&child) {
                                 if !matches!(child_entry.chain_state, ChainState::Onchain) {
-                                    let _ = self
-                                        .remove_block(&child)
-                                        .inspect_err(|err| tracing::error!(custom.error = ?err));
+                                    let child_state = child_entry.chain_state;
+                                    if let Err(err) = self.remove_block(&child) {
+                                        tracing::error!(
+                                            custom.error = ?err,
+                                            custom.child_hash = ?child,
+                                            custom.child_state = ?child_state,
+                                            "Failed to remove non-on-chain child block"
+                                        );
+                                    }
                                 }
                             }
                         }
 
                         // Now remove just this block
-                        let _ = self
-                            .delete_block(&hash)
-                            .inspect_err(|err| tracing::error!(custom.error = ?err));
+                        if let Err(err) = self.delete_block(&hash) {
+                            tracing::error!(
+                                custom.error = ?err,
+                                block.hash = ?hash,
+                                "Failed to delete block"
+                            );
+                        }
                     }
                 }
             }
@@ -1260,45 +1276,44 @@ pub async fn get_canonical_chain(
 /// Initialized commitment snapshot containing all commitments from the current epoch
 pub fn build_current_commitment_snapshot_from_index(
     block_index_guard: BlockIndexReadGuard,
+    start_block_hash: BlockHash,
     epoch_snapshot: Arc<EpochSnapshot>,
     db: DatabaseProvider,
     consensus_config: &ConsensusConfig,
 ) -> CommitmentSnapshot {
     let num_blocks_in_epoch = consensus_config.epoch.num_blocks_in_epoch;
     let block_index = block_index_guard.read();
-    let latest_item = block_index.get_latest_item();
 
     let mut snapshot = CommitmentSnapshot::default();
 
-    if let Some(latest_item) = latest_item {
-        let tx = db.tx().unwrap();
+    let tx = db.tx().unwrap();
 
-        let latest = block_header_by_hash(&tx, &latest_item.block_hash, false)
+    let latest = block_header_by_hash(&tx, &start_block_hash, false)
+        .unwrap()
+        .expect("block_index block to be in database");
+    let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
+
+    let start = last_epoch_block_height + 1;
+
+    // Loop though all the blocks starting with the first block following the last epoch block
+    for height in start..=latest.height {
+        // Query each block to see if they have commitment txids
+        let block_item = block_index.get_item(height).unwrap();
+        let block = block_header_by_hash(&tx, &block_item.block_hash, false)
             .unwrap()
             .expect("block_index block to be in database");
-        let last_epoch_block_height = latest.height - (latest.height % num_blocks_in_epoch);
 
-        let start = last_epoch_block_height + 1;
+        let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+        if !commitment_tx_ids.is_empty() {
+            // If so, retrieve the full commitment transactions
+            for txid in commitment_tx_ids {
+                let commitment_tx = commitment_tx_by_txid(&tx, &txid)
+                    .unwrap()
+                    .expect("commitment transactions to be in database");
 
-        // Loop though all the blocks starting with the first block following the last epoch block
-        for height in start..=latest.height {
-            // Query each block to see if they have commitment txids
-            let block_item = block_index.get_item(height).unwrap();
-            let block = block_header_by_hash(&tx, &block_item.block_hash, false)
-                .unwrap()
-                .expect("block_index block to be in database");
-
-            let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
-            if !commitment_tx_ids.is_empty() {
-                // If so, retrieve the full commitment transactions
-                for txid in commitment_tx_ids {
-                    let commitment_tx = commitment_tx_by_txid(&tx, &txid)
-                        .unwrap()
-                        .expect("commitment transactions to be in database");
-
-                    // Apply them to the commitment snapshot
-                    let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
-                }
+                // Apply them to the commitment snapshot
+                let _status = snapshot.add_commitment(&commitment_tx, &epoch_snapshot);
+                // TODO: we should be asserting the status here... should it always be `Accepted`??
             }
         }
     }
@@ -1331,7 +1346,9 @@ pub fn create_commitment_snapshot_for_block(
     epoch_snapshot: Arc<EpochSnapshot>,
     consensus_config: &ConsensusConfig,
 ) -> Arc<CommitmentSnapshot> {
-    let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(consensus_config.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         return Arc::new(CommitmentSnapshot::default());
@@ -1353,7 +1370,9 @@ pub fn create_epoch_snapshot_for_block(
     parent_block_entry: &BlockMetadata,
     consensus_config: &ConsensusConfig,
 ) -> eyre::Result<Arc<EpochSnapshot>> {
-    let is_epoch_block = block.height % consensus_config.epoch.num_blocks_in_epoch == 0;
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(consensus_config.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         let prev_epoch_snapshot = parent_block_entry.epoch_snapshot.clone();

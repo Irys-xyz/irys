@@ -233,7 +233,7 @@ impl InternalPackingService {
                     .pack(
                         &storage_module,
                         current_chunk_range,
-                        **mining_address,
+                        mining_address,
                         partition_hash,
                         storage_module_id,
                         short_writes_before_sync,
@@ -251,7 +251,7 @@ impl InternalPackingService {
                 .pack(
                     &storage_module,
                     current_chunk_range,
-                    **mining_address,
+                    mining_address,
                     partition_hash,
                     storage_module_id,
                     short_writes_before_sync,
