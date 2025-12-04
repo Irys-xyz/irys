@@ -352,6 +352,8 @@ impl InnerCacheTask {
 
     #[tracing::instrument(level = "trace", skip_all, fields(prune_height))]
     fn prune_data_root_cache(&self, prune_height: u64) -> eyre::Result<()> {
+        let signer = self.config.irys_signer();
+        let local_addr = signer.address();
         let mut chunks_pruned: u64 = 0;
         let mut eviction_count: usize = 0;
         let write_tx = self.db.tx_mut()?;
@@ -402,6 +404,28 @@ impl InnerCacheTask {
             );
 
             if max_height < prune_height {
+                // Check for locally generated ingress proof
+                let mut proofs_cursor = write_tx.cursor_read::<IngressProofs>()?;
+                let mut has_local_proof = false;
+                let mut proof_walker = proofs_cursor.walk(Some(data_root))?;
+                while let Some((key, compact)) = proof_walker.next().transpose()? {
+                    if key != data_root {
+                        break;
+                    }
+                    if compact.0.address == local_addr {
+                        has_local_proof = true;
+                        break;
+                    }
+                }
+
+                if has_local_proof {
+                    debug!(
+                        data_root.data_root = ?data_root,
+                        "Skipping prune for data root with locally generated ingress proof"
+                    );
+                    continue;
+                }
+
                 debug!(
                     data_root.data_root = ?data_root,
                     data_root.max_height = ?max_height,
@@ -1527,6 +1551,89 @@ mod tests {
             );
             Ok(())
         })??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
+        let node_config = NodeConfig::testing();
+        let config = Config::new(node_config);
+        let db_env = open_or_create_db(
+            irys_testing_utils::utils::temporary_directory(None, false),
+            IrysTables::ALL,
+            None,
+        )?;
+        let db = DatabaseProvider(Arc::new(db_env));
+
+        // Create a data root cached via mempool path
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
+            data_size: 64,
+            ..Default::default()
+        });
+        db.update(|wtx| {
+            database::cache_data_root(wtx, &tx_header, None)?;
+            eyre::Ok(())
+        })??;
+
+        // Set expiry_height to 5 so prune_height > expiry would trigger deletion
+        db.update(|wtx| {
+            let mut cdr = wtx
+                .get::<CachedDataRoots>(tx_header.data_root)?
+                .ok_or_else(|| eyre::eyre!("missing CachedDataRoots entry"))?;
+            cdr.expiry_height = Some(5);
+            wtx.put::<CachedDataRoots>(tx_header.data_root, cdr)?;
+            eyre::Ok(())
+        })??;
+
+        // Add a LOCAL ingress proof
+        let signer = config.irys_signer();
+        let local_addr = signer.address();
+
+        db.update(|wtx| {
+            let mut ingress_proof = IngressProof::default();
+            ingress_proof.data_root = tx_header.data_root;
+            irys_database::store_external_ingress_proof_checked(
+                wtx,
+                &ingress_proof,
+                local_addr, // Local address
+            )?;
+            eyre::Ok(())
+        })??;
+
+        let genesis_block = IrysBlockHeader::new_mock_header();
+        let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+        let block_tree_guard =
+            irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+        let block_index = BlockIndex::new(&config.node_config).await?;
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
+            RwLock::new(block_index),
+        ));
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let service_task = InnerCacheTask {
+            db: db.clone(),
+            block_tree_guard,
+            block_index_guard,
+            config: config.clone(),
+            gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
+            ingress_proof_generation_state: IngressProofGenerationState::new(),
+            cache_sender: tx,
+        };
+
+        // Prune with prune_height greater than expiry (6 > 5).
+        // Normally this would delete the data root, but because of the local proof, it should stay.
+        service_task.prune_data_root_cache(6)?;
+
+        // Verify it was NOT pruned
+        db.view(|rtx| -> eyre::Result<()> {
+            let has_root = rtx.get::<CachedDataRoots>(tx_header.data_root)?.is_some();
+            eyre::ensure!(
+                has_root,
+                "CachedDataRoots should NOT have been pruned due to local proof"
+            );
+            Ok(())
+        })??;
+
         Ok(())
     }
 }
