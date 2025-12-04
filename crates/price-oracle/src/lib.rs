@@ -5,6 +5,7 @@
 //! read the most recent value across all configured oracles.
 
 use irys_types::TokioServiceHandle;
+use irys_types::UnixTimestamp;
 use irys_types::storage_pricing::{
     Amount,
     phantoms::{IrysPrice, Usd},
@@ -204,10 +205,10 @@ impl IrysPriceOracle {
         Arc::new(Self { oracles })
     }
 
-    /// Returns the freshest price along with its last_updated timestamp.
+    /// Returns the freshest price along with its last_updated timestamp (in seconds).
     pub fn current_snapshot(
         &self,
-    ) -> eyre::Result<(Amount<(IrysPrice, Usd)>, std::time::SystemTime)> {
+    ) -> eyre::Result<(Amount<(IrysPrice, Usd)>, UnixTimestamp)> {
         let mut best_ts: Option<std::time::SystemTime> = None;
         let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
         for o in &self.oracles {
@@ -221,7 +222,13 @@ impl IrysPriceOracle {
             }
         }
         match (best_val, best_ts) {
-            (Some(v), Some(ts)) => Ok((v, ts)),
+            (Some(v), Some(ts)) => {
+                let secs = ts
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                Ok((v, UnixTimestamp::from_secs(secs)))
+            }
             _ => eyre::bail!("no oracles configured"),
         }
     }
