@@ -30,7 +30,7 @@ enum OracleSource {
 #[derive(Debug, Clone, Copy)]
 struct PriceCache {
     value: Amount<(IrysPrice, Usd)>,
-    last_updated: std::time::SystemTime,
+    last_updated: UnixTimestamp,
 }
 
 /// A single configured oracle (mock or CoinMarketCap) with its own cache.
@@ -61,7 +61,7 @@ impl SingleOracle {
             source,
             cache: Arc::new(RwLock::new(PriceCache {
                 value: initial_price,
-                last_updated: std::time::SystemTime::now(),
+                last_updated: UnixTimestamp::now().unwrap_or_default(),
             })),
             poll_interval,
         })
@@ -160,7 +160,7 @@ impl SingleOracle {
         match &self.source {
             OracleSource::Mock(m) => {
                 let amount = m.current_price()?;
-                self.update_cache(amount, std::time::SystemTime::now())
+                self.update_cache(amount, UnixTimestamp::now().unwrap_or_default())
             }
             OracleSource::CoinMarketCap(c) => {
                 let coinmarketcap::CoinMarketCapQuote {
@@ -182,7 +182,7 @@ impl SingleOracle {
     fn update_cache(
         &self,
         amount: Amount<(IrysPrice, Usd)>,
-        timestamp: std::time::SystemTime,
+        timestamp: UnixTimestamp,
     ) -> eyre::Result<()> {
         let mut guard = self
             .cache
@@ -206,10 +206,8 @@ impl IrysPriceOracle {
     }
 
     /// Returns the freshest price along with its last_updated timestamp (in seconds).
-    pub fn current_snapshot(
-        &self,
-    ) -> eyre::Result<(Amount<(IrysPrice, Usd)>, UnixTimestamp)> {
-        let mut best_ts: Option<std::time::SystemTime> = None;
+    pub fn current_snapshot(&self) -> eyre::Result<(Amount<(IrysPrice, Usd)>, UnixTimestamp)> {
+        let mut best_ts: Option<UnixTimestamp> = None;
         let mut best_val: Option<Amount<(IrysPrice, Usd)>> = None;
         for o in &self.oracles {
             let guard = o
@@ -222,13 +220,7 @@ impl IrysPriceOracle {
             }
         }
         match (best_val, best_ts) {
-            (Some(v), Some(ts)) => {
-                let secs = ts
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                Ok((v, UnixTimestamp::from_secs(secs)))
-            }
+            (Some(v), Some(ts)) => Ok((v, ts)),
             _ => eyre::bail!("no oracles configured"),
         }
     }

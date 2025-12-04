@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use eyre::{Context as _, bail, eyre};
+use irys_types::UnixTimestamp;
 use irys_types::storage_pricing::{
     Amount,
     phantoms::{IrysPrice, Usd},
@@ -11,7 +12,6 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr as _;
-use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct CoinMarketCapOracle {
@@ -74,7 +74,7 @@ impl CoinMarketCapOracle {
 
         let amount = Amount::<(IrysPrice, Usd)>::token(quote.price)
             .context("failed to convert price to Amount")?;
-        let last_updated = chrono_to_system_time(quote.last_updated);
+        let last_updated = chrono_to_unix_timestamp(quote.last_updated);
 
         Ok(CoinMarketCapQuote {
             amount,
@@ -83,12 +83,12 @@ impl CoinMarketCapOracle {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CoinMarketCapQuote {
     /// Latest price converted into an `Amount`.
     pub amount: Amount<(IrysPrice, Usd)>,
-    /// Timestamp reported by CoinMarketCap.
-    pub last_updated: SystemTime,
+    /// Timestamp reported by CoinMarketCap (seconds since UNIX epoch).
+    pub last_updated: UnixTimestamp,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,8 +150,8 @@ fn extract_quote_from_cmc(
     })
 }
 
-fn chrono_to_system_time(dt: DateTime<Utc>) -> SystemTime {
-    dt.into()
+fn chrono_to_unix_timestamp(dt: DateTime<Utc>) -> UnixTimestamp {
+    UnixTimestamp::from_secs(dt.timestamp() as u64)
 }
 
 fn deserialize_decimal<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
@@ -242,8 +242,8 @@ mod tests {
         let expected_dt = DateTime::parse_from_rfc3339("2018-08-09T21:56:28.000Z")
             .unwrap()
             .with_timezone(&Utc);
-        let expected = chrono_to_system_time(expected_dt);
-        let actual = chrono_to_system_time(quote.last_updated);
+        let expected = chrono_to_unix_timestamp(expected_dt);
+        let actual = chrono_to_unix_timestamp(quote.last_updated);
         assert_eq!(actual, expected);
     }
 }
