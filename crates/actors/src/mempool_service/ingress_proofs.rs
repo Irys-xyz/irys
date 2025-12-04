@@ -301,6 +301,33 @@ pub fn generate_and_store_ingress_proof(
         .block_hash;
     let anchor = anchor_hint.unwrap_or(latest_anchor);
 
+    let is_already_generating = {
+        let (response_sender, response_receiver) = std::sync::mpsc::channel();
+        if let Err(err) = cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
+            data_root,
+            response_sender,
+        }) {
+            return Err(eyre::eyre!(
+                "Failed to request ingress proof generation state: {err}"
+            ));
+        }
+
+        response_receiver
+            .recv()
+            .map_err(|err| {
+                eyre::eyre!(
+                    "Failed to receive ingress proof generation state response: {err}"
+                )
+            })?
+    };
+
+    if is_already_generating {
+        return Err(eyre::eyre!(
+            "Ingress proof generation is already in progress for data_root {:?}",
+            data_root
+        ));
+    }
+
     // Generate + persist
     // Notify start of proof generation
     let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(data_root));
@@ -344,6 +371,33 @@ pub fn reanchor_and_store_ingress_proof(
     gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
     cache_sender: &CacheServiceSender,
 ) -> eyre::Result<IngressProof> {
+    let is_already_generating = {
+        let (response_sender, response_receiver) = std::sync::mpsc::channel();
+        if let Err(err) = cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
+            data_root: proof.data_root,
+            response_sender,
+        }) {
+            return Err(eyre::eyre!(
+                "Failed to request ingress proof generation state: {err}"
+            ));
+        }
+
+        response_receiver
+            .recv()
+            .map_err(|err| {
+                eyre::eyre!(
+                    "Failed to receive ingress proof generation state response: {err}"
+                )
+            })?
+    };
+
+    if is_already_generating {
+        return Err(eyre::eyre!(
+            "Ingress proof reanchoring already in progress for data_root {:?}",
+            proof.data_root
+        ));
+    }
+
     // Notify start of reanchoring
     let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationStarted(
         proof.data_root,

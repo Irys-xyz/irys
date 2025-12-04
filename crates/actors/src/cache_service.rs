@@ -27,6 +27,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
+use std::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn, Instrument as _};
 
 pub const REGENERATE_PROOFS: bool = true;
@@ -54,6 +55,11 @@ pub enum CacheServiceAction {
     /// Send this when ingress proof generation is completed and the proof has been persisted to the
     /// db. Chunks related to this data root can now be pruned if needed.
     NotifyProofGenerationCompleted(DataRoot),
+    /// Requests whether ingress proof generation is currently ongoing for the specified data root.
+    RequestIngressProofGenerationState{
+        data_root: DataRoot,
+        response_sender: Sender<bool>,
+    }
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
@@ -812,6 +818,18 @@ impl ChunkCacheService {
                 self.cache_task
                     .ingress_proof_generation_state
                     .unmark_generating(data_root);
+            }
+            CacheServiceAction::RequestIngressProofGenerationState {
+                data_root,
+                response_sender,
+            } => {
+                let is_generating = self
+                    .cache_task
+                    .ingress_proof_generation_state
+                    .is_generating(data_root);
+                if let Err(e) = response_sender.send(is_generating) {
+                    warn!(custom.error = ?e, "Failed to respond to RequestIngressProofGenerationState");
+                }
             }
         }
     }
