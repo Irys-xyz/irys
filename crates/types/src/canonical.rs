@@ -1076,7 +1076,7 @@ mod tests {
     // fn t() {
     //     use crate::Config;
     //     let cfg = crate::ConsensusConfig::testing();
-    //     let cfg2 = Canonical(cfg.clone());
+    //     let cfg2 = Canonical(cfg);
     //     let s = serde_json::to_string_pretty(&cfg2).unwrap();
     //     // TODO: add some tests against ConsensusConfig
     //     dbg!(s);
