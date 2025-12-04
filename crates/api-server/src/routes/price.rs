@@ -1,5 +1,4 @@
 use actix_web::{
-    error::ErrorBadRequest,
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };

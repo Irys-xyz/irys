@@ -32,12 +32,6 @@ pub async fn post_commitment_tx(
 
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body("Failed to deliver transaction"));
-
-        return Err((
-            "Failed to deliver transaction",
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-            .into());
     }
 
     let msg_result = oneshot_rx.await;
