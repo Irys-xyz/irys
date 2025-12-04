@@ -77,20 +77,16 @@ pub async fn post_commitment_tx(
                     .into())
             }
             TxIngressError::InvalidAnchor(_) => {
-                // Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                //     .body(format!("{err} (anchor: {anchor})")))
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
             TxIngressError::DatabaseError(ref db_err) => {
                 tracing::error!("API: Database error: {}", db_err);
-                // Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                //     .body("Internal database error"))
+
                 Err(("Internal database error", StatusCode::INTERNAL_SERVER_ERROR).into())
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {}", err);
-                // Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                //     .body("Internal service error"))
+
                 Err((
                     "Internal service error".to_owned(),
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -98,13 +94,9 @@ pub async fn post_commitment_tx(
                     .into())
             }
             TxIngressError::CommitmentValidationError(_) => {
-                // Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
-                //     "Commitment validation error: {commitment_validation_error}"
-                // )))
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
             TxIngressError::InvalidLedger(_) => {
-                // Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err}")))
                 Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
             TxIngressError::BalanceFetchError { address, reason } => {
@@ -118,8 +110,7 @@ pub async fn post_commitment_tx(
             }
             TxIngressError::MempoolFull(reason) => {
                 tracing::warn!("API: Mempool at capacity: {}", reason);
-                // Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
-                //     .body("Mempool is at capacity. Please try again later."))
+
                 Err((
                     "Mempool is at capacity. Please try again later.".to_owned(),
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -128,7 +119,6 @@ pub async fn post_commitment_tx(
             }
             TxIngressError::FundMisalignment(reason) => {
                 tracing::debug!("Tx has invalid funding params: {}", reason);
-                // Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body("Funding for tx is invalid"))
                 Err((
                     "Funding for tx is invalid".to_owned(),
                     StatusCode::BAD_REQUEST,

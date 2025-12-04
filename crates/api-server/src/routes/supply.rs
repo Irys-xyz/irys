@@ -46,14 +46,11 @@ pub struct SupplyResponse {
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
-        Err(e) => {
-            // HttpResponse::InternalServerError().body(format!("Error calculating supply: {}", e))
-            ApiError::CustomWithStatus(
-                format!("Error calculating supply: {}", e),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-            .error_response()
-        }
+        Err(e) => ApiError::CustomWithStatus(
+            format!("Error calculating supply: {}", e),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+        .error_response(),
     }
 }
 

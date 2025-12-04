@@ -84,9 +84,6 @@ pub async fn genesis_route(state: web::Data<ApiState>) -> HttpResponse {
             .content_type(ContentType::json())
             .body(serde_json::to_string_pretty(&genesis_info).unwrap())
     } else {
-        // HttpResponse::InternalServerError().json(serde_json::json!({
-        //     "error": "Genesis block not found in block index"
-        // }))
         std::convert::Into::<ApiError>::into((
             "Genesis block not found in block index".to_owned(),
             StatusCode::INTERNAL_SERVER_ERROR,

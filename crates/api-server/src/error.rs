@@ -96,26 +96,6 @@ impl From<(String, StatusCode)> for ApiError {
 
 // TODO: move this somewhere smarter
 
-// pub trait IrysJsonBodyIntoExt {
-//     // fn into_irys_json_body(body: String) -> BoxBody;
-//     fn into_irys_json_response(body: String, status: StatusCode) -> HttpResponse;
-// }
-
-// impl IrysJsonBodyIntoExt for String {
-//     // fn into_irys_json_body(body: String) -> BoxBody {
-//     //     body.into()
-//     // }
-//     fn into_irys_json_response(body: String, status: StatusCode) -> HttpResponse {
-//         HttpResponse::build(status).body(body)
-//     }
-// }
-
-// impl Into<HttpResponse> for (String, StatusCode) {
-//     fn into(self) -> HttpResponse {
-//         HttpResponse::build(self.1).body(self.0)
-//     }
-// }
-
 pub struct ApiStatusResponse(pub String, pub StatusCode);
 
 impl From<(String, StatusCode)> for ApiStatusResponse {
