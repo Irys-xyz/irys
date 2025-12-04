@@ -37,7 +37,7 @@ use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
-use tracing::{trace, warn};
+use tracing::trace;
 
 // External crate imports - Other
 
@@ -888,29 +888,8 @@ where
         // at this point, the shadow tx has been processed, and it was valid *enough*
         // that we should generate a receipt for it even in a failure state
         let execution_result = match new_account_state {
-            Ok((mut account, execution_result, account_existed)) => {
-                self.commit_account_change(target, account.clone());
-
-                let state_acc = self.state.get(&target).unwrap().clone();
-
-                account.status = AccountStatus::Touched;
-                // let mut status = AccountStatus::Touched;
-                if account.info.is_empty() {
-                    // Existing account that is still empty after increment - don't touch it
-                    // This handles the case where increment amount is 0 or results in 0 balance
-                    account.status |= AccountStatus::SelfDestructed;
-                } else if !account_existed {
-                    // New account being created with non-zero balance - mark as created and touched
-                    account.status |= AccountStatus::Created;
-                } else {
-                    account.status = AccountStatus::Touched
-                }
-
-                // ensure status changing logic as part of `commit_account_change` is sane
-                if state_acc.status != account.status {
-                    warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
-                }
-
+            Ok((account, execution_result, _account_existed)) => {
+                self.commit_account_change(target, account);
                 execution_result
             }
             Err(execution_result) => execution_result,
