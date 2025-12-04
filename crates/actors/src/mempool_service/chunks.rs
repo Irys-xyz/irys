@@ -5,15 +5,15 @@ use irys_database::{
     confirm_data_size_for_data_root,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::data_size_to_chunk_count,
-    tables::{CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs},
+    tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
+    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
     validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
 };
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{
-    cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
+    cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _,
 };
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
@@ -256,7 +256,7 @@ impl Inner {
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
         if let Err(e) = self
             .irys_db
-            .update_eyre(|tx| irys_database::store_cached_chunk(tx, &chunk))
+            .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
             .map_err(|e| {
                 error!(
                     "Database error caching chunk data_root {:?} tx_offset {}: {:?}",

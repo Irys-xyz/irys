@@ -2,7 +2,6 @@ use crate::cache_service::{CacheServiceAction, CacheServiceSender};
 use crate::mempool_service::{IngressProofError, Inner};
 use irys_database::db::{IrysDatabaseExt as _, IrysDupCursorExt as _};
 use irys_database::reth_db::transaction::DbTx as _;
-use irys_database::tables::{CompactCachedIngressProof, IngressProofs};
 use irys_database::{
     cached_data_root_by_data_root, db_cache::data_size_to_chunk_count, tables::CachedChunksIndex,
 };
@@ -10,10 +9,10 @@ use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    ingress::CachedIngressProof, Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
+    Config, DataRoot, DatabaseProvider, GossipBroadcastMessage,
     IngressProof, H256,
 };
-use reth_db::{transaction::DbTxMut as _, Database as _, DatabaseError};
+use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, instrument, warn};
 
 impl Inner {
