@@ -35,6 +35,8 @@ pub mod tx_source;
 pub mod version;
 pub mod versioning;
 
+pub mod canonical;
+
 pub mod block_provider;
 pub mod h256;
 pub mod remote_packing;

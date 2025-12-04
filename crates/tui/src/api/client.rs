@@ -191,7 +191,7 @@ impl ApiClient {
         node_url: &str,
         cancel_token: &CancellationToken,
     ) -> Result<PeerListResponse> {
-        self.get_with_cancellation(node_url, "/peer_list", Some(cancel_token))
+        self.get_with_cancellation(node_url, "/peer-list", Some(cancel_token))
             .await
     }
 
@@ -334,7 +334,7 @@ impl ApiClient {
         node_url: &str,
         cancel_token: &CancellationToken,
     ) -> Result<BlockTreeForksResponse> {
-        self.get_with_cancellation(node_url, "/block_tree/forks", Some(cancel_token))
+        self.get_with_cancellation(node_url, "/block-tree/forks", Some(cancel_token))
             .await
     }
 
