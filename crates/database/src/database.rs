@@ -228,10 +228,7 @@ type IsDuplicate = bool;
 /// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
 /// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
-pub fn cache_chunk<T: DbTx + DbTxMut>(
-    tx: &T,
-    chunk: &UnpackedChunk,
-) -> eyre::Result<IsDuplicate> {
+pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
     let data_root = chunk.data_root;
     // Check if the data root exists
     if tx.get::<CachedDataRoots>(data_root)?.is_none() {
@@ -421,9 +418,7 @@ pub fn store_ingress_proof(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    Ok(db.update(|rw_tx| {
-        store_ingress_proof_checked(rw_tx, ingress_proof, signer)
-    })??)
+    db.update(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
 }
 
 pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
@@ -431,7 +426,10 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    if tx.get::<CachedDataRoots>(ingress_proof.data_root)?.is_none() {
+    if tx
+        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .is_none()
+    {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
             ingress_proof.data_root
@@ -453,7 +451,10 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     ingress_proof: &IngressProof,
     address: Address,
 ) -> eyre::Result<()> {
-    if tx.get::<CachedDataRoots>(ingress_proof.data_root)?.is_none() {
+    if tx
+        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .is_none()
+    {
         return Err(eyre::eyre!(
             "Data root {} not found in CachedDataRoots",
             ingress_proof.data_root

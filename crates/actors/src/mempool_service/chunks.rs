@@ -8,13 +8,11 @@ use irys_database::{
     tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner,
-    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
+    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataRoot, DatabaseProvider,
+    GossipBroadcastMessage, IngressProof, H256,
 };
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{
-    cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _,
-};
+use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -546,9 +544,7 @@ pub fn generate_ingress_proof(
     assert_eq!(actual_data_size, size);
     assert_eq!(actual_chunk_count, expected_chunk_count);
 
-    db.update(|rw_tx| {
-        irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer)
-    })??;
+    db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
     Ok(proof)
 }

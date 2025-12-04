@@ -1,8 +1,7 @@
 use irys_database::{
-    cache_data_root, cached_chunk_by_chunk_offset,
+    cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     open_or_create_db,
-    cache_chunk,
     submodule::{get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset},
     tables::IrysTables,
 };
