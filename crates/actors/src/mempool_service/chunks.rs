@@ -503,7 +503,8 @@ impl Inner {
             };
 
             for info in &infos.0 {
-                let relative_offset = info.start_offset.0 as i64 + last_chunk_offset as i64;
+                let relative_offset =
+                    (info.start_offset.0 as i64).saturating_add(last_chunk_offset as i64);
                 if relative_offset < 0 {
                     continue;
                 }
