@@ -1,4 +1,5 @@
-use actix_web::{web, HttpResponse, Responder};
+use actix_web::{web, HttpResponse, Responder, ResponseError as _};
+use awc::http::StatusCode;
 use eyre::{eyre, Result};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_reward_curve::HalvingCurve;
@@ -6,6 +7,7 @@ use irys_types::IrysBlockHeader;
 use irys_types::{serialization::string_u64, U256};
 use serde::{Deserialize, Serialize};
 
+use crate::error::ApiError;
 use crate::ApiState;
 
 const PERCENT_SCALE: u128 = 10000;
@@ -45,7 +47,12 @@ pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) 
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => {
-            HttpResponse::InternalServerError().body(format!("Error calculating supply: {}", e))
+            // HttpResponse::InternalServerError().body(format!("Error calculating supply: {}", e))
+            ApiError::CustomWithStatus(
+                format!("Error calculating supply: {}", e),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+            .error_response()
         }
     }
 }

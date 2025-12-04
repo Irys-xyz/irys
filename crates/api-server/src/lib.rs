@@ -95,6 +95,7 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
         .route("/genesis", web::get().to(index::genesis_route))
+        // TODO: need to fix serialization here
         .route("/network/config", web::get().to(config::get_config))
         .route("/peer-list", web::get().to(peer_list::peer_list_route))
         .route(

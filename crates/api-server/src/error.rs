@@ -81,3 +81,68 @@ impl ResponseError for ApiError {
         res.set_body(BoxBody::new(body))
     }
 }
+
+impl From<(&str, StatusCode)> for ApiError {
+    fn from(value: (&str, StatusCode)) -> Self {
+        Self::CustomWithStatus(value.0.to_string(), value.1)
+    }
+}
+
+impl From<(String, StatusCode)> for ApiError {
+    fn from(value: (String, StatusCode)) -> Self {
+        Self::CustomWithStatus(value.0, value.1)
+    }
+}
+
+// TODO: move this somewhere smarter
+
+// pub trait IrysJsonBodyIntoExt {
+//     // fn into_irys_json_body(body: String) -> BoxBody;
+//     fn into_irys_json_response(body: String, status: StatusCode) -> HttpResponse;
+// }
+
+// impl IrysJsonBodyIntoExt for String {
+//     // fn into_irys_json_body(body: String) -> BoxBody {
+//     //     body.into()
+//     // }
+//     fn into_irys_json_response(body: String, status: StatusCode) -> HttpResponse {
+//         HttpResponse::build(status).body(body)
+//     }
+// }
+
+// impl Into<HttpResponse> for (String, StatusCode) {
+//     fn into(self) -> HttpResponse {
+//         HttpResponse::build(self.1).body(self.0)
+//     }
+// }
+
+pub struct ApiStatusResponse(pub String, pub StatusCode);
+
+impl From<(String, StatusCode)> for ApiStatusResponse {
+    fn from(value: (String, StatusCode)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+
+impl From<(&str, StatusCode)> for ApiStatusResponse {
+    fn from(value: (&str, StatusCode)) -> Self {
+        Self(value.0.to_string(), value.1)
+    }
+}
+
+impl From<ApiStatusResponse> for HttpResponse {
+    fn from(val: ApiStatusResponse) -> Self {
+        #[derive(Serialize)]
+        struct Status {
+            // informative status message
+            // we use JSON so we can extend it etc later
+            status: String,
+        }
+
+        let response = Status { status: val.0 };
+
+        let body = serde_json::to_string(&response).unwrap();
+        let res = Self::new(val.1);
+        res.set_body(BoxBody::new(body))
+    }
+}

@@ -3,6 +3,7 @@ use actix_web::{
     web::{self, Path},
     HttpResponse, Result as ActixResult,
 };
+use awc::http::StatusCode;
 use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
@@ -11,7 +12,7 @@ use irys_types::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{utils::address::parse_address, ApiState};
+use crate::{error::ApiError, utils::address::parse_address, ApiState};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -36,13 +37,13 @@ pub struct CommitmentPriceInfo {
 pub async fn get_price(
     path: Path<(u32, u64)>,
     state: web::Data<ApiState>,
-) -> ActixResult<HttpResponse> {
+) -> Result<HttpResponse, ApiError> {
     let (ledger, bytes_to_store) = path.into_inner();
     let chunk_size = state.config.consensus.chunk_size;
 
     // Convert ledger to enum, or bail out with an HTTP 400
-    let data_ledger =
-        DataLedger::try_from(ledger).map_err(|_| ErrorBadRequest("Ledger type not supported"))?;
+    let data_ledger = DataLedger::try_from(ledger)
+        .map_err(|_| ("Ledger type not supported", StatusCode::BAD_REQUEST))?;
 
     // enforce that the requested size is at least equal to a single chunk
     let bytes_to_store = std::cmp::max(chunk_size, bytes_to_store);
@@ -57,14 +58,14 @@ pub async fn get_price(
             let (canonical, _) = tree.get_canonical_chain();
             let last_block_entry = canonical
                 .last()
-                .ok_or_else(|| ErrorBadRequest("Empty canonical chain"))?;
+                .ok_or(("Empty canonical chain", StatusCode::BAD_REQUEST))?;
             let ema = tree
                 .get_ema_snapshot(&last_block_entry.block_hash)
-                .ok_or_else(|| ErrorBadRequest("EMA snapshot not available"))?;
+                .ok_or(("EMA snapshot not available", StatusCode::BAD_REQUEST))?;
             // Get the actual block to access its timestamp
             let last_block = tree
                 .get_block(&last_block_entry.block_hash)
-                .ok_or_else(|| ErrorBadRequest("Block not found"))?;
+                .ok_or(("Block not found", StatusCode::BAD_REQUEST))?;
             // Convert block timestamp from millis to seconds for hardfork params
             let latest_block_timestamp_secs = last_block.timestamp_secs();
             drop(tree);
@@ -113,7 +114,12 @@ pub async fn get_price(
                 number_of_ingress_proofs_total,
                 pricing_ema,
             )
-            .map_err(|e| ErrorBadRequest(format!("Failed to calculate term fee: {e:?}")))?;
+            .map_err(|e| {
+                (
+                    format!("Failed to calculate term fee: {e:?}"),
+                    StatusCode::BAD_REQUEST,
+                )
+            })?;
 
             tracing::debug!(
                 "Fee calculation - bytes: {}, term_fee: {}, inclusion_reward_percent raw: {}, num_ingress_proofs: {}",
@@ -131,7 +137,7 @@ pub async fn get_price(
                 pricing_ema,
                 term_fee,
             )
-            .map_err(|e| ErrorBadRequest(format!("{e:?}")))?;
+            .map_err(|e| (format!("{e:?}"), StatusCode::BAD_REQUEST))?;
 
             Ok(HttpResponse::Ok().json(PriceInfo {
                 perm_fee: total_perm_cost.amount,
@@ -141,7 +147,7 @@ pub async fn get_price(
             }))
         }
         // TODO: support other term ledgers here
-        DataLedger::Submit => Err(ErrorBadRequest("Term ledger not supported")),
+        DataLedger::Submit => Err(("Term ledger not supported", StatusCode::BAD_REQUEST).into()),
     }
 }
 

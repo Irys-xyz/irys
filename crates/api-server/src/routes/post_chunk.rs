@@ -1,3 +1,7 @@
+use crate::{
+    error::{ApiError, ApiStatusResponse},
+    ApiState,
+};
 use actix_web::{
     http::header::ContentType,
     web::{self, Json},
@@ -10,8 +14,6 @@ use irys_actors::{
 use irys_types::UnpackedChunk;
 use tracing::{info, warn};
 
-use crate::ApiState;
-
 /// Handles the HTTP POST request for adding a chunk to the mempool.
 /// This function takes in a JSON payload of a `Chunk` type, encapsulates it
 /// into a `ChunkIngressMessage` for further processing by the mempool actor,
@@ -19,7 +21,7 @@ use crate::ApiState;
 pub async fn post_chunk(
     state: web::Data<ApiState>,
     body: Json<UnpackedChunk>,
-) -> actix_web::Result<HttpResponse> {
+) -> Result<HttpResponse, ApiError> {
     let chunk = body.into_inner();
     let data_root = chunk.data_root;
     let number = chunk.tx_offset;
@@ -32,16 +34,22 @@ pub async fn post_chunk(
     // Handle failure to deliver the message (e.g., channel closed)
     if let Err(err) = state.mempool_service.send(tx_ingress_msg.into()) {
         tracing::error!("Failed to send to mempool channel: {:?}", err);
-        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to send to mempool channel: {err:?}")));
+        return Err((
+            format!("Failed to send to mempool channel: {err:?}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+            .into());
     }
 
     // Handle errors in reading the oneshot response
     let msg_result = match oneshot_rx.await {
         Err(err) => {
             tracing::error!("API: Errors reading the mempool oneshot response {:?}", err);
-            return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(format!("Internal error: {err:?}")));
+            return Err((
+                format!("Internal error: {err:?}"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+                .into());
         }
         Ok(v) => v,
     };
@@ -53,51 +61,61 @@ pub async fn post_chunk(
         return match err {
             ChunkIngressError::Critical(err) => match err {
                 CriticalChunkIngressError::InvalidProof => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                        .body(format!("Invalid proof: {err:?}")))
+                    Err((format!("Invalid proof: {err:?}"), StatusCode::BAD_REQUEST).into())
                 }
-                CriticalChunkIngressError::InvalidDataHash => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                        .body(format!("Invalid data_hash: {err:?}")))
-                }
-                CriticalChunkIngressError::InvalidChunkSize => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                        .body(format!("Invalid chunk size: {err:?}")))
-                }
-                CriticalChunkIngressError::InvalidDataSize => {
-                    Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                        .body(format!("Invalid data_size field : {err:?}")))
-                }
+                CriticalChunkIngressError::InvalidDataHash => Err((
+                    format!("Invalid data_hash: {err:?}"),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into()),
+                CriticalChunkIngressError::InvalidChunkSize => Err((
+                    format!("Invalid chunk size: {err:?}"),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into()),
+                CriticalChunkIngressError::InvalidDataSize => Err((
+                    format!("Invalid data_size field : {err:?}"),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into()),
 
-                CriticalChunkIngressError::ServiceUninitialized => {
-                    Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(format!("Internal service error: {err:?}")))
-                }
-                CriticalChunkIngressError::DatabaseError => {
-                    Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(format!("Failed to store chunk: {err:?}")))
-                }
-                CriticalChunkIngressError::Other(err) => {
-                    Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(format!("Internal error: {err:?}")))
-                }
+                CriticalChunkIngressError::ServiceUninitialized => Err((
+                    format!("Internal service error: {err:?}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into()),
+                CriticalChunkIngressError::DatabaseError => Err((
+                    format!("Failed to store chunk: {err:?}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into()),
+                CriticalChunkIngressError::Other(err) => Err((
+                    format!("Internal error: {err:?}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into()),
             },
             ChunkIngressError::Advisory(err) => match err {
-                AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
-                    Ok(HttpResponse::build(StatusCode::OK)
-                        .body(format!("Pre-header chunk oversized bytes: {err:?}")))
-                }
-                AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
-                    Ok(HttpResponse::build(StatusCode::OK)
-                        .body(format!("Pre-header chunk oversized data_path: {err:?}")))
-                }
-                AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
-                    Ok(HttpResponse::build(StatusCode::OK)
-                        .body(format!("Pre-header chunk tx_offset exceeds cap: {err:?}")))
-                }
-                AdvisoryChunkIngressError::Other(err) => Ok(
-                    HttpResponse::build(StatusCode::OK).body(format!("Internal error: {err:?}"))
-                ),
+                AdvisoryChunkIngressError::PreHeaderOversizedBytes => Ok(ApiStatusResponse(
+                    format!("Pre-header chunk oversized bytes: {err:?}"),
+                    StatusCode::OK,
+                )
+                .into()),
+                AdvisoryChunkIngressError::PreHeaderOversizedDataPath => Ok(ApiStatusResponse(
+                    format!("Pre-header chunk oversized data_path: {err:?}"),
+                    StatusCode::OK,
+                )
+                .into()),
+                AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => Ok(ApiStatusResponse(
+                    format!("Pre-header chunk tx_offset exceeds cap: {err:?}"),
+                    StatusCode::OK,
+                )
+                .into()),
+                AdvisoryChunkIngressError::Other(err) => Ok(ApiStatusResponse(
+                    format!("Internal error: {err:?}"),
+                    StatusCode::OK,
+                )
+                .into()),
             },
         };
     }
