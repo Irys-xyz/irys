@@ -9,7 +9,8 @@ use irys_database::{
 };
 use irys_types::{
     chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
-    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    H256,
 };
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{
@@ -27,8 +28,14 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
+        let chunk_size = self.config.consensus.chunk_size;
 
-        info!("Processing chunk");
+        info!(
+            chunk.data_root = ?chunk.data_root,
+            chunk.tx_offset = %chunk.tx_offset,
+            chunk.data_size = chunk.data_size,
+            "Processing chunk"
+        );
 
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
@@ -45,11 +52,10 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
-        let data_size = self
+        let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
-                    .map(|opt| opt.map(|cdr| cdr.data_size))
             })
             .map_err(|e| {
                 error!(
@@ -57,27 +63,58 @@ impl Inner {
                     chunk.data_root, chunk.tx_offset, e
                 );
                 CriticalChunkIngressError::DatabaseError
-            })?
-            .or_else(|| {
+            })?;
+
+        let (data_size, data_size_confirmed) = match cached_data_root {
+            Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
+            None => {
                 debug!(
                     chunk.data_root = ?chunk.data_root,
                     chunk.tx_offset = ?chunk.tx_offset,
                     "Checking SMs for data_size"
                 );
-                // Get a list of all the local storage modules
                 let storage_modules = self.storage_modules_guard.read().clone();
 
-                // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
-                storage_modules
-                    .iter()
-                    .filter_map(|sm| {
-                        sm.collect_data_root_infos(chunk.data_root)
-                            .ok()
-                            .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
-                    })
-                    .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
-                    .max()
-            });
+                let mut sm_data_size: Option<u64> = None;
+                let mut from_publish_ledger = false;
+
+                for sm in storage_modules.iter() {
+                    let infos = match sm.collect_data_root_infos(chunk.data_root) {
+                        Ok(i) if !i.0.is_empty() => i,
+                        _ => continue,
+                    };
+
+                    for info in &infos.0 {
+                        let current_max = sm_data_size.unwrap_or(0);
+                        if info.data_size > current_max {
+                            sm_data_size = Some(info.data_size);
+                        }
+                    }
+
+                    // Publish ledger data can be trusted - chunks verified before tx accepted
+                    if sm
+                        .partition_assignment()
+                        .is_some_and(|pa| pa.ledger_id == Some(DataLedger::Publish.get_id()))
+                    {
+                        from_publish_ledger = true;
+                    }
+                }
+
+                // Publish ledger data is trusted; submit ledger needs verification
+                let confirmed = from_publish_ledger
+                    || sm_data_size
+                        .map(|ds| {
+                            self.verify_data_size_from_storage_modules(
+                                &storage_modules,
+                                chunk.data_root,
+                                ds,
+                            )
+                        })
+                        .unwrap_or(false);
+
+                (sm_data_size, confirmed)
+            }
+        };
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -85,7 +122,6 @@ impl Inner {
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                 // Pre-header sanity checks to reduce DoS risk.
-                let chunk_size = self.config.consensus.chunk_size;
                 let chunk_len_u64 = u64::try_from(chunk.bytes.len())
                     .map_err(|_| AdvisoryChunkIngressError::PreHeaderOversizedBytes)?;
                 if chunk_len_u64 > chunk_size {
@@ -112,16 +148,36 @@ impl Inner {
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath.into());
                 }
-                let preheader_chunks_per_item =
-                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
-                if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
-                    >= preheader_chunks_per_item
-                {
+
+                if !chunk.is_valid_offset(chunk_size) {
+                    let max_offset = chunk.max_valid_offset(chunk_size);
                     warn!(
-                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds pre-header capacity {}",
+                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds max valid offset {:?} for data_size {}",
                         &chunk.data_root,
                         &chunk.tx_offset,
                         *chunk.tx_offset,
+                        max_offset,
+                        chunk.data_size
+                    );
+                    return Err(AdvisoryChunkIngressError::PreHeaderInvalidOffset(format!(
+                        "tx_offset {} exceeds max valid offset {:?} for data_size {}",
+                        *chunk.tx_offset, max_offset, chunk.data_size
+                    ))
+                    .into());
+                }
+
+                let preheader_chunks_per_item =
+                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
+                let current_chunk_count = self
+                    .mempool_state
+                    .pending_chunk_count_for_data_root(&chunk.data_root)
+                    .await;
+                if current_chunk_count >= preheader_chunks_per_item {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        current_chunk_count,
                         preheader_chunks_per_item
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
@@ -132,17 +188,27 @@ impl Inner {
             }
         };
 
-        debug!("Got data root and data size");
-        // Validate that the data_size for this chunk is less than or equal to
-        // the largest data_size paid for by a data tx with this data_root
         if chunk.data_size > data_size {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                CriticalChunkIngressError::InvalidDataSize,
-                data_size,
-                chunk.data_size
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
+            if data_size_confirmed {
+                // Confirmed size is authoritative - reject mismatched chunks
+                error!(
+                    "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
+                    CriticalChunkIngressError::InvalidDataSize,
+                    data_size,
+                    chunk.data_size
+                );
+                return Err(CriticalChunkIngressError::InvalidDataSize.into());
+            } else {
+                // Unconfirmed: chunk claims larger size than cached.
+                // This may be legitimate (tx with larger size not yet processed).
+                // Park the chunk for the time being.
+                debug!(
+                    "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
+                    chunk.data_size, data_size, chunk.data_root
+                );
+                self.mempool_state.put_chunk(chunk.clone()).await;
+                return Ok(());
+            }
         }
 
         // Validate the data_path/proof for the chunk, linking
@@ -157,8 +223,36 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
 
+        let num_chunks = data_size.div_ceil(chunk_size);
+        let max_valid_offset = num_chunks.saturating_sub(1);
+        let offset_u64 = u64::from(*chunk.tx_offset);
+
+        if offset_u64 > max_valid_offset {
+            error!(
+                "Invalid tx_offset: {} exceeds max valid offset {} for data_size {} (num_chunks: {})",
+                offset_u64, max_valid_offset, data_size, num_chunks
+            );
+            return Err(CriticalChunkIngressError::InvalidOffset(format!(
+                "tx_offset {} exceeds max valid offset {} for data_size {}",
+                offset_u64, max_valid_offset, data_size
+            ))
+            .into());
+        }
+
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
+        let target_offset = match chunk.end_byte_offset_checked(chunk_size) {
+            Some(offset) => u128::from(offset),
+            None => {
+                error!(
+                    "Byte offset calculation failed for tx_offset {} with data_size {}",
+                    *chunk.tx_offset, chunk.data_size
+                );
+                return Err(CriticalChunkIngressError::InvalidOffset(
+                    "Byte offset calculation overflow or invalid offset".to_string(),
+                )
+                .into());
+            }
+        };
         let path_buff = &chunk.data_path;
 
         info!(
@@ -205,39 +299,26 @@ impl Inner {
         // data_path is valid but the chunk size doesn't mach the protocols
         // consensus size, then the data_root is actually invalid and no future
         // chunks from that data_root should be ingressed.
-        let chunk_size = self.config.consensus.chunk_size;
 
-        // Validate that we will have chunks in the tx
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size);
-        if num_chunks_in_tx == 0 {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: {:?}",
-                CriticalChunkIngressError::InvalidDataSize,
-                chunk.data_root,
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        }
-        // Is this chunk index any of the chunks before the last in the tx?
-        let last_index = num_chunks_in_tx - 1;
-        if u64::from(*chunk.tx_offset) < last_index {
-            // Ensure prefix chunks are all exactly chunk_size
-            if chunk_len != chunk_size {
+        // Note: num_chunks, chunk_size, offset_u64, and max_valid_offset already
+        // computed in offset validation above
+        let is_last_chunk = offset_u64 == max_valid_offset;
+
+        if is_last_chunk {
+            // Last chunk can be <= chunk_size
+            if chunk_len > chunk_size {
                 error!(
-                    "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
-                    CriticalChunkIngressError::InvalidChunkSize,
-                    chunk.tx_offset,
-                    chunk_len
+                    "Last chunk exceeds max size: tx_offset {} chunk_len {} max {}",
+                    chunk.tx_offset, chunk_len, chunk_size
                 );
                 return Ok(());
             }
         } else {
-            // Ensure the last chunk is no larger than chunk_size
-            if chunk_len > chunk_size {
+            // Non-last chunk must be exactly chunk_size
+            if chunk_len != chunk_size {
                 error!(
-                    "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                    CriticalChunkIngressError::InvalidChunkSize,
-                    chunk.tx_offset,
-                    chunk_len
+                    "Non-last chunk has wrong size: tx_offset {} chunk_len {} expected {}",
+                    chunk.tx_offset, chunk_len, chunk_size
                 );
                 return Ok(());
             }
@@ -388,6 +469,68 @@ impl Inner {
 
         Ok(())
     }
+
+    /// Verifies data_size by fetching the expected last chunk and validating its merkle proof.
+    fn verify_data_size_from_storage_modules(
+        &self,
+        storage_modules: &[std::sync::Arc<irys_domain::StorageModule>],
+        data_root: DataRoot,
+        claimed_data_size: u64,
+    ) -> bool {
+        let chunk_size = self.config.consensus.chunk_size;
+        let last_chunk_offset = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
+
+        for sm in storage_modules {
+            let infos = match sm.collect_data_root_infos(data_root) {
+                Ok(i) if !i.0.is_empty() => i,
+                _ => continue,
+            };
+
+            for info in &infos.0 {
+                let relative_offset =
+                    (info.start_offset.0 as i64).saturating_add(last_chunk_offset as i64);
+                if relative_offset < 0 {
+                    continue;
+                }
+
+                let partition_offset =
+                    irys_types::PartitionChunkOffset::from(relative_offset as u32);
+                let chunk = match sm.generate_full_chunk(partition_offset) {
+                    Ok(Some(c)) if c.data_root == data_root => c,
+                    _ => continue,
+                };
+
+                // Compute end byte offset: for the last chunk, it's data_size - 1
+                let target_offset = u128::from(claimed_data_size.saturating_sub(1));
+
+                if let Ok(result) = validate_path(data_root.0, &chunk.data_path, target_offset) {
+                    if result.is_rightmost_chunk {
+                        let confirmed_size = result.max_byte_range as u64;
+                        debug!(
+                            "Verified data_size {} for data_root {:?} via rightmost chunk proof",
+                            confirmed_size, data_root
+                        );
+                        // Cache the confirmed data_size so subsequent chunks skip verification
+                        if let Err(e) = self.irys_db.update_eyre(|db_tx| {
+                            confirm_data_size_for_data_root(db_tx, &data_root, confirmed_size)
+                        }) {
+                            warn!(
+                                "Failed to cache confirmed data_size for {:?}: {:?}",
+                                data_root, e
+                            );
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        debug!(
+            "Could not verify data_size {} for data_root {:?} - no valid rightmost chunk found",
+            claimed_data_size, data_root
+        );
+        false
+    }
 }
 
 /// Reasons why Chunk Ingress might fail
@@ -441,6 +584,8 @@ pub enum CriticalChunkIngressError {
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
+    /// The tx_offset exceeds valid bounds for the data_size
+    InvalidOffset(String),
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
@@ -458,6 +603,8 @@ pub enum AdvisoryChunkIngressError {
     PreHeaderOversizedDataPath,
     /// tx_offset exceeds pre-header capacity bound
     PreHeaderOffsetExceedsCap,
+    /// tx_offset exceeds valid bounds for claimed data_size (pre-header)
+    PreHeaderInvalidOffset(String),
     /// Catch-all variant for other errors.
     Other(String),
 }

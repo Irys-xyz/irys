@@ -94,6 +94,57 @@ impl UnpackedChunk {
             (self.tx_offset.0 as u64 + 1) * chunk_size - 1
         }
     }
+
+    /// Returns the maximum valid tx_offset for this chunk's data_size.
+    /// Returns None if data_size is 0.
+    pub fn max_valid_offset(&self, chunk_size: u64) -> Option<u64> {
+        if self.data_size == 0 {
+            return None;
+        }
+
+        let num_chunks = self.data_size.div_ceil(chunk_size);
+        Some(num_chunks.saturating_sub(1))
+    }
+
+    /// Validates that tx_offset is within valid bounds for the claimed data_size.
+    ///
+    /// Returns `true` if:
+    /// - data_size > 0 AND tx_offset <= max_valid_offset
+    /// - data_size == 0 AND tx_offset == 0
+    ///
+    /// Returns `false` otherwise (offset exceeds valid chunk count).
+    pub fn is_valid_offset(&self, chunk_size: u64) -> bool {
+        let offset_u64 = u64::from(self.tx_offset.0);
+
+        match self.max_valid_offset(chunk_size) {
+            Some(max_offset) => offset_u64 <= max_offset,
+            None => offset_u64 == 0,
+        }
+    }
+
+    /// Returns the end byte offset for this chunk, or None if calculation would overflow
+    /// or if the offset is invalid for the data_size.
+    pub fn end_byte_offset_checked(&self, chunk_size: u64) -> Option<u64> {
+        if self.data_size == 0 {
+            return Some(0);
+        }
+
+        let max_offset = self.max_valid_offset(chunk_size)?;
+        let offset_u64 = u64::from(self.tx_offset.0);
+
+        if offset_u64 > max_offset {
+            return None;
+        }
+
+        if offset_u64 == max_offset {
+            Some(self.data_size.saturating_sub(1))
+        } else {
+            offset_u64
+                .checked_add(1)?
+                .checked_mul(chunk_size)?
+                .checked_sub(1)
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -429,5 +480,68 @@ mod tests {
             tx_offset: TxChunkOffset(1),
         };
         assert_eq!(chunk.end_byte_offset(64), 127);
+    }
+
+    mod offset_validation {
+        use super::*;
+        use rstest::rstest;
+
+        const CHUNK_SIZE: u64 = 256 * 1024;
+
+        #[rstest]
+        #[case(0, None)]
+        #[case(1000, Some(0))]
+        #[case(CHUNK_SIZE * 10, Some(9))]
+        #[case(CHUNK_SIZE * 10 + CHUNK_SIZE / 2, Some(10))]
+        fn max_valid_offset_cases(#[case] data_size: u64, #[case] expected: Option<u64>) {
+            let chunk = UnpackedChunk {
+                data_size,
+                ..Default::default()
+            };
+            assert_eq!(chunk.max_valid_offset(CHUNK_SIZE), expected);
+        }
+
+        #[rstest]
+        #[case(0, 0, true)]
+        #[case(0, 1, false)]
+        #[case(1000, 0, true)]
+        #[case(1000, 1, false)]
+        #[case(CHUNK_SIZE * 10, 0, true)]
+        #[case(CHUNK_SIZE * 10, 9, true)]
+        #[case(CHUNK_SIZE * 10, 10, false)]
+        #[case(CHUNK_SIZE * 10, u32::MAX, false)]
+        #[case(CHUNK_SIZE * 2 + CHUNK_SIZE / 2, 0, true)]
+        #[case(CHUNK_SIZE * 2 + CHUNK_SIZE / 2, 2, true)]
+        #[case(CHUNK_SIZE * 2 + CHUNK_SIZE / 2, 3, false)]
+        fn is_valid_offset_cases(
+            #[case] data_size: u64,
+            #[case] tx_offset: u32,
+            #[case] expected: bool,
+        ) {
+            let chunk = UnpackedChunk {
+                data_size,
+                tx_offset: TxChunkOffset(tx_offset),
+                ..Default::default()
+            };
+            assert_eq!(chunk.is_valid_offset(CHUNK_SIZE), expected);
+        }
+
+        #[rstest]
+        #[case(1000, 5, None)]
+        #[case(CHUNK_SIZE * 3, 0, Some(CHUNK_SIZE - 1))]
+        #[case(CHUNK_SIZE * 3, 2, Some(CHUNK_SIZE * 3 - 1))]
+        #[case(0, 0, Some(0))]
+        fn end_byte_offset_checked_cases(
+            #[case] data_size: u64,
+            #[case] tx_offset: u32,
+            #[case] expected: Option<u64>,
+        ) {
+            let chunk = UnpackedChunk {
+                data_size,
+                tx_offset: TxChunkOffset(tx_offset),
+                ..Default::default()
+            };
+            assert_eq!(chunk.end_byte_offset_checked(CHUNK_SIZE), expected);
+        }
     }
 }
