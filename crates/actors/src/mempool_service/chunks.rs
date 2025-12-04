@@ -27,7 +27,12 @@ impl Inner {
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
         let chunk_size = self.config.consensus.chunk_size;
 
-        info!("Processing chunk");
+        info!(
+            chunk.data_root = ?chunk.data_root,
+            chunk.tx_offset = %chunk.tx_offset,
+            chunk.data_size = chunk.data_size,
+            "Processing chunk"
+        );
 
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
