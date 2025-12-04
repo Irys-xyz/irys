@@ -303,22 +303,20 @@ pub fn generate_and_store_ingress_proof(
 
     let is_already_generating = {
         let (response_sender, response_receiver) = std::sync::mpsc::channel();
-        if let Err(err) = cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
-            data_root,
-            response_sender,
-        }) {
+        if let Err(err) =
+            cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
+                data_root,
+                response_sender,
+            })
+        {
             return Err(eyre::eyre!(
                 "Failed to request ingress proof generation state: {err}"
             ));
         }
 
-        response_receiver
-            .recv()
-            .map_err(|err| {
-                eyre::eyre!(
-                    "Failed to receive ingress proof generation state response: {err}"
-                )
-            })?
+        response_receiver.recv().map_err(|err| {
+            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
+        })?
     };
 
     if is_already_generating {
@@ -373,22 +371,20 @@ pub fn reanchor_and_store_ingress_proof(
 ) -> eyre::Result<IngressProof> {
     let is_already_generating = {
         let (response_sender, response_receiver) = std::sync::mpsc::channel();
-        if let Err(err) = cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
-            data_root: proof.data_root,
-            response_sender,
-        }) {
+        if let Err(err) =
+            cache_sender.send(CacheServiceAction::RequestIngressProofGenerationState {
+                data_root: proof.data_root,
+                response_sender,
+            })
+        {
             return Err(eyre::eyre!(
                 "Failed to request ingress proof generation state: {err}"
             ));
         }
 
-        response_receiver
-            .recv()
-            .map_err(|err| {
-                eyre::eyre!(
-                    "Failed to receive ingress proof generation state response: {err}"
-                )
-            })?
+        response_receiver.recv().map_err(|err| {
+            eyre::eyre!("Failed to receive ingress proof generation state response: {err}")
+        })?
     };
 
     if is_already_generating {

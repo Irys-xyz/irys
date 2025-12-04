@@ -22,12 +22,12 @@ use reth_db::transaction::DbTx as _;
 use reth_db::transaction::DbTxMut as _;
 use reth_db::*;
 use std::collections::{HashSet, VecDeque};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use std::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn, Instrument as _};
 
 pub const REGENERATE_PROOFS: bool = true;
@@ -56,10 +56,10 @@ pub enum CacheServiceAction {
     /// db. Chunks related to this data root can now be pruned if needed.
     NotifyProofGenerationCompleted(DataRoot),
     /// Requests whether ingress proof generation is currently ongoing for the specified data root.
-    RequestIngressProofGenerationState{
+    RequestIngressProofGenerationState {
         data_root: DataRoot,
         response_sender: Sender<bool>,
-    }
+    },
 }
 
 /// Tracks data roots for which ingress proofs are currently being generated
