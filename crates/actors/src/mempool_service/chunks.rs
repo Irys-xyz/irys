@@ -25,6 +25,7 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
+        let chunk_size = self.config.consensus.chunk_size;
 
         info!("Processing chunk");
 
@@ -56,7 +57,6 @@ impl Inner {
                 CriticalChunkIngressError::DatabaseError
             })?;
 
-        // Extract data_size, falling back to storage modules if not in cache
         let (data_size, data_size_confirmed) = match cached_data_root {
             Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
             None => {
@@ -67,7 +67,6 @@ impl Inner {
                 );
                 let storage_modules = self.storage_modules_guard.read().clone();
 
-                // Find the max data_size and check if any source is from publish ledger
                 let mut sm_data_size: Option<u64> = None;
                 let mut from_publish_ledger = false;
 
@@ -115,7 +114,6 @@ impl Inner {
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                 // Pre-header sanity checks to reduce DoS risk.
-                let chunk_size = self.config.consensus.chunk_size;
                 let chunk_len_u64 = u64::try_from(chunk.bytes.len())
                     .map_err(|_| AdvisoryChunkIngressError::PreHeaderOversizedBytes)?;
                 if chunk_len_u64 > chunk_size {
@@ -142,8 +140,7 @@ impl Inner {
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath.into());
                 }
-                // Validate tx_offset is consistent with claimed data_size
-                let chunk_size = self.config.consensus.chunk_size;
+
                 if !chunk.is_valid_offset(chunk_size) {
                     let max_offset = chunk.max_valid_offset(chunk_size);
                     warn!(
@@ -183,9 +180,6 @@ impl Inner {
             }
         };
 
-        debug!("Got data root and data size");
-        // Validate that the data_size for this chunk is less than or equal to
-        // the largest data_size paid for by a data tx with this data_root
         if chunk.data_size > data_size {
             if data_size_confirmed {
                 // Confirmed size is authoritative - reject mismatched chunks
@@ -221,8 +215,6 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         }
 
-        // Validate tx_offset is within valid bounds for confirmed data_size
-        let chunk_size = self.config.consensus.chunk_size;
         let num_chunks = data_size.div_ceil(chunk_size);
         let max_valid_offset = num_chunks.saturating_sub(1);
         let offset_u64 = u64::from(*chunk.tx_offset);
