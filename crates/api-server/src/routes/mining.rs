@@ -2,19 +2,26 @@ use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::web::{Data, Json};
 use irys_domain::get_canonical_chain;
-use irys_types::VDFLimiterInfo;
+use irys_types::{
+    serialization::{string_u128, string_u64},
+    VDFLimiterInfo,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct MiningInfo {
     // Block info
+    #[serde(with = "string_u64")]
     pub block_height: u64,
     pub block_hash: String,
+    #[serde(with = "string_u128")]
     pub block_timestamp: u128,
 
     // Difficulty info
     pub current_difficulty: String,
     pub cumulative_difficulty: String,
+    #[serde(with = "string_u128")]
     pub last_diff_adjustment_timestamp: u128,
 
     // Mining rewards

@@ -118,7 +118,7 @@ impl ApiClientExt for IrysApiClient {
                 .make_request::<PromotionStatus, _>(
                     peer,
                     Method::GET,
-                    format!("/tx/{}/promotion_status", &tx_id).as_str(),
+                    format!("/tx/{}/promotion-status", &tx_id).as_str(),
                     None::<&()>,
                 )
                 .await?;
@@ -165,7 +165,7 @@ impl ApiClientExt for IrysApiClient {
         self.make_request(
             peer,
             Method::GET,
-            format!("/chunk/data_root/{}/{data_root}/{offset}", ledger_id as u32).as_str(),
+            format!("/chunk/data-root/{}/{data_root}/{offset}", ledger_id as u32).as_str(),
             None::<&()>,
         )
         .await?
