@@ -2,6 +2,10 @@ use serde::{de, ser, Deserialize, Serialize};
 use serde_json::{Map, Number, Value};
 use std::fmt::{self, Display};
 
+/// "canonical" JSON serializer, thrown together by Claude
+/// Notable features include camelCase key conversion and serializing numeric types >=u64 as strings (max safe int for JS is 2 ^ 53)
+/// Yes all this code is just to do those two things... :c
+
 // === Error Type ===
 #[derive(Debug)]
 pub struct Error(pub String);
