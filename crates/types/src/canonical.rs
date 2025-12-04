@@ -36,7 +36,8 @@ fn to_camel_case(s: &str) -> String {
             cap_next = true;
         } else if cap_next {
             result.push(c.to_ascii_uppercase());
-            cap_next = false;
+            // Keep cap_next true if this is a digit, so the next letter gets capitalized
+            cap_next = c.is_ascii_digit();
         } else {
             result.push(c);
         }
@@ -45,11 +46,25 @@ fn to_camel_case(s: &str) -> String {
 }
 
 fn to_snake_case(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut result = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_ascii_uppercase() && i > 0 {
-            result.push('_');
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+
+        if c.is_ascii_uppercase() {
+            // Insert underscore before uppercase letter, but NOT if previous char was a digit
+            // (because the underscore was already inserted before the digit)
+            if i > 0 && !chars[i - 1].is_ascii_digit() {
+                result.push('_');
+            }
             result.push(c.to_ascii_lowercase());
+        } else if c.is_ascii_digit() && i > 0 {
+            // If this digit is followed by an uppercase letter, insert underscore before the digit
+            if i + 1 < chars.len() && chars[i + 1].is_ascii_uppercase() {
+                result.push('_');
+            }
+            result.push(c);
         } else {
             result.push(c.to_ascii_lowercase());
         }
@@ -723,366 +738,167 @@ impl<'de> de::VariantAccess<'de> for VariantDe {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
+    use crate::config::ConsensusConfig;
+    use proptest::prelude::*;
+
+    #[test]
+    fn case_conversion_handles_digit_patterns() {
+        assert_eq!(to_camel_case("sha_1s_difficulty"), "sha1SDifficulty");
+        assert_eq!(to_snake_case("sha1SDifficulty"), "sha_1s_difficulty");
+
+        // Verify roundtrip
+        let original = "sha_1s_difficulty";
+        let camel = to_camel_case(original);
+        let back = to_snake_case(&camel);
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn consensus_config_uses_camel_case_keys() {
+        let v = to_canonical(&ConsensusConfig::testing()).unwrap();
+
+        assert!(v.get("chainId").is_some());
+        assert!(v.get("chunkSize").is_some());
+        assert!(v.get("blockMigrationDepth").is_some());
+        assert!(v.get("numChunksInPartition").is_some());
+        assert!(v.get("difficultyAdjustment").is_some());
+        assert!(v["difficultyAdjustment"].get("blockTime").is_some());
+        assert!(v["difficultyAdjustment"]
+            .get("difficultyAdjustmentInterval")
+            .is_some());
+        assert!(v.get("mempool").is_some());
+        assert!(v["mempool"].get("maxDataTxsPerBlock").is_some());
+        assert!(v["mempool"].get("txAnchorExpiryDepth").is_some());
+    }
+
+    #[test]
+    fn consensus_config_u64_fields_serialize_as_strings() {
+        let v = to_canonical(&ConsensusConfig::testing()).unwrap();
+
+        assert!(v["chainId"].is_string());
+        assert!(v["chunkSize"].is_string());
+        assert!(v["numChunksInPartition"].is_string());
+    }
+
+    fn assert_roundtrip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(
+        config: T,
+    ) {
+        let restored: T = from_canonical(to_canonical(&config).unwrap()).unwrap();
+        assert_eq!(config, restored);
+    }
+
+    #[rstest::rstest]
+    #[case::mempool(ConsensusConfig::testing().mempool)]
+    #[case::difficulty_adjustment(ConsensusConfig::testing().difficulty_adjustment)]
+    #[case::epoch(ConsensusConfig::testing().epoch)]
+    #[case::ema(ConsensusConfig::testing().ema)]
+    #[case::block_reward(ConsensusConfig::testing().block_reward_config)]
+    #[case::genesis(ConsensusConfig::testing().genesis)]
+    #[case::reth(ConsensusConfig::testing().reth)]
+    #[case::vdf(ConsensusConfig::testing().vdf)]
+    fn roundtrip_config<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(
+        #[case] config: T,
+    ) {
+        assert_roundtrip(config);
+    }
+
+    #[test]
+    fn roundtrip_full_consensus_config() {
+        let config = ConsensusConfig::testing();
+        assert_roundtrip(config);
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrip_primitives(
+            b in any::<bool>(),
+            i8_val in any::<i8>(),
+            i16_val in any::<i16>(),
+            i32_val in any::<i32>(),
+            i64_val in any::<i64>(),
+            u8_val in any::<u8>(),
+            u16_val in any::<u16>(),
+            u32_val in any::<u32>(),
+            u64_val in any::<u64>(),
+        ) {
+            prop_assert_eq!(b, from_canonical::<bool>(to_canonical(&b).unwrap()).unwrap());
+            prop_assert_eq!(i8_val, from_canonical::<i8>(to_canonical(&i8_val).unwrap()).unwrap());
+            prop_assert_eq!(i16_val, from_canonical::<i16>(to_canonical(&i16_val).unwrap()).unwrap());
+            prop_assert_eq!(i32_val, from_canonical::<i32>(to_canonical(&i32_val).unwrap()).unwrap());
+            prop_assert_eq!(i64_val, from_canonical::<i64>(to_canonical(&i64_val).unwrap()).unwrap());
+            prop_assert_eq!(u8_val, from_canonical::<u8>(to_canonical(&u8_val).unwrap()).unwrap());
+            prop_assert_eq!(u16_val, from_canonical::<u16>(to_canonical(&u16_val).unwrap()).unwrap());
+            prop_assert_eq!(u32_val, from_canonical::<u32>(to_canonical(&u32_val).unwrap()).unwrap());
+            prop_assert_eq!(u64_val, from_canonical::<u64>(to_canonical(&u64_val).unwrap()).unwrap());
+        }
+    }
+
+    #[test]
+    fn u64_i64_serialize_as_strings() {
+        assert_eq!(
+            to_canonical(&9_007_199_254_740_993_u64).unwrap(),
+            serde_json::json!("9007199254740993")
+        );
+        assert_eq!(
+            to_canonical(&(-9_007_199_254_740_993_i64)).unwrap(),
+            serde_json::json!("-9007199254740993")
+        );
+    }
+
+    #[test]
+    fn option_none_serializes_as_null() {
+        let v = to_canonical(&ConsensusConfig::testing()).unwrap();
+        assert_eq!(v["expectedGenesisHash"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn hashmap_keys_use_camel_case() {
+        let v = to_canonical(&ConsensusConfig::testnet()).unwrap();
+        assert!(v["reth"]["alloc"].is_object());
+    }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-    struct TestStruct {
-        user_name: String,
-        user_age: u32,
-        big_number: u64,
-        negative_big: i64,
-        items: Vec<i32>,
-    }
-
-    #[test]
-    fn test_serialize() {
-        let s = TestStruct {
-            user_name: "Alice".into(),
-            user_age: 30,
-            big_number: 42,
-            negative_big: -100,
-            items: vec![1, 2, 3],
-        };
-        let v = to_canonical(&s).unwrap();
-        assert_eq!(v["userName"], "Alice");
-        assert_eq!(v["userAge"], 30);
-        assert_eq!(v["bigNumber"], "42"); // u64 -> string
-        assert_eq!(v["negativeBig"], "-100"); // i64 -> string
-        assert_eq!(v["items"], serde_json::json!([1, 2, 3]));
-    }
-
-    #[test]
-    fn test_deserialize() {
-        let v = serde_json::json!({
-            "userName": "Bob",
-            "userAge": 25,
-            "bigNumber": "999",
-            "negativeBig": "-50",
-            "items": [4, 5]
-        });
-        let s: TestStruct = from_canonical(v).unwrap();
-        assert_eq!(s.user_name, "Bob");
-        assert_eq!(s.user_age, 25);
-        assert_eq!(s.big_number, 999);
-        assert_eq!(s.negative_big, -50);
-        assert_eq!(s.items, vec![4, 5]);
-    }
-
-    #[test]
-    fn test_roundtrip() {
-        let original = TestStruct {
-            user_name: "Test".into(),
-            user_age: 100,
-            big_number: 12345678901234,
-            negative_big: -9876543210,
-            items: vec![10, 20, 30],
-        };
-        let v = to_canonical(&original).unwrap();
-        let restored: TestStruct = from_canonical(v).unwrap();
-        assert_eq!(original, restored);
-    }
-
-    #[test]
-    fn test_wrapper() {
-        let original = TestStruct {
-            user_name: "Wrapper".into(),
-            user_age: 42,
-            big_number: 1000000000000,
-            negative_big: -1000000000000,
-            items: vec![],
-        };
-        let wrapped = Canonical(original.clone());
-        let json_str = serde_json::to_string(&wrapped).unwrap();
-        assert!(json_str.contains("userName"));
-        assert!(json_str.contains("\"1000000000000\""));
-
-        let restored: Canonical<TestStruct> = serde_json::from_str(&json_str).unwrap();
-        assert_eq!(original, restored.0);
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct Address {
-        street_name: String,
-        zip_code: u32,
-        building_id: u64,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct Company {
-        company_name: String,
-        employee_count: u64,
-        headquarters: Address,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct Person {
-        full_name: String,
-        account_balance: i64,
-        home_address: Address,
-        employer: Option<Company>,
-        past_employers: Vec<Company>,
-    }
-
-    #[test]
-    fn test_nested_struct() {
-        let addr = Address {
-            street_name: "Main St".into(),
-            zip_code: 12345,
-            building_id: 9999999999999,
-        };
-        let v = to_canonical(&addr).unwrap();
-        assert_eq!(v["streetName"], "Main St");
-        assert_eq!(v["zipCode"], 12345);
-        assert_eq!(v["buildingId"], "9999999999999");
-
-        let restored: Address = from_canonical(v).unwrap();
-        assert_eq!(addr, restored);
-    }
-
-    #[test]
-    fn test_deeply_nested_struct() {
-        let person = Person {
-            full_name: "Jane Doe".into(),
-            account_balance: -50000,
-            home_address: Address {
-                street_name: "Oak Ave".into(),
-                zip_code: 54321,
-                building_id: 42,
-            },
-            employer: Some(Company {
-                company_name: "Tech Corp".into(),
-                employee_count: 10000,
-                headquarters: Address {
-                    street_name: "Corporate Blvd".into(),
-                    zip_code: 99999,
-                    building_id: 1234567890123,
-                },
-            }),
-            past_employers: vec![],
-        };
-
-        let v = to_canonical(&person).unwrap();
-
-        // Check top-level camelCase
-        assert_eq!(v["fullName"], "Jane Doe");
-        assert_eq!(v["accountBalance"], "-50000"); // i64 -> string
-
-        // Check nested struct camelCase
-        assert_eq!(v["homeAddress"]["streetName"], "Oak Ave");
-        assert_eq!(v["homeAddress"]["zipCode"], 54321);
-        assert_eq!(v["homeAddress"]["buildingId"], "42"); // u64 -> string
-
-        // Check doubly nested (inside Option)
-        assert_eq!(v["employer"]["companyName"], "Tech Corp");
-        assert_eq!(v["employer"]["employeeCount"], "10000");
-        assert_eq!(
-            v["employer"]["headquarters"]["streetName"],
-            "Corporate Blvd"
-        );
-        assert_eq!(v["employer"]["headquarters"]["buildingId"], "1234567890123");
-
-        let restored: Person = from_canonical(v).unwrap();
-        assert_eq!(person, restored);
-    }
-
-    #[test]
-    fn test_vec_of_nested_structs() {
-        let person = Person {
-            full_name: "John Smith".into(),
-            account_balance: 100000,
-            home_address: Address {
-                street_name: "Elm St".into(),
-                zip_code: 11111,
-                building_id: 1,
-            },
-            employer: None,
-            past_employers: vec![
-                Company {
-                    company_name: "StartupA".into(),
-                    employee_count: 50,
-                    headquarters: Address {
-                        street_name: "First St".into(),
-                        zip_code: 22222,
-                        building_id: 100,
-                    },
-                },
-                Company {
-                    company_name: "BigCorp".into(),
-                    employee_count: 999999999999,
-                    headquarters: Address {
-                        street_name: "Money Lane".into(),
-                        zip_code: 33333,
-                        building_id: 9007199254740993, // > JS MAX_SAFE_INTEGER
-                    },
-                },
-            ],
-        };
-
-        let v = to_canonical(&person).unwrap();
-
-        // Check vec elements have camelCase
-        assert_eq!(v["pastEmployers"][0]["companyName"], "StartupA");
-        assert_eq!(v["pastEmployers"][0]["employeeCount"], "50");
-        assert_eq!(v["pastEmployers"][1]["companyName"], "BigCorp");
-        assert_eq!(v["pastEmployers"][1]["employeeCount"], "999999999999");
-        assert_eq!(
-            v["pastEmployers"][1]["headquarters"]["buildingId"],
-            "9007199254740993"
-        );
-
-        // Check None becomes null
-        assert_eq!(v["employer"], serde_json::Value::Null);
-
-        let restored: Person = from_canonical(v).unwrap();
-        assert_eq!(person, restored);
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
     #[serde(rename_all = "snake_case")]
     enum Status {
-        ActiveUser,
-        InactiveUser {
-            last_seen_timestamp: i64,
-        },
-        Banned {
-            ban_reason: String,
-            banned_by_user_id: u64,
-        },
+        Active,
+        Suspended { reason: String, by_user_id: u64 },
     }
 
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
     struct Account {
         account_id: u64,
-        user_status: Status,
+        status: Status,
     }
 
     #[test]
-    fn test_nested_enum_unit_variant() {
-        let acc = Account {
+    fn wrapper_and_enum_variants() {
+        // Test Canonical wrapper with enum unit variant
+        let active = Account {
             account_id: 12345678901234,
-            user_status: Status::ActiveUser,
+            status: Status::Active,
         };
+        let wrapped = Canonical(active.clone());
+        let json_str = serde_json::to_string(&wrapped).unwrap();
+        assert!(json_str.contains("accountId"));
+        assert!(json_str.contains("\"12345678901234\""));
+        assert!(json_str.contains("active"));
+        let restored: Canonical<Account> = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(active, restored.0);
 
-        let v = to_canonical(&acc).unwrap();
-        assert_eq!(v["accountId"], "12345678901234");
-        assert_eq!(v["userStatus"], "activeUser");
-
-        let restored: Account = from_canonical(v).unwrap();
-        assert_eq!(acc, restored);
-    }
-
-    #[test]
-    fn test_nested_enum_struct_variant() {
-        let acc = Account {
+        // Test enum struct variant
+        let suspended = Account {
             account_id: 999,
-            user_status: Status::Banned {
-                ban_reason: "spam".into(),
-                banned_by_user_id: 9007199254740993,
+            status: Status::Suspended {
+                reason: "spam".into(),
+                by_user_id: 9007199254740993,
             },
         };
-
-        let v = to_canonical(&acc).unwrap();
+        let v = to_canonical(&suspended).unwrap();
         assert_eq!(v["accountId"], "999");
-        assert_eq!(v["userStatus"]["banned"]["banReason"], "spam");
-        assert_eq!(
-            v["userStatus"]["banned"]["bannedByUserId"],
-            "9007199254740993"
-        );
-
+        assert_eq!(v["status"]["suspended"]["reason"], "spam");
+        assert_eq!(v["status"]["suspended"]["byUserId"], "9007199254740993");
         let restored: Account = from_canonical(v).unwrap();
-        assert_eq!(acc, restored);
+        assert_eq!(suspended, restored);
     }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct NestedMaps {
-        outer_map: std::collections::HashMap<String, InnerData>,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, PartialEq)]
-    struct InnerData {
-        inner_value: u64,
-        inner_name: String,
-    }
-
-    #[test]
-    fn test_nested_hashmap() {
-        let mut outer = std::collections::HashMap::new();
-        outer.insert(
-            "first_key".into(),
-            InnerData {
-                inner_value: 111111111111,
-                inner_name: "first".into(),
-            },
-        );
-        outer.insert(
-            "second_key".into(),
-            InnerData {
-                inner_value: 222222222222,
-                inner_name: "second".into(),
-            },
-        );
-
-        let data = NestedMaps { outer_map: outer };
-        let v = to_canonical(&data).unwrap();
-
-        // Map keys should be camelCase
-        assert!(v["outerMap"]["firstKey"].is_object());
-        assert!(v["outerMap"]["secondKey"].is_object());
-
-        // Nested struct fields should be camelCase with stringified u64
-        assert_eq!(v["outerMap"]["firstKey"]["innerValue"], "111111111111");
-        assert_eq!(v["outerMap"]["firstKey"]["innerName"], "first");
-
-        let restored: NestedMaps = from_canonical(v).unwrap();
-        assert_eq!(data, restored);
-    }
-
-    #[test]
-    fn test_triple_nested() {
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
-        struct Level3 {
-            deep_value: u64,
-        }
-
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
-        struct Level2 {
-            level_three: Level3,
-            mid_value: i64,
-        }
-
-        #[derive(Debug, Serialize, Deserialize, PartialEq)]
-        struct Level1 {
-            level_two: Level2,
-            top_value: u64,
-        }
-
-        let data = Level1 {
-            level_two: Level2 {
-                level_three: Level3 {
-                    deep_value: 9007199254740993,
-                },
-                mid_value: -9007199254740993,
-            },
-            top_value: 42,
-        };
-
-        let v = to_canonical(&data).unwrap();
-        assert_eq!(v["topValue"], "42");
-        assert_eq!(v["levelTwo"]["midValue"], "-9007199254740993");
-        assert_eq!(v["levelTwo"]["levelThree"]["deepValue"], "9007199254740993");
-
-        let restored: Level1 = from_canonical(v).unwrap();
-        assert_eq!(data, restored);
-    }
-
-    // #[test]
-    // fn t() {
-    //     use crate::Config;
-    //     let cfg = crate::ConsensusConfig::testing();
-    //     let cfg2 = Canonical(cfg);
-    //     let s = serde_json::to_string_pretty(&cfg2).unwrap();
-    //     // TODO: add some tests against ConsensusConfig
-    //     dbg!(s);
-    // }
 }
