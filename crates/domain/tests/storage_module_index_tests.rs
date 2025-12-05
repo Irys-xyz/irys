@@ -1,5 +1,5 @@
 use irys_database::{
-    cache_chunk, cached_chunk_by_chunk_offset,
+    cache_chunk, cache_data_root, cached_chunk_by_chunk_offset,
     db::IrysDatabaseExt as _,
     open_or_create_db,
     submodule::{get_data_root_infos_for_data_root, get_full_tx_path, get_path_hashes_by_offset},
@@ -349,6 +349,10 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
 
     // Loop though all the transactions and add their chunks to the cache
     for tx in &txs {
+        let _ = db.update_eyre(|wtx| {
+            cache_data_root(wtx, &tx.header, None)?;
+            Ok(())
+        });
         let mut prev_byte_offset: u64 = 0;
         info!("num chunks in tx: {:?}", tx.proofs.len());
         for (i, proof) in tx.proofs.iter().enumerate() {

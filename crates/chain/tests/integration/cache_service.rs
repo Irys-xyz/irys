@@ -11,6 +11,7 @@ use irys_database::{
 use irys_testing_utils::initialize_tracing;
 use irys_types::irys::IrysSigner;
 use irys_types::{Base64, DataLedger, NodeConfig, TxChunkOffset, UnpackedChunk};
+use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;
 use std::time::Duration;
 use tracing::info;
@@ -194,7 +195,15 @@ async fn heavy_test_cache_pruning() -> eyre::Result<()> {
     node.post_data_tx_raw(&tx.header).await;
 
     // mine enough blocks to cause the submit ledger to expire a partition
-    node.mine_blocks(10).await?;
+    node.mine_blocks(9).await?;
+
+    // Manually remove ingress proofs to ensure there are no active proofs for a root
+    node.node_ctx.db.update(|tx| {
+        tx.clear::<IngressProofs>()?;
+        eyre::Ok(())
+    })??;
+
+    node.mine_blocks(1).await?;
 
     // confirm that we no longer see an entry in CachedChunks mdbx table
     node.wait_for_chunk_cache_count(0, 10).await?;
