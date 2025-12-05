@@ -517,7 +517,7 @@ mod tests {
             signer,
             CommitmentType::Unpledge {
                 pledge_count_before_executing: 3,
-                partition_hash: partition_hashes[0].to_fixed_bytes(),
+                partition_hash: partition_hashes[0],
             },
             U256::from(500_u64),
         );
@@ -531,7 +531,7 @@ mod tests {
             signer,
             CommitmentType::Unpledge {
                 pledge_count_before_executing: 2,
-                partition_hash: partition_hashes[1].to_fixed_bytes(),
+                partition_hash: partition_hashes[1],
             },
             U256::from(400_u64),
         );
@@ -591,7 +591,7 @@ mod tests {
             signer,
             CommitmentType::Unpledge {
                 pledge_count_before_executing: 2,
-                partition_hash: partition_hashes[0].to_fixed_bytes(),
+                partition_hash: partition_hashes[0],
             },
             U256::from(500_u64),
         );

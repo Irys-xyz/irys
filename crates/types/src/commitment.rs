@@ -2,7 +2,7 @@ use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 
-use crate::serialization::string_u64;
+use crate::{serialization::string_u64, H256};
 
 #[derive(
     PartialEq,
@@ -86,7 +86,7 @@ pub enum CommitmentType {
         #[serde(rename = "pledgeCountBeforeExecuting", with = "string_u64")]
         pledge_count_before_executing: u64,
         #[serde(rename = "partitionHash")]
-        partition_hash: [u8; 32],
+        partition_hash: H256,
     },
     Unstake,
 }
@@ -110,7 +110,7 @@ impl Encodable for CommitmentType {
             } => {
                 out.put_u8(COMMITMENT_TYPE_UNPLEDGE);
                 pledge_count_before_executing.encode(out);
-                out.put_slice(partition_hash);
+                out.put_slice(&partition_hash.0);
             }
             Self::Unstake => {
                 out.put_u8(COMMITMENT_TYPE_UNSTAKE);
@@ -159,7 +159,7 @@ impl Decodable for CommitmentType {
                 buf.advance(PARTITION_HASH_SIZE);
                 Ok(Self::Unpledge {
                     pledge_count_before_executing: count,
-                    partition_hash: ph,
+                    partition_hash: ph.into(),
                 })
             }
             COMMITMENT_TYPE_UNSTAKE => Ok(Self::Unstake),
@@ -189,7 +189,7 @@ impl reth_codecs::Compact for CommitmentType {
             } => {
                 buf.put_u8(COMMITMENT_TYPE_UNPLEDGE);
                 buf.put_u64_le(*pledge_count_before_executing);
-                buf.put_slice(partition_hash);
+                buf.put_slice(&partition_hash.0);
                 TYPE_DISCRIMINANT_SIZE + U64_SIZE + PARTITION_HASH_SIZE
             }
             Self::Unstake => {
@@ -259,7 +259,7 @@ impl reth_codecs::Compact for CommitmentType {
                 (
                     Self::Unpledge {
                         pledge_count_before_executing: count,
-                        partition_hash: ph,
+                        partition_hash: ph.into(),
                     },
                     &rem[PARTITION_HASH_SIZE..],
                 )
@@ -303,7 +303,7 @@ mod tests {
     #[case::pledge_one(CommitmentType::Pledge { pledge_count_before_executing: 1 }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::pledge_hundred(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::pledge_max(CommitmentType::Pledge { pledge_count_before_executing: u64::MAX }, 9, COMMITMENT_TYPE_PLEDGE)]
-    #[case::unpledge(CommitmentType::Unpledge { pledge_count_before_executing: 42, partition_hash: [7_u8; 32] }, 1 + 8 + 32, COMMITMENT_TYPE_UNPLEDGE)]
+    #[case::unpledge(CommitmentType::Unpledge { pledge_count_before_executing: 42, partition_hash: [7_u8; 32].into() }, 1 + 8 + 32, COMMITMENT_TYPE_UNPLEDGE)]
     fn test_commitment_type_compact_roundtrip(
         #[case] original: CommitmentType,
         #[case] expected_len: usize,
@@ -356,7 +356,7 @@ mod tests {
     #[rstest]
     #[case::stake(CommitmentType::Stake, 1)]
     #[case::pledge(CommitmentType::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length())]
-    #[case::unpledge(CommitmentType::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32] }, 1 + 5_u64.length() + 32)]
+    #[case::unpledge(CommitmentType::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32].into() }, 1 + 5_u64.length() + 32)]
     fn test_commitment_type_rlp_length(
         #[case] commitment_type: CommitmentType,
         #[case] expected_length: usize,
@@ -369,7 +369,7 @@ mod tests {
         use bytes::BytesMut;
         let original = CommitmentType::Unpledge {
             pledge_count_before_executing: 3,
-            partition_hash: [1_u8; 32],
+            partition_hash: [1_u8; 32].into(),
         };
         let mut buf = BytesMut::new();
         original.encode(&mut buf);
