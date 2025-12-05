@@ -829,7 +829,7 @@ impl EpochSnapshot {
                 continue;
             };
             let signer = commitment.signer;
-            let ph: irys_types::H256 = (*partition_hash).into();
+            let ph: irys_types::H256 = *partition_hash;
 
             let cap_present = self.partition_assignments.capacity_partitions.remove(&ph);
             let data_present = self.partition_assignments.data_partitions.remove(&ph);
@@ -1502,7 +1502,7 @@ mod tests {
             tx.signer = signer;
             tx.commitment_type = CommitmentType::Unpledge {
                 pledge_count_before_executing: 1,
-                partition_hash: ph.into(),
+                partition_hash: ph,
             };
             tx
         }

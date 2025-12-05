@@ -914,7 +914,7 @@ mod tests {
             create_test_commitment(
                 CommitmentType::Unpledge {
                     pledge_count_before_executing: 1,
-                    partition_hash: [0_u8; 32],
+                    partition_hash: [0_u8; 32].into(),
                 },
                 pledge_value,
                 pledge_fee,
