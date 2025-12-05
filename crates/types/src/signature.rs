@@ -170,7 +170,7 @@ impl alloy_rlp::Decodable for IrysSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::BoundedFee;
+    use crate::{BoundedFee, CommitmentTransaction, CommitmentType, Signable as _};
 
     use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
@@ -184,16 +184,17 @@ mod tests {
         "db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0";
     const DEV_ADDRESS: &str = "64f1a2829e0e698c18e7792d6e74f67d89aa0a32";
 
-    // from the JS Client - `txSigningParity`
-    const SIG_HEX: &str = "0x2b80b5cb509d4a1b7cad4f68c44cc13b2e985c7101fe5a38668bcfeb1e79f01351e2c570ba367698228b52785b0375e3579d7a9ceef995116a25c565efa820281c";
-    // Base58 encoding of the signature (for version=1 signing preimage)
-    const SIG_BS58: &str =
-        "4qfCDRG4yFjuFebpicpPk4baWjw7gtHWoBb9S3HRzLY942sQmwv216dGWPXABWN9s2n8hy1XiLNu1VmarHLDUe8VH";
-
     // spellchecker:on
 
     #[test]
-    fn signature_signing_serialization() -> eyre::Result<()> {
+    fn data_tx_signature_signing_serialization() -> eyre::Result<()> {
+        // spellchecker:off
+        // from the JS Client - `txSigningParity`
+        const SIG_HEX: &str = "0x2b80b5cb509d4a1b7cad4f68c44cc13b2e985c7101fe5a38668bcfeb1e79f01351e2c570ba367698228b52785b0375e3579d7a9ceef995116a25c565efa820281c";
+        // Base58 encoding of the signature (for version=1 signing preimage)
+        const SIG_BS58: &str = "4qfCDRG4yFjuFebpicpPk4baWjw7gtHWoBb9S3HRzLY942sQmwv216dGWPXABWN9s2n8hy1XiLNu1VmarHLDUe8VH";
+        // spellchecker:on
+
         let testing_config = ConsensusConfig::testing();
         let irys_signer = IrysSigner {
             signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
@@ -264,6 +265,85 @@ mod tests {
         assert_eq!(
             IrysSignature::decode(&mut &bytes[..]).unwrap(),
             transaction.header.signature
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
+        // spellchecker:off
+        // from the JS Client - `txSigningParity`
+        const SIG_HEX: &str = "0xbd608ebb350409c185816ce00338c8095dc1fae22261e819f6eb9f3a247fdf1c04d3807154be2932709176faf27623eaec485ab188dfe70edf99338c0fce38311c";
+        // Base58 encoding of the signature (for version=1 signing preimage)
+        const SIG_BS58: &str = "HiHLPhitbugcBNoJ7kFicwxJe7w2vEk37HZhHsaB1V9tsgd3cPrPEdMtWqss8QRwHwhQvvPA1GJsRDhGoXGEU519V";
+        // spellchecker:on
+        let testing_config = ConsensusConfig::testing();
+        let irys_signer = IrysSigner {
+            signer: SigningKey::from_slice(hex::decode(DEV_PRIVATE_KEY).unwrap().as_slice())
+                .unwrap(),
+            chain_id: testing_config.chain_id,
+            chunk_size: testing_config.chunk_size,
+        };
+
+        let mut transaction = CommitmentTransaction::V1(crate::CommitmentTransactionV1 {
+            id: Default::default(),
+            anchor: H256::from([1_u8; 32]),
+            signer: Address::ZERO,
+            commitment_type: CommitmentType::Unpledge {
+                pledge_count_before_executing: 0,
+                partition_hash: [2_u8; 32].into(),
+            },
+            chain_id: testing_config.chain_id,
+            signature: Default::default(),
+            fee: 1234,
+            value: 0.into(),
+        });
+
+        irys_signer.sign_commitment(&mut transaction)?;
+        assert!(transaction.signature.validate_signature(
+            transaction.signature_hash(),
+            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
+        ));
+
+        // encode and decode the signature
+        //compact
+        let mut bytes = Vec::new();
+        transaction.signature.to_compact(&mut bytes);
+
+        let (signature2, _) = IrysSignature::from_compact(&bytes, bytes.len());
+
+        assert_eq!(transaction.signature, signature2);
+
+        // serde-json base58 roundtrip
+        let ser = serde_json::to_string(&transaction.signature)?;
+        let de_ser: IrysSignature = serde_json::from_str(&ser)?;
+        assert_eq!(transaction.signature, de_ser);
+
+        // Verify base58 encoding matches expected (parity check with JS client)
+        assert_eq!(ser, format!("\"{}\"", SIG_BS58));
+        // dbg!(&ser);
+        // println!("{}", serde_json::to_string_pretty(&transaction).unwrap());
+
+        // assert parity against regenerated hex
+        let decoded_js_sig = Signature::try_from(&hex::decode(&SIG_HEX[2..])?[..])?;
+
+        let d2 = hex::encode(transaction.signature.as_bytes());
+        // println!("{}", &d2);
+        assert_eq!(
+            transaction.signature,
+            Signature::try_from(&hex::decode(&d2)?[..])?.into()
+        );
+        assert_eq!(SIG_HEX, format!("0x{}", d2));
+
+        assert_eq!(transaction.signature, decoded_js_sig.into());
+
+        // test RLP roundtrip
+        let mut bytes = Vec::new();
+        transaction.signature.encode(&mut bytes);
+        assert_eq!(
+            IrysSignature::decode(&mut &bytes[..]).unwrap(),
+            transaction.signature
         );
 
         Ok(())
