@@ -19,6 +19,7 @@ use crate::{
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
@@ -159,6 +160,7 @@ impl P2PService {
         config: Config,
         service_senders: ServiceSenders,
         chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
+        mempool_guard: MempoolReadGuard,
     ) -> GossipResult<(
         ServiceHandleWithShutdownSignal,
         Arc<BlockPool<B, M>>,
@@ -181,6 +183,7 @@ impl P2PService {
             execution_payload_provider.clone(),
             config.clone(),
             service_senders,
+            mempool_guard,
         );
 
         let arc_pool = Arc::new(block_pool);

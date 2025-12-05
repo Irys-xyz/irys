@@ -11,6 +11,7 @@
 //! 4. **Parent Dependencies**: Wait for parent validation before reporting
 //!     results of a child block.
 use crate::{
+    block_discovery::BlockTransactions,
     block_tree_service::{ReorgEvent, ValidationResult},
     block_validation::{is_seed_data_valid, ValidationError},
     mempool_guard::MempoolReadGuard,
@@ -50,6 +51,7 @@ pub enum ValidationServiceMessage {
     /// Validate a block
     ValidateBlock {
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf_validation: bool,
     },
 }
@@ -196,9 +198,10 @@ impl ValidationService {
                 // Receive new validation messages
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(ValidationServiceMessage::ValidateBlock { block, skip_vdf_validation }) => {
+                        Some(ValidationServiceMessage::ValidateBlock { block, transactions, skip_vdf_validation }) => {
                             let task = block_validation_task::BlockValidationTask::new(
                                 block.clone(),
+                                Arc::new(transactions),
                                 Arc::clone(&self.inner),
                                 self.inner.block_tree_guard.clone(),
                                 skip_vdf_validation,

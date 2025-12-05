@@ -2,7 +2,8 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use irys_actors::block_discovery::BlockDiscoveryFacade;
+use irys_actors::block_discovery::{BlockDiscoveryFacade, BlockTransactions};
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, TxIngressError};
@@ -14,12 +15,12 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
-use crate::block_pool::FailureReason::FailedToSendCachedTransactionToMempool;
+use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
-    BlockHash, Config, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError,
+    BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage,
+    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -88,7 +89,7 @@ impl From<PeerNetworkError> for BlockPoolError {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum ProcessBlockResult {
+pub(crate) enum ProcessBlockResult {
     /// Block has been processed successfully
     Processed,
     /// Block has been added to the pool, waiting for the parent block
@@ -123,6 +124,7 @@ where
 
     config: Config,
     service_senders: ServiceSenders,
+    pub mempool_guard: MempoolReadGuard,
 }
 
 #[derive(Clone, Debug)]
@@ -169,7 +171,6 @@ impl Display for BlockRemovalReason {
 pub(crate) enum FailureReason {
     ParentIsAPartOfAPrunedFork,
     WasNotAbleToFetchRethPayload,
-    FailedToSendCachedTransactionToMempool,
     BlockPrevalidationFailed,
     FailedToPull(GossipError),
 }
@@ -182,9 +183,6 @@ impl Display for FailureReason {
             }
             Self::WasNotAbleToFetchRethPayload => {
                 write!(f, "Was not able to fetch Reth execution payload")
-            }
-            Self::FailedToSendCachedTransactionToMempool => {
-                write!(f, "Failed to send cached transaction to mempool")
             }
             Self::BlockPrevalidationFailed => {
                 write!(f, "Block prevalidation failed")
@@ -266,12 +264,12 @@ impl BlockCacheGuard {
             .change_block_processing_status(block_hash, is_processing);
     }
 
-    async fn add_tx_for_block(&self, block_hash: BlockHash, tx: IrysTransactionResponse) {
-        self.inner.write().await.add_tx_for_block(block_hash, tx);
-    }
-
     async fn take_txs_for_block(&self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
         self.inner.write().await.take_txs_for_block(block_hash)
+    }
+
+    async fn add_txs_for_block(&self, block_hash: BlockHash, txs: Vec<IrysTransactionResponse>) {
+        self.inner.write().await.add_txs_for_block(block_hash, txs);
     }
 }
 
@@ -350,16 +348,12 @@ impl BlockCacheInner {
         self.blocks.get(block_hash).cloned()
     }
 
-    fn add_tx_for_block(&mut self, block_hash: BlockHash, tx: IrysTransactionResponse) {
-        if let Some(vec) = self.txs_by_block.get_mut(&block_hash) {
-            vec.push(tx);
-        } else {
-            self.txs_by_block.put(block_hash, vec![tx]);
-        }
-    }
-
     fn take_txs_for_block(&mut self, block_hash: &BlockHash) -> Vec<IrysTransactionResponse> {
         self.txs_by_block.pop(block_hash).unwrap_or_default()
+    }
+
+    fn add_txs_for_block(&mut self, block_hash: BlockHash, txs: Vec<IrysTransactionResponse>) {
+        self.txs_by_block.put(block_hash, txs);
     }
 }
 
@@ -387,6 +381,7 @@ where
         execution_payload_provider: ExecutionPayloadCache,
         config: Config,
         service_senders: ServiceSenders,
+        mempool_guard: MempoolReadGuard,
     ) -> Self {
         Self {
             db,
@@ -399,6 +394,7 @@ where
             execution_payload_provider,
             config,
             service_senders,
+            mempool_guard,
         }
     }
 
@@ -593,6 +589,14 @@ where
         Ok(())
     }
 
+    /// Process a block with provided BlockTransactions.
+    ///
+    /// This method handles:
+    /// - Block status validation
+    /// - Parent block resolution (caches txs if block becomes orphan)
+    /// - Mempool synchronization (inserting txs for validation service)
+    /// - Block discovery processing
+    /// - Cleanup and notifications
     #[instrument(
         skip_all,
         target = "BlockPool",
@@ -601,6 +605,7 @@ where
     pub(crate) async fn process_block<A: ApiClient>(
         &self,
         block_header: Arc<IrysBlockHeader>,
+        block_transactions: BlockTransactions,
         skip_validation_for_fast_track: bool,
     ) -> Result<ProcessBlockResult, BlockPoolError> {
         check_block_status(
@@ -629,7 +634,6 @@ where
             .await;
 
         if let Some((evicted_hash, _)) = maybe_evicted_or_updated {
-            // Otherwise it's updated, not evicted
             let is_evicted = evicted_hash != block_header.block_hash;
             if is_evicted {
                 warn!("Block {evicted_hash:?} has been evicted from BlockPool cache");
@@ -672,6 +676,29 @@ where
             self.blocks_cache
                 .change_block_processing_status(block_header.block_hash, false)
                 .await;
+
+            // Cache transactions for this orphan block so they're available when reprocessed
+            let txs_to_cache: Vec<IrysTransactionResponse> = block_transactions
+                .all_data_txs()
+                .map(|tx| IrysTransactionResponse::Storage(tx.clone()))
+                .chain(
+                    block_transactions
+                        .commitment_txs
+                        .iter()
+                        .map(|tx| IrysTransactionResponse::Commitment(tx.clone())),
+                )
+                .collect();
+            if !txs_to_cache.is_empty() {
+                debug!(
+                    "Caching {} transactions for orphan block {:?}",
+                    txs_to_cache.len(),
+                    current_block_hash
+                );
+                self.blocks_cache
+                    .add_txs_for_block(current_block_hash, txs_to_cache)
+                    .await;
+            }
+
             debug!(
                 "Parent block for block {:?} is not found in the db",
                 current_block_hash
@@ -782,93 +809,55 @@ where
         );
 
         // TODO: validate this UNTRUSTED height against the parent block's height (as we have processed it)
-
         self.block_status_provider
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
-        // Send cached transactions (if any) to the mempool before handling the block
-        let cached_txs = self
-            .blocks_cache
-            .take_txs_for_block(&block_header.block_hash)
-            .await;
-        if !cached_txs.is_empty() {
-            debug!(
-                "Block pool: Sending {} cached txs for block {:?} to mempool",
-                cached_txs.len(),
-                current_block_hash
-            );
-        } else {
-            debug!(
-                "Block pool: No cached txs for block {:?} to send to mempool",
-                current_block_hash
-            );
-        }
+        debug!(
+            "Block pool: Processing block {:?} with {} submit, {} publish, {} commitment txs",
+            current_block_hash,
+            block_transactions.get_ledger_txs(DataLedger::Submit).len(),
+            block_transactions.get_ledger_txs(DataLedger::Publish).len(),
+            block_transactions.commitment_txs.len()
+        );
 
-        for tx in cached_txs {
-            match tx {
-                IrysTransactionResponse::Commitment(commitment_tx) => {
-                    let id = commitment_tx.id;
-                    if let Err(err) = self
-                        .mempool
-                        .handle_commitment_transaction_ingress_gossip(commitment_tx)
-                        .await
-                    {
-                        if !matches!(err, TxIngressError::Skipped) {
-                            warn!(
-                                "Block pool: Failed to send commitment tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
-                                &id, &current_block_hash, err
-                            );
-                            self.blocks_cache
-                                .remove_block(
-                                    &block_header.block_hash,
-                                    BlockRemovalReason::FailedToProcess(
-                                        FailureReason::FailedToSendCachedTransactionToMempool,
-                                    ),
-                                )
-                                .await;
-                            return Err(CriticalBlockPoolError::TransactionValidationFailed(
-                                current_block_hash,
-                                err,
-                            )
-                            .into());
-                        }
-                    }
+        // Insert transactions into mempool so validation service can find them later.
+        for commitment_tx in &block_transactions.commitment_txs {
+            if let Err(err) = self
+                .mempool
+                .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
+                .await
+            {
+                if !matches!(err, TxIngressError::Skipped) {
+                    warn!(
+                        "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
+                        commitment_tx.id, current_block_hash, err
+                    );
                 }
-                IrysTransactionResponse::Storage(storage_tx) => {
-                    let id = storage_tx.id;
-                    if let Err(err) = self
-                        .mempool
-                        .handle_data_transaction_ingress_gossip(storage_tx)
-                        .await
-                    {
-                        if !matches!(err, TxIngressError::Skipped) {
-                            warn!(
-                                "Block pool: Failed to send storage tx {} (unverified) to mempool for block {:?}: {:?}, stopping block processing and removing block from the pool",
-                                &id, current_block_hash, err
-                            );
-                            self.blocks_cache
-                                .remove_block(
-                                    &block_header.block_hash,
-                                    BlockRemovalReason::FailedToProcess(
-                                        FailedToSendCachedTransactionToMempool,
-                                    ),
-                                )
-                                .await;
-                            return Err(CriticalBlockPoolError::TransactionValidationFailed(
-                                current_block_hash,
-                                err,
-                            )
-                            .into());
-                        }
-                    }
+            }
+        }
+        for data_tx in block_transactions.all_data_txs() {
+            if let Err(err) = self
+                .mempool
+                .handle_data_transaction_ingress_gossip(data_tx.clone())
+                .await
+            {
+                if !matches!(err, TxIngressError::Skipped) {
+                    warn!(
+                        "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
+                        data_tx.id, current_block_hash, err
+                    );
                 }
             }
         }
 
         if let Err(block_discovery_error) = self
             .block_discovery
-            .handle_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+            .handle_block(
+                Arc::clone(&block_header),
+                block_transactions,
+                skip_validation_for_fast_track,
+            )
             .await
         {
             error!(
@@ -892,8 +881,6 @@ where
         );
 
         if !skip_validation_for_fast_track {
-            // If skip validation is true, we handle it preemptively above, if it isn't, it's a
-            //  good idea to request it here
             self.pull_and_seal_execution_payload_in_background::<A>(
                 block_header.evm_block_hash,
                 skip_validation_for_fast_track,
@@ -1136,26 +1123,6 @@ where
         }
     }
 
-    #[instrument(skip(self, block_hash), fields(block.hash = ?block_hash))]
-    pub async fn reprocess_block<A: ApiClient>(
-        &self,
-        block_hash: BlockHash,
-    ) -> Result<ProcessBlockResult, BlockPoolError> {
-        debug!("Triggering reprocessing for block {:?}", block_hash);
-        let block = self.blocks_cache.get_block_header_cloned(&block_hash).await;
-        if let Some(cached_block) = block {
-            self.process_block::<A>(cached_block.header, cached_block.is_fast_tracking)
-                .await
-        } else {
-            // This shouldn't happen because we check for block existence before calling this method
-            error!(
-                "Cannot reprocess block {:?} as it is not found in the cache",
-                block_hash
-            );
-            Err(CriticalBlockPoolError::TryingToReprocessBlockThatIsNotInPool(block_hash).into())
-        }
-    }
-
     /// Check if parent hash exists in block cache - for orphan block processing
     pub async fn contains_block(&self, block_hash: &BlockHash) -> bool {
         self.blocks_cache.contains_block(block_hash).await
@@ -1186,13 +1153,106 @@ where
         self.blocks_cache.take_txs_for_block(block_hash).await;
     }
 
-    /// Add a transaction fetched for a specific block into the per-block cache
-    pub(crate) async fn add_tx_for_block(
+    /// Take cached transactions for a block (removes them from cache).
+    /// Used by GossipDataHandler for network-enabled tx fetching.
+    pub async fn take_cached_txs_for_block(
         &self,
-        block_hash: BlockHash,
-        tx: IrysTransactionResponse,
-    ) {
-        self.blocks_cache.add_tx_for_block(block_hash, tx).await;
+        block_hash: &BlockHash,
+    ) -> Vec<IrysTransactionResponse> {
+        self.blocks_cache.take_txs_for_block(block_hash).await
+    }
+
+    /// Get a cached block header by hash.
+    /// Used by GossipDataHandler for network-enabled tx fetching.
+    pub(crate) async fn get_cached_block(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
+        self.blocks_cache.get_block_header_cloned(block_hash).await
+    }
+}
+
+/// Order pre-fetched transactions into BlockTransactions structure.
+///
+/// Caller is responsible for providing ALL required transactions.
+/// This function only handles ordering them correctly per ledger.
+/// Transactions are returned in the exact order specified in the block header,
+/// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+pub(crate) fn order_transactions_for_block(
+    block: &IrysBlockHeader,
+    data_txs: Vec<irys_types::DataTransactionHeader>,
+    commitment_txs: Vec<irys_types::CommitmentTransaction>,
+) -> BlockTransactions {
+    use std::collections::HashMap;
+
+    // Extract required IDs from block header (preserving order)
+    let submit_ids: Vec<H256> = block
+        .data_ledgers
+        .get(DataLedger::Submit as usize)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
+
+    let publish_ids: Vec<H256> = block
+        .data_ledgers
+        .get(DataLedger::Publish as usize)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
+
+    let commitment_ids: Vec<H256> = block
+        .system_ledgers
+        .iter()
+        .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
+        .map(|l| l.tx_ids.0.clone())
+        .unwrap_or_default();
+
+    // Create sets for quick lookup
+    let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
+    let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
+
+    // Collect transactions into maps by ID
+    let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
+    let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
+    let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
+
+    for data_tx in data_txs {
+        // Note: A tx can be in both submit and publish ledgers (published after submission)
+        // so we check both independently and clone if needed for both
+        let in_submit = submit_ids_set.contains(&data_tx.id);
+        let in_publish = publish_ids_set.contains(&data_tx.id);
+
+        if in_submit && in_publish {
+            submit_txs_map.insert(data_tx.id, data_tx.clone());
+            publish_txs_map.insert(data_tx.id, data_tx);
+        } else if in_submit {
+            submit_txs_map.insert(data_tx.id, data_tx);
+        } else if in_publish {
+            publish_txs_map.insert(data_tx.id, data_tx);
+        }
+    }
+
+    for commitment_tx in commitment_txs {
+        commitment_txs_map.insert(commitment_tx.id, commitment_tx);
+    }
+
+    // Build final vectors in the exact order specified by block header
+    let submit_txs: Vec<_> = submit_ids
+        .iter()
+        .filter_map(|id| submit_txs_map.remove(id))
+        .collect();
+
+    let publish_txs: Vec<_> = publish_ids
+        .iter()
+        .filter_map(|id| publish_txs_map.remove(id))
+        .collect();
+
+    let commitment_txs: Vec<_> = commitment_ids
+        .iter()
+        .filter_map(|id| commitment_txs_map.remove(id))
+        .collect();
+
+    BlockTransactions {
+        commitment_txs,
+        data_txs: HashMap::from([
+            (DataLedger::Submit, submit_txs),
+            (DataLedger::Publish, publish_txs),
+        ]),
     }
 }
 

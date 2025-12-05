@@ -1,16 +1,16 @@
+use super::send_block_to_block_tree;
 use crate::utils::{
     assert_validation_error, gossip_data_tx_to_node, read_block_from_state, solution_context,
     BlockValidationOutcome, IrysNodeTest,
 };
 use irys_actors::{
     async_trait,
+    block_discovery::BlockTransactions,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
-    block_tree_service::BlockTreeServiceMessage,
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
-use irys_chain::IrysNodeCtx;
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
 use irys_domain::ChainState;
@@ -19,33 +19,12 @@ use irys_types::storage_pricing::{
 };
 use irys_types::IngressProofsList;
 use irys_types::{
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    OracleConfig, UnixTimestamp, U256,
+    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
+    UnixTimestamp, U256,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
-
-// Helper function to send a block directly to the block tree service for validation
-async fn send_block_to_block_tree(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
-) -> eyre::Result<()> {
-    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-
-    node_ctx
-        .service_senders
-        .block_tree
-        .send(BlockTreeServiceMessage::BlockPreValidated {
-            block,
-            commitment_txs: Arc::new(commitment_txs),
-            response: response_tx,
-            skip_vdf_validation: false,
-        })?;
-
-    Ok(response_rx.await??)
-}
 
 // This test ensures that during full block validation, data transaction pricing validates the perm fee
 #[test_log::test(tokio::test)]
@@ -132,6 +111,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 reward_curve: genesis_block_prod.reward_curve.clone(),
                 vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
                 block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
+                mempool_guard: genesis_block_prod.mempool_guard.clone(),
                 price_oracle: genesis_block_prod.price_oracle.clone(),
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
@@ -141,14 +121,20 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block directly to block tree service for validation
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
@@ -251,6 +237,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
                 reward_curve: genesis_block_prod.reward_curve.clone(),
                 vdf_steps_guard: genesis_block_prod.vdf_steps_guard.clone(),
                 block_tree_guard: genesis_block_prod.block_tree_guard.clone(),
+                mempool_guard: genesis_block_prod.mempool_guard.clone(),
                 price_oracle: genesis_block_prod.price_oracle.clone(),
                 reth_payload_builder: genesis_block_prod.reth_payload_builder.clone(),
                 reth_provider: genesis_block_prod.reth_provider.clone(),
@@ -260,14 +247,20 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Validate the block directly via block tree service
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
@@ -330,7 +323,13 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
     let block = Arc::new(block);
 
     // Send for validation and expect the block to be stored (accepted)
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert!(matches!(
         outcome,
@@ -609,13 +608,19 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         },
     };
 
-    let (promote_block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (promote_block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Validate by sending block directly to the block tree
-    send_block_to_block_tree(&genesis_node.node_ctx, promote_block.clone(), vec![]).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        promote_block.clone(),
+        transactions,
+        false,
+    )
+    .await?;
 
     // Expect the block to be rejected for insufficient perm_fee during prevalidation
     let outcome = read_block_from_state(&genesis_node.node_ctx, &promote_block.block_hash).await;

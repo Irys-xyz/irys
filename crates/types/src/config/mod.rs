@@ -264,6 +264,32 @@ pub struct MempoolConfig {
     pub max_concurrent_mempool_tasks: usize,
 }
 
+impl MempoolConfig {
+    /// Creates a `MempoolConfig` with sensible defaults for testing
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn testing() -> Self {
+        Self {
+            max_data_txs_per_block: 100,
+            max_commitment_txs_per_block: 100,
+            anchor_expiry_depth: 50,
+            max_pending_pledge_items: 100,
+            max_pledges_per_item: 10,
+            max_pending_chunk_items: 100,
+            max_chunks_per_item: 100,
+            max_preheader_chunks_per_item: 10,
+            max_preheader_data_path_bytes: 1024,
+            max_valid_items: 1000,
+            max_invalid_items: 1000,
+            commitment_fee: 100,
+            max_valid_chunks: 1000,
+            max_valid_submit_txs: 1000,
+            max_valid_commitment_addresses: 100,
+            max_commitments_per_address: 10,
+            max_concurrent_mempool_tasks: 10,
+        }
+    }
+}
+
 pub mod serde_utils {
 
     use std::time::Duration;

@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::BlockDiscoveryError;
+use irys_actors::block_discovery::{BlockDiscoveryError, BlockTransactions};
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
@@ -232,6 +233,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        _transactions: BlockTransactions,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.block_status_provider
@@ -611,6 +613,7 @@ impl GossipServiceTestFixture {
                 self.config.clone(),
                 self.service_senders.clone(),
                 self.sync_tx.clone(),
+                MempoolReadGuard::stub(),
             )
             .expect("failed to run the gossip service");
 
@@ -918,6 +921,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         execution_payload_cache.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     ));
 
     info!("Created GossipDataHandler stub");
