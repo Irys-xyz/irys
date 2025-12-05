@@ -179,3 +179,8 @@ OR run the executable directly:
 By default your mining address needs to be staked before your storage modules can be pledged and mined. When you are ready to do this, and your node has synchronised to the network head, change the `stake_pledge_drives` config value in `./config.toml` to `true` and restart your node. If you have the funds in your miners account the node will automatically stake your mining address and pledge any storage modules you’ve configured for mining on Irys.
 ## Logs
 The node supports the conventional `RUST_LOG` environment variable to configure logging. By default, the logging level is set to `info`. Note that levels “below” info (`debug`, `trace`) are very high volume, but debug is recommended if you can support it, as it means we'll be able to diagnose any issues you’re having faster.
+## Full node (non-mining)
+A full node that tracks the current network state without participating in mining follows the same setup as a mining node with two exceptions:
+
+1. Since the node will not provide storage, the `irys_submodules.toml` file should remain empty.
+2. The `stake_pledge_drives` parameter in `.config.toml` should be set to `false`.

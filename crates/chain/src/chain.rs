@@ -2078,7 +2078,7 @@ async fn stake_and_pledge(
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = reqwest::Client::new();
-        let url = format!("{}/v1/commitment_tx", api_uri);
+        let url = format!("{}/v1/commitment-tx", api_uri);
 
         client.post(url).json(commitment_tx).send().await
     };

@@ -35,7 +35,8 @@ use irys_types::{
     next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo,
+    H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -50,12 +51,7 @@ use reth::{
 };
 use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
-use std::collections::HashMap;
-use std::time::UNIX_EPOCH;
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, error_span, info, warn, Instrument as _};
 
@@ -1316,14 +1312,13 @@ pub trait BlockProdStrategy {
         parent_block: &IrysBlockHeader,
         parent_block_ema_snapshot: &EmaSnapshot,
     ) -> eyre::Result<ExponentialMarketAvgCalculation> {
-        let (fresh_price, last_updated) = self.inner().price_oracle.current_snapshot()?;
-        let oracle_updated_ms = millis_since_epoch(last_updated);
+        let (fresh_price, oracle_updated_at) = self.inner().price_oracle.current_snapshot()?;
 
         let oracle_irys_price = choose_oracle_price(
-            parent_block.timestamp,
+            parent_block.timestamp.to_secs(),
             parent_block.oracle_irys_price,
             fresh_price,
-            oracle_updated_ms,
+            oracle_updated_at,
         );
 
         let ema_calculation = parent_block_ema_snapshot.calculate_ema_for_new_block(
@@ -1550,29 +1545,33 @@ pub trait BlockProdStrategy {
     }
 }
 
-fn millis_since_epoch(time: SystemTime) -> u128 {
-    time.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-}
-
+/// Chooses between parent block price and fresh oracle price for EMA calculation.
+///
+/// Oracle prices are preferred if they were updated within the last 3 minutes,
+/// accounting for typical reporting delays from oracle providers.
 #[inline]
 #[tracing::instrument(level = "trace", skip_all)]
 fn choose_oracle_price(
-    parent_ts_ms: UnixTimestampMs,
+    parent_ts: UnixTimestamp,
     parent_price: IrysTokenPrice,
     oracle_price: IrysTokenPrice,
-    oracle_updated_ms: u128,
+    oracle_updated_at: UnixTimestamp,
 ) -> IrysTokenPrice {
-    let (chosen, source) = if parent_ts_ms.as_millis() > oracle_updated_ms {
-        (parent_price, "parent_fallback")
-    } else {
+    // Allow 3 minutes grace period for oracle prices to account for reporting delays
+    const ORACLE_MAX_AGE_SECS: u64 = 3 * 60;
+
+    // Prefer oracle if it was updated within the grace period
+    let oracle_is_fresh = parent_ts.as_secs() <= oracle_updated_at.as_secs() + ORACLE_MAX_AGE_SECS;
+
+    let (chosen, source) = if oracle_is_fresh {
         (oracle_price, "oracle_fresh")
+    } else {
+        (parent_price, "parent_fallback")
     };
 
     tracing::debug!(
-        parent_ts_ms = parent_ts_ms.as_millis(),
-        oracle_updated_ms,
+        parent_secs = parent_ts.as_secs(),
+        oracle_secs = oracle_updated_at.as_secs(),
         parent_price = %parent_price,
         oracle_price = %oracle_price,
         chosen_price = %chosen,
@@ -1635,46 +1634,81 @@ pub fn calculate_chunks_added(txs: &[DataTransactionHeader], chunk_size: u64) ->
 
 #[cfg(test)]
 mod oracle_choice_tests {
-    use super::{choose_oracle_price, millis_since_epoch};
-    use irys_types::{storage_pricing::Amount, UnixTimestampMs};
+    use super::choose_oracle_price;
+    use irys_types::{storage_pricing::Amount, UnixTimestamp};
     use rust_decimal_macros::dec;
-    use std::time::{Duration, UNIX_EPOCH};
+
+    const MAX_AGE_SECS: u64 = 3 * 60; // 3 minutes
 
     #[test]
-    fn chooses_parent_when_parent_is_newer() {
+    fn chooses_parent_when_oracle_is_too_stale() {
         let parent_price = Amount::token(dec!(2.0)).unwrap();
         let oracle_price = Amount::token(dec!(1.0)).unwrap();
-        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(2_000); // parent block timestamp 2 seconds
-        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(1_000); // oracle updated at 1 second
 
+        // Oracle is more than 3 minutes behind parent - use parent
         let chosen = choose_oracle_price(
-            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
+            UnixTimestamp::from_secs(1000),
             parent_price,
             oracle_price,
-            millis_since_epoch(oracle_updated_at),
+            UnixTimestamp::from_secs(1000 - MAX_AGE_SECS - 1), // 181 seconds behind
         );
         assert_eq!(
             chosen, parent_price,
-            "should choose parent price when parent is newer"
+            "should choose parent price when oracle is more than 3 minutes stale"
         );
     }
 
     #[test]
-    fn chooses_oracle_when_oracle_is_fresh() {
+    fn chooses_oracle_when_within_tolerance() {
         let parent_price = Amount::token(dec!(2.0)).unwrap();
         let oracle_price = Amount::token(dec!(1.0)).unwrap();
-        let parent_ts_ms = UNIX_EPOCH + Duration::from_millis(1_000); // parent block timestamp 1 second
-        let oracle_updated_at = UNIX_EPOCH + Duration::from_millis(2_000); // oracle updated at 2 seconds
 
+        // Oracle is exactly at the 3-minute tolerance boundary - still use oracle
         let chosen = choose_oracle_price(
-            UnixTimestampMs::from_millis(millis_since_epoch(parent_ts_ms)),
+            UnixTimestamp::from_secs(1000),
             parent_price,
             oracle_price,
-            millis_since_epoch(oracle_updated_at),
+            UnixTimestamp::from_secs(1000 - MAX_AGE_SECS), // exactly 180 seconds behind
+        );
+        assert_eq!(
+            chosen, oracle_price,
+            "should choose oracle price when exactly at 3-minute tolerance"
+        );
+    }
+
+    #[test]
+    fn chooses_oracle_when_oracle_is_fresher() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+
+        // Oracle is fresher than parent - definitely use oracle
+        let chosen = choose_oracle_price(
+            UnixTimestamp::from_secs(100),
+            parent_price,
+            oracle_price,
+            UnixTimestamp::from_secs(200),
         );
         assert_eq!(
             chosen, oracle_price,
             "should choose oracle price when oracle is fresher"
+        );
+    }
+
+    #[test]
+    fn chooses_oracle_when_timestamps_are_equal() {
+        let parent_price = Amount::token(dec!(2.0)).unwrap();
+        let oracle_price = Amount::token(dec!(1.0)).unwrap();
+
+        // Both at same second - prefer oracle (authoritative source)
+        let chosen = choose_oracle_price(
+            UnixTimestamp::from_secs(500),
+            parent_price,
+            oracle_price,
+            UnixTimestamp::from_secs(500),
+        );
+        assert_eq!(
+            chosen, oracle_price,
+            "should choose oracle price when timestamps are equal"
         );
     }
 }

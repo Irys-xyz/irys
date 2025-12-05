@@ -1,4 +1,4 @@
-use crate::error::ApiError;
+use crate::error::{ApiError, ApiStatusResponse};
 use crate::ApiState;
 use actix_web::{
     web::{self, Json},
@@ -15,7 +15,7 @@ use irys_types::{
     IrysTransactionResponse, H256,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 
 /// Handles the HTTP POST request for adding a transaction to the mempool.
 /// This function takes in a JSON payload of a `DataTransactionHeader` type,
@@ -25,7 +25,7 @@ use tracing::info;
 pub async fn post_tx(
     state: web::Data<ApiState>,
     body: Json<DataTransactionHeader>,
-) -> actix_web::Result<HttpResponse> {
+) -> Result<HttpResponse, ApiError> {
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
@@ -33,16 +33,22 @@ pub async fn post_tx(
     let tx_ingress_msg = MempoolServiceMessage::IngestDataTxFromApi(tx, oneshot_tx);
     if let Err(err) = state.mempool_service.send(tx_ingress_msg.into()) {
         tracing::error!("API: {}", err);
-        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver chunk: {err}")));
+        return Err((
+            format!("Failed to deliver chunk: {err}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+            .into());
     }
     let msg_result = oneshot_rx.await;
 
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
         tracing::error!("API: {}", err);
-        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(format!("Failed to deliver transaction: {err}")));
+        return Err((
+            format!("Failed to deliver transaction: {err}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+            .into());
     }
 
     // If message delivery succeeded, check for validation errors within the response
@@ -50,59 +56,82 @@ pub async fn post_tx(
     if let Err(err) = inner_result {
         tracing::warn!("API: {}", err);
         return match err {
-            TxIngressError::InvalidSignature(address) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("Invalid Signature: {err} (address: {address})")))
-            }
-            TxIngressError::Unfunded(tx_id) => {
-                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
-                    .body(format!("Unfunded: {err} (tx_id: {tx_id})")))
-            }
-            TxIngressError::Skipped => Ok(HttpResponse::Ok()
-                .body("Already processed: the transaction was previously handled")),
+            TxIngressError::InvalidSignature(address) => Err((
+                format!("Invalid Signature: {err} (address: {address})"),
+                StatusCode::BAD_REQUEST,
+            )
+                .into()),
+            TxIngressError::Unfunded(tx_id) => Err((
+                format!("Unfunded: {err} (tx_id: {tx_id})"),
+                StatusCode::PAYMENT_REQUIRED,
+            )
+                .into()),
+            TxIngressError::Skipped => Ok(ApiStatusResponse(
+                "Already processed: the transaction was previously handled".to_owned(),
+                StatusCode::OK,
+            )
+            .into()),
             TxIngressError::Other(err) => {
                 tracing::error!("API: {}", err);
-                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Failed to deliver transaction: {err}")))
+                // we explicitly don't forward these to the user
+                Err((
+                    format!("Failed to deliver transaction: {err}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into())
             }
-            TxIngressError::InvalidAnchor(anchor) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("Invalid Anchor: {err} (anchor: {anchor})")))
-            }
+            TxIngressError::InvalidAnchor(anchor) => Err((
+                format!("Invalid Anchor: {err} (anchor: {anchor})"),
+                StatusCode::BAD_REQUEST,
+            )
+                .into()),
             TxIngressError::DatabaseError(ref db_err) => {
                 tracing::error!("API: {}", err);
-                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal database error: {db_err}")))
+                Err((
+                    format!("Internal database error: {db_err}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into())
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {}", err);
-                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(format!("Internal service error: {err}")))
+                Err((
+                    format!("Internal service error: {err}"),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into())
             }
-            TxIngressError::CommitmentValidationError(commitment_validation_error) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
-                    "Commitment validation error: {commitment_validation_error}"
-                )))
+            TxIngressError::CommitmentValidationError(commitment_validation_error) => Err((
+                format!("Commitment validation error: {commitment_validation_error}"),
+                StatusCode::BAD_REQUEST,
+            )
+                .into()),
+            TxIngressError::InvalidLedger(_) => {
+                Err((format!("Invalid ledger ID: {err}"), StatusCode::BAD_REQUEST).into())
             }
-            TxIngressError::InvalidLedger(_) => Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                .body(format!("Invalid ledger ID: {err}"))),
             TxIngressError::BalanceFetchError { address, reason } => {
                 tracing::error!("API: Balance fetch error for {}: {}", address, reason);
-                Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
-                    .body(format!("Unable to verify balance for {address}: {reason}")))
+                Err((
+                    format!("Unable to verify balance for {address}: {reason}"),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                    .into())
             }
             TxIngressError::MempoolFull(reason) => {
                 tracing::warn!("API: Mempool at capacity: {}", reason);
-                Ok(
-                    HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE).body(format!(
-                        "Mempool is at capacity. Please try again later. {reason}"
-                    )),
+                Err((
+                    format!("Mempool is at capacity. Please try again later. {reason}"),
+                    StatusCode::SERVICE_UNAVAILABLE,
                 )
+                    .into())
             }
             TxIngressError::FundMisalignment(reason) => {
                 tracing::debug!("Tx has invalid funding params: {}", reason);
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("Funding for tx is invalid. {reason}")))
+                Err((
+                    format!("Funding for tx is invalid. {reason}"),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into())
             }
         };
     }
@@ -243,7 +272,7 @@ pub async fn get_tx_promotion_status(
     path: web::Path<H256>,
 ) -> Result<Json<PromotionStatus>, ApiError> {
     let tx_id: H256 = path.into_inner();
-    info!("Get tx_is_promoted by tx_id: {}", tx_id);
+    debug!("Get tx_is_promoted by tx_id: {}", tx_id);
 
     // Retrieve the transaction header from mempool or database
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();

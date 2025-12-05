@@ -72,20 +72,20 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(block::get_block_with_poa),
         )
         .route(
-            "/block_index",
+            "/block-index",
             web::get().to(block_index::block_index_route),
         )
         .route(
-            "/block_tree/forks",
+            "/block-tree/forks",
             web::get().to(block_tree::get_block_tree_forks),
         )
         .route(
-            "/commitment_tx",
+            "/commitment-tx",
             web::post().to(commitment::post_commitment_tx),
         )
         .route("/chunk", web::post().to(post_chunk::post_chunk))
         .route(
-            "/chunk/data_root/{ledger_id}/{data_root}/{offset}",
+            "/chunk/data-root/{ledger_id}/{data_root}/{offset}",
             web::get().to(get_chunk::get_chunk_by_data_root_offset),
         )
         .route(
@@ -95,8 +95,9 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/execution-rpc", web::to(proxy))
         .route("/info", web::get().to(index::info_route))
         .route("/genesis", web::get().to(index::genesis_route))
+        // TODO: need to fix serialization here
         .route("/network/config", web::get().to(config::get_config))
-        .route("/peer_list", web::get().to(peer_list::peer_list_route))
+        .route("/peer-list", web::get().to(peer_list::peer_list_route))
         .route(
             "/price/commitment/stake",
             web::get().to(price::get_stake_price),
@@ -117,11 +118,11 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
-            "/tx/{tx_id}/promotion_status",
+            "/tx/{tx_id}/promotion-status",
             web::get().to(tx::get_tx_promotion_status),
         )
         .route(
-            "/tx/{tx_id}/local/data_start_offset",
+            "/tx/{tx_id}/local/data-start-offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
         .route("/version", web::post().to(post_version::post_version))
