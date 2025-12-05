@@ -91,11 +91,6 @@ impl BlockTransactions {
             .unwrap_or(&[])
     }
 
-    /// Get owned transactions for a specific data ledger
-    pub fn take_ledger_txs(&mut self, ledger: DataLedger) -> Vec<DataTransactionHeader> {
-        self.data_txs.remove(&ledger).unwrap_or_default()
-    }
-
     /// Iterate over all data transactions across all ledgers
     pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
         self.data_txs.values().flatten()
@@ -599,7 +594,6 @@ impl BlockDiscoveryServiceInner {
         match validation_result {
             Ok(()) => {
                 // Check if we've reached the end of an epoch and should finalize commitments
-                let arc_commitment_txs = Arc::new(commitment_txs.clone());
 
                 let (epoch_snapshot, mut parent_commitment_snapshot) = {
                     let read = block_tree_guard.read();
@@ -632,13 +626,13 @@ impl BlockDiscoveryServiceInner {
                     let commitments_match = expected_commitment_tx
                         .iter()
                         .map(|c| &**c) // Deref to inner CommitmentTransaction
-                        .eq(arc_commitment_txs.iter().map(|v| &**v));
+                        .eq(commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
                                 new_block_header.block_hash,
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
-                                arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
+                                commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),
@@ -646,7 +640,7 @@ impl BlockDiscoveryServiceInner {
                     }
                 } else {
                     // Validate and add each commitment transaction for non-epoch blocks
-                    for commitment_tx in arc_commitment_txs.iter() {
+                    for commitment_tx in commitment_txs.iter() {
                         let status = parent_commitment_snapshot
                             .get_commitment_status(commitment_tx, &epoch_snapshot);
 
@@ -716,7 +710,7 @@ impl BlockDiscoveryServiceInner {
                 block_tree_sender
                     .send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
-                        commitment_txs: arc_commitment_txs,
+                        transactions,
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })

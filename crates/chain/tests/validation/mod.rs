@@ -6,12 +6,14 @@ mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::utils::{
     assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
     BlockValidationOutcome, IrysNodeTest,
 };
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
@@ -34,9 +36,9 @@ use irys_types::{
 pub async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
+    transactions: BlockTransactions,
     skip_vdf_validation: bool,
-) -> Result<(), PreValidationError> {
+) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     node_ctx
@@ -44,24 +46,30 @@ pub async fn send_block_to_block_tree(
         .block_tree
         .send(BlockTreeServiceMessage::BlockPreValidated {
             block,
-            commitment_txs: Arc::new(commitment_txs),
+            transactions,
             skip_vdf_validation,
             response: response_tx,
-        })
-        .unwrap();
+        })?;
 
-    response_rx.await.unwrap()
+    response_rx.await??;
+    Ok(())
 }
 
 fn send_block_to_block_validation(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
 ) -> Result<(), PreValidationError> {
+    let transactions = BlockTransactions {
+        commitment_txs: vec![],
+        data_txs: HashMap::new(),
+    };
+
     node_ctx
         .service_senders
         .validation_service
         .send(ValidationServiceMessage::ValidateBlock {
             block,
+            transactions,
             skip_vdf_validation: false,
         })
         .unwrap();
@@ -155,18 +163,18 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![invalid_pledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_pledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    // Note: The block is rejected with ShadowTransactionInvalid("Missing transactions")
-    // because we can't gossip invalid commitments to mempool (mempool validates them),
-    // but validation needs to look them up. In production, this scenario wouldn't occur.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block with invalid stake value should be rejected",
     );
 
@@ -263,18 +271,18 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![invalid_pledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_pledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    // Note: The block is rejected with ShadowTransactionInvalid("Missing transactions")
-    // because we can't gossip invalid commitments to mempool (mempool validates them),
-    // but validation needs to look them up. In production, this scenario wouldn't occur.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block with invalid pledge value should be rejected",
     );
 
@@ -384,7 +392,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![pledge, stake],
+        BlockTransactions {
+            commitment_txs: vec![pledge, stake],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -484,12 +495,16 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     let err = send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![wrong_commitment],
+        BlockTransactions {
+            commitment_txs: vec![wrong_commitment],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await
-    .unwrap_err();
+    .expect_err("block with wrong commitment should be rejected");
 
+    let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
         err,
         PreValidationError::InvalidEpochSnapshot { .. }
@@ -919,9 +934,16 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     );
     dbg!(&block);
 
-    let err = send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false)
-        .await
-        .unwrap_err();
+    let err = send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await
+    .expect_err("block with missing commitments should be rejected");
+
+    let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
         err,
         PreValidationError::InvalidEpochSnapshot { .. }

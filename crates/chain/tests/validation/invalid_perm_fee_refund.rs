@@ -4,6 +4,7 @@ use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
 use crate::validation::send_block_to_block_tree;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
@@ -115,7 +116,13 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         .unwrap();
 
     // Send block to the Genesis node for validation (not the genesis node)
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
         outcome,
@@ -124,7 +131,13 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     );
 
     // Send block to the PEER node for validation (not the genesis node)
-    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &peer_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     // Verify the PEER node rejected the block
     let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
@@ -226,7 +239,13 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         .unwrap();
 
     // Send block to the Genesis node for validation (not the genesis node)
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
         outcome,
@@ -235,7 +254,13 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
     );
 
     // Send block to the PEER node for validation (not the genesis node)
-    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &peer_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     // Verify the PEER node rejected the block
     let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
