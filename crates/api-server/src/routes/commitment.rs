@@ -1,4 +1,7 @@
-use crate::ApiState;
+use crate::{
+    error::{ApiError, ApiStatusResponse},
+    ApiState,
+};
 use actix_web::{
     web::{self, Json},
     HttpResponse,
@@ -15,7 +18,7 @@ use irys_types::CommitmentTransaction;
 pub async fn post_commitment_tx(
     state: web::Data<ApiState>,
     body: Json<CommitmentTransaction>,
-) -> actix_web::Result<HttpResponse> {
+) -> Result<HttpResponse, ApiError> {
     let tx = body.into_inner();
 
     // Validate transaction is valid. Check balances etc etc.
@@ -26,6 +29,7 @@ pub async fn post_commitment_tx(
             "API Failed to deliver MempoolServiceMessage::CommitmentTxIngressMessage: {}",
             err
         );
+
         return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
             .body("Failed to deliver transaction"));
     }
@@ -35,8 +39,11 @@ pub async fn post_commitment_tx(
     // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
         tracing::error!("API: {}", err);
-        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body("Failed to deliver transaction"));
+        return Err((
+            "Failed to deliver transaction",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+            .into());
     }
 
     // If message delivery succeeded, check for validation errors within the response
@@ -44,56 +51,79 @@ pub async fn post_commitment_tx(
     if let Err(err) = inner_result {
         tracing::warn!("API: {}", err);
         return match err {
-            TxIngressError::InvalidSignature(address) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("{err} (address: {address})")))
+            TxIngressError::InvalidSignature(address) => Err((
+                format!("{err} (address: {address})"),
+                StatusCode::BAD_REQUEST,
+            )
+                .into()),
+            TxIngressError::Unfunded(_) => {
+                Err((err.to_string(), StatusCode::PAYMENT_REQUIRED).into())
             }
-            TxIngressError::Unfunded(tx_id) => {
-                Ok(HttpResponse::build(StatusCode::PAYMENT_REQUIRED)
-                    .body(format!("{err} (tx_id: {tx_id})")))
-            }
-            TxIngressError::Skipped => Ok(HttpResponse::Ok()
-                .body("Already processed: the transaction was previously handled")),
+            TxIngressError::Skipped => Ok(
+                // TODO: we should just print the error's existing to_string representation here
+                ApiStatusResponse(
+                    "Already processed: the transaction was previously handled".to_owned(),
+                    StatusCode::OK,
+                )
+                .into(),
+            ),
             TxIngressError::Other(err) => {
                 tracing::error!("API: {}", err);
-                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body("Failed to deliver transaction"))
+                // we explicitly don't forward these to the user
+                Err((
+                    "Failed to ingest transaction (other)",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into())
             }
-            TxIngressError::InvalidAnchor(anchor) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST)
-                    .body(format!("{err} (anchor: {anchor})")))
+            TxIngressError::InvalidAnchor(_) => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
             TxIngressError::DatabaseError(ref db_err) => {
                 tracing::error!("API: Database error: {}", db_err);
-                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body("Internal database error"))
+
+                Err(("Internal database error", StatusCode::INTERNAL_SERVER_ERROR).into())
             }
             TxIngressError::ServiceUninitialized => {
                 tracing::error!("API: {}", err);
-                Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body("Internal service error"))
+
+                Err((
+                    "Internal service error".to_owned(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+                    .into())
             }
-            TxIngressError::CommitmentValidationError(commitment_validation_error) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!(
-                    "Commitment validation error: {commitment_validation_error}"
-                )))
+            TxIngressError::CommitmentValidationError(_) => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
             TxIngressError::InvalidLedger(_) => {
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body(format!("{err}")))
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
             }
             TxIngressError::BalanceFetchError { address, reason } => {
                 tracing::error!("API: Balance fetch error for {}: {}", address, reason);
-                Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
-                    .body("Unable to verify balance"))
+
+                Err((
+                    "Unable to verify balance".to_owned(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                    .into())
             }
             TxIngressError::MempoolFull(reason) => {
                 tracing::warn!("API: Mempool at capacity: {}", reason);
-                Ok(HttpResponse::build(StatusCode::SERVICE_UNAVAILABLE)
-                    .body("Mempool is at capacity. Please try again later."))
+
+                Err((
+                    "Mempool is at capacity. Please try again later.".to_owned(),
+                    StatusCode::SERVICE_UNAVAILABLE,
+                )
+                    .into())
             }
             TxIngressError::FundMisalignment(reason) => {
                 tracing::debug!("Tx has invalid funding params: {}", reason);
-                Ok(HttpResponse::build(StatusCode::BAD_REQUEST).body("Funding for tx is invalid"))
+                Err((
+                    "Funding for tx is invalid".to_owned(),
+                    StatusCode::BAD_REQUEST,
+                )
+                    .into())
             }
         };
     }

@@ -33,6 +33,10 @@ pub enum ApiError {
     BalanceUnavailable { reason: String },
     #[error("Invalid block parameter: {parameter}")]
     InvalidBlockParameter { parameter: String },
+    #[error("{0}")]
+    Custom(String),
+    #[error("{0}")]
+    CustomWithStatus(String, StatusCode),
 }
 
 impl ApiError {
@@ -57,6 +61,8 @@ impl ResponseError for ApiError {
             Self::InvalidAddressFormat { .. } => StatusCode::BAD_REQUEST,
             Self::BalanceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidBlockParameter { .. } => StatusCode::BAD_REQUEST,
+            Self::Custom(_) => StatusCode::BAD_REQUEST,
+            Self::CustomWithStatus(_, sc) => *sc,
         }
     }
 
@@ -72,6 +78,51 @@ impl ResponseError for ApiError {
 
         let body = serde_json::to_string(&error_response).unwrap();
         let res = HttpResponse::new(self.status_code());
+        res.set_body(BoxBody::new(body))
+    }
+}
+
+impl From<(&str, StatusCode)> for ApiError {
+    fn from(value: (&str, StatusCode)) -> Self {
+        Self::CustomWithStatus(value.0.to_string(), value.1)
+    }
+}
+
+impl From<(String, StatusCode)> for ApiError {
+    fn from(value: (String, StatusCode)) -> Self {
+        Self::CustomWithStatus(value.0, value.1)
+    }
+}
+
+// TODO: move this somewhere smarter
+
+pub struct ApiStatusResponse(pub String, pub StatusCode);
+
+impl From<(String, StatusCode)> for ApiStatusResponse {
+    fn from(value: (String, StatusCode)) -> Self {
+        Self(value.0, value.1)
+    }
+}
+
+impl From<(&str, StatusCode)> for ApiStatusResponse {
+    fn from(value: (&str, StatusCode)) -> Self {
+        Self(value.0.to_string(), value.1)
+    }
+}
+
+impl From<ApiStatusResponse> for HttpResponse {
+    fn from(val: ApiStatusResponse) -> Self {
+        #[derive(Serialize)]
+        struct Status {
+            // informative status message
+            // we use JSON so we can extend it etc later
+            status: String,
+        }
+
+        let response = Status { status: val.0 };
+
+        let body = serde_json::to_string(&response).unwrap();
+        let res = Self::new(val.1);
         res.set_body(BoxBody::new(body))
     }
 }

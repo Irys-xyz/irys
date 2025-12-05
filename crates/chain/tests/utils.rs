@@ -2404,7 +2404,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
             let client = reqwest::Client::new();
             let api_uri = self.node_ctx.config.node_config.local_api_url();
-            let url = format!("{}/v1/peer_list", api_uri);
+            let url = format!("{}/v1/peer-list", api_uri);
 
             if let Ok(resp) = client.get(&url).send().await {
                 if let Ok(list) = resp.json::<Vec<PeerAddress>>().await {
@@ -2669,7 +2669,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         info!("Posting Commitment TX: {}", commitment_tx.id);
 
         let client = reqwest::Client::new();
-        let url = format!("{}/v1/commitment_tx", api_uri);
+        let url = format!("{}/v1/commitment-tx", api_uri);
         let result = client.post(&url).json(commitment_tx).send().await;
 
         let response = match result {
@@ -3169,7 +3169,7 @@ where
     B: MessageBody + Unpin,
 {
     let req = TestRequest::post()
-        .uri("/v1/commitment_tx")
+        .uri("/v1/commitment-tx")
         .set_json(tx.clone())
         .to_request();
 
