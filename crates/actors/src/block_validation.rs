@@ -1651,29 +1651,16 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
-    // Regular block validation: check priority ordering for stake and pledge commitments
-    let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
-        .iter()
-        .filter(|tx| {
-            matches!(
-                tx.commitment_type,
-                CommitmentType::Stake
-                    | CommitmentType::Pledge { .. }
-                    | CommitmentType::Unpledge { .. }
-            )
-        })
-        .collect();
-
-    if stake_and_pledge_txs.is_empty() {
+    if actual_commitments.is_empty() {
         return Ok(());
     }
 
     // Sort to get expected order
-    let mut expected_order = stake_and_pledge_txs.clone();
+    let mut expected_order = actual_commitments.clone();
     expected_order.sort();
 
     // Compare actual order vs expected order
-    for (idx, pair) in stake_and_pledge_txs
+    for (idx, pair) in actual_commitments
         .iter()
         .zip_longest(expected_order.iter())
         .enumerate()
@@ -1689,7 +1676,7 @@ pub async fn commitment_txs_are_valid(
                 }
             }
             _ => {
-                // This should never happen since we're comparing the same filtered set
+                // This should never happen since we're comparing the same set
                 error!(
                     "Internal error: commitment ordering validation mismatch for block {} (height {})",
                     block.block_hash, block.height
