@@ -765,7 +765,7 @@ impl CommitmentTransactionV1 {
         Self {
             commitment_type: CommitmentType::Unpledge {
                 pledge_count_before_executing: count,
-                partition_hash: partition_hash.into(),
+                partition_hash,
             },
             anchor,
             fee: config.mempool.commitment_fee,
@@ -1776,8 +1776,7 @@ mod pledge_decay_parametrized_tests {
                 pledge_count_before_executing,
             } => {
                 assert_eq!(pledge_count_before_executing, 2);
-                let ph_bytes: [u8; 32] = ph.into();
-                assert_eq!(partition_hash, ph_bytes);
+                assert_eq!(partition_hash, ph);
             }
             _ => panic!("unexpected type"),
         }
@@ -1805,10 +1804,10 @@ mod commitment_ordering_tests {
         }
     }
 
-    fn partition_hash(tag: u8) -> [u8; 32] {
+    fn partition_hash(tag: u8) -> H256 {
         let mut bytes = [0_u8; 32];
         bytes[31] = tag;
-        bytes
+        bytes.into()
     }
 
     #[test]
