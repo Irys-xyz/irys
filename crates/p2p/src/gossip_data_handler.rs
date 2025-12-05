@@ -8,14 +8,14 @@ use crate::{
 use core::net::SocketAddr;
 use futures::stream::{self, StreamExt as _};
 use irys_actors::{
-    block_discovery::{BlockDiscoveryFacade, BlockTransactions},
+    block_discovery::{BlockDiscoveryFacade},
     AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
 };
 use irys_api_client::ApiClient;
 use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
-use irys_types::IrysAddress;
+use irys_types::{BlockBody, BlockTransactions, IrysAddress};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
@@ -530,6 +530,15 @@ where
         Ok(())
     }
 
+    pub async fn handle_block_body(
+        &self,
+       block_header_request: GossipRequest<BlockBody>,
+       source_api_address: SocketAddr,
+       data_source_ip: SocketAddr,
+    ) -> GossipResult<()> {
+        // TODO: Implement handling of block bodies
+    }
+
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub async fn pull_and_add_execution_payload_to_cache(
         &self,
@@ -655,7 +664,7 @@ where
         }
 
         match request.data {
-            GossipDataRequest::Block(block_hash) => {
+            GossipDataRequest::BlockHeader(block_hash) => {
                 let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
 
                 match maybe_block {
@@ -667,7 +676,7 @@ where
                                 "Block pool returned a block without a POA chunk"
                             );
                         }
-                        let data = Arc::new(GossipData::Block(block));
+                        let data = Arc::new(GossipData::BlockHeader(block));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
@@ -684,6 +693,10 @@ where
                     }
                     None => Ok(false),
                 }
+            }
+            GossipDataRequest::BlockBody(_block_hash) => {
+                // TODO: Implement BlockBody retrieval
+                unimplemented!();
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 debug!(
@@ -725,7 +738,7 @@ where
         request: GossipRequest<GossipDataRequest>,
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
-            GossipDataRequest::Block(block_hash) => {
+            GossipDataRequest::BlockHeader(block_hash) => {
                 let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
                 if let Some(block) = &maybe_block {
                     if block.poa.chunk.is_none() {
@@ -736,7 +749,11 @@ where
                         );
                     }
                 }
-                Ok(maybe_block.map(GossipData::Block))
+                Ok(maybe_block.map(GossipData::BlockHeader))
+            }
+            GossipDataRequest::BlockBody(_block_hash) => {
+                // TODO: Implement BlockBody retrieval
+                Ok(None)
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self

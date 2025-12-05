@@ -1,7 +1,4 @@
-use crate::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
-};
+use crate::{BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256};
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
@@ -68,7 +65,7 @@ impl From<IngressProof> for GossipBroadcastMessage {
 impl From<Arc<IrysBlockHeader>> for GossipBroadcastMessage {
     fn from(block: Arc<IrysBlockHeader>) -> Self {
         let key = GossipCacheKey::irys_block(&block);
-        let value = GossipData::Block(block);
+        let value = GossipData::BlockHeader(block);
         Self::new(key, value)
     }
 }
@@ -113,7 +110,8 @@ pub enum GossipData {
     Chunk(UnpackedChunk),
     Transaction(DataTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
-    Block(Arc<IrysBlockHeader>),
+    BlockHeader(Arc<IrysBlockHeader>),
+    BlockBody(BlockBody),
     ExecutionPayload(Block),
     IngressProof(IngressProof),
 }
@@ -136,8 +134,11 @@ impl GossipData {
             Self::CommitmentTransaction(commitment_tx) => {
                 format!("commitment transaction {}", commitment_tx.id)
             }
-            Self::Block(block) => {
+            Self::BlockHeader(block) => {
                 format!("block {} height: {}", block.block_hash, block.height)
+            }
+            Self::BlockBody(block_body) => {
+                format!("block body for block {}", block_body.block_hash)
             }
             Self::ExecutionPayload(execution_payload_data) => {
                 format!(
@@ -165,14 +166,16 @@ pub struct GossipRequest<T> {
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipDataRequest {
     ExecutionPayload(B256),
-    Block(BlockHash),
+    BlockHeader(BlockHash),
+    BlockBody(BlockHash),
     Chunk(ChunkPathHash),
 }
 
 impl Debug for GossipDataRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Block(hash) => write!(f, "block {hash:?}"),
+            Self::BlockHeader(hash) => write!(f, "block {hash:?}"),
+            Self::BlockBody(hash) => write!(f, "block body {hash:?}"),
             Self::ExecutionPayload(block_hash) => {
                 write!(f, "execution payload for block {block_hash:?}")
             }

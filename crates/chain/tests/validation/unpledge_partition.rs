@@ -6,14 +6,13 @@ use crate::utils::{
 };
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::CommitmentType;
+use irys_types::{BlockTransactions, CommitmentType};
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 use std::collections::HashMap;
 

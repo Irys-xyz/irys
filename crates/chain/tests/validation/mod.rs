@@ -13,7 +13,6 @@ use crate::utils::{
     assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
     BlockValidationOutcome, IrysNodeTest,
 };
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
@@ -27,10 +26,7 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
-use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger, H256,
-};
+use irys_types::{BlockTransactions, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger, H256};
 
 // Helper function to send a block directly to the block tree service for validation
 pub async fn send_block_to_block_tree(

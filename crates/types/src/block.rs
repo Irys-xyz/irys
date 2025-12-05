@@ -8,7 +8,7 @@ use crate::versioning::{
     compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
     VersioningError,
 };
-use crate::IrysAddress;
+use crate::{CommitmentTransaction, IrysAddress};
 use crate::{decode_rlp_version, encode_rlp_version};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -1037,6 +1037,37 @@ impl BlockIndexItem {
 
         item
     }
+}
+
+/// Transactions for a block, organized by ledger type.
+/// Used to pass pre-fetched transactions to block discovery.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BlockTransactions {
+    /// Commitment ledger transactions
+    pub commitment_txs: Vec<CommitmentTransaction>,
+    /// Data transactions organized by ledger type
+    pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
+}
+
+impl BlockTransactions {
+    /// Get transactions for a specific data ledger
+    pub fn get_ledger_txs(&self, ledger: DataLedger) -> &[DataTransactionHeader] {
+        self.data_txs
+            .get(&ledger)
+            .map(std::vec::Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Iterate over all data transactions across all ledgers
+    pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
+        self.data_txs.values().flatten()
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct BlockBody {
+    pub block_hash: BlockHash,
+    pub transactions: BlockTransactions
 }
 
 #[cfg(test)]

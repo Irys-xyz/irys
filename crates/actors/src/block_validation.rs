@@ -1,6 +1,5 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::{
-    block_discovery::BlockTransactions,
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -25,7 +24,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
-use irys_types::UnixTimestampMs;
+use irys_types::{BlockTransactions, UnixTimestampMs};
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,

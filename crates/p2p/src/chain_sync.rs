@@ -1614,7 +1614,7 @@ mod tests {
             fake_gossip_server.set_on_pull_data_request(move |data_request| {
                 match data_request {
                     GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
-                    GossipDataRequest::Block(block_hash) => {
+                    GossipDataRequest::BlockHeader(block_hash) => {
                         info!("Fake server pull data request: {block_hash:?}");
                         let mut block_requests = block_requests.lock().unwrap();
                         let requests_len = block_requests.len();
@@ -1625,12 +1625,13 @@ mod tests {
                             GossipResponse::Accepted(None)
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
-                            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
+                            GossipResponse::Accepted(Some(GossipData::BlockHeader(Arc::new(
                                 IrysBlockHeader::new_mock_header(),
                             ))))
                         }
                     }
                     GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+                    GossipDataRequest::BlockBody(_) => GossipResponse::Accepted(None),
                 }
             });
             let fake_gossip_address = fake_gossip_server.spawn();
@@ -1881,7 +1882,7 @@ mod tests {
             let s2_calls = Arc::new(Mutex::new(0_usize));
             let s1_calls_clone = s1_calls.clone();
             server1.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequest::BlockHeader(_hash) => {
                     let mut c = s1_calls_clone.lock().unwrap();
                     *c += 1;
                     GossipResponse::Accepted(None)
@@ -1891,10 +1892,10 @@ mod tests {
 
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequest::BlockHeader(_hash) => {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
-                    GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
+                    GossipResponse::Accepted(Some(GossipData::BlockHeader(Arc::new(
                         IrysBlockHeader::new_mock_header(),
                     ))))
                 }
@@ -2014,7 +2015,7 @@ mod tests {
             let s2_calls = Arc::new(Mutex::new(0_usize));
             let s1_calls_clone = s1_calls.clone();
             server1.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequest::BlockHeader(_hash) => {
                     *s1_calls_clone.lock().unwrap() += 1;
                     GossipResponse::Accepted(None)
                 }
@@ -2022,7 +2023,7 @@ mod tests {
             });
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequest::BlockHeader(_hash) => {
                     *s2_calls_clone.lock().unwrap() += 1;
                     GossipResponse::Accepted(None)
                 }

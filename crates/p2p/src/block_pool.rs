@@ -2,7 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use irys_actors::block_discovery::{BlockDiscoveryFacade, BlockTransactions};
+use irys_actors::block_discovery::{BlockDiscoveryFacade};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -18,10 +18,7 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
-use irys_types::{
-    BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage,
-    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
-};
+use irys_types::{BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256};
 use lru::LruCache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;

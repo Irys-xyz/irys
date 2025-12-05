@@ -12,7 +12,6 @@ use alloy_core::primitives::FixedBytes;
 use alloy_eips::BlockId;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
@@ -44,11 +43,7 @@ use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
-use irys_types::{
-    block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, DataLedger, EvmBlockHash, GossipBroadcastMessage,
-    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
-};
+use irys_types::{block_production::Seed, block_production::SolutionContext, irys::IrysSigner, partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash, GossipBroadcastMessage, H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256};
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
     DataTransactionHeader, DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId,

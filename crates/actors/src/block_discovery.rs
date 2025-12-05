@@ -16,11 +16,7 @@ use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
 };
 use irys_reward_curve::HalvingCurve;
-use irys_types::{
-    get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle, H256,
-};
+use irys_types::{get_ingress_proofs, BlockHash, BlockTransactions, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader, IrysTransactionId, TokioServiceHandle, H256};
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
@@ -71,31 +67,6 @@ pub enum AnchorItemType {
     DataTransaction { tx_id: H256 },
     IngressProof { promotion_target_id: H256 },
     SystemTransaction { tx_id: H256 },
-}
-
-/// Transactions for a block, organized by ledger type.
-/// Used to pass pre-fetched transactions to block discovery.
-#[derive(Debug, Clone, Default)]
-pub struct BlockTransactions {
-    /// Commitment ledger transactions
-    pub commitment_txs: Vec<CommitmentTransaction>,
-    /// Data transactions organized by ledger type
-    pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
-}
-
-impl BlockTransactions {
-    /// Get transactions for a specific data ledger
-    pub fn get_ledger_txs(&self, ledger: DataLedger) -> &[DataTransactionHeader] {
-        self.data_txs
-            .get(&ledger)
-            .map(std::vec::Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    /// Iterate over all data transactions across all ledgers
-    pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
-        self.data_txs.values().flatten()
-    }
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::{BlockDiscoveryError, BlockTransactions};
+use irys_actors::block_discovery::{BlockDiscoveryError};
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
@@ -26,7 +26,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
-use irys_types::IrysAddress;
+use irys_types::{BlockTransactions, IrysAddress};
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
@@ -824,7 +824,7 @@ async fn handle_get_data(
 
     match handler.read() {
         Ok(handler) => match data_request.data {
-            GossipDataRequest::Block(block_hash) => {
+            GossipDataRequest::BlockHeader(block_hash) => {
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {:?}",
@@ -833,6 +833,12 @@ async fn handle_get_data(
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(res)
+            }
+            GossipDataRequest::BlockBody(block_hash) => {
+                warn!("Block body request for hash {:?}", block_hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(false)
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 warn!("Execution payload request for hash {:?}", evm_block_hash);
