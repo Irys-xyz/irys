@@ -237,7 +237,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         let count = target_counts[idx];
         tx.commitment_type = CommitmentType::Unpledge {
             pledge_count_before_executing: count,
-            partition_hash: assignment.partition_hash.into(),
+            partition_hash: assignment.partition_hash,
         };
         tx.value = CommitmentTransaction::calculate_pledge_value_at_count(
             consensus,

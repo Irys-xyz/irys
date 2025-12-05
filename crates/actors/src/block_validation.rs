@@ -1629,7 +1629,6 @@ pub async fn commitment_txs_are_valid(
 
     for tx in &actual_commitments {
         if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
-            let partition_hash = H256::from(partition_hash);
             let owner = parent_epoch_snapshot
                 .partition_assignments
                 .get_assignment(partition_hash)

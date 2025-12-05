@@ -279,7 +279,7 @@ impl CommitmentSnapshot {
                 // Capacity ownership check
                 let owned = epoch_snapshot
                     .partition_assignments
-                    .get_assignment(irys_types::H256::from(*partition_hash))
+                    .get_assignment(*partition_hash)
                     .is_some_and(|pa| pa.miner_address == *signer);
                 if !owned {
                     return CommitmentSnapshotStatus::Unowned;
