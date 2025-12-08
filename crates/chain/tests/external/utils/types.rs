@@ -2,6 +2,14 @@ use irys_types::{partition::PartitionAssignment, H256};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn deserialize_string_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = serde::Deserialize::deserialize(deserializer)?;
+    s.parse().map_err(serde::de::Error::custom)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct GenesisResponse {
     pub genesis_block_hash: String,
@@ -34,8 +42,10 @@ pub(crate) struct NetworkConfigResponse {
     pub entropy_packing_iterations: u32,
 }
 
+/// Response from /v1/block/latest endpoint - only the fields we need
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ChainHeightResponse {
+pub(crate) struct BlockHeightResponse {
+    #[serde(deserialize_with = "deserialize_string_u64")]
     pub height: u64,
 }
 
