@@ -1,8 +1,3 @@
-//! PD (Programmable Data) pricing service.
-//!
-//! Provides functionality for querying PD base fees, estimating future fees,
-//! and analyzing priority fees for PD transactions.
-
 use self::base_fee::{
     calculate_pd_base_fee_for_new_block, count_pd_chunks_in_block, extract_pd_base_fee_from_block,
     extract_priority_fees_from_block,
@@ -22,8 +17,6 @@ use reth::providers::BlockReader as _;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-// PdPricing Service
-
 /// Service for calculating and estimating PD pricing.
 ///
 /// This service encapsulates all PD pricing logic, making it reusable across
@@ -36,7 +29,6 @@ pub struct PdPricing {
 }
 
 impl PdPricing {
-    /// Create a new PdPricing service.
     pub fn new(
         block_tree: BlockTreeReadGuard,
         reth_provider: RethNodeProvider,
@@ -63,7 +55,6 @@ impl PdPricing {
     /// # Example
     /// ```ignore
     /// let history = pd_pricing.get_fee_history(20, &[25, 50, 75])?;
-    /// // Returns per-block base fees, utilization, and priority fees
     /// ```
     pub fn get_fee_history(
         &self,
@@ -102,14 +93,7 @@ impl PdPricing {
 
         for (irys_block, ema_snapshot) in &blocks_with_ema {
             // Get EVM block
-            let evm_block = self
-                .reth_provider
-                .provider
-                .block_by_hash(irys_block.evm_block_hash)?
-                .ok_or_eyre(format!(
-                    "EVM block {} not found for Irys block {}",
-                    irys_block.evm_block_hash, irys_block.block_hash
-                ))?;
+            let evm_block = self.get_evm_block_for_irys_block(irys_block)?;
 
             // Extract base fee
             let pd_config = &self.config.consensus.programmable_data;
@@ -125,81 +109,21 @@ impl PdPricing {
             base_fee_usd_vec.push(base_fee_usd);
 
             // Calculate utilization (deterministic fixed-point arithmetic)
-            let pd_chunks_used = count_pd_chunks_in_block(&evm_block);
-            let max_pd_chunks = self
-                .config
-                .consensus
-                .programmable_data
-                .max_pd_chunks_per_block;
-            let utilization_percent = if max_pd_chunks > 0 {
-                // Calculate: (pd_chunks_used * PRECISION_SCALE) / max_pd_chunks
-                // This gives us the percentage in fixed-point where PRECISION_SCALE = 100%
-                let percent_amount = mul_div(
-                    irys_types::U256::from(pd_chunks_used),
-                    PRECISION_SCALE,
-                    irys_types::U256::from(max_pd_chunks),
-                )?;
-                Amount::<Percentage>::new(percent_amount)
-            } else {
-                Amount::<Percentage>::new(irys_types::U256::from(0))
-            };
-
+            let utilization_percent = self.calculate_pd_utilization_percent(&evm_block)?;
             gas_used_ratio_vec.push(utilization_percent);
 
             // Extract priority fees and calculate percentiles
-            let block_priority_fees = extract_priority_fees_from_block(&evm_block);
-
-            let mut percentile_map = std::collections::HashMap::new();
-            if !block_priority_fees.is_empty() {
-                let mut sorted_fees = block_priority_fees.clone();
-                sorted_fees.sort_by(|a, b| a.amount.cmp(&b.amount));
-
-                for &percentile in reward_percentiles {
-                    let index = ((percentile as usize * sorted_fees.len()) / 100)
-                        .min(sorted_fees.len().saturating_sub(1));
-                    let fee_irys = sorted_fees[index];
-                    let fee_usd = convert_irys_to_usd(fee_irys, &ema_price)?;
-
-                    percentile_map
-                        .insert(percentile, PriorityFeeAtPercentile { fee_irys, fee_usd });
-                }
-            }
-
-            reward_vec.push(BlockPriorityFees {
-                percentiles: percentile_map,
-                sample_size: block_priority_fees.len(),
-            });
+            let block_priority_fees =
+                Self::calculate_priority_fee_percentiles(&evm_block, reward_percentiles, &ema_price)?;
+            reward_vec.push(block_priority_fees);
         }
 
-        // Predict next block's base fee
+        // Predict next block's base fee (Ethereum N+1 pattern)
         let (current_irys_block, current_ema) =
             blocks_with_ema.first().ok_or_eyre("No blocks available")?;
-        let current_evm_block = self
-            .reth_provider
-            .provider
-            .block_by_hash(current_irys_block.evm_block_hash)?
-            .ok_or_eyre("Current EVM block not found")?;
 
-        let pd_config = &self.config.consensus.programmable_data;
-        let chunk_size = self.config.consensus.chunk_size;
-        let current_base_fee = extract_pd_base_fee_from_block(
-            current_irys_block,
-            &current_evm_block,
-            pd_config,
-            chunk_size,
-        )?;
-        let current_chunks_used = count_pd_chunks_in_block(&current_evm_block);
-        let current_ema_price = current_ema.ema_for_public_pricing();
-
-        let next_base_fee_irys = calculate_pd_base_fee_for_new_block(
-            current_ema,
-            &current_ema_price,
-            current_chunks_used as u32,
-            current_base_fee,
-            pd_config,
-            chunk_size,
-        )?;
-        let next_base_fee_usd = convert_irys_to_usd(next_base_fee_irys, &current_ema_price)?;
+        let (next_base_fee_irys, next_base_fee_usd) =
+            self.predict_next_block_fees(current_irys_block, current_ema)?;
 
         // Append next block prediction to base fee arrays (Ethereum N+1 pattern)
         base_fee_irys_vec.push(next_base_fee_irys);
@@ -215,6 +139,174 @@ impl PdPricing {
             gas_used_ratio: gas_used_ratio_vec,
             reward: reward_vec,
         })
+    }
+
+    /// Fetch the EVM block corresponding to an Irys block.
+    ///
+    /// # Arguments
+    /// * `irys_block` - The Irys block header containing the EVM block hash
+    ///
+    /// # Returns
+    /// The corresponding EVM block
+    ///
+    /// # Errors
+    /// Returns error if EVM block not found or fetch fails
+    fn get_evm_block_for_irys_block(
+        &self,
+        irys_block: &irys_types::IrysBlockHeader,
+    ) -> eyre::Result<reth_ethereum_primitives::Block> {
+        self.reth_provider
+            .provider
+            .block_by_hash(irys_block.evm_block_hash)?
+            .ok_or_eyre(format!(
+                "EVM block {} not found for Irys block {}",
+                irys_block.evm_block_hash, irys_block.block_hash
+            ))
+    }
+
+    /// Calculate PD utilization as a percentage using fixed-point arithmetic.
+    ///
+    /// Computes: (chunks_used * PRECISION_SCALE) / max_chunks
+    ///
+    /// # Arguments
+    /// * `evm_block` - The EVM block to analyze
+    ///
+    /// # Returns
+    /// Utilization percentage (0-100% in fixed-point)
+    ///
+    /// # Examples
+    /// - 50 chunks used / 100 max = 50% utilization
+    /// - 0 chunks used = 0% utilization
+    /// - max_chunks = 0 = 0% utilization (edge case)
+    fn calculate_pd_utilization_percent(
+        &self,
+        evm_block: &reth_ethereum_primitives::Block,
+    ) -> eyre::Result<Amount<Percentage>> {
+        let pd_chunks_used = count_pd_chunks_in_block(evm_block);
+        let max_pd_chunks = self
+            .config
+            .consensus
+            .programmable_data
+            .max_pd_chunks_per_block;
+
+        let utilization_percent = if max_pd_chunks > 0 {
+            // Calculate: (pd_chunks_used * PRECISION_SCALE) / max_pd_chunks
+            // This gives us the percentage in fixed-point where PRECISION_SCALE = 100%
+            let percent_amount = mul_div(
+                irys_types::U256::from(pd_chunks_used),
+                PRECISION_SCALE,
+                irys_types::U256::from(max_pd_chunks),
+            )?;
+            Amount::<Percentage>::new(percent_amount)
+        } else {
+            Amount::<Percentage>::new(irys_types::U256::from(0))
+        };
+
+        Ok(utilization_percent)
+    }
+
+    /// Calculate priority fee percentiles for a block's PD transactions.
+    ///
+    /// Extracts all priority fees, sorts them, calculates requested percentiles,
+    /// and converts each to USD.
+    ///
+    /// # Arguments
+    /// * `evm_block` - The EVM block to analyze
+    /// * `reward_percentiles` - Percentiles to calculate (e.g., [25, 50, 75])
+    /// * `ema_price` - Current EMA price for USD conversion
+    ///
+    /// # Returns
+    /// Block priority fees with percentile map and sample size
+    ///
+    /// # Examples
+    /// - Empty block (no PD txs) = empty percentile map, sample_size = 0
+    /// - Block with 10 PD txs, percentiles [50] = median fee
+    fn calculate_priority_fee_percentiles(
+        evm_block: &reth_ethereum_primitives::Block,
+        reward_percentiles: &[u8],
+        ema_price: &IrysTokenPrice,
+    ) -> eyre::Result<BlockPriorityFees> {
+        let block_priority_fees = extract_priority_fees_from_block(evm_block);
+
+        let mut percentile_map = std::collections::HashMap::new();
+        if !block_priority_fees.is_empty() {
+            let mut sorted_fees = block_priority_fees.clone();
+            sorted_fees.sort_by(|a, b| a.amount.cmp(&b.amount));
+
+            for &percentile in reward_percentiles {
+                let index = ((percentile as usize * sorted_fees.len()) / 100)
+                    .min(sorted_fees.len().saturating_sub(1));
+                let fee_irys = sorted_fees[index];
+                let fee_usd = convert_irys_to_usd(fee_irys, ema_price)?;
+
+                percentile_map.insert(percentile, PriorityFeeAtPercentile { fee_irys, fee_usd });
+            }
+        }
+
+        Ok(BlockPriorityFees {
+            percentiles: percentile_map,
+            sample_size: block_priority_fees.len(),
+        })
+    }
+
+    /// Predict the base fees for the next block based on current block state.
+    ///
+    /// This implements Ethereum's N+1 fee prediction pattern by:
+    /// 1. Fetching the current block's EVM data
+    /// 2. Extracting current base fee
+    /// 3. Counting chunks used in current block
+    /// 4. Calculating next block's base fee based on utilization
+    /// 5. Converting to USD
+    ///
+    /// # Arguments
+    /// * `current_irys_block` - Current (most recent) Irys block header
+    /// * `current_ema` - Current EMA snapshot for price conversions
+    ///
+    /// # Returns
+    /// Tuple of (next_base_fee_irys, next_base_fee_usd)
+    ///
+    /// # Errors
+    /// Returns error if EVM block fetch fails, fee extraction fails, or calculation fails
+    fn predict_next_block_fees(
+        &self,
+        current_irys_block: &irys_types::IrysBlockHeader,
+        current_ema: &irys_domain::EmaSnapshot,
+    ) -> eyre::Result<(Amount<(CostPerChunk, Irys)>, Amount<(CostPerChunk, Usd)>)> {
+        // Fetch current EVM block using helper #1
+        let current_evm_block = self.get_evm_block_for_irys_block(current_irys_block)?;
+
+        // Extract config values
+        let pd_config = &self.config.consensus.programmable_data;
+        let chunk_size = self.config.consensus.chunk_size;
+
+        // Extract current base fee
+        let current_base_fee = extract_pd_base_fee_from_block(
+            current_irys_block,
+            &current_evm_block,
+            pd_config,
+            chunk_size,
+        )?;
+
+        // Count chunks used in current block
+        let current_chunks_used = count_pd_chunks_in_block(&current_evm_block);
+
+        // Get current EMA price
+        let current_ema_price = current_ema.ema_for_public_pricing();
+
+        // Calculate next block's base fee
+        let next_base_fee_irys = calculate_pd_base_fee_for_new_block(
+            current_ema,
+            &current_ema_price,
+            current_chunks_used as u32,
+            current_base_fee,
+            pd_config,
+            chunk_size,
+        )?;
+
+        // Convert to USD
+        let next_base_fee_usd = convert_irys_to_usd(next_base_fee_irys, &current_ema_price)?;
+
+        Ok((next_base_fee_irys, next_base_fee_usd))
     }
 }
 
