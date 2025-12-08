@@ -1224,7 +1224,18 @@ impl StorageModule {
     ) -> Result<Option<PackedChunk>> {
         let range = self.get_storage_module_ledger_offsets()?;
         let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
-        self.generate_full_chunk(partition_offset)
+
+        match self.generate_full_chunk(partition_offset) {
+            Ok(some_full_chunk) => Ok(some_full_chunk),
+            // Convert errors to Ok(None) to prevent node panics and HTTP 500 errors.
+            // Missing chunks are expected during normal operation (e.g., pruned data,
+            // gaps in storage) and should be handled gracefully by returning None
+            // rather than propagating errors up to the API layer.
+            Err(err) => {
+                debug!("Unable to find chunk at ledger offset: {err:?}");
+                Ok(None)
+            }
+        }
     }
 
     /// Constructs a Chunk struct for the given ledger offset

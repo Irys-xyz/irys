@@ -9,7 +9,8 @@ use crate::{
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
+    block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
+    db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
 };
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
@@ -383,6 +384,56 @@ impl BlockDiscoveryServiceInner {
         let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
         let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
         let commitment_txs = &transactions.commitment_txs;
+        let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
+
+        if publish_txs.len() != publish_tx_ids_to_check.len() {
+            let missing_txs = publish_tx_ids_to_check
+                .into_iter()
+                .filter(|id| !publish_txs.iter().any(|tx| tx.id == *id))
+                .collect();
+            return Err(BlockDiscoveryError::MissingTransactions(missing_txs));
+        }
+
+        if !publish_txs.is_empty() {
+            // Pre-Validate the ingress-proofs for each published transaction
+            for tx_header in publish_txs.iter() {
+                // Get the ingress proofs for the transaction
+                let tx_proofs =
+                    get_ingress_proofs(publish_ledger, &tx_header.id).map_err(|_| {
+                        BlockDiscoveryError::BlockValidationError(
+                            PreValidationError::IngressProofsMissing,
+                        )
+                    })?;
+                // Validate the signatures and data_roots
+                for proof in tx_proofs.iter() {
+                    proof.pre_validate(&tx_header.data_root).map_err(|e| {
+                        BlockDiscoveryError::BlockValidationError(
+                            PreValidationError::IngressProofSignatureInvalid(e.to_string()),
+                        )
+                    })?;
+
+                    // Check to see if we have a confirmed data_size for the data_root
+                    let cdr = self
+                        .db
+                        .view_eyre(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+                        .map_err(BlockDiscoveryInternalError::DatabaseError)?;
+
+                    // If so, compare it with the data_size in the tx
+                    if let Some(cdr) = cdr {
+                        // If the tx data_size doesn't match the confirmed size, this is an invalid promotion
+                        if cdr.data_size_confirmed && cdr.data_size != tx_header.data_size {
+                            return Err(BlockDiscoveryError::BlockValidationError(
+                                PreValidationError::InvalidPromotionDataSizeMismatch {
+                                    txid: tx_header.id,
+                                    got: tx_header.data_size,
+                                    expected: cdr.data_size,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
         info!(
             "Pre-validating block {:?} {}\ncommitments:\n{:#?}\ntransactions:\n{:?}",

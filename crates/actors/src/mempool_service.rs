@@ -12,6 +12,7 @@ pub use pending_chunks::PriorityPendingChunks;
 
 pub use chunks::*;
 pub use facade::*;
+use irys_database::db_cache::CachedDataRoot;
 pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
@@ -1063,7 +1064,7 @@ impl Inner {
         );
 
         {
-            let publish_txids = self
+            let (publish_txids, cached_data_roots) = self
                 .irys_db
                 .view_eyre(|tx| {
                     let mut read_cursor = tx
@@ -1080,18 +1081,20 @@ impl Inner {
                         })?;
 
                     let mut publish_txids: Vec<H256> = Vec::new();
+                    let mut cached_data_roots: HashMap<H256, CachedDataRoot> = HashMap::new();
 
                     // Loop through all the data_roots with ingress proofs and find corresponding transaction ids
                     for data_root in ingress_proofs.keys() {
                         let cached_data_root =
                             cached_data_root_by_data_root(tx, *data_root).unwrap();
                         if let Some(cached_data_root) = cached_data_root {
-                            let txids = cached_data_root.txid_set;
+                            let txids = cached_data_root.txid_set.clone();
                             trace!(tx.ids = ?txids, "Publish candidates");
-                            publish_txids.extend(txids)
+                            publish_txids.extend(txids);
+                            cached_data_roots.insert(*data_root, cached_data_root);
                         }
                     }
-                    Ok(publish_txids)
+                    Ok((publish_txids, cached_data_roots))
                 })
                 .map_err(|e| eyre!("Failed to create DB transaction: {}", e))?;
 
@@ -1117,6 +1120,13 @@ impl Inner {
 
             // Sort the resulting publish_txs & proofs
             tx_headers.sort_by(|a, b| a.id.cmp(&b.id));
+
+            // Filter out any tx headers with the wrong data_size for this data_root
+            tx_headers.retain(|tx| {
+                cached_data_roots.get(&tx.data_root).map_or(true, |cdr| {
+                    !cdr.data_size_confirmed || tx.data_size == cdr.data_size
+                })
+            });
 
             // reduce down the canonical chain to the txs in the submit ledger
             let submit_txs_from_canonical = canonical.iter().fold(HashSet::new(), |mut acc, v| {

@@ -298,8 +298,39 @@ impl Inner {
             }
         }
 
+        // Gossip the chunk before moving onto ingress proof checks
+        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
+        let chunk_data_root = chunk.data_root;
+        let chunk_tx_offset = chunk.tx_offset;
+        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk.clone());
+
+        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+            tracing::error!(
+                "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
+                chunk_data_root,
+                chunk_tx_offset,
+                error
+            );
+        }
+
         // ==== INGRESS PROOFS ====
         let root_hash: H256 = root_hash.into();
+        let cached_data_root = self
+            .irys_db
+            .view_eyre(|read_tx| irys_database::cached_data_root_by_data_root(read_tx, root_hash))
+            .map_err(|_| CriticalChunkIngressError::DatabaseError)?;
+
+        // Early out: only generate ingress proofs for confirmed data sizes
+        let Some(cdr) = cached_data_root else {
+            return Ok(());
+        };
+
+        if !cdr.data_size_confirmed {
+            return Ok(());
+        }
+
+        // Be explicit that data_size used from here on is the confirmed data size
+        let data_size = cdr.data_size;
 
         // check if we have generated an ingress proof for this tx already
         // if we have, update it's expiry height
@@ -369,21 +400,6 @@ impl Inner {
                 }
             }).in_current_span();
         }
-
-        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
-        let chunk_data_root = chunk.data_root;
-        let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
-
-        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
-            tracing::error!(
-                "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
-                chunk_data_root,
-                chunk_tx_offset,
-                error
-            );
-        }
-
         Ok(())
     }
 }

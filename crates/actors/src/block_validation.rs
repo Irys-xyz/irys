@@ -75,6 +75,8 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
+    #[error("Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}")]
+    InvalidPromotionDataSizeMismatch { txid: H256, expected: u64, got: u64 },
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch {
         expected: UnixTimestampMs,
