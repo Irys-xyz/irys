@@ -5610,6 +5610,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "color-eyre",
+ "irys-types",
  "irys-utils",
  "libc",
  "rand 0.8.5",

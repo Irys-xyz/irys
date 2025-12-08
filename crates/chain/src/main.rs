@@ -1,5 +1,6 @@
 use irys_chain::{utils::load_config, IrysNode};
 use irys_testing_utils::setup_panic_hook;
+use irys_utils::shutdown::spawn_shutdown_watchdog;
 use tracing::{info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
@@ -53,6 +54,9 @@ async fn main() -> eyre::Result<()> {
     // wait for the node to be shut down
     let shutdown_reason =
         tokio::task::spawn_blocking(|| reth_thread_handle.unwrap().join().unwrap()).await?;
+
+    // Spawn watchdog thread to force exit if graceful shutdown hangs
+    spawn_shutdown_watchdog(shutdown_reason.clone());
 
     handle.stop(shutdown_reason).await;
 
