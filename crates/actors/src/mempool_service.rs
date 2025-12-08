@@ -4,8 +4,11 @@ pub mod data_txs;
 pub mod facade;
 pub mod ingress_proofs;
 pub mod lifecycle;
+mod pending_chunks;
 pub mod pledge_provider;
 pub mod types;
+
+pub use pending_chunks::PriorityPendingChunks;
 
 pub use chunks::*;
 pub use facade::*;
@@ -454,9 +457,6 @@ impl Inner {
         })? {
             Some(height) => height,
             None => {
-                self.mempool_state
-                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
-                    .await;
                 return Err(TxIngressError::InvalidAnchor(anchor).into());
             }
         };
@@ -1427,9 +1427,6 @@ impl Inner {
             })? {
             Some(height) => height,
             None => {
-                self.mempool_state
-                    .mark_tx_as_invalid(tx_id, format!("Unknown anchor: {}", anchor))
-                    .await;
                 return Err(TxIngressError::InvalidAnchor(anchor));
             }
         };
@@ -1920,25 +1917,9 @@ impl AtomicMempoolState {
             .unwrap_or(0)
     }
 
-    pub async fn put_chunk(&self, chunk: UnpackedChunk, preheader_chunks_per_item: usize) {
+    pub async fn put_chunk(&self, chunk: UnpackedChunk) {
         let mempool_state_write_guard = &mut self.write().await;
-        if let Some(chunks_map) = mempool_state_write_guard
-            .pending_chunks
-            .get_mut(&chunk.data_root)
-        {
-            chunks_map.put(chunk.tx_offset, chunk.clone());
-        } else {
-            // If there's no entry for this data_root yet, create one
-            // TODO: rework LRU logic to separate LRU/map https://github.com/Irys-xyz/irys/issues/632
-            let mut new_lru_cache = LruCache::new(
-                NonZeroUsize::new(preheader_chunks_per_item)
-                    .expect("expected valid NonZeroUsize::new"),
-            );
-            new_lru_cache.put(chunk.tx_offset, chunk.clone());
-            mempool_state_write_guard
-                .pending_chunks
-                .put(chunk.data_root, new_lru_cache);
-        }
+        mempool_state_write_guard.pending_chunks.put(chunk);
     }
 
     pub async fn record_recent_valid_chunk(&self, chunk_path_hash: ChunkPathHash) {
@@ -2336,8 +2317,9 @@ pub struct MempoolState {
     pub recent_valid_tx: LruCache<H256, ()>,
     /// Tracks recently processed chunk hashes to prevent re-gossip
     pub recent_valid_chunks: LruCache<ChunkPathHash, ()>,
-    /// LRU caches for out of order gossip data
-    pub pending_chunks: LruCache<DataRoot, LruCache<TxChunkOffset, UnpackedChunk>>,
+    /// Priority-based cache for out of order gossip chunks.
+    /// Evicts entries with fewer chunks first to mitigate cache poisoning attacks.
+    pub pending_chunks: PriorityPendingChunks,
     pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
     pub stake_and_pledge_whitelist: HashSet<Address>,
 }
@@ -2362,7 +2344,10 @@ pub fn create_state(
         ),
         recent_valid_tx: LruCache::new(NonZeroUsize::new(config.max_valid_items).unwrap()),
         recent_valid_chunks: LruCache::new(NonZeroUsize::new(config.max_valid_chunks).unwrap()),
-        pending_chunks: LruCache::new(NonZeroUsize::new(max_pending_chunk_items).unwrap()),
+        pending_chunks: PriorityPendingChunks::new(
+            max_pending_chunk_items,
+            config.max_preheader_chunks_per_item,
+        ),
         pending_pledges: LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap()),
         stake_and_pledge_whitelist: HashSet::from_iter(stake_and_pledge_whitelist.iter().copied()),
     }
@@ -3039,7 +3024,7 @@ mod bounded_mempool_tests {
             recent_invalid_payload_fingerprints: LruCache::new(NonZeroUsize::new(100).unwrap()),
             recent_valid_tx: LruCache::new(NonZeroUsize::new(100).unwrap()),
             recent_valid_chunks: LruCache::new(NonZeroUsize::new(100).unwrap()),
-            pending_chunks: LruCache::new(NonZeroUsize::new(10).unwrap()),
+            pending_chunks: PriorityPendingChunks::new(10, 100),
             pending_pledges: LruCache::new(NonZeroUsize::new(10).unwrap()),
             stake_and_pledge_whitelist: HashSet::new(),
         }

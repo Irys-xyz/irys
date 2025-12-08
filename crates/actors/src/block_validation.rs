@@ -1682,7 +1682,6 @@ pub async fn commitment_txs_are_valid(
 
     for tx in &actual_commitments {
         if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
-            let partition_hash = H256::from(partition_hash);
             let owner = parent_epoch_snapshot
                 .partition_assignments
                 .get_assignment(partition_hash)
@@ -2209,7 +2208,7 @@ pub async fn data_txs_are_valid(
                         for api_addr in api_addrs.iter() {
                             // Build data_root/offset fetch URL using peer API address
                             let url = format!(
-                                "http://{}/v1/chunk/data_root/{}/{}/{}",
+                                "http://{}/v1/chunk/data-root/{}/{}/{}",
                                 api_addr,
                                 publish_ledger.ledger_id,
                                 tx_header.data_root,

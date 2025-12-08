@@ -397,7 +397,11 @@ impl IrysNode {
                     .fetch_genesis_from_trusted_peer(expected_genesis_hash)
                     .await;
                 let timestamp_secs = block.timestamp_secs().as_secs();
-
+                // TODO: we should enforce this
+                // assert_eq!(
+                //     timestamp_secs,
+                //     (self.config.consensus.genesis.timestamp_millis / 1000) as u64
+                // );
                 Ok((
                     block,
                     commitments,
@@ -1239,6 +1243,7 @@ impl IrysNode {
             receivers.chunk_cache,
             config.clone(),
             service_senders.gossip_broadcast.clone(),
+            service_senders.chunk_cache.clone(),
             runtime_handle.clone(),
         );
         debug!("Chunk cache initialized");
@@ -2094,7 +2099,7 @@ async fn stake_and_pledge(
 
     let post_commitment_tx = async |commitment_tx: &CommitmentTransaction| {
         let client = reqwest::Client::new();
-        let url = format!("{}/v1/commitment_tx", api_uri);
+        let url = format!("{}/v1/commitment-tx", api_uri);
 
         client.post(url).json(commitment_tx).send().await
     };

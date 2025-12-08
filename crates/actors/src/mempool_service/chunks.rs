@@ -5,16 +5,14 @@ use irys_database::{
     confirm_data_size_for_data_root,
     db::{IrysDatabaseExt as _, IrysDupCursorExt as _},
     db_cache::data_size_to_chunk_count,
-    tables::{CachedChunks, CachedChunksIndex, CompactCachedIngressProof, IngressProofs},
+    tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, ingress::CachedIngressProof, irys::IrysSigner,
-    validate_path, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
+    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataRoot, DatabaseProvider,
+    GossipBroadcastMessage, IngressProof, H256,
 };
 use reth::revm::primitives::alloy_primitives::ChainId;
-use reth_db::{
-    cursor::DbDupCursorRO as _, transaction::DbTx as _, transaction::DbTxMut as _, Database as _,
-};
+use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -127,9 +125,7 @@ impl Inner {
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
                 }
 
-                self.mempool_state
-                    .put_chunk(chunk.clone(), preheader_chunks_per_item)
-                    .await;
+                self.mempool_state.put_chunk(chunk.clone()).await;
                 return Ok(());
             }
         };
@@ -358,6 +354,7 @@ impl Inner {
             let block_tree_read_guard = self.block_tree_read_guard.clone();
             let config = self.config.clone();
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
+            let cache_sender = self.service_senders.chunk_cache.clone();
             let _fut = self.exec.clone().spawn_blocking(async move {
                 if let Err(e) = generate_and_store_ingress_proof(
                     &block_tree_read_guard,
@@ -366,6 +363,7 @@ impl Inner {
                     chunk.data_root,
                     None,
                     &gossip_sender,
+                    &cache_sender,
                 ) {
                     tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
                 }
@@ -546,15 +544,7 @@ pub fn generate_ingress_proof(
     assert_eq!(actual_data_size, size);
     assert_eq!(actual_chunk_count, expected_chunk_count);
 
-    db.update(|rw_tx| {
-        rw_tx.put::<IngressProofs>(
-            data_root,
-            CompactCachedIngressProof(CachedIngressProof {
-                address: signer.address(),
-                proof: proof.clone(),
-            }),
-        )
-    })??;
+    db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
     Ok(proof)
 }

@@ -7,7 +7,7 @@ use irys_types::{
     LedgerIndexItem, NodeConfig, H256,
 };
 use std::fs::OpenOptions;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::instrument;
@@ -253,7 +253,7 @@ pub struct BlockBounds {
 }
 
 fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
-    match OpenOptions::new().append(true).open(file_path) {
+    match OpenOptions::new().append(true).create(true).open(file_path) {
         Ok(mut file) => {
             file.write_all(&item.to_bytes())?;
             file.sync_all()?;
@@ -267,41 +267,103 @@ fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
     }
 }
 
+const HEADER_SIZE: usize = 33; // 32 bytes block_hash + 1 byte num_ledgers
+const LEDGER_ITEM_SIZE: usize = 40; // 8 bytes total_chunks + 32 bytes tx_root
+
+// NOTE: Must match BlockIndexItem::to_bytes() encoding. Changing this is a format change.
+const EXPECTED_NUM_LEDGERS: u8 = 2; // Publish and Submit ledgers
+
+/// Loads the block index from file using streaming deserialization.
+///
+/// Uses a buffered reader to avoid loading the entire file into memory,
+/// which would otherwise double the memory footprint during startup.
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(file_path)?;
+    let file = match OpenOptions::new().read(true).open(file_path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(e.into()),
+    };
 
-    // Determine the file size
-    let file_size = file.seek(SeekFrom::End(0))?;
-    file.seek(SeekFrom::Start(0))?;
+    let file_size = file.metadata()?.len();
+    if file_size == 0 {
+        return Ok(Vec::new());
+    }
 
-    let mut buffer = vec![0_u8; file_size as usize];
-    file.read_exact(&mut buffer)?;
+    let estimated_item_size = HEADER_SIZE + (EXPECTED_NUM_LEDGERS as usize * LEDGER_ITEM_SIZE);
+    let estimated_items = (file_size as usize / estimated_item_size) + 1;
 
-    let mut block_index_items = Vec::new();
-    let mut offset = 0;
+    let mut block_index_items = Vec::with_capacity(estimated_items);
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
 
-    // Read until we can't get another complete item
-    while offset + 33 <= buffer.len() {
-        // Read num_ledgers to determine full item size
-        let num_ledgers = buffer[offset + 32] as usize;
-        let item_size = 33 + (num_ledgers * 40); // 33 bytes header + ledger items
+    let mut header_buf = [0_u8; HEADER_SIZE];
+    let mut ledger_buf = [0_u8; LEDGER_ITEM_SIZE];
 
-        // Ensure we have enough bytes for the full item
-        if offset + item_size > buffer.len() {
-            break;
+    'outer: loop {
+        match reader.read_exact(&mut header_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                if block_index_items.is_empty() {
+                    tracing::trace!("Empty block index file");
+                } else {
+                    tracing::warn!(
+                        loaded_blocks = block_index_items.len(),
+                        "Block index file truncated mid-header; dropping trailing partial block"
+                    );
+                }
+                break;
+            }
+            Err(e) => return Err(e.into()),
         }
 
-        // Deserialize the item
-        let item = BlockIndexItem::from_bytes(&buffer[offset..offset + item_size]);
-        block_index_items.push(item);
+        let block_hash = H256::from_slice(&header_buf[..32]);
+        let num_ledgers_byte = header_buf[32];
 
-        offset += item_size;
+        eyre::ensure!(
+            num_ledgers_byte == EXPECTED_NUM_LEDGERS,
+            "Corrupted block index: expected {} ledgers, found {}",
+            EXPECTED_NUM_LEDGERS,
+            num_ledgers_byte
+        );
+
+        let num_ledgers = num_ledgers_byte as usize;
+
+        // Read ledger entries
+        let mut ledgers = Vec::with_capacity(num_ledgers);
+        for _ in 0..num_ledgers {
+            match reader.read_exact(&mut ledger_buf) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    tracing::warn!(
+                        loaded_blocks = block_index_items.len(),
+                        block_hash = %block_hash,
+                        "Block index file truncated mid-ledger; dropping trailing partial block"
+                    );
+                    break 'outer;
+                }
+                Err(e) => return Err(e.into()),
+            }
+
+            let total_chunks = u64::from_le_bytes(
+                ledger_buf[0..8]
+                    .try_into()
+                    .expect("slice is exactly 8 bytes"),
+            );
+            let tx_root = H256::from_slice(&ledger_buf[8..40]);
+
+            ledgers.push(LedgerIndexItem {
+                total_chunks,
+                tx_root,
+            });
+        }
+
+        block_index_items.push(BlockIndexItem {
+            block_hash,
+            num_ledgers: num_ledgers as u8,
+            ledgers,
+        });
     }
 
     Ok(block_index_items)
@@ -435,5 +497,36 @@ mod tests {
         assert_eq!(*item, block_items[2]);
 
         Ok(())
+    }
+
+    #[test]
+    fn block_index_encoding_layout_matches_constants() {
+        let item = BlockIndexItem {
+            block_hash: H256::zero(),
+            num_ledgers: EXPECTED_NUM_LEDGERS,
+            ledgers: vec![
+                LedgerIndexItem {
+                    total_chunks: 0,
+                    tx_root: H256::zero(),
+                },
+                LedgerIndexItem {
+                    total_chunks: 0,
+                    tx_root: H256::zero(),
+                },
+            ],
+        };
+
+        let bytes = item.to_bytes();
+        assert_eq!(
+            bytes.len(),
+            HEADER_SIZE + (EXPECTED_NUM_LEDGERS as usize * LEDGER_ITEM_SIZE),
+            "BlockIndexItem encoding does not match HEADER_SIZE and LEDGER_ITEM_SIZE constants"
+        );
+
+        // Verify num_ledgers field is at the expected position
+        assert_eq!(
+            bytes[32], EXPECTED_NUM_LEDGERS,
+            "num_ledgers byte does not match EXPECTED_NUM_LEDGERS constant"
+        );
     }
 }

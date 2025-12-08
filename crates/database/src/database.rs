@@ -227,26 +227,40 @@ type IsDuplicate = bool;
 
 /// Caches a [`UnpackedChunk`] - returns `true` if the chunk was a duplicate (present in [`CachedChunks`])
 /// and was not inserted into [`CachedChunksIndex`] or [`CachedChunks`]
+/// This function ensures that the DataRoot exists in CachedDataRoots before storing the chunk.
 pub fn cache_chunk<T: DbTx + DbTxMut>(tx: &T, chunk: &UnpackedChunk) -> eyre::Result<IsDuplicate> {
+    let data_root = chunk.data_root;
+    // Check if the data root exists
+    if tx.get::<CachedDataRoots>(data_root)?.is_none() {
+        return Err(eyre::eyre!(
+            "Data root {} not found in CachedDataRoots",
+            data_root
+        ));
+    }
+
     let chunk_path_hash: ChunkPathHash = chunk.chunk_path_hash();
     if cached_chunk_by_chunk_path_hash(tx, &chunk_path_hash)?.is_some() {
         warn!(
             "Chunk {} of {} is already cached, skipping..",
-            &chunk_path_hash, &chunk.data_root
+            &chunk_path_hash, &data_root
         );
         return Ok(true);
     }
     let value = CachedChunkIndexEntry {
         index: chunk.tx_offset,
-        meta: CachedChunkIndexMetadata { chunk_path_hash },
+        meta: CachedChunkIndexMetadata {
+            chunk_path_hash,
+            updated_at: UnixTimestamp::now()
+                .map_err(|e| eyre::eyre!("Failed to get current timestamp: {}", e))?,
+        },
     };
 
     debug!(
         "Caching chunk {} ({}) of {}",
-        &chunk.tx_offset, &chunk_path_hash, &chunk.data_root
+        &chunk.tx_offset, &chunk_path_hash, &data_root
     );
 
-    tx.put::<CachedChunksIndex>(chunk.data_root, value)?;
+    tx.put::<CachedChunksIndex>(data_root, value)?;
     tx.put::<CachedChunks>(chunk_path_hash, chunk.into())?;
     Ok(false)
 }
@@ -316,6 +330,36 @@ pub fn delete_cached_chunks_by_data_root<T: DbTxMut>(
     Ok(chunks_pruned)
 }
 
+/// Deletes [`CachedChunk`]s from [`CachedChunks`] by looking up the [`ChunkPathHash`] in [`CachedChunksIndex`]
+/// It also removes the index values
+pub fn delete_cached_chunks_by_data_root_older_than<T: DbTxMut>(
+    tx: &T,
+    data_root: DataRoot,
+    older_than: UnixTimestamp,
+) -> eyre::Result<u64> {
+    let mut chunks_pruned = 0;
+    // get all chunks specified by the `CachedChunksIndex`
+    let mut cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut walker = cursor.walk_dup(Some(data_root), None)?; // iterate a specific key's subkeys
+    while let Some((_k, c)) = walker.next().transpose()? {
+        if c.meta.updated_at >= older_than {
+            continue;
+        }
+        // delete them
+        tx.delete::<CachedChunks>(c.meta.chunk_path_hash, None)?;
+        // delete the specific index entry instead of nuking the whole key
+        tx.delete::<CachedChunksIndex>(data_root, Some(c))?;
+        chunks_pruned += 1;
+    }
+    // If we removed all subkeys, remove the empty key bucket
+    let mut check_cursor = tx.cursor_dup_write::<CachedChunksIndex>()?;
+    let mut remaining = check_cursor.walk_dup(Some(data_root), None)?;
+    if remaining.next().transpose()?.is_none() {
+        tx.delete::<CachedChunksIndex>(data_root, None)?;
+    }
+    Ok(chunks_pruned)
+}
+
 pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Result<(u64, u64)> {
     let chunk_count: usize = tx.entries::<T>()?;
     let chunk_count_u64 = u64::try_from(chunk_count)
@@ -374,15 +418,57 @@ pub fn store_ingress_proof(
     ingress_proof: &IngressProof,
     signer: &IrysSigner,
 ) -> eyre::Result<()> {
-    Ok(db.update(|rw_tx| {
-        rw_tx.put::<IngressProofs>(
-            ingress_proof.data_root,
-            CompactCachedIngressProof(CachedIngressProof {
-                address: signer.address(),
-                proof: ingress_proof.clone(),
-            }),
-        )
-    })??)
+    db.update(|rw_tx| store_ingress_proof_checked(rw_tx, ingress_proof, signer))?
+}
+
+pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
+    tx: &T,
+    ingress_proof: &IngressProof,
+    signer: &IrysSigner,
+) -> eyre::Result<()> {
+    if tx
+        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .is_none()
+    {
+        return Err(eyre::eyre!(
+            "Data root {} not found in CachedDataRoots",
+            ingress_proof.data_root
+        ));
+    }
+
+    tx.put::<IngressProofs>(
+        ingress_proof.data_root,
+        CompactCachedIngressProof(CachedIngressProof {
+            address: signer.address(),
+            proof: ingress_proof.clone(),
+        }),
+    )?;
+    Ok(())
+}
+
+pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
+    tx: &T,
+    ingress_proof: &IngressProof,
+    address: Address,
+) -> eyre::Result<()> {
+    if tx
+        .get::<CachedDataRoots>(ingress_proof.data_root)?
+        .is_none()
+    {
+        return Err(eyre::eyre!(
+            "Data root {} not found in CachedDataRoots",
+            ingress_proof.data_root
+        ));
+    }
+
+    tx.put::<IngressProofs>(
+        ingress_proof.data_root,
+        CompactCachedIngressProof(CachedIngressProof {
+            address,
+            proof: ingress_proof.clone(),
+        }),
+    )?;
+    Ok(())
 }
 
 pub fn walk_all<T: Table, TX: DbTx>(

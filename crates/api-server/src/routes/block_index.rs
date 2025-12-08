@@ -1,5 +1,5 @@
-use crate::ApiState;
-use actix_web::{http::header::ContentType, web, HttpResponse};
+use crate::{error::ApiError, ApiState};
+use actix_web::web::{self, Json};
 use irys_types::{BlockIndexItem, BlockIndexQuery};
 
 /// Maximum number of blocks that can be requested in a single query.
@@ -13,16 +13,16 @@ const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
 pub async fn block_index_route(
     state: web::Data<ApiState>,
     query: web::Query<BlockIndexQuery>,
-) -> HttpResponse {
+) -> Result<Json<Vec<BlockIndexItem>>, ApiError> {
     let limit = if query.limit == 0 {
         DEFAULT_BLOCK_INDEX_QUERY_LIMIT
     } else {
         query.limit
     };
     if limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
-        return HttpResponse::BadRequest().body(format!(
+        return Err(ApiError::Custom(format!(
             "limit exceeds maximum allowed value of {MAX_BLOCK_INDEX_QUERY_LIMIT}"
-        ));
+        )));
     }
     let height = query.height;
 
@@ -35,7 +35,5 @@ pub async fn block_index_route(
         block_index_read.items[start..end].to_vec()
     };
 
-    HttpResponse::Ok()
-        .content_type(ContentType::json())
-        .body(serde_json::to_string_pretty(&requested_blocks).unwrap())
+    Ok(Json(requested_blocks))
 }
