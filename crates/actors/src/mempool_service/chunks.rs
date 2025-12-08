@@ -299,12 +299,15 @@ impl Inner {
         }
 
         // Gossip the chunk before moving onto ingress proof checks
-        let gossip_sender = &self.service_senders.gossip_broadcast.clone();
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk.clone());
+        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
 
-        if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
+        if let Err(error) = self
+            .service_senders
+            .gossip_broadcast
+            .send(gossip_broadcast_message)
+        {
             tracing::error!(
                 "Failed to send gossip data for chunk data_root {:?} tx_offset {}: {:?}",
                 chunk_data_root,
@@ -374,7 +377,7 @@ impl Inner {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}",
                 CriticalChunkIngressError::InvalidDataSize,
-                chunk.data_root,
+                chunk_data_root,
             );
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
         };
@@ -391,12 +394,12 @@ impl Inner {
                     &block_tree_read_guard,
                     &db,
                     &config,
-                    chunk.data_root,
+                    chunk_data_root,
                     None,
                     &gossip_sender,
                     &cache_sender,
                 ) {
-                    tracing::warn!(proof.data_root = ?chunk.data_root, "Failed to generate ingress proof: {e}");
+                    tracing::warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {e}");
                 }
             }).in_current_span();
         }
