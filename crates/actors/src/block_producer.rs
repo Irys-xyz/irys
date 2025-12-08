@@ -2,6 +2,7 @@ use crate::{
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
+    pd_pricing::base_fee,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -96,7 +97,6 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
-pub mod pd_base_fee;
 pub use block_validation_tracker::BlockValidationTracker;
 
 /// Result of checking parent validity and solution compatibility
@@ -1306,7 +1306,7 @@ pub trait BlockProdStrategy {
         prev_block_ema_snapshot: &EmaSnapshot,
         current_ema_price: &irys_types::IrysTokenPrice,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-        pd_base_fee::compute_base_fee_per_chunk(
+        base_fee::compute_base_fee_per_chunk(
             &self.inner().config,
             prev_block_header,
             prev_block_ema_snapshot,

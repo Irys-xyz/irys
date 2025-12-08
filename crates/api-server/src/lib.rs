@@ -19,7 +19,7 @@ use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
-    mining, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    mining, pd_pricing, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -50,6 +50,7 @@ pub struct ApiState {
     pub block_index: BlockIndexReadGuard,
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub pd_pricing: Arc<irys_actors::pd_pricing::PdPricing>,
     pub started_at: Instant,
     pub mining_address: Address,
 }
@@ -115,6 +116,23 @@ pub fn routes() -> impl HttpServiceFactory {
             web::get().to(price::get_unpledge_price),
         )
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
+        // PD Pricing endpoints
+        .route(
+            "/price/pd/base-fee",
+            web::get().to(pd_pricing::get_current_base_fee_pd),
+        )
+        .route(
+            "/price/pd/estimate/{blocks_ahead}",
+            web::get().to(pd_pricing::estimate_base_fee_pd),
+        )
+        .route(
+            "/price/pd/priority-fee/{target_blocks}",
+            web::get().to(pd_pricing::estimate_priority_fee_pd),
+        )
+        .route(
+            "/price/pd/history/{blocks}",
+            web::get().to(pd_pricing::get_base_fee_history),
+        )
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
