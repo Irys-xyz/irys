@@ -207,7 +207,6 @@ pub async fn get_unpledge_price(
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
     let user_address = address.into_inner();
-    // let user_address = parse_address(&user_address_str).map_err(actix_web::Error::from)?;
 
     // Use the MempoolPledgeProvider to get accurate pledge count
     let pledge_count = state

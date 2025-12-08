@@ -82,7 +82,7 @@ async fn get_ledger_summary(
     ledger_type: DataLedger,
 ) -> Result<Json<LedgerSummary>, ApiError> {
     // Parse address before acquiring lock
-    let node_address = node_id; /* parse_address(node_id.as_str())?; */
+    let node_address = node_id;
 
     // Minimize lock scope - get partition assignments and release lock immediately
     let partition_assignments = {

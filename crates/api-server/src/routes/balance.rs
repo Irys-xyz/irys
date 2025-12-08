@@ -37,13 +37,11 @@ enum BlockParameter {
 }
 
 /// Query account balance at specified block.
-/// Supports hex (0x...) and Base58 addresses.
 pub async fn get_balance(
     state: web::Data<ApiState>,
     address: Path<IrysAddress>,
     query: Query<BalanceQuery>,
 ) -> Result<Json<BalanceResponse>, ApiError> {
-    // let address = parse_address(&path)?;
     let address = address.into_inner();
     let BalanceQuery { block } = query.into_inner();
     let block_param = parse_block_parameter(&block)?;
