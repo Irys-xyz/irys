@@ -1,7 +1,7 @@
 //! PD (Programmable Data) pricing API endpoints.
 //!
-//! Provides public-facing endpoints for querying PD base fees, estimating future fees,
-//! and analyzing priority fees for PD transactions.
+//! Provides a unified endpoint for querying PD base fees, utilization, and priority fees
+//! following Ethereum's eth_feeHistory pattern.
 
 use actix_web::{web, HttpResponse};
 
@@ -9,26 +9,86 @@ use crate::{error::ApiError, ApiState};
 
 // Re-export response types from actors module
 pub use irys_actors::pd_pricing::{
-    PdBaseFeeEstimate, PdBaseFeeHistory, PdBaseFeeHistoryItem, PdBaseFeeResponse, PdFeeAtHeight,
-    PdPriorityFeeEstimate,
+    BlockBaseFee, BlockPriorityFees, BlockUtilization, FeeHistoryAnalysis,
+    PdFeeHistoryResponse, PriorityFeeAtPercentile,
 };
 
-//==============================================================================
-// API Endpoints
-//==============================================================================
+// Query Parameters
 
-/// GET /v1/price/pd/base-fee
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeHistoryQuery {
+    block_count: u64,
+    #[serde(default = "default_percentiles")]
+    reward_percentiles: Vec<u8>,
+}
+
+fn default_percentiles() -> Vec<u8> {
+    vec![25, 50, 75]
+}
+
+// API Endpoint
+
+/// GET /v1/price/pd/fee-history?blockCount=N&rewardPercentiles=25,50,75
 ///
-/// Returns the current PD base fee per chunk.
-pub async fn get_current_base_fee_pd(
+/// Returns comprehensive fee history (Ethereum eth_feeHistory style).
+///
+/// Provides per-block data for:
+/// - Base fees (in Irys and USD)
+/// - PD utilization metrics
+/// - Priority fee percentiles
+/// - Next block base fee prediction (N+1)
+///
+/// Query parameters:
+/// - `blockCount` (required): Number of recent blocks to analyze (1-1000)
+/// - `rewardPercentiles` (optional): Priority fee percentiles to calculate (0-100, max 10)
+///   Defaults to [25, 50, 75]
+///
+/// Example: GET /v1/price/pd/fee-history?blockCount=20&rewardPercentiles=10,50,90
+pub async fn get_fee_history(
+    query: web::Query<FeeHistoryQuery>,
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
+    // Validate block_count
+    if query.block_count == 0 || query.block_count > 1000 {
+        return Err((
+            "block_count must be between 1 and 1000".to_string(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+        )
+            .into());
+    }
+
+    // Validate percentiles
+    if query.reward_percentiles.is_empty() {
+        return Err((
+            "At least one percentile must be specified".to_string(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+        )
+            .into());
+    }
+    if query.reward_percentiles.len() > 10 {
+        return Err((
+            "Maximum 10 percentiles allowed".to_string(),
+            actix_web::http::StatusCode::BAD_REQUEST,
+        )
+            .into());
+    }
+    for &p in &query.reward_percentiles {
+        if p > 100 {
+            return Err((
+                format!("Percentiles must be 0-100, got {}", p),
+                actix_web::http::StatusCode::BAD_REQUEST,
+            )
+                .into());
+        }
+    }
+
     let response = state
         .pd_pricing
-        .get_current_base_fee()
+        .get_fee_history(query.block_count, &query.reward_percentiles)
         .map_err(|e| {
             (
-                format!("Failed to get current base fee: {}", e),
+                format!("Failed to get fee history: {}", e),
                 actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
             )
         })?;
@@ -36,98 +96,27 @@ pub async fn get_current_base_fee_pd(
     Ok(HttpResponse::Ok().json(response))
 }
 
-/// GET /v1/price/pd/estimate/{blocks_ahead}
-///
-/// Projects future PD base fee using moving average utilization.
-pub async fn estimate_base_fee_pd(
-    path: web::Path<u64>,
-    state: web::Data<ApiState>,
-) -> Result<HttpResponse, ApiError> {
-    let blocks_ahead = path.into_inner();
+// Tests
 
-    // Validate input
-    if blocks_ahead == 0 || blocks_ahead > 1000 {
-        return Err((
-            "blocks_ahead must be between 1 and 1000".to_string(),
-            actix_web::http::StatusCode::BAD_REQUEST,
-        )
-            .into());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fee_history_default_percentiles() {
+        let query = FeeHistoryQuery {
+            block_count: 20,
+            reward_percentiles: default_percentiles(),
+        };
+        assert_eq!(query.reward_percentiles, vec![25, 50, 75]);
     }
 
-    let response = state
-        .pd_pricing
-        .estimate_base_fee(blocks_ahead)
-        .map_err(|e| {
-            (
-                format!("Failed to estimate base fee: {}", e),
-                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-            )
-        })?;
-
-    Ok(HttpResponse::Ok().json(response))
-}
-
-/// GET /v1/price/pd/priority-fee/{target_blocks}
-///
-/// Suggests priority fee per chunk for inclusion within N blocks.
-///
-/// This endpoint analyzes recent PD transactions to estimate appropriate priority fees.
-/// It returns three recommendations (low/medium/high) based on historical data and current utilization.
-pub async fn estimate_priority_fee_pd(
-    path: web::Path<u64>,
-    state: web::Data<ApiState>,
-) -> Result<HttpResponse, ApiError> {
-    let target_blocks = path.into_inner();
-
-    // Validate input
-    if target_blocks == 0 || target_blocks > 100 {
-        return Err((
-            "target_blocks must be between 1 and 100".to_string(),
-            actix_web::http::StatusCode::BAD_REQUEST,
-        )
-            .into());
+    #[test]
+    fn test_fee_history_custom_percentiles() {
+        let query = FeeHistoryQuery {
+            block_count: 50,
+            reward_percentiles: vec![10, 50, 90],
+        };
+        assert_eq!(query.reward_percentiles, vec![10, 50, 90]);
     }
-
-    let response = state
-        .pd_pricing
-        .estimate_priority_fee(target_blocks)
-        .map_err(|e| {
-            (
-                format!("Failed to estimate priority fee: {}", e),
-                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-            )
-        })?;
-
-    Ok(HttpResponse::Ok().json(response))
-}
-
-/// GET /v1/price/pd/history/{blocks}
-///
-/// Returns historical PD base fees.
-pub async fn get_base_fee_history(
-    path: web::Path<u64>,
-    state: web::Data<ApiState>,
-) -> Result<HttpResponse, ApiError> {
-    let requested_blocks = path.into_inner();
-
-    // Validate input
-    if requested_blocks == 0 || requested_blocks > 1000 {
-        return Err((
-            "blocks must be between 1 and 1000".to_string(),
-            actix_web::http::StatusCode::BAD_REQUEST,
-        )
-            .into());
-    }
-
-    let response = state
-        .pd_pricing
-        .get_base_fee_history(requested_blocks)
-        .map_err(|e| {
-            (
-                format!("Failed to get base fee history: {}", e),
-                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
-            )
-        })?;
-
-    Ok(HttpResponse::Ok().json(response))
 }

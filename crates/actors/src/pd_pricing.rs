@@ -9,7 +9,7 @@ use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{
     storage_pricing::{
         mul_div,
-        phantoms::{CostPerChunk, Irys, Usd},
+        phantoms::{CostPerChunk, Irys, Percentage, Usd},
         Amount, PRECISION_SCALE,
     },
     Config, IrysTokenPrice, UnixTimestampMs, H256,
@@ -23,127 +23,7 @@ use self::base_fee::{
     extract_priority_fees_from_block,
 };
 
-//==============================================================================
-// Constants
-//==============================================================================
-
-/// Number of recent blocks to analyze for utilization patterns and priority fee estimation.
-const ANALYSIS_BLOCKS: usize = 20;
-
-//==============================================================================
-// Confidence Level
-//==============================================================================
-
-/// Confidence level for priority fee estimates based on sample size and analysis window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Confidence {
-    Low,
-    Medium,
-    High,
-}
-
-impl Confidence {
-    /// Returns the minimum (most conservative) of two confidence levels.
-    pub fn min(self, other: Self) -> Self {
-        if self < other {
-            self
-        } else {
-            other
-        }
-    }
-
-    /// Determines confidence based on sample size (number of transactions).
-    pub fn from_sample_size(sample_size: usize) -> Self {
-        if sample_size >= 20 {
-            Confidence::High
-        } else if sample_size >= 10 {
-            Confidence::Medium
-        } else {
-            Confidence::Low
-        }
-    }
-
-    /// Determines confidence based on analysis window size (number of blocks).
-    pub fn from_window_size(window_size: u64) -> Self {
-        if window_size < 5 {
-            Confidence::Low
-        } else if window_size <= 50 {
-            Confidence::High
-        } else {
-            Confidence::Medium
-        }
-    }
-}
-
-//==============================================================================
-// Response Types
-//==============================================================================
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PdBaseFeeResponse {
-    pub base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
-    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
-    pub block_height: u64,
-    pub block_hash: H256,
-    pub ema_price: IrysTokenPrice,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PdBaseFeeEstimate {
-    pub estimates: Vec<PdFeeAtHeight>,
-    pub methodology: String,
-    pub avg_utilization_percent: f64,
-    pub analysis_period_blocks: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PdFeeAtHeight {
-    pub block_height: u64,
-    pub base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
-    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PdPriorityFeeEstimate {
-    pub low_priority: Amount<(CostPerChunk, Irys)>,
-    pub low_priority_usd: Amount<(CostPerChunk, Usd)>,
-    pub medium_priority: Amount<(CostPerChunk, Irys)>,
-    pub medium_priority_usd: Amount<(CostPerChunk, Usd)>,
-    pub high_priority: Amount<(CostPerChunk, Irys)>,
-    pub high_priority_usd: Amount<(CostPerChunk, Usd)>,
-    pub confidence: Confidence,
-    pub avg_utilization_percent: f64,
-    pub analysis_period_blocks: u64,
-    pub sample_size: usize,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PdBaseFeeHistoryItem {
-    pub block_height: u64,
-    pub block_hash: H256,
-    pub base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
-    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
-    pub pd_chunks_used: u64,
-    pub utilization_percent: f64,
-    pub timestamp: UnixTimestampMs,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PdBaseFeeHistory {
-    pub history: Vec<PdBaseFeeHistoryItem>,
-    pub blocks_returned: u64,
-}
-
-//==============================================================================
 // PdPricing Service
-//==============================================================================
 
 /// Service for calculating and estimating PD pricing.
 ///
@@ -244,8 +124,8 @@ impl PdPricing {
                 .collect()
         }; // Lock released here
 
-        // Calculate moving average utilization from recent blocks
-        let mut total_utilization = 0.0;
+        // Calculate moving average utilization from recent blocks (deterministic fixed-point)
+        let mut total_utilization = Amount::<Percentage>::new(irys_types::U256::from(0));
         let mut analyzed_count = 0;
 
         for irys_block in &blocks_to_analyze {
@@ -261,15 +141,24 @@ impl PdPricing {
                     irys_block.height
                 ))?;
 
-            // Count PD chunks
+            // Count PD chunks and calculate utilization
             let pd_chunks_used = count_pd_chunks_in_block(&evm_block);
             let utilization = if max_chunks > 0 {
-                pd_chunks_used as f64 / max_chunks as f64
+                // Calculate: (pd_chunks_used * PRECISION_SCALE) / max_chunks
+                let percent_amount = mul_div(
+                    irys_types::U256::from(pd_chunks_used),
+                    PRECISION_SCALE,
+                    irys_types::U256::from(max_chunks),
+                )?;
+                Amount::<Percentage>::new(percent_amount)
             } else {
-                0.0
+                Amount::<Percentage>::new(irys_types::U256::from(0))
             };
 
-            total_utilization += utilization;
+            total_utilization = Amount::new(
+                total_utilization.amount.checked_add(utilization.amount)
+                    .ok_or_eyre("Overflow adding utilization")?
+            );
             analyzed_count += 1;
         }
 
@@ -280,7 +169,14 @@ impl PdPricing {
             );
         }
 
-        let avg_utilization = total_utilization / analyzed_count as f64;
+        let avg_utilization_percent = {
+            let avg_amount = mul_div(
+                total_utilization.amount,
+                irys_types::U256::from(1),
+                irys_types::U256::from(analyzed_count),
+            )?;
+            Amount::<Percentage>::new(avg_amount)
+        };
 
         // Get current block and base fee
         let (current_height, evm_block_hash, ema_snapshot, irys_block) = {
@@ -333,7 +229,16 @@ impl PdPricing {
 
         for i in 1..=blocks_ahead {
             // Simulate the adjustment using moving average utilization
-            let chunks_used = (avg_utilization * max_chunks as f64) as u32;
+            // Convert percentage back to chunks: (utilization * max_chunks) / PRECISION_SCALE
+            let chunks_used = {
+                let chunks_u256 = mul_div(
+                    avg_utilization_percent.amount,
+                    irys_types::U256::from(max_chunks),
+                    PRECISION_SCALE,
+                )?;
+                u32::try_from(chunks_u256)
+                    .map_err(|_| eyre::eyre!("Chunks used exceeds u32::MAX"))?
+            };
 
             // Calculate new fee using the same function used in block production
             let new_fee_irys = calculate_pd_base_fee_for_new_block(
@@ -359,7 +264,7 @@ impl PdPricing {
         Ok(PdBaseFeeEstimate {
             estimates,
             methodology: "moving_average_utilization".to_string(),
-            avg_utilization_percent: avg_utilization * 100.0,
+            avg_utilization_percent,
             analysis_period_blocks: analyzed_count as u64,
         })
     }
@@ -403,9 +308,9 @@ impl PdPricing {
                 .collect()
         }; // Lock released here
 
-        // Collect priority fees and utilization from recent blocks
+        // Collect priority fees and utilization from recent blocks (deterministic fixed-point)
         let mut all_priority_fees = Vec::new();
-        let mut total_utilization = 0.0;
+        let mut total_utilization = Amount::<Percentage>::new(irys_types::U256::from(0));
         let mut analyzed_count = 0;
 
         for irys_block in &blocks_to_analyze {
@@ -424,11 +329,21 @@ impl PdPricing {
             // Calculate utilization for this block
             let pd_chunks_used = count_pd_chunks_in_block(&evm_block);
             let utilization = if max_chunks > 0 {
-                pd_chunks_used as f64 / max_chunks as f64
+                // Calculate: (pd_chunks_used * PRECISION_SCALE) / max_chunks
+                let percent_amount = mul_div(
+                    irys_types::U256::from(pd_chunks_used),
+                    PRECISION_SCALE,
+                    irys_types::U256::from(max_chunks),
+                )?;
+                Amount::<Percentage>::new(percent_amount)
             } else {
-                0.0
+                Amount::<Percentage>::new(irys_types::U256::from(0))
             };
-            total_utilization += utilization;
+
+            total_utilization = Amount::new(
+                total_utilization.amount.checked_add(utilization.amount)
+                    .ok_or_eyre("Overflow adding utilization")?
+            );
             analyzed_count += 1;
 
             // Extract priority fees from PD transactions
@@ -446,10 +361,15 @@ impl PdPricing {
         }
 
         // Calculate average utilization
-        let avg_utilization = if analyzed_count > 0 {
-            total_utilization / analyzed_count as f64
+        let avg_utilization_percent = if analyzed_count > 0 {
+            let avg_amount = mul_div(
+                total_utilization.amount,
+                irys_types::U256::from(1),
+                irys_types::U256::from(analyzed_count),
+            )?;
+            Amount::<Percentage>::new(avg_amount)
         } else {
-            0.0
+            Amount::<Percentage>::new(irys_types::U256::from(0))
         };
 
         // Sort fees for percentile calculation
@@ -495,7 +415,7 @@ impl PdPricing {
             high_priority: percentile_75,
             high_priority_usd: percentile_75_usd,
             confidence,
-            avg_utilization_percent: avg_utilization * 100.0,
+            avg_utilization_percent,
             analysis_period_blocks: analyzed_count as u64,
             sample_size: all_priority_fees.len(),
         })
@@ -561,12 +481,18 @@ impl PdPricing {
             // Count PD chunks used
             let pd_chunks_used = count_pd_chunks_in_block(&evm_block);
 
-            // Calculate utilization
+            // Calculate utilization (deterministic fixed-point arithmetic)
             let max_chunks = self.config.consensus.programmable_data.max_pd_chunks_per_block;
             let utilization_percent = if max_chunks > 0 {
-                (pd_chunks_used as f64 / max_chunks as f64) * 100.0
+                // Calculate: (pd_chunks_used * PRECISION_SCALE) / max_chunks
+                let percent_amount = mul_div(
+                    irys_types::U256::from(pd_chunks_used),
+                    PRECISION_SCALE,
+                    irys_types::U256::from(max_chunks),
+                )?;
+                Amount::<Percentage>::new(percent_amount)
             } else {
-                0.0
+                Amount::<Percentage>::new(irys_types::U256::from(0))
             };
 
             // Convert to USD
@@ -590,11 +516,422 @@ impl PdPricing {
             blocks_returned,
         })
     }
+
+    /// Get comprehensive fee history (Ethereum eth_feeHistory style).
+    ///
+    /// Returns per-block data for base fees, utilization, and priority fees.
+    ///
+    /// # Arguments
+    /// * `block_count` - Number of recent blocks to analyze (1-1000)
+    /// * `reward_percentiles` - Priority fee percentiles to calculate (0-100)
+    ///
+    /// # Returns
+    /// * `PdFeeHistoryResponse` with per-block data
+    ///
+    /// # Example
+    /// ```ignore
+    /// let history = pd_pricing.get_fee_history(20, &[25, 50, 75])?;
+    /// // Returns per-block base fees, utilization, and priority fees
+    /// ```
+    pub fn get_fee_history(
+        &self,
+        block_count: u64,
+        reward_percentiles: &[u8],
+    ) -> eyre::Result<PdFeeHistoryResponse> {
+        use self::base_fee::{count_pd_chunks_in_block, extract_pd_base_fee_from_block, calculate_pd_base_fee_for_new_block, extract_priority_fees_from_block};
+
+        // Validate inputs
+        validate_percentiles(reward_percentiles)?;
+
+        // Get canonical blocks (acquire lock once)
+        let blocks_with_ema: Vec<_> = {
+            let tree = self.block_tree.read();
+            let (canonical, _) = tree.get_canonical_chain();
+
+            canonical
+                .iter()
+                .rev()
+                .take(block_count as usize)
+                .filter_map(|entry| {
+                    let block = tree.get_block(&entry.block_hash)?.clone();
+                    let ema = tree.get_ema_snapshot(&entry.block_hash)?.clone();
+                    Some((block, ema))
+                })
+                .collect()
+        };
+
+        if blocks_with_ema.is_empty() {
+            eyre::bail!("No blocks available for analysis");
+        }
+
+        // Process each block
+        let mut base_fees = Vec::new();
+        let mut utilizations = Vec::new();
+        let mut priority_fees_per_block = Vec::new();
+        let mut total_utilization = Amount::<Percentage>::new(irys_types::U256::from(0));
+        let mut total_pd_transactions = 0;
+
+        for (irys_block, ema_snapshot) in &blocks_with_ema {
+            // Get EVM block
+            let evm_block = self
+                .reth_provider
+                .provider
+                .block_by_hash(irys_block.evm_block_hash)?
+                .ok_or_eyre(format!(
+                    "EVM block {} not found for Irys block {}",
+                    irys_block.evm_block_hash,
+                    irys_block.block_hash
+                ))?;
+
+            // Extract base fee
+            let pd_config = &self.config.consensus.programmable_data;
+            let chunk_size = self.config.consensus.chunk_size;
+            let base_fee_irys = extract_pd_base_fee_from_block(
+                irys_block,
+                &evm_block,
+                pd_config,
+                chunk_size,
+            )?;
+
+            let ema_price = ema_snapshot.ema_for_public_pricing();
+            let base_fee_usd = convert_irys_to_usd(base_fee_irys, &ema_price)?;
+
+            base_fees.push(BlockBaseFee {
+                block_height: irys_block.height,
+                block_hash: irys_block.block_hash,
+                timestamp: irys_block.timestamp,
+                base_fee_irys,
+                base_fee_usd,
+            });
+
+            // Calculate utilization (deterministic fixed-point arithmetic)
+            let pd_chunks_used = count_pd_chunks_in_block(&evm_block);
+            let max_pd_chunks = self.config.consensus.programmable_data.max_pd_chunks_per_block;
+            let utilization_percent = if max_pd_chunks > 0 {
+                // Calculate: (pd_chunks_used * PRECISION_SCALE) / max_pd_chunks
+                // This gives us the percentage in fixed-point where PRECISION_SCALE = 100%
+                let percent_amount = mul_div(
+                    irys_types::U256::from(pd_chunks_used),
+                    PRECISION_SCALE,
+                    irys_types::U256::from(max_pd_chunks),
+                )?;
+                Amount::<Percentage>::new(percent_amount)
+            } else {
+                Amount::<Percentage>::new(irys_types::U256::from(0))
+            };
+
+            // Accumulate total utilization for averaging
+            total_utilization = Amount::new(
+                total_utilization.amount.checked_add(utilization_percent.amount)
+                    .ok_or_eyre("Overflow adding utilization")?
+            );
+
+            utilizations.push(BlockUtilization {
+                pd_chunks_used,
+                max_pd_chunks,
+                utilization_percent,
+            });
+
+            // Extract priority fees and calculate percentiles
+            let block_priority_fees = extract_priority_fees_from_block(&evm_block);
+            total_pd_transactions += block_priority_fees.len();
+
+            let mut percentile_map = std::collections::HashMap::new();
+            if !block_priority_fees.is_empty() {
+                let mut sorted_fees = block_priority_fees.clone();
+                sorted_fees.sort_by(|a, b| a.amount.cmp(&b.amount));
+
+                for &percentile in reward_percentiles {
+                    let index = ((percentile as usize * sorted_fees.len()) / 100)
+                        .min(sorted_fees.len().saturating_sub(1));
+                    let fee_irys = sorted_fees[index];
+                    let fee_usd = convert_irys_to_usd(fee_irys, &ema_price)?;
+
+                    percentile_map.insert(
+                        percentile,
+                        PriorityFeeAtPercentile { fee_irys, fee_usd },
+                    );
+                }
+            }
+
+            priority_fees_per_block.push(BlockPriorityFees {
+                percentiles: percentile_map,
+                sample_size: block_priority_fees.len(),
+            });
+        }
+
+        // Predict next block's base fee
+        let (current_irys_block, current_ema) = blocks_with_ema.first()
+            .ok_or_eyre("No blocks available")?;
+        let current_evm_block = self
+            .reth_provider
+            .provider
+            .block_by_hash(current_irys_block.evm_block_hash)?
+            .ok_or_eyre("Current EVM block not found")?;
+
+        let pd_config = &self.config.consensus.programmable_data;
+        let chunk_size = self.config.consensus.chunk_size;
+        let current_base_fee = extract_pd_base_fee_from_block(
+            current_irys_block,
+            &current_evm_block,
+            pd_config,
+            chunk_size,
+        )?;
+        let current_chunks_used = count_pd_chunks_in_block(&current_evm_block);
+        let current_ema_price = current_ema.ema_for_public_pricing();
+
+        let next_base_fee_irys = calculate_pd_base_fee_for_new_block(
+            current_ema,
+            &current_ema_price,
+            current_chunks_used as u32,
+            current_base_fee,
+            pd_config,
+            chunk_size,
+        )?;
+        let next_base_fee_usd = convert_irys_to_usd(next_base_fee_irys, &current_ema_price)?;
+
+        // Calculate confidence
+        let sample_confidence = Confidence::from_sample_size(total_pd_transactions);
+        let window_confidence = Confidence::from_window_size(block_count);
+        let confidence = sample_confidence.min(window_confidence);
+
+        // Calculate average utilization (deterministic fixed-point arithmetic)
+        let avg_utilization_percent = if !blocks_with_ema.is_empty() {
+            let avg_amount = mul_div(
+                total_utilization.amount,
+                irys_types::U256::from(1),
+                irys_types::U256::from(blocks_with_ema.len()),
+            )?;
+            Amount::<Percentage>::new(avg_amount)
+        } else {
+            Amount::<Percentage>::new(irys_types::U256::from(0))
+        };
+
+        // Build response
+        let oldest_block = blocks_with_ema.last()
+            .ok_or_eyre("No oldest block")?;
+
+        Ok(PdFeeHistoryResponse {
+            oldest_block: oldest_block.0.height,
+            oldest_block_hash: oldest_block.0.block_hash,
+            base_fee_per_chunk: base_fees,
+            next_base_fee_per_chunk: next_base_fee_irys,
+            next_base_fee_usd,
+            pd_utilization: utilizations,
+            priority_fees: priority_fees_per_block,
+            analysis: FeeHistoryAnalysis {
+                avg_utilization_percent,
+                total_pd_transactions,
+                priority_fee_confidence: confidence,
+                ema_price: current_ema_price,
+                blocks_returned: blocks_with_ema.len() as u64,
+                requested_percentiles: reward_percentiles.to_vec(),
+            },
+        })
+    }
 }
 
-//==============================================================================
+// Constants
+
+/// Number of recent blocks to analyze for utilization patterns and priority fee estimation.
+const ANALYSIS_BLOCKS: usize = 20;
+
+// Confidence Level
+
+/// Confidence level for priority fee estimates based on sample size and analysis window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl Confidence {
+    /// Returns the minimum (most conservative) of two confidence levels.
+    pub fn min(self, other: Self) -> Self {
+        if self < other {
+            self
+        } else {
+            other
+        }
+    }
+
+    /// Determines confidence based on sample size (number of transactions).
+    pub fn from_sample_size(sample_size: usize) -> Self {
+        if sample_size >= 20 {
+            Confidence::High
+        } else if sample_size >= 10 {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        }
+    }
+
+    /// Determines confidence based on analysis window size (number of blocks).
+    pub fn from_window_size(window_size: u64) -> Self {
+        if window_size < 5 {
+            Confidence::Low
+        } else if window_size <= 50 {
+            Confidence::High
+        } else {
+            Confidence::Medium
+        }
+    }
+}
+
+// Response Types
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdBaseFeeResponse {
+    pub base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
+    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
+    pub block_height: u64,
+    pub block_hash: H256,
+    pub ema_price: IrysTokenPrice,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdBaseFeeEstimate {
+    pub estimates: Vec<PdFeeAtHeight>,
+    pub methodology: String,
+    pub avg_utilization_percent: Amount<Percentage>,
+    pub analysis_period_blocks: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdFeeAtHeight {
+    pub block_height: u64,
+    pub base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
+    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdPriorityFeeEstimate {
+    pub low_priority: Amount<(CostPerChunk, Irys)>,
+    pub low_priority_usd: Amount<(CostPerChunk, Usd)>,
+    pub medium_priority: Amount<(CostPerChunk, Irys)>,
+    pub medium_priority_usd: Amount<(CostPerChunk, Usd)>,
+    pub high_priority: Amount<(CostPerChunk, Irys)>,
+    pub high_priority_usd: Amount<(CostPerChunk, Usd)>,
+    pub confidence: Confidence,
+    pub avg_utilization_percent: Amount<Percentage>,
+    pub analysis_period_blocks: u64,
+    pub sample_size: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PdBaseFeeHistoryItem {
+    pub block_height: u64,
+    pub block_hash: H256,
+    pub base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
+    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
+    pub pd_chunks_used: u64,
+    pub utilization_percent: Amount<Percentage>,
+    pub timestamp: UnixTimestampMs,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdBaseFeeHistory {
+    pub history: Vec<PdBaseFeeHistoryItem>,
+    pub blocks_returned: u64,
+}
+
+// Unified Fee History Response (Ethereum eth_feeHistory style)
+
+/// Comprehensive fee history response combining base fees, utilization, and priority fees.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PdFeeHistoryResponse {
+    /// Oldest block in the range (first block analyzed)
+    pub oldest_block: u64,
+
+    /// Oldest block hash
+    pub oldest_block_hash: H256,
+
+    /// Per-block base fees (length = blockCount)
+    pub base_fee_per_chunk: Vec<BlockBaseFee>,
+
+    /// Predicted base fee for the next block (N+1)
+    pub next_base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
+    pub next_base_fee_usd: Amount<(CostPerChunk, Usd)>,
+
+    /// Per-block PD utilization (length = blockCount)
+    pub pd_utilization: Vec<BlockUtilization>,
+
+    /// Per-block priority fee percentiles (length = blockCount)
+    pub priority_fees: Vec<BlockPriorityFees>,
+
+    /// Metadata about the analysis
+    pub analysis: FeeHistoryAnalysis,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockBaseFee {
+    pub block_height: u64,
+    pub block_hash: H256,
+    pub timestamp: UnixTimestampMs,
+    pub base_fee_irys: Amount<(CostPerChunk, Irys)>,
+    pub base_fee_usd: Amount<(CostPerChunk, Usd)>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockUtilization {
+    pub pd_chunks_used: u64,
+    pub max_pd_chunks: u64,
+    pub utilization_percent: Amount<Percentage>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockPriorityFees {
+    /// Requested percentiles with their values
+    /// Key: percentile (e.g., 25, 50, 90)
+    /// Value: fee amount in Irys and USD
+    pub percentiles: std::collections::HashMap<u8, PriorityFeeAtPercentile>,
+
+    /// Number of PD transactions in this block
+    pub sample_size: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PriorityFeeAtPercentile {
+    pub fee_irys: Amount<(CostPerChunk, Irys)>,
+    pub fee_usd: Amount<(CostPerChunk, Usd)>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeeHistoryAnalysis {
+    /// Average utilization across analyzed blocks
+    pub avg_utilization_percent: Amount<Percentage>,
+
+    /// Total PD transactions found across all blocks
+    pub total_pd_transactions: usize,
+
+    /// Confidence in priority fee estimates
+    pub priority_fee_confidence: Confidence,
+
+    /// Current EMA price used for conversions
+    pub ema_price: IrysTokenPrice,
+
+    /// Actual number of blocks returned (may be less than requested)
+    pub blocks_returned: u64,
+
+    /// Requested percentiles
+    pub requested_percentiles: Vec<u8>,
+}
+
 // Helper Functions
-//==============================================================================
 
 /// Convert typed Irys amount to typed USD amount using EMA price
 fn convert_irys_to_usd(
@@ -605,9 +942,23 @@ fn convert_irys_to_usd(
     Ok(Amount::<(CostPerChunk, Usd)>::new(usd_amount))
 }
 
-//==============================================================================
+/// Validate percentiles array for fee history queries
+fn validate_percentiles(percentiles: &[u8]) -> eyre::Result<()> {
+    if percentiles.is_empty() {
+        eyre::bail!("At least one percentile must be specified");
+    }
+    if percentiles.len() > 10 {
+        eyre::bail!("Maximum 10 percentiles allowed");
+    }
+    for &p in percentiles {
+        if p > 100 {
+            eyre::bail!("Percentiles must be 0-100, got {}", p);
+        }
+    }
+    Ok(())
+}
+
 // Base Fee Calculation Module
-//==============================================================================
 
 /// Base fee calculation utilities for Programmable Data.
 ///
