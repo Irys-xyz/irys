@@ -1123,9 +1123,9 @@ impl Inner {
 
             // Filter out any tx headers with the wrong data_size for this data_root
             tx_headers.retain(|tx| {
-                cached_data_roots.get(&tx.data_root).map_or(true, |cdr| {
-                    !cdr.data_size_confirmed || tx.data_size == cdr.data_size
-                })
+                cached_data_roots
+                    .get(&tx.data_root)
+                    .is_none_or(|cdr| !cdr.data_size_confirmed || tx.data_size == cdr.data_size)
             });
 
             // reduce down the canonical chain to the txs in the submit ledger

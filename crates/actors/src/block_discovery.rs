@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use irys_database::{
     block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
-    db::IrysDatabaseExt as _, tx_header_by_txid, SystemLedger,
+    db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
