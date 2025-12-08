@@ -2,13 +2,13 @@
 //!
 //! This module implements a single location where these types are managed,
 //! making them easy to reference and maintain.
-use crate::address_base58_stringify;
 use crate::block_production::SolutionContext;
 use crate::storage_pricing::{phantoms::IrysPrice, phantoms::Usd, Amount};
 use crate::versioning::{
     compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
     VersioningError,
 };
+use crate::IrysAddress;
 use crate::{decode_rlp_version, encode_rlp_version};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -21,7 +21,7 @@ use crate::{
     IrysSignature, Proof, H256, U256,
 };
 
-use alloy_primitives::{keccak256, Address, TxHash, B256};
+use alloy_primitives::{keccak256, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
 use irys_macros_integer_tagged::IntegerTagged;
@@ -376,16 +376,16 @@ pub struct IrysBlockHeaderV1 {
     pub poa: PoaData,
 
     /// The address that the block reward should be sent to
-    #[serde(with = "address_base58_stringify")]
-    pub reward_address: Address,
+    // #[serde(with = "address_base58_stringify")]
+    pub reward_address: IrysAddress,
 
     /// The amount of Irys tokens that must be rewarded to the `self.reward_address`
     pub reward_amount: U256,
 
     /// The address of the block producer - used to validate the block hash/signature & the PoA chunk (as the packing key)
     /// We allow for miners to send rewards to a separate address
-    #[serde(with = "address_base58_stringify")]
-    pub miner_address: Address,
+    // #[serde(with = "address_base58_stringify")]
+    pub miner_address: IrysAddress,
 
     /// timestamp (in milliseconds) since UNIX_EPOCH of when the block was discovered/produced
     #[serde(with = "string_u128")]
@@ -782,7 +782,7 @@ impl IrysBlockHeaderV1 {
 
                 ledger_id: None,
             },
-            reward_address: Address::ZERO,
+            reward_address: IrysAddress::ZERO,
             signature: IrysSignature::new(alloy_signer::Signature::test_signature()),
             timestamp: now.as_millis(),
             system_ledgers: vec![], // Many tests will fail if you add fake txids to this ledger
@@ -809,7 +809,7 @@ impl IrysBlockHeaderV1 {
                 },
             ],
             evm_block_hash: B256::ZERO,
-            miner_address: Address::ZERO,
+            miner_address: IrysAddress::ZERO,
             oracle_irys_price: Amount::token(dec!(1.0))
                 .expect("dec!(1.0) must evaluate to a valid token amount"),
             ema_irys_price: Amount::token(dec!(1.0))

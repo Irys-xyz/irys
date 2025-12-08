@@ -2,7 +2,7 @@ use crate::error::ApiError;
 use crate::ApiState;
 use actix_web::web::{Data, Json, Path};
 use irys_types::{
-    partition::PartitionAssignment, serialization::string_u64, Address, DataLedger, H256,
+    partition::PartitionAssignment, serialization::string_u64, DataLedger, IrysAddress, H256,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -79,7 +79,7 @@ fn analyze_partition_hashes(assignments: &[PartitionAssignment]) -> HashAnalysis
 fn determine_assignment_status(
     node_assignments: &[PartitionAssignment],
     _epoch_snapshot: &irys_domain::EpochSnapshot,
-    _node_address: irys_types::Address,
+    _node_address: irys_types::IrysAddress,
 ) -> AssignmentStatus {
     if node_assignments.is_empty() {
         return AssignmentStatus::Unassigned;
@@ -104,7 +104,7 @@ fn determine_assignment_status(
 }
 
 fn count_assignments_by_ledger_type(
-    miner_address: Address,
+    miner_address: IrysAddress,
     partition_assignments: &[PartitionAssignment],
     ledger_type: DataLedger,
 ) -> Result<usize, ApiError> {
@@ -124,7 +124,7 @@ fn count_assignments_by_ledger_type(
 }
 
 fn filter_assignments_by_ledger_type(
-    miner_address: Address,
+    miner_address: IrysAddress,
     partition_assignments: Vec<PartitionAssignment>,
     ledger_type: DataLedger,
 ) -> Result<Vec<PartitionAssignment>, ApiError> {
@@ -145,7 +145,7 @@ fn filter_assignments_by_ledger_type(
 
 #[expect(clippy::unused_async)]
 async fn get_ledger_summary(
-    miner_address: Path<Address>,
+    miner_address: Path<IrysAddress>,
     app_state: Data<ApiState>,
     ledger_type: DataLedger,
 ) -> Result<Json<LedgerSummary>, ApiError> {
@@ -165,14 +165,14 @@ async fn get_ledger_summary(
 }
 
 pub async fn get_submit_summary(
-    miner_address: Path<Address>,
+    miner_address: Path<IrysAddress>,
     app_state: Data<ApiState>,
 ) -> Result<Json<LedgerSummary>, ApiError> {
     get_ledger_summary(miner_address, app_state, DataLedger::Submit).await
 }
 
 pub async fn get_publish_summary(
-    miner_address: Path<Address>,
+    miner_address: Path<IrysAddress>,
     app_state: Data<ApiState>,
 ) -> Result<Json<LedgerSummary>, ApiError> {
     get_ledger_summary(miner_address, app_state, DataLedger::Publish).await
@@ -180,7 +180,7 @@ pub async fn get_publish_summary(
 
 #[expect(clippy::unused_async)]
 async fn get_partition_assignments(
-    miner_address: Path<Address>,
+    miner_address: Path<IrysAddress>,
     app_state: Data<ApiState>,
     ledger_type: DataLedger,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
@@ -209,32 +209,32 @@ async fn get_partition_assignments(
 }
 
 pub async fn get_submit_assignments(
-    miner_address: Path<Address>,
+    miner_address: Path<IrysAddress>,
     app_state: Data<ApiState>,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
     get_partition_assignments(miner_address, app_state, DataLedger::Submit).await
 }
 
 pub async fn get_publish_assignments(
-    miner_address: Path<Address>,
+    miner_address: Path<IrysAddress>,
     app_state: Data<ApiState>,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
     get_partition_assignments(miner_address, app_state, DataLedger::Publish).await
 }
 
 pub async fn get_all_assignments(
-    miner_address: Path<Address>,
-    app_state: Data<ApiState>,
+    state: Data<ApiState>,
+    miner_address: Path<IrysAddress>,
 ) -> Result<Json<PartitionAssignmentsResponse>, ApiError> {
     let (partition_assignments, epoch_height) = {
-        let epoch_snapshot = get_canonical_epoch_snapshot(&app_state);
+        let epoch_snapshot = get_canonical_epoch_snapshot(&state);
         let assignments = epoch_snapshot.get_partition_assignments(*miner_address);
         (assignments, epoch_snapshot.epoch_height)
     };
 
     let assignment_status = determine_assignment_status(
         &partition_assignments,
-        &get_canonical_epoch_snapshot(&app_state),
+        &get_canonical_epoch_snapshot(&state),
         *miner_address,
     );
     let hash_analysis = analyze_partition_hashes(&partition_assignments);

@@ -6,13 +6,12 @@ use std::{
 
 use crate::node::{eth_payload_attributes, NodeHelperType, RethNode};
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{BlockNumber, B256};
+use alloy_primitives::{Address, BlockNumber, B256};
 use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes, PayloadStatusEnum};
 use irys_reth::{
     payload::{DeterministicShadowTxKey, ShadowTxStore},
     IrysEthereumNode,
 };
-use irys_types::Address;
 use reth::transaction_pool::EthPooledTransaction;
 use reth_e2e_test_utils::node::NodeTestContext;
 use reth_node_api::{EngineApiMessageVersion, NodeTypes, PayloadTypes};

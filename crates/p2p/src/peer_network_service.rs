@@ -7,10 +7,10 @@ use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    build_user_agent, Address, AnnouncementFinishedMessage, Config, DatabaseProvider,
-    GossipDataRequest, HandshakeMessage, NetworkConfigWithDefaults as _, PeerAddress,
-    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
-    PeerResponse, RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
+    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, GossipDataRequest,
+    HandshakeMessage, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
+    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
+    RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -216,11 +216,11 @@ where
         Ok(())
     }
 
-    fn increase_peer_score(&self, mining_addr: &Address, reason: ScoreIncreaseReason) {
+    fn increase_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreIncreaseReason) {
         self.peer_list.increase_peer_score(mining_addr, reason);
     }
 
-    fn decrease_peer_score(&self, mining_addr: &Address, reason: ScoreDecreaseReason) {
+    fn decrease_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreDecreaseReason) {
         self.peer_list.decrease_peer_score(mining_addr, reason);
     }
 
@@ -273,7 +273,7 @@ where
         let trusted_peers = peer_list.trusted_peer_addresses();
         Self::trusted_peers_handshake_task(sender.clone(), trusted_peers);
 
-        let initial_peers: HashMap<Address, PeerListItem> = peer_list
+        let initial_peers: HashMap<IrysAddress, PeerListItem> = peer_list
             .all_peers()
             .iter()
             .map(|(addr, peer)| (*addr, peer.clone()))
@@ -812,7 +812,7 @@ where
     }
 
     fn spawn_announce_yourself_to_all_peers_task(
-        known_peers: HashMap<Address, PeerListItem>,
+        known_peers: HashMap<IrysAddress, PeerListItem>,
         sender: PeerNetworkSender,
     ) {
         for (_mining_addr, peer) in known_peers {
@@ -1018,9 +1018,9 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
     use irys_types::{
-        AcceptedResponse, Address, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-        CommitmentTransaction, Config, DataTransactionHeader, IrysTransactionResponse, NodeConfig,
-        NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
+        AcceptedResponse, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+        CommitmentTransaction, Config, DataTransactionHeader, IrysAddress, IrysTransactionResponse,
+        NodeConfig, NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
     };
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::net::{IpAddr, SocketAddr};
@@ -1035,8 +1035,8 @@ mod tests {
         gossip_port: u16,
         is_online: bool,
         custom_ip: Option<IpAddr>,
-    ) -> (Address, PeerListItem) {
-        let mining_addr = Address::from_str(mining_addr).expect("Invalid mining address");
+    ) -> (IrysAddress, PeerListItem) {
+        let mining_addr = IrysAddress::from_str(mining_addr).expect("Invalid mining address");
         let ip = custom_ip.unwrap_or_else(|| IpAddr::from_str("127.0.0.1").expect("invalid ip"));
         let gossip_addr = SocketAddr::new(ip, gossip_port);
         let api_addr = SocketAddr::new(ip, gossip_port + 1);
@@ -1344,8 +1344,8 @@ mod tests {
         )
         .1;
         let known_peers = HashMap::from([
-            (Address::repeat_byte(0xAA), peer1.clone()),
-            (Address::repeat_byte(0xBB), peer2.clone()),
+            (IrysAddress::repeat_byte(0xAA), peer1.clone()),
+            (IrysAddress::repeat_byte(0xBB), peer2.clone()),
         ]);
         PeerNetworkService::<IrysApiClient>::spawn_announce_yourself_to_all_peers_task(
             known_peers,
@@ -1409,7 +1409,7 @@ mod tests {
         .1;
         harness
             .peer_list()
-            .add_or_update_peer(Address::repeat_byte(0xAA), peer.clone(), true);
+            .add_or_update_peer(IrysAddress::repeat_byte(0xAA), peer.clone(), true);
         harness
             .api_client
             .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))

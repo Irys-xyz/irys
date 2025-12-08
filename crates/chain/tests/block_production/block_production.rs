@@ -100,7 +100,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(block_reward_receipt.cumulative_gas_used, 0);
     assert_eq!(
         block_reward_receipt.logs[0].address,
-        node.cfg.signer().address()
+        node.cfg.signer().alloy_address()
     );
 
     // storage tx
@@ -112,7 +112,10 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         *shadow_tx_topics::STORAGE_FEES,
     );
     assert_eq!(storage_tx_receipt.cumulative_gas_used, 0);
-    assert_eq!(storage_tx_receipt.logs[0].address, user_account.address());
+    assert_eq!(
+        storage_tx_receipt.logs[0].address,
+        user_account.alloy_address()
+    );
     assert_eq!(tx.header.signer, user_account.address());
     assert_eq!(tx.header.data_size, data_bytes.len() as u64);
 
@@ -120,7 +123,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let signer_balance = context
         .inner
         .provider
-        .basic_account(&user_account.address())
+        .basic_account(&user_account.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get signer_b balance: {}", err);
@@ -139,7 +142,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     );
 
     // ensure that the block reward has increased the block reward address balance
-    let block_reward_address = node.cfg.signer().address();
+    let block_reward_address = node.cfg.signer().alloy_address();
     let block_reward_balance = context
         .inner
         .provider
@@ -341,7 +344,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
     let _recipient_init_balance = reth_context.rpc.get_balance(recipient.address(), None)?;
 
     let evm_tx_req = TransactionRequest {
-        to: Some(TxKind::Call(recipient.address())),
+        to: Some(TxKind::Call(recipient.alloy_address())),
         max_fee_per_gas: Some(EVM_GAS_PRICE),
         max_priority_fee_per_gas: Some(EVM_GAS_PRICE),
         gas: Some(EVM_GAS_LIMIT),
@@ -569,7 +572,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let user_balance = context
         .inner
         .provider
-        .basic_account(&unfunded_user.address())
+        .basic_account(&unfunded_user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get unfunded user balance: {}", err);
@@ -653,7 +656,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let user_balance = context
         .inner
         .provider
-        .basic_account(&nonexistent_user.address())
+        .basic_account(&nonexistent_user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get nonexistent user balance: {}", err);
@@ -765,7 +768,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     );
     assert_eq!(
         storage_fee_receipt.logs[0].address,
-        user.address(),
+        user.alloy_address(),
         "Storage fee transaction should target the user's address"
     );
 
@@ -773,7 +776,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     let user_balance = context
         .inner
         .provider
-        .basic_account(&user.address())
+        .basic_account(&user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get user balance: {}", err);
@@ -824,7 +827,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let initial_balance = reth_context
         .inner
         .provider
-        .basic_account(&peer_signer.address())
+        .basic_account(&peer_signer.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get peer balance: {}", err);
@@ -891,7 +894,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
     assert_eq!(
         stake_receipt.logs[0].address,
-        peer_signer.address(),
+        peer_signer.alloy_address(),
         "Stake transaction should target the peer's address"
     );
 
@@ -912,7 +915,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
     assert_eq!(
         pledge_receipt.logs[0].address,
-        peer_signer.address(),
+        peer_signer.alloy_address(),
         "Pledge transaction should target the peer's address"
     );
 
@@ -920,7 +923,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let balance_after_block1 = reth_context
         .inner
         .provider
-        .basic_account(&peer_signer.address())
+        .basic_account(&peer_signer.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get peer balance: {}", err);
@@ -1015,8 +1018,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let stake_shadow_tx = ShadowTransaction::decode(&mut block_txs1[1].input().as_ref())
         .expect("Second transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
-        assert_eq!(bd.target, peer_signer.address());
-        let expected_stake_amount = stake_tx.deref().value.into();
+        assert_eq!(bd.target, peer_signer.alloy_address());
+        let expected_stake_amount: U256 = stake_tx.deref().value.into();
         assert_eq!(
             bd.amount, expected_stake_amount,
             "Stake amount should be fee + stake_fee.amount"
@@ -1029,8 +1032,8 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let pledge_shadow_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
         .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
-        assert_eq!(bd.target, peer_signer.address());
-        let expected_pledge_amount = consensus_config.pledge_base_value.amount.into();
+        assert_eq!(bd.target, peer_signer.alloy_address());
+        let expected_pledge_amount: U256 = consensus_config.pledge_base_value.amount.into();
         assert_eq!(
             bd.amount, expected_pledge_amount,
             "Pledge amount should be fee + pledge_fee.amount"

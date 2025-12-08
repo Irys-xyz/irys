@@ -1,10 +1,9 @@
 use alloy_genesis::GenesisAccount;
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use irys_database::reth_db::{
     self, cursor::*, transaction::*, Bytecodes, Headers, PlainAccountState, PlainStorageState,
     StageCheckpoints,
 };
-use irys_types::Address;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};

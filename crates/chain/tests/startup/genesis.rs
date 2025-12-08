@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, fs::remove_dir_all};
 
 use irys_reth_node_bridge::{dump::dump_state, genesis::init_state};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::{irys::IrysSigner, IrysAddress};
 
 use crate::utils::IrysNodeTest;
 
@@ -38,7 +38,7 @@ async fn test_genesis_state_dump_and_restore() -> eyre::Result<()> {
             },
         ),
         (
-            Address::random(),
+            IrysAddress::random(),
             GenesisAccount {
                 balance: U256::from(1000),
                 storage: Some(BTreeMap::from_iter([

@@ -1,8 +1,8 @@
 pub use crate::ingress::IngressProof;
 pub use crate::CommitmentType;
 pub use crate::{
-    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
+    address_base58_stringify, optional_string_u64, string_u64, Arbitrary, Base64, Compact,
+    ConsensusConfig, IrysAddress, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use crate::{decode_rlp_version, TxChunkOffset, UnpackedChunk};
 use crate::{
@@ -320,7 +320,7 @@ impl CommitmentTransaction {
         config: &ConsensusConfig,
         anchor: H256,
         provider: &impl PledgeDataProvider,
-        signer_address: Address,
+        signer_address: IrysAddress,
     ) -> Self {
         Self::V1(
             CommitmentTransactionV1::new_pledge(config, anchor, provider, signer_address).await,
@@ -332,7 +332,7 @@ impl CommitmentTransaction {
         config: &ConsensusConfig,
         anchor: H256,
         provider: &impl PledgeDataProvider,
-        signer_address: Address,
+        signer_address: IrysAddress,
         partition_hash: H256,
     ) -> Self {
         Self::V1(
@@ -383,8 +383,8 @@ pub struct DataTransactionHeaderV1 {
     pub anchor: H256,
 
     /// The ecdsa/secp256k1 public key of the transaction signer
-    #[serde(with = "address_base58_stringify")]
-    pub signer: Address,
+    // #[serde(with = "address_base58_stringify")]
+    pub signer: IrysAddress,
 
     /// The merkle root of the transactions data chunks
     // #[serde(default, with = "address_base58_stringify")]
@@ -510,7 +510,7 @@ impl DataTransactionHeaderV1 {
         Self {
             id: H256::zero(),
             anchor: H256::zero(),
-            signer: Address::default(),
+            signer: IrysAddress::default(),
             data_root: H256::zero(),
             data_size: 0,
             header_size: 0,
@@ -529,7 +529,7 @@ impl DataTransactionHeaderV1 {
         self.id
     }
 
-    pub fn signer(&self) -> Address {
+    pub fn signer(&self) -> IrysAddress {
         self.signer
     }
 
@@ -585,8 +585,8 @@ pub struct CommitmentTransactionV1 {
     pub anchor: H256,
 
     /// The ecdsa/secp256k1 public key of the transaction signer
-    #[serde(with = "address_base58_stringify")]
-    pub signer: Address,
+    // #[serde(with = "address_base58_stringify")]
+    pub signer: IrysAddress,
 
     /// The type of commitment Stake/UnStake Pledge/UnPledge
     pub commitment_type: CommitmentType,
@@ -684,7 +684,7 @@ impl CommitmentTransactionV1 {
         Self {
             id: H256::zero(),
             anchor: H256::zero(),
-            signer: Address::default(),
+            signer: IrysAddress::default(),
             commitment_type: CommitmentType::default(),
             chain_id: config.chain_id,
             fee: 0,
@@ -733,7 +733,7 @@ impl CommitmentTransactionV1 {
         config: &ConsensusConfig,
         anchor: H256,
         provider: &impl PledgeDataProvider,
-        signer_address: Address,
+        signer_address: IrysAddress,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
         let value = Self::calculate_pledge_value_at_count(config, count);
@@ -756,7 +756,7 @@ impl CommitmentTransactionV1 {
         config: &ConsensusConfig,
         anchor: H256,
         provider: &impl PledgeDataProvider,
-        signer_address: Address,
+        signer_address: IrysAddress,
         partition_hash: H256,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
@@ -805,7 +805,7 @@ impl CommitmentTransactionV1 {
         self.id
     }
 
-    pub fn signer(&self) -> Address {
+    pub fn signer(&self) -> IrysAddress {
         self.signer
     }
 
@@ -896,7 +896,7 @@ pub trait IrysTransactionCommon {
     fn is_signature_valid(&self) -> bool;
     fn id(&self) -> IrysTransactionId;
     fn total_cost(&self) -> U256;
-    fn signer(&self) -> Address;
+    fn signer(&self) -> IrysAddress;
     fn signature(&self) -> &IrysSignature;
     fn anchor(&self) -> H256;
     fn user_fee(&self) -> U256;
@@ -937,7 +937,7 @@ impl IrysTransactionCommon for DataTransactionHeader {
         Self::total_cost(self).into()
     }
 
-    fn signer(&self) -> Address {
+    fn signer(&self) -> IrysAddress {
         self.signer
     }
 
@@ -954,11 +954,11 @@ impl IrysTransactionCommon for DataTransactionHeader {
     }
 
     fn sign(mut self, signer: &crate::irys::IrysSigner) -> Result<Self, eyre::Error> {
-        use crate::Address;
+        use crate::IrysAddress;
         use alloy_primitives::keccak256;
 
         // Store the signer address
-        self.signer = Address::from_public_key(signer.signer.verifying_key());
+        self.signer = IrysAddress::from_public_key(signer.signer.verifying_key());
 
         // Create the signature hash and sign it
         let prehash = self.signature_hash();
@@ -1015,7 +1015,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
         Self::total_cost(self)
     }
 
-    fn signer(&self) -> Address {
+    fn signer(&self) -> IrysAddress {
         self.signer
     }
 
@@ -1105,7 +1105,7 @@ impl IrysTransactionCommon for IrysTransaction {
         }
     }
 
-    fn signer(&self) -> Address {
+    fn signer(&self) -> IrysAddress {
         match self {
             Self::Data(tx) => tx.signer(),
             Self::Commitment(tx) => tx.signer(),
@@ -1197,12 +1197,12 @@ impl From<DataTransactionHeader> for IrysTransactionResponse {
 #[async_trait::async_trait]
 pub trait PledgeDataProvider {
     /// Returns the number of existing pledges for a given user address
-    async fn pledge_count(&self, user_address: Address) -> u64;
+    async fn pledge_count(&self, user_address: IrysAddress) -> u64;
 }
 
 #[async_trait::async_trait]
 impl PledgeDataProvider for u64 {
-    async fn pledge_count(&self, _user_address: Address) -> Self {
+    async fn pledge_count(&self, _user_address: IrysAddress) -> Self {
         *self
     }
 }
@@ -1213,7 +1213,7 @@ mod test_helpers {
     use std::collections::HashMap;
 
     pub(super) struct MockPledgeProvider {
-        pub pledge_counts: HashMap<Address, u64>,
+        pub pledge_counts: HashMap<IrysAddress, u64>,
     }
 
     impl MockPledgeProvider {
@@ -1223,7 +1223,7 @@ mod test_helpers {
             }
         }
 
-        pub(super) fn with_pledge_count(mut self, address: Address, count: u64) -> Self {
+        pub(super) fn with_pledge_count(mut self, address: IrysAddress, count: u64) -> Self {
             self.pledge_counts.insert(address, count);
             self
         }
@@ -1231,7 +1231,7 @@ mod test_helpers {
 
     #[async_trait::async_trait]
     impl PledgeDataProvider for MockPledgeProvider {
-        async fn pledge_count(&self, user_address: Address) -> u64 {
+        async fn pledge_count(&self, user_address: IrysAddress) -> u64 {
             self.pledge_counts.get(&user_address).copied().unwrap_or(0)
         }
     }
@@ -1311,7 +1311,7 @@ mod tests {
         let inner_header = DataTransactionHeaderV1 {
             id: H256::zero(),
             anchor: H256::from([1_u8; 32]),
-            signer: Address::default(),
+            signer: IrysAddress::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
             header_size: 0,
@@ -1600,7 +1600,7 @@ mod tests {
         DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::from([255_u8; 32]),
             anchor: H256::from([1_u8; 32]),
-            signer: Address::default(),
+            signer: IrysAddress::default(),
             data_root: H256::from([3_u8; 32]),
             data_size: 1024,
             header_size: 0,
@@ -1617,7 +1617,7 @@ mod tests {
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
         let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
         tx.id = H256::from([255_u8; 32]);
-        tx.signer = Address::default();
+        tx.signer = IrysAddress::default();
         tx.signature = Signature::test_signature().into();
         tx
     }
@@ -1669,7 +1669,7 @@ mod pledge_decay_parametrized_tests {
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
         // Create provider with existing pledge count
-        let signer_address = Address::default();
+        let signer_address = IrysAddress::default();
         let provider =
             MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
 
@@ -1722,7 +1722,7 @@ mod pledge_decay_parametrized_tests {
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
 
         // Create provider with existing pledge count
-        let signer_address = Address::default();
+        let signer_address = IrysAddress::default();
         let provider =
             MockPledgeProvider::new().with_pledge_count(signer_address, existing_pledges);
 
@@ -1763,7 +1763,7 @@ mod pledge_decay_parametrized_tests {
     #[tokio::test]
     async fn test_new_unpledge_includes_partition_hash() {
         let config = ConsensusConfig::testing();
-        let signer = Address::default();
+        let signer = IrysAddress::default();
         let provider = MockPledgeProvider::new().with_pledge_count(signer, 2);
         let ph = H256::from([0xAB_u8; 32]);
         let tx =
@@ -1795,7 +1795,7 @@ mod commitment_ordering_tests {
         CommitmentTransactionV1 {
             id: H256::from_slice(&[id.as_bytes()[0]; 32]),
             anchor: H256::zero(),
-            signer: Address::default(),
+            signer: IrysAddress::default(),
             signature: IrysSignature::default(),
             fee,
             value: U256::zero(),

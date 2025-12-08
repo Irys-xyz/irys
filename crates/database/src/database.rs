@@ -11,7 +11,7 @@ use crate::tables::{
 use crate::metadata::MetadataKey;
 use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::{
-    Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader, IrysAddress,
     IrysBlockHeader, IrysTransactionId, PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk,
     H256, MEGABYTE,
 };
@@ -325,7 +325,7 @@ pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Res
 
 pub fn insert_peer_list_item<T: DbTxMut>(
     tx: &T,
-    mining_address: &Address,
+    mining_address: &IrysAddress,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
     Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
@@ -348,7 +348,7 @@ pub fn ingress_proofs_by_data_root<TX: DbTx>(
 pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     read_tx: &TX,
     data_root: DataRoot,
-    address: Address,
+    address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
     let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
 

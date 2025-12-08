@@ -140,13 +140,13 @@ async fn heavy_perm_fee_refund_for_unpromoted_tx() -> eyre::Result<()> {
     // Calculate refund amounts for each user
     let user1_refund_amount = refunds
         .iter()
-        .filter(|r| r.target == user1_address)
+        .filter(|r| r.target == user1_address.to_alloy_address())
         .map(|r| U256::from_le_bytes(r.amount.to_le_bytes()))
         .fold(U256::from(0), irys_types::U256::saturating_add);
 
     let user2_refund_amount = refunds
         .iter()
-        .filter(|r| r.target == user2_address)
+        .filter(|r| r.target == user2_address.to_alloy_address())
         .map(|r| U256::from_le_bytes(r.amount.to_le_bytes()))
         .fold(U256::from(0), irys_types::U256::saturating_add);
 

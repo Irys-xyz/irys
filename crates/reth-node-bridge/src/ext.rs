@@ -2,7 +2,7 @@ use alloy_eips::BlockId;
 use alloy_primitives::U256;
 use std::collections::HashMap;
 
-use irys_types::Address;
+use irys_types::IrysAddress;
 use rayon::iter::{IntoParallelIterator as _, ParallelIterator as _};
 use reth_chainspec::EthereumHardforks;
 use reth_e2e_test_utils::rpc::RpcTestContext;
@@ -13,17 +13,22 @@ use tracing::warn;
 
 pub trait IrysRethLoadStateExt: LoadState {
     /// Get the account balance.
-    fn balance(&self, address: Address, block_id: Option<BlockId>) -> Result<U256, Self::Error>;
+    fn balance(&self, address: IrysAddress, block_id: Option<BlockId>)
+        -> Result<U256, Self::Error>;
 }
 
 impl<T> IrysRethLoadStateExt for T
 where
     T: LoadState,
 {
-    fn balance(&self, address: Address, block_id: Option<BlockId>) -> Result<U256, Self::Error> {
+    fn balance(
+        &self,
+        address: IrysAddress,
+        block_id: Option<BlockId>,
+    ) -> Result<U256, Self::Error> {
         Ok(self
             .state_at_block_id_or_latest(block_id)?
-            .account_balance(&address)
+            .account_balance(&address.into())
             .unwrap_or_default()
             .unwrap_or(U256::ZERO))
     }
@@ -36,19 +41,20 @@ where
         + EthTransactions
         + TraceExt,
 {
-    fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256>;
+    fn get_balance(&self, address: IrysAddress, block_id: Option<BlockId>) -> eyre::Result<U256>;
 
-    fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256;
+    fn get_balance_irys(&self, address: IrysAddress, block_id: Option<BlockId>)
+        -> irys_types::U256;
 
     fn get_balances_irys(
         &self,
-        addresses: &[Address],
+        addresses: &[IrysAddress],
         block_id: Option<BlockId>,
-    ) -> HashMap<Address, irys_types::U256>;
+    ) -> HashMap<IrysAddress, irys_types::U256>;
 
     fn get_balance_irys_canonical_and_pending(
         &self,
-        address: Address,
+        address: IrysAddress,
         block_id: Option<BlockId>,
     ) -> eyre::Result<irys_types::U256>;
 }
@@ -60,14 +66,18 @@ where
         + EthTransactions
         + TraceExt,
 {
-    fn get_balance(&self, address: Address, block_id: Option<BlockId>) -> eyre::Result<U256> {
+    fn get_balance(&self, address: IrysAddress, block_id: Option<BlockId>) -> eyre::Result<U256> {
         let eth_api = self.inner.eth_api();
         Ok(eth_api.balance(address, block_id)?)
     }
 
     /// Modified version of the above `get_balance` impl,
     /// which will return an Irys U256, and will return a value of `0` if getting the balance fails
-    fn get_balance_irys(&self, address: Address, block_id: Option<BlockId>) -> irys_types::U256 {
+    fn get_balance_irys(
+        &self,
+        address: IrysAddress,
+        block_id: Option<BlockId>,
+    ) -> irys_types::U256 {
         let eth_api = self.inner.eth_api();
         eth_api
             .balance(address, block_id)
@@ -83,9 +93,9 @@ where
 
     fn get_balances_irys(
         &self,
-        addresses: &[Address],
+        addresses: &[IrysAddress],
         block_id: Option<BlockId>,
-    ) -> HashMap<Address, irys_types::U256> {
+    ) -> HashMap<IrysAddress, irys_types::U256> {
         addresses
             .into_par_iter()
             .map(|address| (*address, self.get_balance_irys(*address, block_id)))
@@ -95,7 +105,7 @@ where
     /// checks all known blocks (pending & canonical) for the provided hash and returns the account's balance using an Irys U256.
     fn get_balance_irys_canonical_and_pending(
         &self,
-        address: Address,
+        address: IrysAddress,
         block_id: Option<BlockId>,
     ) -> eyre::Result<irys_types::U256> {
         use eyre::OptionExt as _;
@@ -116,7 +126,7 @@ where
             }
         };
         Ok(state_provider
-            .account_balance(&address)?
+            .account_balance(&address.into())?
             .ok_or_eyre("Unable to get account balance from state")?
             .into())
     }

@@ -46,8 +46,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, BlockHash, DataLedger, EvmBlockHash,
-    GossipBroadcastMessage, H256List, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockHash, DataLedger, EvmBlockHash, GossipBroadcastMessage,
+    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -81,7 +81,7 @@ use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument};
 
 pub async fn capacity_chunk_solution(
-    miner_addr: Address,
+    miner_addr: IrysAddress,
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
@@ -1610,7 +1610,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // get account reth balance at specific block
-    pub fn get_balance(&self, address: Address, evm_block_hash: FixedBytes<32>) -> U256 {
+    pub fn get_balance(&self, address: IrysAddress, evm_block_hash: FixedBytes<32>) -> U256 {
         let block = Some(BlockId::Hash(RpcBlockHash {
             block_hash: evm_block_hash,
             require_canonical: Some(false),
@@ -2446,7 +2446,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn get_pledge_price(
         &self,
-        user_address: Address,
+        user_address: IrysAddress,
     ) -> eyre::Result<CommitmentPriceInfo> {
         let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
@@ -2641,7 +2641,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
+    pub fn get_partition_assignments(
+        &self,
+        miner_address: IrysAddress,
+    ) -> Vec<PartitionAssignment> {
         let epoch_snapshot = self
             .node_ctx
             .block_tree_guard

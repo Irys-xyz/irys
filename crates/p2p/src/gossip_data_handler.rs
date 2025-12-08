@@ -14,7 +14,7 @@ use irys_actors::{
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
@@ -380,7 +380,7 @@ where
     pub async fn pull_and_process_block_from_peer(
         &self,
         block_hash: BlockHash,
-        peer: &(irys_types::Address, PeerListItem),
+        peer: &(irys_types::IrysAddress, PeerListItem),
     ) -> GossipResult<()> {
         let (source_address, irys_block) = self
             .gossip_client
@@ -562,7 +562,7 @@ where
         let fetch_results: Vec<_> = stream::iter(missing_invalid_tx_ids)
             .map(|tx_id_to_fetch| async move {
                 // Try source peer first
-                let mut fetched: Option<(IrysTransactionResponse, irys_types::Address)> = None;
+                let mut fetched: Option<(IrysTransactionResponse, irys_types::IrysAddress)> = None;
                 let mut last_err: Option<String> = None;
 
                 match self
@@ -933,7 +933,7 @@ where
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<IrysAddress> {
         self.mempool
             .get_stake_and_pledge_whitelist()
             .await

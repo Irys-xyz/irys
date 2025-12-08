@@ -4,7 +4,7 @@ use std::time::Duration;
 use irys_chain::IrysNodeCtx;
 use irys_domain::{ChunkType, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, Address, DataLedger, NodeConfig};
+use irys_types::{irys::IrysSigner, DataLedger, IrysAddress, NodeConfig};
 use tracing::{debug, info};
 // use tracing::debug;
 
@@ -291,7 +291,7 @@ fn check_storage_module_chunks(
 
 fn validate_partition_assignments(
     epoch_snapshot: &EpochSnapshot,
-    signer_address: Address,
+    signer_address: IrysAddress,
     expected_publish: usize,
     expected_submit: usize,
     expected_capacity: usize,

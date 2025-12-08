@@ -25,7 +25,7 @@ use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
-use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, P2PGossipConfig};
+use irys_types::{Config, DatabaseProvider, GossipBroadcastMessage, IrysAddress, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -121,7 +121,7 @@ impl P2PService {
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
-        mining_address: Address,
+        mining_address: IrysAddress,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());

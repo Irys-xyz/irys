@@ -10,7 +10,7 @@ use irys_types::{
     IrysBlockHeader, NodeConfig, SimpleRNG, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, Address, CommitmentTransaction, ConsensusConfig, DataLedger,
+    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
     PartitionChunkOffset,
 };
 use openssl::sha;
@@ -84,7 +84,7 @@ pub enum EpochSnapshotError {
     #[error("unpledge target partition {partition_hash:?} for signer {signer:?} not found in assignments")]
     UnpledgeTargetNotFound {
         partition_hash: H256,
-        signer: Address,
+        signer: IrysAddress,
     },
     /// Unpledge signer does not match assignment owner
     #[error(
@@ -92,18 +92,18 @@ pub enum EpochSnapshotError {
     )]
     UnpledgeSignerMismatch {
         partition_hash: H256,
-        expected: Address,
-        actual: Address,
+        expected: IrysAddress,
+        actual: IrysAddress,
     },
     /// Inconsistent state: partition appears in both capacity and data maps
     #[error("partition {partition_hash:?} present in both capacity and data assignments")]
     UnpledgeTargetInBothMaps { partition_hash: H256 },
     /// Unstake signer does not have an active stake
     #[error("unstake signer {signer:?} is not currently staked")]
-    UnstakeSignerNotStaked { signer: Address },
+    UnstakeSignerNotStaked { signer: IrysAddress },
     /// Unstake attempted while pledges still active
     #[error("unstake for signer {signer:?} has active pledges: {remaining}")]
-    UnstakeHasActivePledges { signer: Address, remaining: u64 },
+    UnstakeHasActivePledges { signer: IrysAddress, remaining: u64 },
 }
 
 impl EpochSnapshot {
@@ -1004,7 +1004,10 @@ impl EpochSnapshot {
     ///
     /// # Returns
     /// * `Vec<PartitionAssignment>` - A vector containing all matching partition assignments
-    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
+    pub fn get_partition_assignments(
+        &self,
+        miner_address: IrysAddress,
+    ) -> Vec<PartitionAssignment> {
         let mut assignments = Vec::new();
 
         // Get a read only view of the partition assignments
@@ -1174,7 +1177,7 @@ impl EpochSnapshot {
         sm_packing_info: &mut [(PathBuf, Option<PackingParams>)],
         module_infos: &mut Vec<StorageModuleInfo>,
         target_ledger_id: Option<u32>,
-        miner: Address,
+        miner: IrysAddress,
         num_chunks: u32,
     ) {
         let filtered_assignments = assignments
@@ -1245,7 +1248,7 @@ impl EpochSnapshot {
         self.partition_assignments.get_assignment(partition_hash)
     }
 
-    pub fn is_staked(&self, miner_address: Address) -> bool {
+    pub fn is_staked(&self, miner_address: IrysAddress) -> bool {
         self.commitment_state.is_staked(miner_address)
     }
 
@@ -1492,7 +1495,7 @@ mod tests {
 
         fn make_unpledge_tx(
             config: &ConsensusConfig,
-            signer: Address,
+            signer: IrysAddress,
             ph: H256,
         ) -> CommitmentTransaction {
             let mut tx = CommitmentTransaction::new(config);

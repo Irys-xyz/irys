@@ -3,10 +3,11 @@ mod perm_refund;
 use crate::utils::IrysNodeTest;
 use alloy_core::primitives::B256;
 use alloy_genesis::GenesisAccount;
+use alloy_primitives::Address;
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    fee_distribution::TermFeeCharges, irys::IrysSigner, Address, ConsensusConfig, DataLedger,
-    DataTransaction, IrysBlockHeader, NodeConfig, U256,
+    fee_distribution::TermFeeCharges, irys::IrysSigner, ConsensusConfig, DataLedger,
+    DataTransaction, IrysAddress, IrysBlockHeader, NodeConfig, U256,
 };
 use reth::providers::TransactionsProvider as _;
 use reth::rpc::types::TransactionTrait as _;
@@ -207,7 +208,7 @@ struct LedgerExpiryTestContext {
 
     // Balances
     initial_balance: U256,
-    miner_address: Address,
+    miner_address: IrysAddress,
 
     // Config
     consensus_config: ConsensusConfig,
@@ -579,6 +580,8 @@ impl LedgerExpiryTestContext {
         // Look for expired ledger fee shadow transactions in ALL blocks we mined
         let mut actual_expiry_fees = U256::from(0);
 
+        let miner_address: Address = self.miner_address.into();
+
         // Check each block for TermFeeReward shadow transactions
         for block in &self.blocks_mined {
             // Get all transactions from this block
@@ -604,7 +607,7 @@ impl LedgerExpiryTestContext {
                     if let Some(irys_reth_node_bridge::irys_reth::shadow_tx::TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
                         info!("Found TermFeeReward shadow tx in block {}: target={}, amount={}, irys_ref={:?}",
                             block.height, reward.target, reward.amount, reward.irys_ref);
-                        if reward.target == self.miner_address {
+                        if reward.target == miner_address {
                             let amount = U256::from_le_bytes(reward.amount.to_le_bytes());
                             actual_expiry_fees = actual_expiry_fees.saturating_add(amount);
                         }

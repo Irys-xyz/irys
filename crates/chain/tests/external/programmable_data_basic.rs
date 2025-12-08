@@ -1,6 +1,7 @@
 use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use alloy_network::EthereumWallet;
+use alloy_primitives::Address;
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_macro::sol;
@@ -9,7 +10,7 @@ use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_types::precompile::IrysPrecompileOffsets;
-use irys_types::{irys::IrysSigner, Address, NodeConfig};
+use irys_types::{irys::IrysSigner, IrysAddress, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
@@ -60,7 +61,7 @@ async fn test_programmable_data_basic_external() -> eyre::Result<()> {
             },
         ),
         (
-            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
+            IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
             GenesisAccount {
                 balance: U256::from(4200000000000000000_u128),
                 ..Default::default()

@@ -1,5 +1,5 @@
 use alloy_core::primitives::aliases::U200;
-use alloy_core::primitives::U256;
+use alloy_core::primitives::{Address, U256};
 use alloy_eips::eip2930::AccessListItem;
 use alloy_eips::BlockNumberOrTag;
 use alloy_genesis::GenesisAccount;
@@ -17,7 +17,7 @@ use irys_api_server::routes::tx::TxOffset;
 use irys_types::precompile::IrysPrecompileOffsets;
 use irys_types::range_specifier::ChunkRangeSpecifier;
 use irys_types::range_specifier::{ByteRangeSpecifier, PdAccessListArgSerde as _, U18, U34};
-use irys_types::{irys::IrysSigner, Address};
+use irys_types::{irys::IrysSigner, IrysAddress};
 use irys_types::{Base64, DataTransactionHeader, NodeConfig, TxChunkOffset, UnpackedChunk};
 
 use crate::utils::IrysNodeTest;
@@ -61,7 +61,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
             },
         ),
         (
-            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
+            IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
             GenesisAccount {
                 balance: U256::from(4200000000000000000_u128),
                 ..Default::default()

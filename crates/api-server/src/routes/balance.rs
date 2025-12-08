@@ -1,9 +1,9 @@
-use crate::{error::ApiError, utils::address::parse_address, ApiState};
+use crate::{error::ApiError, ApiState};
 use actix_web::web::{self, Json, Path, Query};
 use alloy_eips::BlockNumberOrTag;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
-use irys_types::{u64_stringify, Address, BlockHash, U256};
+use irys_types::{u64_stringify, BlockHash, IrysAddress, U256};
 use reth::providers::BlockNumReader as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -12,7 +12,7 @@ use tracing::{debug, error};
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct BalanceResponse {
-    pub address: Address,
+    pub address: IrysAddress,
     pub balance: U256,
     #[serde(with = "u64_stringify")]
     pub block_height: u64,
@@ -37,13 +37,12 @@ enum BlockParameter {
 }
 
 /// Query account balance at specified block.
-/// Supports hex (0x...) and Base58 addresses.
 pub async fn get_balance(
     state: web::Data<ApiState>,
-    path: Path<String>,
+    address: Path<IrysAddress>,
     query: Query<BalanceQuery>,
 ) -> Result<Json<BalanceResponse>, ApiError> {
-    let address = parse_address(&path)?;
+    let address = address.into_inner();
     let BalanceQuery { block } = query.into_inner();
     let block_param = parse_block_parameter(&block)?;
     let provider = &state.reth_provider.provider;
@@ -147,10 +146,10 @@ fn get_state_at_block(
 
 fn query_balance(
     state_provider: &impl reth::providers::StateProvider,
-    address: &Address,
+    address: &IrysAddress,
 ) -> Result<U256, ApiError> {
     Ok(state_provider
-        .account_balance(address)
+        .account_balance(&(address.into()))
         .map_err(|e| {
             error!("Failed to query balance for address {}: {}", address, e);
             ApiError::BalanceUnavailable {

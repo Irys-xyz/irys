@@ -8,7 +8,7 @@ use crate::{
         },
         Amount,
     },
-    H256,
+    IrysAddress, H256,
 };
 use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
@@ -215,10 +215,14 @@ pub enum ConsensusOptions {
 impl ConsensusOptions {
     pub fn extend_genesis_accounts(
         &mut self,
-        accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
+        accounts: impl IntoIterator<Item = (IrysAddress, GenesisAccount)>,
     ) {
         let config = self.get_mut();
-        config.reth.genesis = config.reth.genesis.clone().extend_accounts(accounts);
+        config.reth.genesis = config
+            .reth
+            .genesis
+            .clone()
+            .extend_accounts(accounts.into_iter().map(|a| (a.0.into(), a.1)));
     }
 
     pub fn get_mut(&mut self) -> &mut ConsensusConfig {
@@ -263,10 +267,10 @@ pub struct GenesisConfig {
     pub timestamp_millis: u128,
 
     /// Address that signs the genesis block
-    pub miner_address: Address,
+    pub miner_address: IrysAddress,
 
     /// Address that receives the genesis block reward
-    pub reward_address: Address,
+    pub reward_address: IrysAddress,
 
     /// The initial last_epoch_hash used by the genesis block
     pub last_epoch_hash: H256,
@@ -539,10 +543,10 @@ impl ConsensusConfig {
                 // The timestamp in milliseconds used for the genesis block
                 timestamp_millis: 1763749823171,
                 // Address that signs the genesis block
-                miner_address: Address::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
+                miner_address: IrysAddress::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
                     .unwrap(), // todo()
                 // Address that receives the genesis block reward
-                reward_address: Address::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
+                reward_address: IrysAddress::from_hex("faf11d0e472d0b2dc4dab8d4817d0854e3f9e03e")
                     .unwrap(), // todo()
                 // The initial last_epoch_hash used by the genesis block
                 last_epoch_hash: H256::from_base58("4eiVupeZoaBgxyDMacRHnvbbzodLRTEcGUG3yjXpAE4i"),
@@ -672,8 +676,8 @@ impl ConsensusConfig {
             number_of_ingress_proofs_from_assignees: 0,
             genesis: GenesisConfig {
                 timestamp_millis: 0,
-                miner_address: Address::ZERO,
-                reward_address: Address::ZERO,
+                miner_address: IrysAddress::ZERO,
+                reward_address: IrysAddress::ZERO,
                 last_epoch_hash: H256::zero(),
                 vdf_seed: H256::zero(),
                 vdf_next_seed: None,
