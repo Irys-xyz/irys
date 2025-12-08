@@ -86,7 +86,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
                 response: response_tx,
             })
             .unwrap();
-        let (block, _) = response_rx.await??.unwrap();
+        let (block, _, _) = response_rx.await??.unwrap();
 
         //check reth for built block
         let reth_block = reth_context

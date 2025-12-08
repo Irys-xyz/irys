@@ -80,7 +80,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .post_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
+    let (irys_block, reth_exec_env, _block_txs) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
@@ -285,7 +285,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _, outcome) = node.mine_block_and_wait_for_validation().await?;
+    let (block, _, _, outcome) = node.mine_block_and_wait_for_validation().await?;
     assert_eq!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
@@ -369,7 +369,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .post_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
+    let (irys_block, reth_exec_env, _block_txs) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
 
     // Get the transaction hashes from the block in order
@@ -1138,7 +1138,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .await?;
 
     // Produce block with valid PoA/difficulty but invalid EVM payload (subit txs tampered to not match shadow tx order)
-    let (evil_block, _eth_payload) = evil_strategy
+    let (evil_block, _eth_payload, _) = evil_strategy
         .fully_produce_new_block(solution_context(&node.node_ctx).await?)
         .await?
         .unwrap();
@@ -1152,7 +1152,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // turn back on the validation for this test
     node.node_ctx.set_validation_enabled(true);
-    let (new_block, _reth_block) = ProductionStrategy {
+    let (new_block, _reth_block, _) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)
@@ -1346,13 +1346,15 @@ async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<
     let mut source_blocks = Vec::with_capacity(BLOCKS_TO_PIPELINE);
 
     for _ in 0..BLOCKS_TO_PIPELINE {
-        let block = source_node.mine_block().await?;
-        source_node.send_full_block(&peer_node, &block).await?;
+        let (block, payload, block_txs) = source_node.mine_block_with_payload().await?;
+        source_node
+            .send_full_block(&peer_node, &block, payload, block_txs)
+            .await?;
         tracing::error!(
             block.hash = ?block.block_hash,
             block.previous_block_hash = ?block.previous_block_hash
         );
-        source_blocks.push(block);
+        source_blocks.push((*block).clone());
     }
 
     let last_source_block = source_blocks
@@ -1527,7 +1529,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     let solution = solution_context(&node.node_ctx).await?;
 
     // Produce a block with the evil strategy (invalid solution hash)
-    let (evil_block, _eth_payload) = evil_strategy
+    let (evil_block, _eth_payload, _) = evil_strategy
         .fully_produce_new_block(solution.clone())
         .await?
         .unwrap();
@@ -1542,7 +1544,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     );
 
     // Now produce a valid block with the correct strategy to ensure the system still works
-    let (valid_block, _) = ProductionStrategy {
+    let (valid_block, _, _) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)

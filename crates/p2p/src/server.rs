@@ -120,19 +120,12 @@ where
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
             if peer.address.gossip.ip() != peer_address.ip() {
-                debug!(
-                    "Miner address {} request came from ip {}, but the expected ip was {}",
-                    miner_address,
-                    peer_address.ip(),
-                    peer.address.gossip.ip()
-                );
                 return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                     RejectionReason::HandshakeRequired,
                 )));
             }
             Ok(peer)
         } else {
-            warn!("Miner address {} is not in the peer list", miner_address);
             Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::HandshakeRequired,
             )))
