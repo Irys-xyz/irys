@@ -8,7 +8,7 @@ use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    Address, BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, NodeMode,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysAddress, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle, U256,
 };
 use rand::prelude::SliceRandom as _;
@@ -1025,9 +1025,9 @@ async fn pull_highest_blocks(
     api_client: &impl ApiClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
-) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)>> {
+) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
-    let peers: Vec<(Address, irys_types::PeerListItem)> = if use_trusted_peers_only {
+    let peers: Vec<(IrysAddress, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Post-sync: Collecting the highest blocks from trusted peers");
         peer_list.online_trusted_peers()
     } else {
@@ -1046,7 +1046,7 @@ async fn pull_highest_blocks(
         ));
     }
 
-    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(Address, PeerListItem)>)> =
+    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)> =
         HashMap::new();
 
     for (miner_address, peer) in peers {
@@ -1471,7 +1471,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
     peer_list: &PeerList,
     api_client: &impl ApiClient,
     trusted_peers_only: bool,
-) -> ChainSyncResult<BTreeMap<U256, Vec<(Address, PeerListItem)>>> {
+) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysAddress, PeerListItem)>>> {
     let peers = if trusted_peers_only {
         peer_list.online_trusted_peers()
     } else {
@@ -1553,7 +1553,7 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            Config, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, IrysBlockHeader,
             NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
@@ -1652,7 +1652,7 @@ mod tests {
             );
 
             peer_list_guard.add_or_update_peer(
-                Address::repeat_byte(2),
+                IrysAddress::repeat_byte(2),
                 PeerListItem {
                     reputation_score: PeerScore::new(100),
                     response_time: 0,
@@ -1774,7 +1774,7 @@ mod tests {
             };
 
             peer_list.add_or_update_peer(
-                Address::repeat_byte(2),
+                IrysAddress::repeat_byte(2),
                 PeerListItem {
                     reputation_score: PeerScore::new(100),
                     response_time: 0,
@@ -1824,7 +1824,7 @@ mod tests {
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
-            Address, Config, DatabaseProvider, GossipData, GossipDataRequest, IrysBlockHeader,
+            Config, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, IrysBlockHeader,
             NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
             SyncMode,
         };
@@ -1927,8 +1927,8 @@ mod tests {
                 is_online: true,
             };
 
-            let addr_a = Address::repeat_byte(0xA0);
-            let addr_b = Address::repeat_byte(0xB0);
+            let addr_a = IrysAddress::repeat_byte(0xA0);
+            let addr_b = IrysAddress::repeat_byte(0xB0);
             peer_list_guard.add_or_update_peer(addr_a, peer1, true);
             peer_list_guard.add_or_update_peer(addr_b, peer2, true);
 
@@ -2051,8 +2051,8 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
             };
-            let addr_a = Address::repeat_byte(0xA1);
-            let addr_b = Address::repeat_byte(0xB1);
+            let addr_a = IrysAddress::repeat_byte(0xA1);
+            let addr_b = IrysAddress::repeat_byte(0xB1);
             peer_list_guard.add_or_update_peer(addr_a, peer1, true);
             peer_list_guard.add_or_update_peer(addr_b, peer2, true);
 

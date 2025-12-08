@@ -10,7 +10,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{
     DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
     U256,
@@ -24,7 +24,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub data_tx: DataTransactionHeader,
-        pub invalid_refund: (H256, U256, Address),
+        pub invalid_refund: (H256, U256, IrysAddress),
     }
 
     #[async_trait::async_trait]
@@ -155,7 +155,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> eyre::Result<()> {
     struct PhantomRefundStrategy {
         pub prod: ProductionStrategy,
-        pub invalid_refund: (H256, U256, Address),
+        pub invalid_refund: (H256, U256, IrysAddress),
     }
 
     #[async_trait::async_trait]

@@ -1,5 +1,5 @@
 use actix_web::{body::BoxBody, HttpResponse, ResponseError};
-use irys_types::{Address, AddressParseError, DataLedger};
+use irys_types::{AddressParseError, DataLedger, IrysAddress};
 use serde::Serialize;
 
 use awc::http::StatusCode;
@@ -13,10 +13,10 @@ pub enum ApiError {
     #[error("Not implemented: {feature}")]
     NotImplemented { feature: String },
     #[error("Miner not found: {miner_address}")]
-    MinerNotFound { miner_address: Address },
+    MinerNotFound { miner_address: IrysAddress },
     #[error("No {ledger_type} ledger assignments found for miner: {miner_address}")]
     LedgerNotFound {
-        miner_address: Address,
+        miner_address: IrysAddress,
         ledger_type: DataLedger,
     },
     #[error("Invalid address: {0}")]

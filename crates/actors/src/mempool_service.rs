@@ -45,8 +45,8 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    Address, ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, MempoolConfig, TxChunkOffset, UnpackedChunk,
+    ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{BlockHash, CommitmentType};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
@@ -272,8 +272,8 @@ pub enum MempoolServiceMessage {
     GetState(oneshot::Sender<AtomicMempoolState>),
     /// Remove the set of txids from any blocklists (recent_invalid_txs)
     RemoveFromBlacklist(Vec<H256>, oneshot::Sender<()>),
-    UpdateStakeAndPledgeWhitelist(HashSet<Address>, oneshot::Sender<()>),
-    CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<Address>>),
+    UpdateStakeAndPledgeWhitelist(HashSet<IrysAddress>, oneshot::Sender<()>),
+    CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<IrysAddress>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
 }
@@ -518,7 +518,7 @@ impl Inner {
         parent_block_hash: BlockHash,
     ) -> eyre::Result<MempoolTxs> {
         let mempool_state = &self.mempool_state;
-        let mut fees_spent_per_address: HashMap<Address, U256> = HashMap::new();
+        let mut fees_spent_per_address: HashMap<IrysAddress, U256> = HashMap::new();
         let mut confirmed_commitments = HashSet::new();
         let mut commitment_tx = Vec::new();
         let mut unfunded_address = HashSet::new();
@@ -603,7 +603,7 @@ impl Inner {
         let max_anchor_height =
             current_height.saturating_sub(self.config.consensus.block_migration_depth as u64);
 
-        let mut balances: HashMap<Address, U256> = HashMap::new();
+        let mut balances: HashMap<IrysAddress, U256> = HashMap::new();
 
         info!(
             block.height = parent_block_height,
@@ -1658,13 +1658,13 @@ impl Inner {
         .map_err(|e| TxIngressError::Other(format!("Failed to calculate term fee: {}", e)))
     }
 
-    async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+    async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<IrysAddress>) {
         self.mempool_state
             .extend_stake_and_pledge_whitelist(new_entries)
             .await;
     }
 
-    async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+    async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<IrysAddress> {
         self.mempool_state
             .get_stake_and_pledge_whitelist_cloned()
             .await
@@ -1851,12 +1851,12 @@ impl AtomicMempoolState {
             .contains(fingerprint)
     }
 
-    pub async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<Address>) {
+    pub async fn extend_stake_and_pledge_whitelist(&self, new_entries: HashSet<IrysAddress>) {
         let mut state = self.write().await;
         state.stake_and_pledge_whitelist.extend(new_entries);
     }
 
-    pub async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<Address> {
+    pub async fn get_stake_and_pledge_whitelist_cloned(&self) -> HashSet<IrysAddress> {
         let state = self.read().await;
         state.stake_and_pledge_whitelist.clone()
     }
@@ -1899,7 +1899,7 @@ impl AtomicMempoolState {
 
     pub async fn count_mempool_commitments(
         &self,
-        user_address: &Address,
+        user_address: &IrysAddress,
         commitment_type_filter: impl Fn(&CommitmentType) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
@@ -1943,7 +1943,7 @@ impl AtomicMempoolState {
 
     pub async fn all_valid_commitment_txs_cloned(
         &self,
-    ) -> BTreeMap<Address, Vec<CommitmentTransaction>> {
+    ) -> BTreeMap<IrysAddress, Vec<CommitmentTransaction>> {
         self.read().await.valid_commitment_tx.clone()
     }
 
@@ -1956,7 +1956,7 @@ impl AtomicMempoolState {
             .collect::<Vec<_>>()
     }
 
-    pub async fn all_valid_commitment_ledger_addresses(&self) -> Vec<Address> {
+    pub async fn all_valid_commitment_ledger_addresses(&self) -> Vec<IrysAddress> {
         let state = self.read().await;
         state
             .valid_commitment_tx
@@ -1967,7 +1967,7 @@ impl AtomicMempoolState {
 
     pub async fn valid_commitment_txs_cloned(
         &self,
-        address: &Address,
+        address: &IrysAddress,
     ) -> Option<Vec<CommitmentTransaction>> {
         self.0
             .read()
@@ -2008,7 +2008,7 @@ impl AtomicMempoolState {
         }
 
         // Create a vector of addresses to update to avoid borrowing issues
-        let addresses_to_check: Vec<Address> = mempool_state_guard
+        let addresses_to_check: Vec<IrysAddress> = mempool_state_guard
             .valid_commitment_tx
             .keys()
             .copied()
@@ -2038,7 +2038,7 @@ impl AtomicMempoolState {
         &self,
     ) -> (
         BTreeMap<H256, DataTransactionHeader>,
-        BTreeMap<Address, Vec<CommitmentTransaction>>,
+        BTreeMap<IrysAddress, Vec<CommitmentTransaction>>,
     ) {
         let mut state = self.write().await;
         state.recent_valid_tx.clear();
@@ -2140,14 +2140,14 @@ impl AtomicMempoolState {
         }
     }
 
-    pub async fn is_address_in_a_whitelist(&self, address: &Address) -> bool {
+    pub async fn is_address_in_a_whitelist(&self, address: &IrysAddress) -> bool {
         let read_guard = self.read().await;
         let whitelist = &read_guard.stake_and_pledge_whitelist;
         whitelist.is_empty() || whitelist.contains(address)
     }
 
     /// Returns true if the commitment tx is already known in the mempool caches/maps.
-    pub async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: Address) -> bool {
+    pub async fn is_known_commitment_in_mempool(&self, tx_id: &H256, signer: IrysAddress) -> bool {
         let guard = self.read().await;
         // Only treat recent valid entries as known. Invalid must not block legitimate re-ingress.
         if guard.recent_valid_tx.contains(tx_id) {
@@ -2194,7 +2194,7 @@ impl AtomicMempoolState {
 
     pub async fn pop_pending_pledges_for_signer(
         &self,
-        signer: &Address,
+        signer: &IrysAddress,
     ) -> Option<LruCache<IrysTransactionId, CommitmentTransaction>> {
         self.write().await.pending_pledges.pop(signer)
     }
@@ -2234,7 +2234,7 @@ impl AtomicMempoolState {
         Ok(())
     }
 
-    async fn is_there_a_pledge_for_unstaked_address(&self, signer: &Address) -> bool {
+    async fn is_there_a_pledge_for_unstaked_address(&self, signer: &IrysAddress) -> bool {
         // For unstaked addresses, check for pending stake transactions
         let mempool_state_guard = self.read().await;
         // Get pending transactions for this address
@@ -2305,7 +2305,7 @@ pub struct MempoolState {
     pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub max_submit_txs: usize,
     /// bounded map with manual capacity enforcement
-    pub valid_commitment_tx: BTreeMap<Address, Vec<CommitmentTransaction>>,
+    pub valid_commitment_tx: BTreeMap<IrysAddress, Vec<CommitmentTransaction>>,
     pub max_commitment_addresses: usize,
     pub max_commitments_per_address: usize,
     /// The miner's signer instance, used to sign ingress proofs
@@ -2320,15 +2320,15 @@ pub struct MempoolState {
     /// Priority-based cache for out of order gossip chunks.
     /// Evicts entries with fewer chunks first to mitigate cache poisoning attacks.
     pub pending_chunks: PriorityPendingChunks,
-    pub pending_pledges: LruCache<Address, LruCache<IrysTransactionId, CommitmentTransaction>>,
-    pub stake_and_pledge_whitelist: HashSet<Address>,
+    pub pending_pledges: LruCache<IrysAddress, LruCache<IrysTransactionId, CommitmentTransaction>>,
+    pub stake_and_pledge_whitelist: HashSet<IrysAddress>,
 }
 
 /// Create a new instance of the mempool state passing in a reference
 /// counted reference to a `DatabaseEnv`, a copy of reth's task executor and the miner's signer
 pub fn create_state(
     config: &MempoolConfig,
-    stake_and_pledge_whitelist: &[Address],
+    stake_and_pledge_whitelist: &[IrysAddress],
 ) -> MempoolState {
     let max_pending_chunk_items = config.max_pending_chunk_items;
     let max_pending_pledge_items = config.max_pending_pledge_items;
@@ -2498,7 +2498,7 @@ impl MempoolState {
 
     /// Find address with lowest total commitment value for eviction.
     /// Returns (Address, total_value) tuple.
-    fn find_lowest_value_address(&self) -> Option<(Address, U256)> {
+    fn find_lowest_value_address(&self) -> Option<(IrysAddress, U256)> {
         self.valid_commitment_tx
             .iter()
             .map(|(addr, txs)| {
@@ -2543,7 +2543,7 @@ impl TxReadError {
 pub enum TxIngressError {
     /// The transaction's signature is invalid
     #[error("Transaction signature is invalid for address {0}")]
-    InvalidSignature(Address),
+    InvalidSignature(IrysAddress),
     /// The account does not have enough tokens to fund this transaction
     #[error("Account has insufficient funds for transaction {0}")]
     Unfunded(H256),
@@ -2874,8 +2874,8 @@ async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
     reth_adapter: &IrysRethNodeAdapter,
     block_id: Option<BlockId>,
     txs: &[T],
-) -> HashMap<Address, U256> {
-    let signers: Vec<Address> = txs
+) -> HashMap<IrysAddress, U256> {
+    let signers: Vec<IrysAddress> = txs
         .iter()
         .map(irys_types::IrysTransactionCommon::signer)
         .collect();
@@ -2891,9 +2891,9 @@ async fn fetch_balances_for_transactions<T: IrysTransactionCommon>(
 // and previously included transactions in this block
 fn check_funding<T: IrysTransactionCommon>(
     tx: &T,
-    balances: &HashMap<Address, U256>,
-    unfunded_address: &mut HashSet<Address>,
-    fees_spent_per_address: &mut HashMap<Address, U256>,
+    balances: &HashMap<IrysAddress, U256>,
+    unfunded_address: &mut HashSet<IrysAddress>,
+    fees_spent_per_address: &mut HashMap<IrysAddress, U256>,
 ) -> bool {
     let signer = tx.signer();
 
@@ -2980,7 +2980,7 @@ mod bounded_mempool_tests {
         DataTransactionHeader::V1(DataTransactionHeaderV1 {
             id: H256::random(),
             anchor: H256::zero(),
-            signer: Address::random(),
+            signer: IrysAddress::random(),
             data_root: H256::random(),
             data_size: 1024,
             header_size: 0,
@@ -2995,7 +2995,7 @@ mod bounded_mempool_tests {
     }
 
     /// Creates a test commitment transaction with specified signer and value
-    fn create_test_commitment_tx(signer: Address, value: u64) -> CommitmentTransaction {
+    fn create_test_commitment_tx(signer: IrysAddress, value: u64) -> CommitmentTransaction {
         CommitmentTransaction::V1(CommitmentTransactionV1 {
             id: H256::random(), // Random ID for testing
             anchor: H256::zero(),
@@ -3107,7 +3107,7 @@ mod bounded_mempool_tests {
         // Setup: Create state with max 3 commitments per address
         let mut state = create_test_mempool_state(10, 10, 3);
 
-        let address = Address::random();
+        let address = IrysAddress::random();
         let tx1 = create_test_commitment_tx(address, 100);
         let tx2 = create_test_commitment_tx(address, 200);
         let tx3 = create_test_commitment_tx(address, 300);
@@ -3141,8 +3141,8 @@ mod bounded_mempool_tests {
         // Setup: Max 2 commitments per address
         let mut state = create_test_mempool_state(10, 10, 2);
 
-        let addr_a = Address::random();
-        let addr_b = Address::random();
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
 
         let tx_a1 = create_test_commitment_tx(addr_a, 100);
         let tx_a2 = create_test_commitment_tx(addr_a, 200);
@@ -3184,10 +3184,10 @@ mod bounded_mempool_tests {
         // Setup: Max 3 addresses globally
         let mut state = create_test_mempool_state(10, 3, 10);
 
-        let addr_a = Address::random();
-        let addr_b = Address::random();
-        let addr_c = Address::random();
-        let addr_d = Address::random();
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
+        let addr_c = IrysAddress::random();
+        let addr_d = IrysAddress::random();
 
         // Create commitments with different total values per address
         let tx_a = create_test_commitment_tx(addr_a, 100); // Lowest total value
@@ -3232,9 +3232,9 @@ mod bounded_mempool_tests {
         // Setup: Fill global address limit
         let mut state = create_test_mempool_state(10, 3, 10);
 
-        let addr_a = Address::random();
-        let addr_b = Address::random();
-        let addr_c = Address::random();
+        let addr_a = IrysAddress::random();
+        let addr_b = IrysAddress::random();
+        let addr_c = IrysAddress::random();
 
         state
             .bounded_insert_commitment_tx(&create_test_commitment_tx(addr_a, 100))

@@ -6,7 +6,7 @@ use std::time::*;
 #[cfg(feature = "nvidia")]
 pub fn main() {
     use irys_packing::CUDAConfig;
-    use irys_types::Address;
+    use irys_types::IrysAddress;
 
     // std::env::set_var("JDBG_BLOCKS", "40"); // 3090: 82, 5090: 170
     // std::env::set_var("JDBG_THREADS", "128");

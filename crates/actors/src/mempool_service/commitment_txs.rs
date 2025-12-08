@@ -2,7 +2,7 @@ use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressEr
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_types::{
-    Address, CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage,
+    CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage, IrysAddress,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
@@ -258,7 +258,7 @@ impl Inner {
 
     /// Processes any pending pledges for a newly staked address by re-ingesting them via gossip path.
     #[tracing::instrument(level = "trace", skip_all, fields(account.signer = ?signer))]
-    async fn process_pending_pledges_for_new_stake(&self, signer: Address) {
+    async fn process_pending_pledges_for_new_stake(&self, signer: IrysAddress) {
         let pop = self
             .mempool_state
             .pop_pending_pledges_for_signer(&signer)

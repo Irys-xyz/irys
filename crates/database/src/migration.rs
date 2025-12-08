@@ -106,7 +106,7 @@ mod tests {
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::ingress::CachedIngressProof;
     use irys_types::{
-        Address, Base64, ChunkPathHash, DataRoot, DataTransactionHeader, IrysBlockHeader,
+        Base64, ChunkPathHash, DataRoot, DataTransactionHeader, IrysAddress, IrysBlockHeader,
         TxChunkOffset, UnixTimestamp, H256,
     };
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
@@ -132,7 +132,7 @@ mod tests {
         let tx_id: H256 = H256::random();
         let data_root: DataRoot = H256::random();
         let chunk_path_hash: ChunkPathHash = H256::random();
-        let address: Address = Address::random();
+        let address: IrysAddress = IrysAddress::random();
 
         {
             let write_tx = old_db.tx_mut()?;

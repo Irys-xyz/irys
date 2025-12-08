@@ -29,9 +29,9 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, Address, AdjustmentStats, Base64,
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
+    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
+    H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
     SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo,
     H256, U256,
 };
@@ -177,7 +177,7 @@ pub struct BlockProducerInner {
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnpledgeRefundEvent {
-    pub account: Address,
+    pub account: IrysAddress,
     pub amount: U256,
     pub irys_ref_txid: H256,
 }
@@ -199,7 +199,7 @@ impl PartialOrd for UnpledgeRefundEvent {
 /// Event emitted on epoch blocks to refund Unstake commitments (fee charged at inclusion; value refunded at epoch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnstakeRefundEvent {
-    pub account: Address,
+    pub account: IrysAddress,
     pub amount: U256,
     pub irys_ref_txid: H256,
 }
@@ -857,7 +857,7 @@ pub trait BlockProdStrategy {
             inner: PayloadAttributes {
                 timestamp: timestamp_ms.to_secs().as_secs(), // **THIS HAS TO BE SECONDS**
                 prev_randao: parent_mix_hash,
-                suggested_fee_recipient: self.inner().config.node_config.reward_address,
+                suggested_fee_recipient: self.inner().config.node_config.reward_address.into(),
                 withdrawals: None, // these should ALWAYS be none
                 parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             },

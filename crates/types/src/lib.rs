@@ -44,7 +44,7 @@ pub mod remote_packing;
 pub mod rlp;
 
 pub mod address;
-pub use address::Address;
+pub use address::IrysAddress;
 
 use std::sync::{atomic::AtomicU64, Arc};
 
@@ -62,7 +62,6 @@ pub use transaction::*;
 pub use tx_source::*;
 
 pub use alloy_primitives::{/* Address, */ Signature};
-
 
 pub use app_state::*;
 pub use arbiter_handle::*;

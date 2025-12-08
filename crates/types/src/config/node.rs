@@ -4,12 +4,11 @@ use crate::{
         phantoms::{IrysPrice, Usd},
         Amount,
     },
-    ConsensusConfig, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
+    ConsensusConfig, IrysAddress, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
 };
 use crate::{serde_utils, ConsensusOptions};
 #[cfg(any(test, feature = "test-utils"))]
 use alloy_genesis::GenesisAccount;
-use alloy_primitives::Address;
 
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -50,7 +49,7 @@ pub struct NodeConfig {
     /// This has effect only on the genesis node, as all other nodes will get this parameter
     /// from their trusted peers.
     #[serde(default)]
-    pub initial_stake_and_pledge_whitelist: Vec<Address>,
+    pub initial_stake_and_pledge_whitelist: Vec<IrysAddress>,
 
     /// Initial whitelist of peers to connect to. If you're joining the network as a peer in a
     /// trusted-only or trusted-and-handshake mode, you'll be supplied one during the handshake
@@ -62,7 +61,7 @@ pub struct NodeConfig {
     #[serde(default = "default_peer_filter_mode")]
     pub peer_filter_mode: PeerFilterMode,
 
-    pub reward_address: Address,
+    pub reward_address: IrysAddress,
 
     // whether we should try to stake & pledge our local drives
     pub stake_pledge_drives: bool,
@@ -687,8 +686,8 @@ impl NodeConfig {
         self
     }
 
-    pub fn miner_address(&self) -> Address {
-        Address::from_private_key(&self.mining_key)
+    pub fn miner_address(&self) -> IrysAddress {
+        IrysAddress::from_private_key(&self.mining_key)
     }
 
     pub fn new_random_signer(&self) -> IrysSigner {
@@ -716,7 +715,7 @@ impl NodeConfig {
         &mut self,
         signers: impl IntoIterator<Item = &'a IrysSigner>,
     ) -> &mut Self {
-        let mut accounts: Vec<(Address, GenesisAccount)> = Vec::new();
+        let mut accounts: Vec<(IrysAddress, GenesisAccount)> = Vec::new();
         for signer in signers {
             accounts.push((
                 signer.address(),

@@ -11,10 +11,10 @@ use irys_packing::{capacity_single::compute_entropy_chunk, packing_xor_vec_u8};
 use irys_testing_utils::setup_tracing_and_temp_dir;
 use irys_types::{
     irys::IrysSigner, ledger_chunk_offset_ie, partition::PartitionAssignment,
-    partition_chunk_offset_ie, Address, Base64, Config, ConsensusConfig, DataLedger,
-    DataSyncServiceConfig, DataTransaction, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange,
-    NodeConfig, PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig,
-    TxChunkOffset, UnpackedChunk, H256,
+    partition_chunk_offset_ie, Base64, Config, ConsensusConfig, DataLedger, DataSyncServiceConfig,
+    DataTransaction, IrysAddress, IrysBlockHeader, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PackedChunk, PartitionChunkOffset, PeerAddress, PeerListItem, StorageSyncConfig, TxChunkOffset,
+    UnpackedChunk, H256,
 };
 use nodit::Interval;
 use rust_decimal::prelude::ToPrimitive as _;
@@ -250,7 +250,7 @@ impl DataSyncServiceTestHarness {
     /// Get peers list
     fn get_active_peers(
         &mut self,
-    ) -> eyre::Result<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>> {
+    ) -> eyre::Result<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>> {
         let (tx, mut rx) = oneshot::channel();
         self.handle_message(DataSyncServiceMessage::GetActivePeersList(tx))?;
         rx.try_recv()
@@ -261,7 +261,7 @@ impl DataSyncServiceTestHarness {
     fn take_performance_snapshot(
         &mut self,
         label: &str,
-        peer_addresses: &(Address, Address, Address),
+        peer_addresses: &(IrysAddress, IrysAddress, IrysAddress),
         mock_fetchers: &HashMap<SocketAddr, Arc<MockChunkFetcher>>,
         storage_module: &Arc<StorageModule>,
     ) -> eyre::Result<()> {
@@ -317,7 +317,7 @@ impl DataSyncServiceTestHarness {
         &mut self,
         num_ticks: u32,
         tick_interval: Duration,
-        peer_addresses: &(Address, Address, Address),
+        peer_addresses: &(IrysAddress, IrysAddress, IrysAddress),
         mock_fetchers: &HashMap<SocketAddr, Arc<MockChunkFetcher>>,
         storage_module: &Arc<StorageModule>,
         snapshot_ticks: Vec<u32>, // Specify which ticks to take snapshots at
@@ -358,9 +358,9 @@ impl DataSyncServiceTestHarness {
 //==============================================================================
 struct TestSetup {
     // Test peer addresses
-    slow_peer_addr: Address,
-    stable_peer_addr: Address,
-    fast_peer_addr: Address,
+    slow_peer_addr: IrysAddress,
+    stable_peer_addr: IrysAddress,
+    fast_peer_addr: IrysAddress,
 
     // Only one real storage module - the one that needs to sync data
     storage_module: Arc<StorageModule>,
@@ -411,10 +411,10 @@ impl TestSetup {
         let config = Config::new(node_config);
 
         // Create mining addresses for all the mocked up peers
-        let slow_peer_addr = Address::from([1_u8; 20]);
-        let stable_peer_addr = Address::from([2_u8; 20]);
-        let fast_peer_addr = Address::from([3_u8; 20]);
-        let sync_peer_addr = Address::from([4_u8; 20]);
+        let slow_peer_addr = IrysAddress::from([1_u8; 20]);
+        let stable_peer_addr = IrysAddress::from([2_u8; 20]);
+        let fast_peer_addr = IrysAddress::from([3_u8; 20]);
+        let sync_peer_addr = IrysAddress::from([4_u8; 20]);
 
         // Create partition assignments for each of the peers, assigning them to the same
         // ledger_id(0) and slot_index(0)
@@ -453,7 +453,7 @@ impl TestSetup {
         let fast_api_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8003);
 
         // Create peer list with performance characteristics
-        let peers_data: Vec<(Address, PeerListItem)> = vec![
+        let peers_data: Vec<(IrysAddress, PeerListItem)> = vec![
             (
                 slow_peer_addr, // <- Slow peer
                 PeerListItem {

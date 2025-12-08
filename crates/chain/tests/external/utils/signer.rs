@@ -1,11 +1,11 @@
 use eyre::Result;
-use irys_types::{irys::IrysSigner, Address, ConsensusConfig};
+use irys_types::{irys::IrysSigner, ConsensusConfig, IrysAddress};
 use k256::ecdsa::SigningKey;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TestSigner {
     pub irys_signer: IrysSigner,
-    pub address: Address,
+    pub address: IrysAddress,
     pub name: String,
 }
 

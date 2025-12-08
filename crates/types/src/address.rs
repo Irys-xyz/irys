@@ -15,6 +15,7 @@ use std::{
     borrow::{Borrow, BorrowMut},
     cmp::Ordering,
     str::FromStr,
+    u8,
 };
 
 use alloy_core::hex::FromHex;
@@ -85,8 +86,30 @@ impl FromStr for IrysAddress {
     }
 }
 
+/// As base58 is rather expensive, we want to make sure that input is well formed as soon as possible
+/// this constant is computed using the below `compute_max_str_len` function (to_base58() is not a const fn)
+const MAX_BS58_ADDRESS_STRING_LENGTH: usize = 28;
+
+// #[test]
+// fn compute_max_str_len() {
+//     dbg!([u8::MAX; 20].to_base58().len());
+// }
+
+const MAX_HEX_ADDRESS_STRING_LENGTH: usize = 2 /* 0x */ + 20 * 2 /* 20 bytes, hex encoding */;
+
+// sanity check for the above
+// #[test]
+// fn compute_max_str_len() {
+//     dbg!(alloy_primitives::hex::encode_prefixed(&[u8::MAX; 20]).len());
+// }
+
 impl IrysAddress {
+    // TODO: better error types
     pub fn from_base58(str: &str) -> Result<Self, String> {
+        // reject strings if they are larger than `MAX_BS58_ADDRESS_STRING_LENGTH`
+        if str.len() > MAX_BS58_ADDRESS_STRING_LENGTH {
+            return Err("Input above max allowed base58 length".to_owned());
+        }
         let decoded = str.from_base58().map_err(|e| format!("{:?}", &e))?;
 
         let arr = TryInto::<[u8; 20]>::try_into(decoded.as_slice()).map_err(|e| e.to_string())?;
@@ -95,8 +118,13 @@ impl IrysAddress {
     }
 
     pub fn from_hex_or_base58(str: &str) -> Result<Self, String> {
+        // TODO: maybe figure out which is more efficient: try hex first or try base58 first
         if let Ok(decoded) = Self::from_base58(str) {
             return Ok(decoded);
+        }
+        // max allowable length here is `MAX_HEX_ADDRESS_STRING_LENGTH`
+        if str.len() > MAX_HEX_ADDRESS_STRING_LENGTH {
+            return Err("Input above max allowed hex length".to_owned());
         }
         IrysAddress::from_hex(str).map_err(|e| e.to_string())
     }
@@ -113,6 +141,7 @@ mod tests {
     #[case("not_an_address", false)]
     #[case("0x", false)]
     #[case("0xinvalid", false)]
+    // TODO: a test for `MAX_BS58_ADDRESS_STRING_LENGTH`
     fn test_parse_address(#[case] input: &str, #[case] should_succeed: bool) {
         let result = IrysAddress::from_str(input);
         assert_eq!(result.is_ok(), should_succeed);

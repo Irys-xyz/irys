@@ -6,7 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Address, Base64, PeerListItem};
+use irys_types::{Base64, IrysAddress, PeerListItem};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
 use reth_codecs::Compact;
@@ -150,7 +150,7 @@ table CachedChunks {
 table IngressProofs {
     type Key = DataRoot;
     type Value = CompactCachedIngressProof;
-    type SubKey = Address;
+    type SubKey = IrysAddress;
 }
 
 /// Tracks the peer list of known peers as well as their reputation score.
@@ -158,7 +158,7 @@ table IngressProofs {
 /// ones with high reputation - the PeerListItems contain all the peers
 /// that the node is aware of and is periodically updated via peer discovery
 table PeerListItems {
-    type Key = Address;
+    type Key = IrysAddress;
     type Value = CompactPeerListItem;
 }
 

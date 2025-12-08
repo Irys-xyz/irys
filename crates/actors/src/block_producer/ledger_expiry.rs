@@ -65,9 +65,9 @@ use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, EpochSnapshot};
 use irys_types::{
-    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii, Address,
-    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysBlockHeader, IrysTransactionId,
-    LedgerChunkOffset, LedgerChunkRange, H256, U256,
+    app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii,
+    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysAddress, IrysBlockHeader,
+    IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
@@ -271,7 +271,7 @@ fn collect_expired_partitions(
     parent_epoch_snapshot: &EpochSnapshot,
     block_height: u64,
     target_ledger_type: DataLedger,
-) -> eyre::Result<BTreeMap<SlotIndex, Vec<Address>>> {
+) -> eyre::Result<BTreeMap<SlotIndex, Vec<IrysAddress>>> {
     let partition_assignments = &parent_epoch_snapshot.partition_assignments;
     let expired_partition_info = &parent_epoch_snapshot.get_expiring_partition_info(block_height);
     let mut expired_ledger_slot_indexes = BTreeMap::new();
@@ -310,7 +310,7 @@ fn collect_expired_partitions(
 
             expired_ledger_slot_indexes
                 .entry(slot_index)
-                .and_modify(|miners: &mut Vec<Address>| {
+                .and_modify(|miners: &mut Vec<IrysAddress>| {
                     miners.push(partition.miner_address);
                 })
                 .or_insert(vec![partition.miner_address]);
@@ -328,7 +328,7 @@ fn collect_expired_partitions(
 
 /// Finds all blocks containing data in the expired chunk ranges
 fn find_block_range(
-    expired_slots: BTreeMap<SlotIndex, Vec<Address>>,
+    expired_slots: BTreeMap<SlotIndex, Vec<IrysAddress>>,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
     ledger_type: DataLedger,
@@ -374,7 +374,7 @@ fn find_block_range(
             // If the block already exists, merge the miners
             blocks_with_expired_ledgers
                 .entry(block_index_item.block_hash)
-                .and_modify(|existing_miners: &mut Arc<Vec<Address>>| {
+                .and_modify(|existing_miners: &mut Arc<Vec<IrysAddress>>| {
                     // Merge the new miners with existing ones
                     let mut combined = (**existing_miners).clone();
                     combined.extend(miners.clone());
@@ -461,14 +461,14 @@ fn get_previous_max_offset(
 async fn process_boundary_block(
     boundary: &BoundaryBlock,
     block_hash: H256,
-    miners: Arc<Vec<Address>>,
+    miners: Arc<Vec<IrysAddress>>,
     is_earliest: bool,
     ledger_type: DataLedger,
     config: &Config,
     block_index: &std::sync::RwLock<BlockIndex>,
     mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
-) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
+) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
     // Get the block and its transactions
     let block = get_block_by_hash(block_hash, mempool_sender, db).await?;
     let ledger_tx_ids = block
@@ -531,8 +531,8 @@ fn filter_transactions_by_chunk_range(
     partition_range: LedgerChunkRange,
     is_earliest: bool,
     chunk_size: u64,
-    miners: Arc<Vec<Address>>,
-) -> BTreeMap<IrysTransactionId, Arc<Vec<Address>>> {
+    miners: Arc<Vec<IrysAddress>>,
+) -> BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>> {
     let mut current_offset = prev_max_offset;
     let mut tx_to_miners = BTreeMap::new();
 
@@ -591,11 +591,11 @@ fn filter_transactions_by_chunk_range(
 
 /// Processes all middle blocks (non-boundary blocks)
 async fn process_middle_blocks(
-    middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
+    middle_blocks: BTreeMap<H256, Arc<Vec<IrysAddress>>>,
     ledger_type: DataLedger,
     mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
     db: &DatabaseProvider,
-) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<Address>>>> {
+) -> eyre::Result<BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>> {
     let mut tx_to_miners = BTreeMap::new();
 
     for (block_hash, miners) in middle_blocks {
@@ -621,17 +621,17 @@ async fn process_middle_blocks(
 pub struct LedgerExpiryBalanceDelta {
     /// Rewards for miners who stored the expired data, mapped by miner address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
-    pub miner_balance_increment: BTreeMap<Address, (U256, RollingHash)>,
+    pub miner_balance_increment: BTreeMap<IrysAddress, (U256, RollingHash)>,
 
     /// Refunds of permanent fees for users whose transactions were not promoted.
     /// Sorted by transaction ID. Each tuple contains (transaction_id, refund_amount, user_address).
-    pub user_perm_fee_refunds: Vec<(IrysTransactionId, U256, Address)>,
+    pub user_perm_fee_refunds: Vec<(IrysTransactionId, U256, IrysAddress)>,
 }
 
 /// Calculates and aggregates fees for each miner
 fn aggregate_balance_deltas(
     mut transactions: Vec<DataTransactionHeader>,
-    tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<Address>>>,
+    tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
     config: &Config,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
@@ -646,7 +646,7 @@ fn aggregate_balance_deltas(
         // process miner balance increments for storing the term tx
         {
             // Deduplicate miners - each address should only get one share
-            let unique_miners: Vec<Address> = miners_that_stored_this_tx
+            let unique_miners: Vec<IrysAddress> = miners_that_stored_this_tx
                 .iter()
                 .copied()
                 .collect::<std::collections::HashSet<_>>()
@@ -734,9 +734,9 @@ struct BoundaryBlock {
 struct BlockRange {
     min_block: BoundaryBlock,
     max_block: BoundaryBlock,
-    min_block_miners: Arc<Vec<Address>>,
-    max_block_miners: Arc<Vec<Address>>,
-    middle_blocks: BTreeMap<H256, Arc<Vec<Address>>>,
+    min_block_miners: Arc<Vec<IrysAddress>>,
+    max_block_miners: Arc<Vec<IrysAddress>>,
+    middle_blocks: BTreeMap<H256, Arc<Vec<IrysAddress>>>,
 }
 
 #[cfg(test)]
@@ -766,8 +766,8 @@ mod tests {
         });
 
         // Create miners with duplicates
-        let miner1 = Address::random();
-        let miner2 = Address::random();
+        let miner1 = IrysAddress::random();
+        let miner2 = IrysAddress::random();
 
         // For tx1: miner1 appears twice (duplicate)
         let tx1_miners_with_dup = vec![miner1, miner2, miner1];
