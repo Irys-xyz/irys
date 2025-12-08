@@ -1364,6 +1364,7 @@ impl IrysNode {
             config.clone(),
             service_senders.clone(),
             chain_sync_tx.clone(),
+            mempool_guard.clone(),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)
@@ -1377,6 +1378,7 @@ impl IrysNode {
             &irys_db,
             &service_senders,
             &block_tree_guard,
+            &mempool_guard,
             &vdf_state_readonly,
             block_discovery_facade,
             mining_bus.clone(),
@@ -1760,6 +1762,7 @@ impl IrysNode {
         irys_db: &DatabaseProvider,
         service_senders: &ServiceSenders,
         block_tree_guard: &BlockTreeReadGuard,
+        mempool_guard: &MempoolReadGuard,
         vdf_steps_guard: &VdfStateReadonly,
         block_discovery: BlockDiscoveryFacadeImpl,
         mining_bus: MiningBus,
@@ -1778,6 +1781,7 @@ impl IrysNode {
             block_discovery,
             vdf_steps_guard: vdf_steps_guard.clone(),
             block_tree_guard: block_tree_guard.clone(),
+            mempool_guard: mempool_guard.clone(),
             price_oracle,
             service_senders: service_senders.clone(),
             reth_payload_builder: reth_node_adapter.inner.payload_builder_handle.clone(),

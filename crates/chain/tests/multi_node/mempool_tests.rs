@@ -1007,10 +1007,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         b_blk1_tx1
     };
 
-    let b_blk1 = {
-        b_node.mine_block().await?;
-        b_node.get_block_by_height(network_height).await?
-    };
+    let (b_blk1, b_blk1_payload, b_blk1_txs) = b_node.mine_block_with_payload().await?;
 
     assert_eq!(
         b_blk1.data_ledgers[DataLedger::Submit].tx_ids,
@@ -1033,10 +1030,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         )
         .await;
 
-    let b_blk2 = {
-        b_node.mine_block().await?;
+    let (b_blk2, b_blk2_payload, b_blk2_txs) = {
+        let result = b_node.mine_block_with_payload().await?;
         network_height += 1;
-        b_node.get_block_by_height(network_height).await?
+        result
     };
 
     assert_eq!(
@@ -1060,11 +1057,15 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
 
         // note we send the full blocks to node a, including txs, and chunks
-        b_node.send_full_block(&a_node, &b_blk1).await?;
+        b_node
+            .send_full_block(&a_node, &b_blk1, b_blk1_payload, b_blk1_txs)
+            .await?;
         a_node
             .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
             .await?;
-        b_node.send_full_block(&a_node, &b_blk2).await?;
+        b_node
+            .send_full_block(&a_node, &b_blk2, b_blk2_payload, b_blk2_txs)
+            .await?;
         a_node
             .wait_for_block(&b_blk2.block_hash, seconds_to_wait)
             .await?;
@@ -1162,10 +1163,11 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .await?;
 
     // B: Mine B3
-    b_node.mine_block().await?;
-    network_height += 1;
-
-    let b_blk3 = b_node.get_block_by_height(network_height).await?;
+    let (b_blk3, b_blk3_payload, b_blk3_txs) = {
+        let result = b_node.mine_block_with_payload().await?;
+        network_height += 1;
+        result
+    };
 
     // ensure a_blk1_tx1 is included
     assert_eq!(
@@ -1189,7 +1191,9 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     // now we send (bypassing gossip) B3 back to A
     // it shouldn't reorg, and should accept the block
     // as well as overriding the ingress proof it has locally with the one from the block
-    b_node.send_full_block(&a_node, &b_blk3).await?;
+    b_node
+        .send_full_block(&a_node, &b_blk3, b_blk3_payload, b_blk3_txs)
+        .await?;
 
     // wait for height and index on node a
     a_node
@@ -1393,10 +1397,9 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     let b_blk1_tx1 = b_node.post_pledge_commitment_without_gossip(None).await?;
 
-    b_node.mine_block().await?;
+    let (b_blk1, b_blk1_payload, b_blk1_txs) = b_node.mine_block_with_payload().await?;
     // network_height += 1;
 
-    let b_blk1 = b_node.get_block_by_height(network_height).await?;
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
 
     assert_eq!(
@@ -1408,10 +1411,11 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     let b_blk2_tx1 = b_node.post_pledge_commitment_without_gossip(None).await?;
 
-    b_node.mine_block().await?;
-    network_height += 1;
-
-    let b_blk2 = b_node.get_block_by_height(network_height).await?;
+    let (b_blk2, b_blk2_payload, b_blk2_txs) = {
+        let result = b_node.mine_block_with_payload().await?;
+        network_height += 1;
+        result
+    };
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
 
     assert_eq!(
@@ -1423,8 +1427,12 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     let a1_b2_reorg_fut = a_node.wait_for_reorg(seconds_to_wait);
 
-    b_node.send_full_block(&a_node, &b_blk1).await?;
-    b_node.send_full_block(&a_node, &b_blk2).await?;
+    b_node
+        .send_full_block(&a_node, &b_blk1, b_blk1_payload, b_blk1_txs)
+        .await?;
+    b_node
+        .send_full_block(&a_node, &b_blk2, b_blk2_payload, b_blk2_txs)
+        .await?;
 
     a_node
         .wait_for_block(&b_blk1.block_hash, seconds_to_wait)
@@ -1465,10 +1473,11 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
     b_node.post_commitment_tx(&a_blk1_tx1).await?;
 
     // B: Mine B3
-    b_node.mine_block().await?;
-    network_height += 1;
-
-    let b_blk3 = b_node.get_block_by_height(network_height).await?;
+    let (b_blk3, b_blk3_payload, b_blk3_txs) = {
+        let result = b_node.mine_block_with_payload().await?;
+        network_height += 1;
+        result
+    };
 
     // ensure a_blk1_tx1 is included
     assert_eq!(
@@ -1479,7 +1488,9 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
     // now we gossip B3 back to A
     // it shouldn't reorg, and should accept the block
 
-    b_node.send_full_block(&a_node, &b_blk3).await?;
+    b_node
+        .send_full_block(&a_node, &b_blk3, b_blk3_payload, b_blk3_txs)
+        .await?;
 
     a_node
         .wait_until_height(network_height, seconds_to_wait)
@@ -1684,7 +1695,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
         .expect("shared tx should be accepted");
 
     // mine a block
-    let (_block, reth_exec_env) = genesis.mine_block_with_payload().await?;
+    let (_block, reth_exec_env, _block_txs) = genesis.mine_block_with_payload().await?;
 
     assert_eq!(reth_exec_env.block().transaction_count(), 1 + 1); // +1 for block reward
 

@@ -1,4 +1,5 @@
 use crate::{
+    block_discovery::BlockTransactions,
     block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
     chunk_migration_service::ChunkMigrationServiceMessage,
@@ -17,8 +18,8 @@ use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DatabaseProvider, H256List, IrysBlockHeader, TokioServiceHandle, H256,
+    Address, BlockHash, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List,
+    IrysBlockHeader, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -40,7 +41,7 @@ pub enum BlockTreeServiceMessage {
     },
     BlockPreValidated {
         block: Arc<IrysBlockHeader>,
-        commitment_txs: Arc<Vec<CommitmentTransaction>>,
+        transactions: BlockTransactions,
         skip_vdf_validation: bool,
         response: oneshot::Sender<Result<(), PreValidationError>>,
     },
@@ -220,13 +221,13 @@ impl BlockTreeServiceInner {
             }
             BlockTreeServiceMessage::BlockPreValidated {
                 block,
-                commitment_txs,
+                transactions,
                 skip_vdf_validation: skip_vdf,
                 response,
             } => {
                 let block_hash = block.block_hash;
                 let block_height = block.height;
-                let result = self.on_block_prevalidated(block, commitment_txs, skip_vdf);
+                let result = self.on_block_prevalidated(block, transactions, skip_vdf);
                 if let Err(send_err) = response.send(result) {
                     tracing::warn!(
                         block.hash = ?block_hash,
@@ -429,7 +430,7 @@ impl BlockTreeServiceInner {
     fn on_block_prevalidated(
         &mut self,
         block: Arc<IrysBlockHeader>,
-        commitment_txs: Arc<Vec<CommitmentTransaction>>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> eyre::Result<(), PreValidationError> {
         let block_hash = &block.block_hash;
@@ -469,7 +470,7 @@ impl BlockTreeServiceInner {
         // Create commitment snapshot for this block
         let commitment_snapshot = create_commitment_snapshot_for_block(
             &block,
-            &commitment_txs,
+            &transactions.commitment_txs,
             &prev_commitment_snapshot,
             arc_epoch_snapshot.clone(),
             &self.config.consensus,
@@ -503,6 +504,7 @@ impl BlockTreeServiceInner {
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
                     block: block.clone(),
+                    transactions,
                     skip_vdf_validation: skip_vdf,
                 })
                 .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
