@@ -981,7 +981,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    /// wait for data tx to be in mempool and it's IngressProofs to be in database. does this without mining new blocks.
+    /// wait for data tx to be in mempool and its IngressProofs to be in database. does this without mining new blocks.
     pub async fn wait_for_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -2282,11 +2282,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         );
 
         let response = client.get(&url).send().await;
-        // info!("{:#?}", response);
+        info!("{:#?}", response);
 
         if let Ok(resp) = response {
-            if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
-                return Some(packed_chunk);
+            // Only attempt to parse JSON if we got a successful HTTP status
+            if resp.status().is_success() {
+                if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
+                    return Some(packed_chunk);
+                }
             }
         }
         None
@@ -2321,6 +2324,19 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ledger, chunk_offset
             );
         }
+    }
+
+    pub async fn verify_chunk_not_present(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+    ) {
+        assert!(
+            self.get_chunk(ledger, chunk_offset).await.is_none(),
+            "Expected no chunk at {} ledger chunk_offset: {}, but found one",
+            ledger,
+            chunk_offset
+        );
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {

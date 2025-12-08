@@ -39,7 +39,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .number_of_ingress_proofs_total = 3;
     config.consensus.get_mut().chunk_size = 32;
 
-    // Create a signer (keypair) for the peer and fund it
+    // Create a signer (keypair) for the peers and fund them
     let peer1_signer = config.new_random_signer();
     let peer2_signer = config.new_random_signer();
     config.fund_genesis_accounts(vec![&peer1_signer, &peer2_signer]);
@@ -88,10 +88,10 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .wait_until_height(height_before_commitments + 1, seconds_to_wait)
         .await?;
 
-    genesis_node.mine_until_next_epoch().await?; // Get peers assigned capacity partitions
-    genesis_node.mine_until_next_epoch().await?; // Gets peer partitions assigned to data ledger slots
+    genesis_node.mine_until_next_epoch().await?; // First epoch: Gets peers assigned capacity partitions
+    genesis_node.mine_until_next_epoch().await?; // Second epoch: Gets peer partitions assigned to data ledger slots
 
-    // Post a transaction and it's chunks to all 3
+    // Post a data transaction to the genesis node and wait for it to reach the other peers
     let chunks = vec![[10; 32], [20; 32], [30; 32]];
     let mut data: Vec<u8> = Vec::new();
     for chunk in &chunks {
@@ -112,20 +112,24 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
         .wait_for_mempool(data_tx.header.id, seconds_to_wait)
         .await?;
 
+    // Now post the 3 chunks of the data transaction to the genesis node
     genesis_node.post_chunk_32b(&data_tx, 0, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
 
+    // Wait for ingress proof on the genesis node
     let res = genesis_node
         .wait_for_ingress_proofs(vec![data_tx.header.id], seconds_to_wait)
         .await;
     assert_matches!(res, Ok(()));
 
+    // Wait for ingress proofs on peer1 node
     let res = peer1_node
         .wait_for_ingress_proofs_no_mining(vec![data_tx.header.id], seconds_to_wait * 2)
         .await;
     assert_matches!(res, Ok(()));
 
+    // Wait specifically for 3 ingress proofs on the genesis node
     let res = genesis_node
         .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 3, seconds_to_wait)
         .await;
