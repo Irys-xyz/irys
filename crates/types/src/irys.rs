@@ -1,10 +1,11 @@
 use crate::{
-    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Address,
-    Base64, BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
-    IngressProof, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256,
+    generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Base64,
+    BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
+    IngressProof, IrysAddress, IrysBlockHeader, IrysSignature, Signature, VersionRequest, H256,
 };
 use alloy_core::primitives::keccak256;
 
+use alloy_primitives::Address;
 use alloy_signer::utils::secret_key_to_address;
 use alloy_signer_local::LocalSigner;
 use eyre::Result;
@@ -32,7 +33,11 @@ impl IrysSigner {
     }
 
     /// Returns the address associated with the signer's signing key
-    pub fn address(&self) -> Address {
+    pub fn address(&self) -> IrysAddress {
+        secret_key_to_address(&self.signer).into()
+    }
+
+    pub fn alloy_address(&self) -> Address {
         secret_key_to_address(&self.signer)
     }
 
@@ -110,7 +115,7 @@ impl IrysSigner {
     /// signs and sets signature and id.
     pub fn sign_transaction(&self, mut transaction: DataTransaction) -> Result<DataTransaction> {
         // Store the signer address
-        transaction.header.signer = Address::from_public_key(self.signer.verifying_key());
+        transaction.header.signer = IrysAddress::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
         let prehash = transaction.signature_hash();
@@ -126,7 +131,7 @@ impl IrysSigner {
 
     pub fn sign_commitment(&self, commitment: &mut CommitmentTransaction) -> Result<()> {
         // Store the signer address
-        commitment.signer = Address::from_public_key(self.signer.verifying_key());
+        commitment.signer = IrysAddress::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
         let prehash = commitment.signature_hash();
@@ -142,7 +147,7 @@ impl IrysSigner {
 
     pub fn sign_block_header(&self, block_header: &mut IrysBlockHeader) -> Result<()> {
         // Store the signer address
-        block_header.miner_address = Address::from_public_key(self.signer.verifying_key());
+        block_header.miner_address = IrysAddress::from_public_key(self.signer.verifying_key());
 
         // Create the signature hash and sign it
         let prehash = block_header.signature_hash();
@@ -232,7 +237,7 @@ pub fn vec_to_chunk_iter(data: Vec<u8>) -> std::iter::Once<eyre::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use crate::versioning::Signable as _;
-    use crate::{hash_sha256, validate_chunk, H256};
+    use crate::{hash_sha256, validate_chunk, IrysAddress, H256};
     use rand::Rng as _;
     use reth_primitives::transaction::recover_signer;
 
@@ -304,7 +309,9 @@ mod tests {
         let prehash = tx.header.signature_hash();
         let sig = tx.header.signature.as_bytes();
 
-        let signer = recover_signer(&sig[..].try_into().unwrap(), prehash.into()).unwrap();
+        let signer: IrysAddress = recover_signer(&sig[..].try_into().unwrap(), prehash.into())
+            .unwrap()
+            .into();
 
         assert_eq!(signer, tx.header.signer);
     }

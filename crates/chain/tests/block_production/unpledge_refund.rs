@@ -6,8 +6,8 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    partition::PartitionAssignment, Address, CommitmentTransaction, ConsensusConfig, NodeConfig,
-    PledgeDataProvider as _, U256,
+    partition::PartitionAssignment, CommitmentTransaction, ConsensusConfig, IrysAddress,
+    NodeConfig, PledgeDataProvider as _, U256,
 };
 use reth::providers::{ReceiptProvider as _, TransactionsProvider as _};
 use std::{
@@ -149,7 +149,11 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     for tx in txs_inclusion {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
-                assert_eq!(debit.target, peer_addr, "Unpledge target mismatch");
+                assert_eq!(
+                    debit.target,
+                    peer_addr.to_alloy_address(),
+                    "Unpledge target mismatch"
+                );
                 let expected_irys_ref: FixedBytes<32> = unpledge_tx.id.into();
                 assert_eq!(
                     debit.irys_ref, expected_irys_ref,
@@ -236,7 +240,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     for tx in txs_epoch {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
-                if inc.target == peer_addr {
+                if inc.target == peer_addr.to_alloy_address() {
                     let expected_amount: alloy_primitives::U256 = expected_refund_amount.into();
                     assert_eq!(
                         inc.amount, expected_amount,
@@ -430,7 +434,8 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
             .logs
             .iter()
             .filter(|log| {
-                log.topics()[0] == *shadow_tx_topics::UNPLEDGE && log.address == miner_addr
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE
+                    && log.address == miner_addr.to_alloy_address()
             })
             .count();
     }
@@ -451,7 +456,9 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     for tx in inclusion_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
-                if debit.target == miner_addr && expected_irys_refs.contains(&debit.irys_ref) {
+                if debit.target == miner_addr.to_alloy_address()
+                    && expected_irys_refs.contains(&debit.irys_ref)
+                {
                     matched_irys_refs.insert(debit.irys_ref);
                 }
             }
@@ -489,7 +496,8 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
             .logs
             .iter()
             .filter(|log| {
-                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND && log.address == miner_addr
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND
+                    && log.address == miner_addr.to_alloy_address()
             })
             .count();
     }
@@ -512,7 +520,7 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     for tx in epoch_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
-                if inc.target == miner_addr {
+                if inc.target == miner_addr.to_alloy_address() {
                     if let Some(expected_amount) = expected_refunds.get(&inc.irys_ref) {
                         assert_eq!(
                             U256::from(inc.amount),
@@ -661,7 +669,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
             .iter()
             .filter(|log| {
                 log.topics()[0] == *shadow_tx_topics::UNPLEDGE
-                    && log.address == genesis_signer.address()
+                    && log.address == genesis_signer.alloy_address()
             })
             .count();
     }
@@ -682,7 +690,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     for tx in inclusion_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::Unpledge(debit)) = shadow_tx.as_v1() {
-                if debit.target == genesis_signer.address()
+                if debit.target == genesis_signer.alloy_address()
                     && expected_irys_refs.contains(&debit.irys_ref)
                 {
                     matched_irys_refs.insert(debit.irys_ref);
@@ -738,7 +746,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
             .iter()
             .filter(|log| {
                 log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND
-                    && log.address == genesis_signer.address()
+                    && log.address == genesis_signer.alloy_address()
             })
             .count();
     }
@@ -760,7 +768,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     for tx in epoch_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnpledgeRefund(inc)) = shadow_tx.as_v1() {
-                if inc.target == genesis_signer.address()
+                if inc.target == genesis_signer.alloy_address()
                     && expected_refunds.contains(&inc.irys_ref)
                 {
                     seen_refs.insert(inc.irys_ref);
@@ -896,7 +904,7 @@ pub(crate) async fn setup_env_with_block_migration_depth(
 ) -> eyre::Result<(
     IrysNodeTest<irys_chain::IrysNodeCtx>,
     IrysNodeTest<irys_chain::IrysNodeCtx>,
-    Address,
+    IrysAddress,
     PartitionAssignment,
     ConsensusConfig,
 )> {
@@ -940,7 +948,7 @@ pub(crate) async fn setup_env(
 ) -> eyre::Result<(
     IrysNodeTest<irys_chain::IrysNodeCtx>,
     IrysNodeTest<irys_chain::IrysNodeCtx>,
-    Address,
+    IrysAddress,
     PartitionAssignment,
     ConsensusConfig,
 )> {
@@ -950,10 +958,11 @@ pub(crate) async fn setup_env(
 pub(crate) fn assert_single_log_for(
     receipts: &[reth::primitives::Receipt],
     topic: &[u8; 32],
-    addr: Address,
+    addr: IrysAddress,
     context: &str,
 ) -> usize {
     // Find receipts that contain exactly one matching log for the given topic and address.
+    let addr: alloy_primitives::Address = addr.into();
     let mut idx: Option<usize> = None;
     let hits: Vec<_> = receipts
         .iter()

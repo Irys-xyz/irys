@@ -1,4 +1,4 @@
-use crate::{Address, U256};
+use crate::{IrysAddress, U256};
 use std::str::FromStr as _;
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -8,8 +8,8 @@ pub enum AddressParseError {
 }
 
 /// Parse an Address from a string
-pub fn parse_address(s: &str) -> Result<Address, AddressParseError> {
-    Address::from_str(s).map_err(|e| AddressParseError::InvalidFormat(e.to_string()))
+pub fn parse_address(s: &str) -> Result<IrysAddress, AddressParseError> {
+    IrysAddress::from_str(s).map_err(AddressParseError::InvalidFormat)
 }
 
 /// Convert little-endian bytes to U256

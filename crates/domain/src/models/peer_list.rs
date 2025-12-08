@@ -3,7 +3,7 @@ use alloy_core::primitives::B256;
 use irys_database::reth_db::Database as _;
 use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
     PeerNetworkSender,
@@ -39,13 +39,13 @@ pub enum ScoreIncreaseReason {
 
 #[derive(Debug, Clone)]
 pub struct PeerListDataInner {
-    gossip_addr_to_mining_addr_map: HashMap<IpAddr, Address>,
-    api_addr_to_mining_addr_map: HashMap<SocketAddr, Address>,
+    gossip_addr_to_mining_addr_map: HashMap<IpAddr, IrysAddress>,
+    api_addr_to_mining_addr_map: HashMap<SocketAddr, IrysAddress>,
     /// Main peer list cache - contains both staked and persistable unstaked peers
-    persistent_peers_cache: HashMap<Address, PeerListItem>,
+    persistent_peers_cache: HashMap<IrysAddress, PeerListItem>,
     /// Purgatory for unstaked peers that haven't proven themselves yet
     /// These peers are kept in memory only until they reach the persistence threshold
-    unstaked_peer_purgatory: LruCache<Address, PeerListItem>,
+    unstaked_peer_purgatory: LruCache<IrysAddress, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
     trusted_peers_api_addresses: HashSet<SocketAddr>,
     /// Whitelist of allowed peer API addresses based on peer filter mode
@@ -69,8 +69,8 @@ impl<'a> AllPeersReadGuard<'a> {
     pub fn iter(
         &'a self,
     ) -> Chain<
-        std::collections::hash_map::Iter<'a, Address, PeerListItem>,
-        lru::Iter<'a, Address, PeerListItem>,
+        std::collections::hash_map::Iter<'a, IrysAddress, PeerListItem>,
+        lru::Iter<'a, IrysAddress, PeerListItem>,
     > {
         self.guard
             .persistent_peers_cache
@@ -113,7 +113,7 @@ impl PeerList {
     }
 
     pub fn from_peers(
-        peers: Vec<(Address, PeerListItem)>,
+        peers: Vec<(IrysAddress, PeerListItem)>,
         peer_network: PeerNetworkSender,
         config: &Config,
         peer_events: broadcast::Sender<PeerEvent>,
@@ -122,22 +122,27 @@ impl PeerList {
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
 
-    pub fn add_or_update_peer(&self, mining_addr: Address, peer: PeerListItem, is_staked: bool) {
+    pub fn add_or_update_peer(
+        &self,
+        mining_addr: IrysAddress,
+        peer: PeerListItem,
+        is_staked: bool,
+    ) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         inner.add_or_update_peer(mining_addr, peer, is_staked);
     }
 
-    pub fn increase_peer_score(&self, mining_addr: &Address, reason: ScoreIncreaseReason) {
+    pub fn increase_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreIncreaseReason) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         inner.increase_score(mining_addr, reason);
     }
 
-    pub fn decrease_peer_score(&self, mining_addr: &Address, reason: ScoreDecreaseReason) {
+    pub fn decrease_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreDecreaseReason) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         inner.decrease_peer_score(mining_addr, reason);
     }
 
-    pub fn set_is_online(&self, mining_addr: &Address, is_online: bool) {
+    pub fn set_is_online(&self, mining_addr: &IrysAddress, is_online: bool) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         let mut became_active: Option<irys_types::PeerListItem> = None;
         let mut became_inactive: Option<irys_types::PeerListItem> = None;
@@ -177,7 +182,7 @@ impl PeerList {
     }
 
     /// Get a peer from any cache (persistent or purgatory)
-    pub fn get_peer(&self, mining_addr: &Address) -> Option<PeerListItem> {
+    pub fn get_peer(&self, mining_addr: &IrysAddress) -> Option<PeerListItem> {
         let inner = self.read();
         inner
             .persistent_peers_cache
@@ -197,12 +202,12 @@ impl PeerList {
     }
 
     /// Get only persistable peers (for database storage)
-    pub fn persistable_peers(&self) -> HashMap<Address, PeerListItem> {
+    pub fn persistable_peers(&self) -> HashMap<IrysAddress, PeerListItem> {
         let guard = self.read();
         guard.persistent_peers_cache.clone()
     }
 
-    pub fn temporary_peers(&self) -> LruCache<Address, PeerListItem> {
+    pub fn temporary_peers(&self) -> LruCache<IrysAddress, PeerListItem> {
         self.read().unstaked_peer_purgatory.clone()
     }
 
@@ -252,10 +257,10 @@ impl PeerList {
         }
     }
 
-    pub fn all_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn all_trusted_peers(&self) -> Vec<(IrysAddress, PeerListItem)> {
         let guard = self.read();
 
-        let mut peers: Vec<(Address, PeerListItem)> = Vec::new();
+        let mut peers: Vec<(IrysAddress, PeerListItem)> = Vec::new();
 
         // Add peers from persistent cache
         peers.extend(
@@ -285,7 +290,7 @@ impl PeerList {
         peers
     }
 
-    pub fn online_trusted_peers(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn online_trusted_peers(&self) -> Vec<(IrysAddress, PeerListItem)> {
         let mut trusted_peers = self.all_trusted_peers();
         trusted_peers.retain(|(_miner_address, peer)| peer.is_online);
         trusted_peers
@@ -298,8 +303,8 @@ impl PeerList {
     pub fn top_active_peers(
         &self,
         limit: Option<usize>,
-        exclude_peers: Option<HashSet<Address>>,
-    ) -> Vec<(Address, PeerListItem)> {
+        exclude_peers: Option<HashSet<IrysAddress>>,
+    ) -> Vec<(IrysAddress, PeerListItem)> {
         let guard = self.read();
 
         // Create a chained iterator that combines both peer sources
@@ -325,7 +330,7 @@ impl PeerList {
                     !exclude && peer.reputation_score.is_active() && peer.is_online
                 });
 
-        let mut peers: Vec<(Address, PeerListItem)> = filtered_peers.collect();
+        let mut peers: Vec<(IrysAddress, PeerListItem)> = filtered_peers.collect();
 
         peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
         peers.reverse();
@@ -337,7 +342,7 @@ impl PeerList {
         peers
     }
 
-    pub fn all_peers_sorted_by_score(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn all_peers_sorted_by_score(&self) -> Vec<(IrysAddress, PeerListItem)> {
         let guard = self.read();
 
         // Create a chained iterator that combines both peer sources
@@ -352,7 +357,7 @@ impl PeerList {
             .map(|(key, value)| (*key, value.clone()));
 
         let all_peers = persistent_peers.chain(purgatory_peers);
-        let mut peers: Vec<(Address, PeerListItem)> = all_peers.collect();
+        let mut peers: Vec<(IrysAddress, PeerListItem)> = all_peers.collect();
 
         peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
         peers.reverse();
@@ -360,7 +365,7 @@ impl PeerList {
         peers
     }
 
-    pub fn inactive_peers(&self) -> Vec<(Address, PeerListItem)> {
+    pub fn inactive_peers(&self) -> Vec<(IrysAddress, PeerListItem)> {
         let guard = self.read();
         let mut inactive = Vec::new();
 
@@ -398,7 +403,7 @@ impl PeerList {
             .cloned()
     }
 
-    pub fn peer_by_mining_address(&self, mining_address: &Address) -> Option<PeerListItem> {
+    pub fn peer_by_mining_address(&self, mining_address: &IrysAddress) -> Option<PeerListItem> {
         let binding = self.read();
         binding
             .persistent_peers_cache
@@ -407,7 +412,7 @@ impl PeerList {
             .cloned()
     }
 
-    pub fn is_a_trusted_peer(&self, miner_address: Address, source_ip: IpAddr) -> bool {
+    pub fn is_a_trusted_peer(&self, miner_address: IrysAddress, source_ip: IpAddr) -> bool {
         let binding = self.read();
 
         // Check both persistent cache and purgatory
@@ -488,7 +493,7 @@ impl PeerList {
 
 impl PeerListDataInner {
     pub fn new(
-        peers: Vec<(Address, PeerListItem)>,
+        peers: Vec<(IrysAddress, PeerListItem)>,
         peer_network_sender: PeerNetworkSender,
         config: &Config,
         peer_events: broadcast::Sender<PeerEvent>,
@@ -559,7 +564,7 @@ impl PeerListDataInner {
 
     pub fn add_or_update_peer(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         mut peer: PeerListItem,
         is_staked: bool,
     ) {
@@ -634,7 +639,7 @@ impl PeerListDataInner {
         }
     }
 
-    pub fn increase_score(&mut self, mining_addr: &Address, reason: ScoreIncreaseReason) {
+    pub fn increase_score(&mut self, mining_addr: &IrysAddress, reason: ScoreIncreaseReason) {
         if !self.config.node_config.p2p_gossip.enable_scoring {
             return;
         }
@@ -706,7 +711,7 @@ impl PeerListDataInner {
         }
     }
 
-    pub fn decrease_peer_score(&mut self, mining_addr: &Address, reason: ScoreDecreaseReason) {
+    pub fn decrease_peer_score(&mut self, mining_addr: &IrysAddress, reason: ScoreDecreaseReason) {
         if !self.config.node_config.p2p_gossip.enable_scoring {
             warn!(
                 "Would've decreased score for peer {:?}, reason: {:?}",
@@ -769,11 +774,11 @@ impl PeerListDataInner {
     /// Helper method to update a peer in any cache (persistent or purgatory)
     fn update_peer_in_cache<F>(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         peer: PeerListItem,
         peer_address: PeerAddress,
         cache_getter: F,
-        address_updater: fn(&mut Self, Address, PeerAddress),
+        address_updater: fn(&mut Self, IrysAddress, PeerAddress),
         cache_name: &str,
     ) -> bool
     where
@@ -830,7 +835,7 @@ impl PeerListDataInner {
     /// Helper method to update a peer in the persistent cache
     fn update_peer_in_persistent_cache(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         peer: PeerListItem,
         peer_address: PeerAddress,
     ) -> bool {
@@ -847,7 +852,7 @@ impl PeerListDataInner {
     /// Helper method to update a peer in the purgatory cache
     fn update_peer_in_purgatory_cache(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         peer: PeerListItem,
         peer_address: PeerAddress,
     ) -> bool {
@@ -864,7 +869,7 @@ impl PeerListDataInner {
     /// Helper method to add a peer to a cache with address mappings
     fn add_peer_to_cache(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         peer: PeerListItem,
         peer_address: PeerAddress,
         gossip_addr: SocketAddr,
@@ -886,7 +891,7 @@ impl PeerListDataInner {
     /// Helper method to update address mappings
     fn update_address_mappings(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         old_address: PeerAddress,
         new_address: PeerAddress,
     ) {
@@ -905,7 +910,7 @@ impl PeerListDataInner {
     /// Returns true if the peer was added or needs re-handshaking, false if no update needed.
     fn add_or_update_peer_internal(
         &mut self,
-        mining_addr: Address,
+        mining_addr: IrysAddress,
         peer: PeerListItem,
         is_staked: bool,
     ) -> bool {
@@ -993,7 +998,11 @@ impl PeerListDataInner {
         }
     }
 
-    fn update_peer_address_purgatory(&mut self, mining_addr: Address, new_address: PeerAddress) {
+    fn update_peer_address_purgatory(
+        &mut self,
+        mining_addr: IrysAddress,
+        new_address: PeerAddress,
+    ) {
         if let Some(peer) = self.unstaked_peer_purgatory.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
@@ -1001,7 +1010,7 @@ impl PeerListDataInner {
         }
     }
 
-    fn update_peer_address(&mut self, mining_addr: Address, new_address: PeerAddress) {
+    fn update_peer_address(&mut self, mining_addr: IrysAddress, new_address: PeerAddress) {
         if let Some(peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
@@ -1018,8 +1027,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::mpsc;
 
-    fn create_test_peer(id: u8) -> (Address, PeerListItem) {
-        let mining_addr = Address::from([id; 20]);
+    fn create_test_peer(id: u8) -> (IrysAddress, PeerListItem) {
+        let mining_addr = IrysAddress::from([id; 20]);
         let peer_address = PeerAddress {
             gossip: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)), 8000 + id as u16),
             api: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)), 9000 + id as u16),

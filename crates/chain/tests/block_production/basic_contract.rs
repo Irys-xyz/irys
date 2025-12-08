@@ -53,17 +53,20 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
             .parse()?,
         );
 
-    let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.address()));
+    let mut deploy_fut = Box::pin(IrysERC20::deploy(alloy_provider, account1.alloy_address()));
 
     let contract = node
         .future_or_mine_on_timeout(&mut deploy_fut, Duration::from_millis(2_000))
         .await??;
 
     info!("Contract address is {:?}", contract.address());
-    let main_balance = contract.balanceOf(main_address.address()).call().await?;
+    let main_balance = contract
+        .balanceOf(main_address.alloy_address())
+        .call()
+        .await?;
     assert_eq!(main_balance, U256::from(10000000000000000000000_u128));
 
-    let transfer_call_builder = contract.transfer(account1.address(), U256::from(10));
+    let transfer_call_builder = contract.transfer(account1.alloy_address(), U256::from(10));
     let transfer_call = transfer_call_builder.send().await?;
     let mut transfer_receipt_fut = Box::pin(transfer_call.get_receipt());
 
@@ -72,8 +75,11 @@ async fn heavy_test_erc20() -> eyre::Result<()> {
         .await?;
 
     // check balance for account1
-    let addr1_balance = contract.balanceOf(account1.address()).call().await?;
-    let main_balance2 = contract.balanceOf(main_address.address()).call().await?;
+    let addr1_balance = contract.balanceOf(account1.alloy_address()).call().await?;
+    let main_balance2 = contract
+        .balanceOf(main_address.alloy_address())
+        .call()
+        .await?;
 
     assert_eq!(addr1_balance, U256::from(10));
     assert_eq!(main_balance2, U256::from(10000000000000000000000 - 10_u128));

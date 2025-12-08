@@ -1646,7 +1646,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // Transaction 1: Send to recipient1 (will be in peer1's fork)
     let evm_tx_req1 = TransactionRequest {
-        to: Some(TxKind::Call(recipient1.address())),
+        to: Some(TxKind::Call(recipient1.alloy_address())),
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
@@ -1661,7 +1661,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
     // Transaction 2: Send to recipient2 (will be in peer2's fork)
     // TODO: remove manual nonce calculations (tricky when dealing with forks...)
     let evm_tx_req2 = TransactionRequest {
-        to: Some(TxKind::Call(recipient2.address())),
+        to: Some(TxKind::Call(recipient2.alloy_address())),
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
@@ -1675,7 +1675,7 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
 
     // Shared transaction that should be gossiped to all peers
     let shared_evm_tx_req = TransactionRequest {
-        to: Some(TxKind::Call(recipient1.address())),
+        to: Some(TxKind::Call(recipient1.alloy_address())),
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
@@ -1999,7 +1999,7 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
 
     // Shared transaction that should be gossiped to all peers
     let shared_evm_tx_req = TransactionRequest {
-        to: Some(TxKind::Call(recipient1.address())),
+        to: Some(TxKind::Call(recipient1.alloy_address())),
         max_fee_per_gas: Some(20e9 as u128),
         max_priority_fee_per_gas: Some(20e9 as u128),
         gas: Some(21000),
@@ -2595,7 +2595,7 @@ async fn commitment_tx_cumulative_fee_validation_test(
     let reth_context = genesis_node.node_ctx.reth_node_adapter.clone();
 
     let evm_tx_req = TransactionRequest {
-        to: Some(TxKind::Call(signer.address())),
+        to: Some(TxKind::Call(signer.address().into())),
         max_fee_per_gas: Some(20_000_000_000), //20 gwei
         max_priority_fee_per_gas: Some(20_000_000_000),
         gas: Some(21_000),

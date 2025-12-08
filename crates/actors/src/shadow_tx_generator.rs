@@ -5,8 +5,8 @@ use irys_reth::shadow_tx::{
 };
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    Address, BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader,
-    IngressProofsList, IrysBlockHeader, UnixTimestamp, H256, U256,
+    BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
+    IrysAddress, IrysBlockHeader, UnixTimestamp, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ pub struct ShadowMetadata {
 
 pub struct ShadowTxGenerator<'a> {
     pub block_height: &'a u64,
-    pub reward_address: &'a Address,
+    pub reward_address: &'a IrysAddress,
     pub reward_amount: &'a U256,
     pub parent_block: &'a IrysBlockHeader,
     pub solution_hash: &'a H256,
@@ -132,7 +132,7 @@ impl<'a> ShadowTxGenerator<'a> {
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub fn new(
         block_height: &'a u64,
-        reward_address: &'a Address,
+        reward_address: &'a IrysAddress,
         reward_amount: &'a U256,
         parent_block: &'a IrysBlockHeader,
         solution_hash: &'a H256,
@@ -264,7 +264,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::TermFeeReward(BalanceIncrement {
                         amount: Uint::from_le_bytes(amount.to_le_bytes()),
-                        target: *address,
+                        target: (*address).into(),
                         irys_ref,
                     }),
                     (*self.solution_hash).into(),
@@ -283,7 +283,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PermFeeRefund(BalanceIncrement {
                         amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
-                        target: *user_address,
+                        target: (*user_address).into(),
                         irys_ref: (*tx_id).into(),
                     }),
                     (*self.solution_hash).into(),
@@ -299,8 +299,8 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &PublishLedgerWithTxs,
         config: &ConsensusConfig,
         timestamp_secs: UnixTimestamp,
-    ) -> Result<BTreeMap<Address, (RewardAmount, RollingHash)>> {
-        let mut rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)> = BTreeMap::new();
+    ) -> Result<BTreeMap<IrysAddress, (RewardAmount, RollingHash)>> {
+        let mut rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)> = BTreeMap::new();
 
         // Get ingress proofs if available
         let proofs = publish_ledger
@@ -380,7 +380,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: tx.value.into(),
-                        target: tx.signer,
+                        target: tx.signer.into(),
                         irys_ref: tx.id.into(),
                     }),
                     (*self.solution_hash).into(),
@@ -391,7 +391,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: tx.value.into(),
-                        target: tx.signer,
+                        target: tx.signer.into(),
                         irys_ref: tx.id.into(),
                     }),
                     (*self.solution_hash).into(),
@@ -402,7 +402,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
-                        target: tx.signer,
+                        target: tx.signer.into(),
                         irys_ref: tx.id.into(),
                     }),
                     (*self.solution_hash).into(),
@@ -413,7 +413,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
-                        target: tx.signer,
+                        target: tx.signer.into(),
                         irys_ref: tx.id.into(),
                     }),
                     (*self.solution_hash).into(),
@@ -426,7 +426,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Creates shadow transactions from aggregated rewards
     fn create_publish_shadow_txs(
         &self,
-        rewards_map: BTreeMap<Address, (RewardAmount, RollingHash)>,
+        rewards_map: BTreeMap<IrysAddress, (RewardAmount, RollingHash)>,
     ) -> Result<Vec<ShadowMetadata>> {
         // BTreeMap already maintains sorted order by address
         let shadow_txs: Vec<ShadowMetadata> = rewards_map
@@ -444,7 +444,7 @@ impl<'a> ShadowTxGenerator<'a> {
                     shadow_tx: ShadowTransaction::new_v1(
                         TransactionPacket::IngressProofReward(BalanceIncrement {
                             amount: Uint::from_le_bytes(total_amount.to_le_bytes()),
-                            target: address,
+                            target: address.into(),
                             irys_ref,
                         }),
                         (*self.solution_hash).into(),
@@ -475,7 +475,7 @@ impl<'a> ShadowTxGenerator<'a> {
             shadow_tx: ShadowTransaction::new_v1(
                 TransactionPacket::StorageFees(BalanceDecrement {
                     amount: Uint::from_le_bytes(treasury_amount.to_le_bytes()),
-                    target: tx.signer,
+                    target: tx.signer.into(),
                     irys_ref: tx.id.into(),
                 }),
                 (*self.solution_hash).into(),
@@ -675,7 +675,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnpledgeRefund(BalanceIncrement {
                         amount: event.amount.into(),
-                        target: event.account,
+                        target: event.account.into(),
                         irys_ref: event.irys_ref_txid.into(),
                     }),
                     (*self.solution_hash).into(),
@@ -689,7 +689,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeRefund(BalanceIncrement {
                         amount: event.amount.into(),
-                        target: event.account,
+                        target: event.account.into(),
                         irys_ref: event.irys_ref_txid.into(),
                     }),
                     (*self.solution_hash).into(),
@@ -836,7 +836,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
         let publish_ledger = PublishLedgerWithTxs {
@@ -893,7 +893,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
 
@@ -945,7 +945,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: stake_value.into(),
-                        target: commitments[0].signer,
+                        target: commitments[0].signer.into(),
                         irys_ref: commitments[0].id.into(),
                     }),
                     H256::zero().into(),
@@ -957,7 +957,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: pledge_value.into(),
-                        target: commitments[1].signer,
+                        target: commitments[1].signer.into(),
                         irys_ref: commitments[1].id.into(),
                     }),
                     H256::zero().into(),
@@ -968,7 +968,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
-                        target: commitments[2].signer,
+                        target: commitments[2].signer.into(),
                         irys_ref: commitments[2].id.into(),
                     }),
                     H256::zero().into(),
@@ -979,7 +979,7 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
-                        target: commitments[3].signer,
+                        target: commitments[3].signer.into(),
                         irys_ref: commitments[3].id.into(),
                     }),
                     H256::zero().into(),
@@ -1030,7 +1030,7 @@ mod tests {
         let submit_txs = vec![submit_tx.clone()];
 
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(2000000);
         let publish_ledger = PublishLedgerWithTxs {
@@ -1058,7 +1058,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::StorageFees(BalanceDecrement {
                         amount: term_charges.term_fee_treasury.into(),
-                        target: submit_tx.signer,
+                        target: submit_tx.signer.into(),
                         irys_ref: submit_tx.id.into(),
                     }),
                     H256::zero().into(),
@@ -1109,19 +1109,19 @@ mod tests {
     #[test]
     fn test_btreemap_maintains_sorted_order() {
         // Quick test to verify BTreeMap maintains sorted order
-        let mut rewards_map: BTreeMap<Address, u32> = BTreeMap::new();
+        let mut rewards_map: BTreeMap<IrysAddress, u32> = BTreeMap::new();
 
         // Insert addresses in random order
-        let addr1 = Address::from([5_u8; 20]);
-        let addr2 = Address::from([1_u8; 20]);
-        let addr3 = Address::from([9_u8; 20]);
+        let addr1 = IrysAddress::from([5_u8; 20]);
+        let addr2 = IrysAddress::from([1_u8; 20]);
+        let addr3 = IrysAddress::from([9_u8; 20]);
 
         rewards_map.insert(addr3, 3);
         rewards_map.insert(addr1, 1);
         rewards_map.insert(addr2, 2);
 
         // Verify they come out sorted
-        let addresses: Vec<Address> = rewards_map.keys().copied().collect();
+        let addresses: Vec<IrysAddress> = rewards_map.keys().copied().collect();
         assert_eq!(addresses[0], addr2); // Smallest address first
         assert_eq!(addresses[1], addr1);
         assert_eq!(addresses[2], addr3); // Largest address last
@@ -1177,7 +1177,7 @@ mod tests {
         ];
 
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(20000000);
         let publish_ledger = PublishLedgerWithTxs {
@@ -1235,7 +1235,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::StorageFees(BalanceDecrement {
                         amount: (term_charges.term_fee_treasury + perm_fee).into(),
-                        target: publish_tx.signer,
+                        target: publish_tx.signer.into(),
                         irys_ref: publish_tx.id.into(),
                     }),
                     H256::zero().into(),
@@ -1250,7 +1250,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::IngressProofReward(BalanceIncrement {
                         amount: signer_rewards[0].1.into(),
-                        target: signer_rewards[0].0,
+                        target: signer_rewards[0].0.into(),
                         irys_ref: H256::from(publish_tx.id.0).into(),
                     }),
                     H256::zero().into(),
@@ -1261,7 +1261,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::IngressProofReward(BalanceIncrement {
                         amount: signer_rewards[1].1.into(),
-                        target: signer_rewards[1].0,
+                        target: signer_rewards[1].0.into(),
                         irys_ref: H256::from(publish_tx.id.0).into(),
                     }),
                     H256::zero().into(),
@@ -1272,7 +1272,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::IngressProofReward(BalanceIncrement {
                         amount: signer_rewards[2].1.into(),
-                        target: signer_rewards[2].0,
+                        target: signer_rewards[2].0.into(),
                         irys_ref: H256::from(publish_tx.id.0).into(),
                     }),
                     H256::zero().into(),
@@ -1317,14 +1317,14 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
 
         // Create miners and their rewards
-        let miner1 = Address::from([10_u8; 20]);
-        let miner2 = Address::from([11_u8; 20]);
-        let miner3 = Address::from([12_u8; 20]);
+        let miner1 = IrysAddress::from([10_u8; 20]);
+        let miner2 = IrysAddress::from([11_u8; 20]);
+        let miner3 = IrysAddress::from([12_u8; 20]);
 
         let miner1_reward = U256::from(1000);
         let miner2_reward = U256::from(2000);
@@ -1371,7 +1371,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::TermFeeReward(BalanceIncrement {
                         amount: Uint::from_le_bytes(reward.to_le_bytes()),
-                        target: *miner,
+                        target: (*miner).into(),
                         irys_ref: H256::from(hash.to_bytes()).into(),
                     }),
                     H256::zero().into(),
@@ -1417,13 +1417,13 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
 
         // Create users and their refunds
-        let user1 = Address::from([30_u8; 20]);
-        let user2 = Address::from([31_u8; 20]);
+        let user1 = IrysAddress::from([30_u8; 20]);
+        let user2 = IrysAddress::from([31_u8; 20]);
 
         let tx1_id = H256::from([40_u8; 32]);
         let tx2_id = H256::from([41_u8; 32]);
@@ -1472,7 +1472,7 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PermFeeRefund(BalanceIncrement {
                         amount: Uint::from_le_bytes(refund_amount.to_le_bytes()),
-                        target: *user,
+                        target: (*user).into(),
                         irys_ref: (*tx_id).into(),
                     }),
                     H256::zero().into(),
@@ -1518,7 +1518,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let parent_block = IrysBlockHeader::new_mock_header();
         let block_height = 101;
-        let reward_address = Address::from([20_u8; 20]);
+        let reward_address = IrysAddress::from([20_u8; 20]);
         let reward_amount = U256::from(5000);
         let initial_treasury = U256::from(10_000_000);
 

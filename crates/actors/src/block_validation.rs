@@ -25,25 +25,25 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
-use irys_types::u256_from_le_bytes as hash_to_number;
-use irys_types::CommitmentType;
 use irys_types::UnixTimestampMs;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, Address, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    IrysTransactionCommon, IrysTransactionId, PoaData, UnixTimestamp, H256, U256,
+    validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
+    IrysBlockHeader, PoaData, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
+use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
 use irys_types::{BlockHash, LedgerChunkRange};
+use irys_types::{CommitmentType, IrysTransactionCommon};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
-use reth::revm::primitives::FixedBytes;
+use reth::revm::primitives::{Address, FixedBytes};
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
@@ -219,7 +219,7 @@ pub enum PreValidationError {
     #[error("Ingress proof mismatch for transaction {tx_id}")]
     IngressProofMismatch { tx_id: H256 },
     #[error("Duplicate ingress proof signer {signer} for transaction {tx_id}")]
-    DuplicateIngressProofSigner { tx_id: H256, signer: Address },
+    DuplicateIngressProofSigner { tx_id: H256, signer: IrysAddress },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
@@ -320,7 +320,7 @@ pub enum ValidationError {
     UnpledgePartitionNotOwned {
         tx_id: H256,
         partition_hash: H256,
-        signer: Address,
+        signer: IrysAddress,
     },
 
     /// Parent commitment snapshot not found
@@ -1063,7 +1063,7 @@ pub fn poa_is_valid(
     block_index_guard: &BlockIndexReadGuard,
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
-    miner_address: &Address,
+    miner_address: &IrysAddress,
 ) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
@@ -1310,12 +1310,13 @@ pub async fn shadow_transactions_are_valid(
 
     // 3. Extract shadow transactions from the beginning of the block lazily
     let txs_slice = &evm_block.body.transactions;
+    let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
         // Verify signer for each yielded shadow tx (must be the miner)
         let (stx, tx_ref) = res?;
         let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
         ensure!(
-            block.miner_address == tx_signer,
+            block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
         );
         Ok(stx)
@@ -2814,7 +2815,7 @@ where
 }
 
 fn get_submit_ledger_slot_assignments(
-    address: &Address,
+    address: &IrysAddress,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> Vec<usize> {
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
@@ -2862,9 +2863,9 @@ mod tests {
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::TokioServiceHandle;
     use irys_types::{
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
-        NodeConfig, Signature, H256, U256,
+        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Base64, BlockHash,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
+        IrysBlockHeaderV1, NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2875,7 +2876,7 @@ mod tests {
         pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
         #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
-        pub miner_address: Address,
+        pub miner_address: IrysAddress,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,

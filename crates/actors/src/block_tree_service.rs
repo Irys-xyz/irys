@@ -18,7 +18,7 @@ use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    Address, BlockHash, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List,
+    BlockHash, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysAddress,
     IrysBlockHeader, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
@@ -65,7 +65,7 @@ pub struct BlockTreeServiceInner {
     /// Block tree internal state
     pub cache: Arc<RwLock<BlockTree>>,
     /// The wallet address of the local miner
-    pub miner_address: Address,
+    pub miner_address: IrysAddress,
     /// Read view of the `block_index`
     pub block_index_guard: BlockIndexReadGuard,
     /// Global storage config

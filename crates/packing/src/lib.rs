@@ -3,7 +3,7 @@ use std::ops::BitXor as _;
 pub use irys_c::{capacity, capacity_single};
 
 use irys_types::{
-    partition::PartitionHash, Address, Base64, ChunkBytes, PackedChunk, UnpackedChunk,
+    partition::PartitionHash, Base64, ChunkBytes, IrysAddress, PackedChunk, UnpackedChunk,
 };
 
 #[cfg(feature = "nvidia")]
@@ -82,7 +82,7 @@ pub fn unpack_with_entropy(
 /// Precondition: `out_entropy_chunk` should have at least DATA_CONFIG.chunk_size = 256KB (defined in capacity.h file) capacity
 /// Uses C 2D Packing implementation
 pub fn capacity_pack_range_c(
-    mining_address: Address,
+    mining_address: IrysAddress,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     out_entropy_chunk: &mut Vec<u8>,
@@ -117,7 +117,7 @@ pub fn capacity_pack_range_c(
 /// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_cuda_c(
     num_chunks: u32,
-    mining_address: Address,
+    mining_address: IrysAddress,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     entropy_packing_iterations: u32,
@@ -176,7 +176,7 @@ pub fn capacity_pack_range_cuda_c(
 /// 2D Packing CUDA C implementation
 pub fn capacity_pack_range_with_data_cuda_c(
     data: &mut [u8],
-    mining_address: Address,
+    mining_address: IrysAddress,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     entropy_packing_iterations: u32,
@@ -218,7 +218,7 @@ pub const PACKING_TYPE: PackingType = PackingType::CUDA;
 /// 2D Packing Rust implementation
 pub fn capacity_pack_range_with_data(
     data: &mut [ChunkBytes],
-    mining_address: Address,
+    mining_address: IrysAddress,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     chunk_size: usize,
@@ -245,7 +245,7 @@ pub fn capacity_pack_range_with_data(
 /// 2D Packing C implementation
 pub fn capacity_pack_range_with_data_c(
     data: &mut [ChunkBytes],
-    mining_address: Address,
+    mining_address: IrysAddress,
     chunk_offset: std::ffi::c_ulong,
     partition_hash: PartitionHash,
     entropy_packing_iterations: u32,
@@ -294,7 +294,7 @@ pub fn calibrate_packing(runs: u64) -> u32 {
     let target_secs = std::time::Duration::from_millis(3_500).as_secs_f64();
 
     let chunk_size = 256 * 1024;
-    let mining_address = Address::random();
+    let mining_address = IrysAddress::random();
     let partition_hash = irys_types::H256::random();
     let mut iterations = 10_000_000;
     let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
@@ -519,7 +519,7 @@ mod tests {
         testing_config.chunk_size = DATA_CHUNK_SIZE as u64;
         testing_config.entropy_packing_iterations = 1_000;
         let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
-        let mining_address = Address::random();
+        let mining_address = IrysAddress::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash);
@@ -598,7 +598,7 @@ mod tests {
         testing_config.chunk_size = ConsensusConfig::CHUNK_SIZE;
         testing_config.entropy_packing_iterations = 100_000;
         let mut rng = rand::thread_rng();
-        let mining_address = Address::random();
+        let mining_address = IrysAddress::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash: [u8; SHA_HASH_SIZE] = [0; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash);
@@ -662,7 +662,7 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let testing_config = ConsensusConfig::testing();
-        let mining_address = Address::random();
+        let mining_address = IrysAddress::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);

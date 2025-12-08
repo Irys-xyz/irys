@@ -2,7 +2,7 @@ use alloy_core::primitives::{TxHash, U256};
 use alloy_genesis::GenesisAccount;
 use irys_actors::block_producer::BlockProducerCommand;
 use irys_database::db::IrysDatabaseExt as _;
-use irys_types::{block_production::SolutionContext, irys::IrysSigner, Address, NodeConfig};
+use irys_types::{block_production::SolutionContext, irys::IrysSigner, IrysAddress, NodeConfig};
 use k256::ecdsa::SigningKey;
 use reth::{providers::BlockReader as _, transaction_pool::TransactionPool as _};
 use std::time::Duration;
@@ -49,7 +49,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
 
     assert_eq!(
         node.node_ctx.config.node_config.miner_address(),
-        Address::from_slice(expected_addr.as_slice())
+        IrysAddress::from_slice(expected_addr.as_slice())
     );
     let account1_address = hex::decode(DEV2_ADDRESS)?;
     let account1 = IrysSigner {
@@ -59,7 +59,7 @@ async fn continuous_blockprod_evm_tx() -> eyre::Result<()> {
     };
     assert_eq!(
         account1.address(),
-        Address::from_slice(account1_address.as_slice())
+        IrysAddress::from_slice(account1_address.as_slice())
     );
 
     let reth_context = node.node_ctx.reth_node_adapter.clone();

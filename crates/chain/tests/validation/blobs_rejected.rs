@@ -169,7 +169,12 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
         let w = Withdrawal {
             index: 0,
             validator_index: 0,
-            address: genesis_node.node_ctx.config.node_config.reward_address,
+            address: genesis_node
+                .node_ctx
+                .config
+                .node_config
+                .reward_address
+                .into(),
             amount: 1,
         };
         blk.body.withdrawals = Some(Withdrawals::new(vec![w]));
@@ -227,7 +232,12 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
             max_fee_per_gas: 1_000_000_000_u128,
             max_priority_fee_per_gas: 0,
             gas_limit: 100_000,
-            to: genesis_node.node_ctx.config.node_config.reward_address,
+            to: genesis_node
+                .node_ctx
+                .config
+                .node_config
+                .reward_address
+                .into(),
             value: U256::ZERO,
             input: Bytes::new(),
             access_list: Default::default(),

@@ -13,8 +13,8 @@ use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    Address, BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, PeerListItem,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
+    DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, PeerListItem,
     TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
@@ -372,7 +372,7 @@ pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Res
 
 pub fn insert_peer_list_item<T: DbTxMut>(
     tx: &T,
-    mining_address: &Address,
+    mining_address: &IrysAddress,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
     Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
@@ -395,7 +395,7 @@ pub fn ingress_proofs_by_data_root<TX: DbTx>(
 pub fn ingress_proof_by_data_root_address<TX: DbTx>(
     read_tx: &TX,
     data_root: DataRoot,
-    address: Address,
+    address: IrysAddress,
 ) -> eyre::Result<Option<CompactCachedIngressProof>> {
     let mut cursor = read_tx.cursor_dup_read::<IngressProofs>()?;
 
@@ -449,7 +449,7 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
 pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
     tx: &T,
     ingress_proof: &IngressProof,
-    address: Address,
+    address: IrysAddress,
 ) -> eyre::Result<()> {
     if tx
         .get::<CachedDataRoots>(ingress_proof.data_root)?

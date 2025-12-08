@@ -15,7 +15,7 @@ use irys_api_client::ApiClient;
 use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
@@ -381,7 +381,7 @@ where
     pub async fn pull_and_process_block_from_peer(
         &self,
         block_hash: BlockHash,
-        peer: &(irys_types::Address, PeerListItem),
+        peer: &(irys_types::IrysAddress, PeerListItem),
     ) -> GossipResult<()> {
         let (source_address, irys_block) = self
             .gossip_client
@@ -751,7 +751,7 @@ where
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<Address> {
+    pub(crate) async fn handle_get_stake_and_pledge_whitelist(&self) -> Vec<IrysAddress> {
         self.mempool
             .get_stake_and_pledge_whitelist()
             .await
@@ -793,7 +793,7 @@ where
     pub async fn fetch_and_build_block_transactions(
         &self,
         block: &IrysBlockHeader,
-        source_peer: Option<(SocketAddr, Address)>,
+        source_peer: Option<(SocketAddr, IrysAddress)>,
     ) -> GossipResult<BlockTransactions> {
         let block_hash = block.block_hash;
 
@@ -995,7 +995,7 @@ where
     async fn fetch_missing_txs_from_network(
         &self,
         missing_tx_ids: Vec<H256>,
-        source_peer: Option<(SocketAddr, Address)>,
+        source_peer: Option<(SocketAddr, IrysAddress)>,
     ) -> GossipResult<(Vec<DataTransactionHeader>, Vec<CommitmentTransaction>)> {
         let mut fetched_data_txs = Vec::new();
         let mut fetched_commitment_txs = Vec::new();
@@ -1009,7 +1009,7 @@ where
         let fetch_results: Vec<_> = stream::iter(missing_tx_ids)
             .map(|tx_id_to_fetch| {
                 async move {
-                    let mut fetched: Option<(IrysTransactionResponse, Address)> = None;
+                    let mut fetched: Option<(IrysTransactionResponse, IrysAddress)> = None;
                     let mut last_err: Option<String> = None;
 
                     // Try source peer first if provided

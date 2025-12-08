@@ -17,8 +17,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
-    Address, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
-    IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof,
+    IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
@@ -109,7 +109,7 @@ where
     fn check_peer(
         peer_list: &PeerList,
         req: &actix_web::HttpRequest,
-        miner_address: Address,
+        miner_address: IrysAddress,
     ) -> Result<PeerListItem, HttpResponse> {
         let Some(peer_address) = req.peer_addr() else {
             warn!("Failed to get peer address from gossip POST request");
@@ -402,7 +402,7 @@ where
     }
 
     fn handle_invalid_data(
-        peer_miner_address: &Address,
+        peer_miner_address: &IrysAddress,
         error: &GossipError,
         peer_list: &PeerList,
     ) {
@@ -599,7 +599,7 @@ mod tests {
         )
         .expect("peer list");
 
-        let miner = Address::new([1_u8; 20]);
+        let miner = IrysAddress::new([1_u8; 20]);
         peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
 
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));

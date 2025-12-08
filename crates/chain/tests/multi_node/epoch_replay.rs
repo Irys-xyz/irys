@@ -5,7 +5,7 @@ use irys_domain::PackingParams;
 use irys_domain::{EpochSnapshot, PACKING_PARAMS_FILE_NAME};
 use irys_testing_utils::initialize_tracing;
 use irys_types::DataLedger;
-use irys_types::{irys::IrysSigner, Address, NodeConfig, H256};
+use irys_types::{irys::IrysSigner, IrysAddress, NodeConfig, H256};
 use std::fs;
 use std::sync::Arc;
 use tracing::{debug, info};
@@ -277,7 +277,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
 fn validate_pledge_assignments(
     epoch_snapshot: Arc<EpochSnapshot>,
     address_name: &str,
-    address: &Address,
+    address: &IrysAddress,
 ) -> eyre::Result<Vec<H256>> {
     let pledges = epoch_snapshot
         .commitment_state

@@ -5,7 +5,7 @@
 )]
 use crate::types::GossipResult;
 use core::time::Duration;
-use irys_types::{Address, BlockHash, ChunkPathHash, GossipCacheKey, IrysTransactionId, H256};
+use irys_types::{BlockHash, ChunkPathHash, GossipCacheKey, IrysAddress, IrysTransactionId, H256};
 use moka::sync::Cache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -18,11 +18,11 @@ const GOSSIP_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 #[derive(Debug)]
 pub struct GossipCache {
     /// Maps data identifiers to a set of peer addresses that have seen the data
-    chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<Address>>>>,
-    transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<Address>>>>,
-    blocks: Cache<BlockHash, Arc<RwLock<HashSet<Address>>>>,
-    payloads: Cache<B256, Arc<RwLock<HashSet<Address>>>>,
-    ingress_proofs: Cache<H256, Arc<RwLock<HashSet<Address>>>>,
+    chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<IrysAddress>>>>,
+    transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<IrysAddress>>>>,
+    blocks: Cache<BlockHash, Arc<RwLock<HashSet<IrysAddress>>>>,
+    payloads: Cache<B256, Arc<RwLock<HashSet<IrysAddress>>>>,
+    ingress_proofs: Cache<H256, Arc<RwLock<HashSet<IrysAddress>>>>,
 }
 
 impl Default for GossipCache {
@@ -75,7 +75,7 @@ impl GossipCache {
     /// This function will return an error if the cache cannot be accessed.
     pub(crate) fn record_seen(
         &self,
-        miner_address: Address,
+        miner_address: IrysAddress,
         key: GossipCacheKey,
     ) -> GossipResult<()> {
         match key {
@@ -130,7 +130,7 @@ impl GossipCache {
     pub(crate) fn peers_that_have_seen(
         &self,
         cache_key: &GossipCacheKey,
-    ) -> GossipResult<HashSet<Address>> {
+    ) -> GossipResult<HashSet<IrysAddress>> {
         let result = match cache_key {
             GossipCacheKey::Chunk(chunk_path_hash) => self
                 .chunks

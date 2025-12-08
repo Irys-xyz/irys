@@ -8,7 +8,7 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    Address, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
+    BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest, IrysAddress,
     IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
@@ -37,13 +37,13 @@ pub enum GossipClientError {
 
 #[derive(Debug, Clone)]
 pub struct GossipClient {
-    pub mining_address: Address,
+    pub mining_address: IrysAddress,
     client: Client,
 }
 
 impl GossipClient {
     #[must_use]
-    pub fn new(timeout: Duration, mining_address: Address) -> Self {
+    pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
         Self {
             mining_address,
             client: Client::builder()
@@ -64,7 +64,7 @@ impl GossipClient {
     /// If the peer is offline or the request fails, an error is returned.
     async fn send_data_and_update_score_internal(
         &self,
-        peer: (&Address, &PeerListItem),
+        peer: (&IrysAddress, &PeerListItem),
         data: &GossipData,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
@@ -80,7 +80,7 @@ impl GossipClient {
     /// and false if it doesn't.
     pub async fn make_get_data_request_and_update_the_score(
         &self,
-        peer: &(Address, PeerListItem),
+        peer: &(IrysAddress, PeerListItem),
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
@@ -96,7 +96,7 @@ impl GossipClient {
     /// and updates the peer's score based on the result.
     async fn pull_data_and_update_the_score(
         &self,
-        peer: &(Address, PeerListItem),
+        peer: &(IrysAddress, PeerListItem),
         requested_data: GossipDataRequest,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipData>>> {
@@ -275,7 +275,7 @@ impl GossipClient {
     fn handle_score<T>(
         peer_list: &PeerList,
         result: &GossipResult<GossipResponse<T>>,
-        peer_miner_address: &Address,
+        peer_miner_address: &IrysAddress,
     ) {
         match &result {
             Ok(_) => {
@@ -304,7 +304,7 @@ impl GossipClient {
     fn handle_data_retrieval_score<T>(
         peer_list: &PeerList,
         result: &GossipResult<T>,
-        peer_miner_address: &Address,
+        peer_miner_address: &IrysAddress,
         response_time: Duration,
     ) {
         match result {
@@ -341,7 +341,7 @@ impl GossipClient {
     /// Sends data to a peer and update their score in a detached task
     pub fn send_data_and_update_the_score_detached(
         &self,
-        peer: (&Address, &PeerListItem),
+        peer: (&IrysAddress, &PeerListItem),
         data: Arc<GossipData>,
         peer_list: &PeerList,
         cache: Arc<GossipCache>,
@@ -371,7 +371,7 @@ impl GossipClient {
     /// Sends data to a peer without updating their score
     pub fn send_data_without_score_update(
         &self,
-        peer: (&Address, &PeerListItem),
+        peer: (&IrysAddress, &PeerListItem),
         data: Arc<GossipData>,
     ) {
         let client = self.clone();
@@ -387,7 +387,7 @@ impl GossipClient {
     /// Sends data to a peer and updates their score specifically for data requests
     pub fn send_data_and_update_score_for_request(
         &self,
-        peer: (&Address, &PeerListItem),
+        peer: (&IrysAddress, &PeerListItem),
         data: Arc<GossipData>,
         peer_list: &PeerList,
     ) {
@@ -429,7 +429,7 @@ impl GossipClient {
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+    ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequest::Block(block_hash);
         self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
             .await
@@ -440,7 +440,7 @@ impl GossipClient {
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(Address, Block), PeerNetworkError> {
+    ) -> Result<(IrysAddress, Block), PeerNetworkError> {
         let data_request = GossipDataRequest::ExecutionPayload(evm_payload_hash);
         self.pull_data_from_network(
             data_request,
@@ -455,9 +455,9 @@ impl GossipClient {
     pub async fn pull_block_from_peer(
         &self,
         block_hash: BlockHash,
-        peer: &(Address, PeerListItem),
+        peer: &(IrysAddress, PeerListItem),
         peer_list: &PeerList,
-    ) -> Result<(Address, Arc<IrysBlockHeader>), PeerNetworkError> {
+    ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequest::Block(block_hash);
         match self
             .pull_data_and_update_the_score(peer, data_request, peer_list)
@@ -523,7 +523,7 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
         map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
-    ) -> Result<(Address, T), PeerNetworkError> {
+    ) -> Result<(IrysAddress, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
             peer_list.online_trusted_peers()
         } else {
@@ -699,7 +699,7 @@ impl GossipClient {
     pub async fn stake_and_pledge_whitelist(
         &self,
         peer_list: &PeerList,
-    ) -> Result<Vec<Address>, PeerNetworkError> {
+    ) -> Result<Vec<IrysAddress>, PeerNetworkError> {
         // Work only with trusted peers
         let mut peers = peer_list.online_trusted_peers();
         peers.shuffle(&mut rand::thread_rng());
@@ -736,7 +736,7 @@ impl GossipClient {
 
                 let status = response.status();
 
-                let res: GossipResult<GossipResponse<Vec<Address>>> = match status {
+                let res: GossipResult<GossipResponse<Vec<IrysAddress>>> = match status {
                     StatusCode::OK => {
                         let text = response.text().await.map_err(|e| {
                             PeerNetworkError::FailedToRequestData(format!(
@@ -852,13 +852,13 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             Self {
-                client: GossipClient::new(Duration::from_secs(1), Address::from([1_u8; 20])),
+                client: GossipClient::new(Duration::from_secs(1), IrysAddress::from([1_u8; 20])),
             }
         }
 
         fn with_timeout(timeout: Duration) -> Self {
             Self {
-                client: GossipClient::new(timeout, Address::from([1_u8; 20])),
+                client: GossipClient::new(timeout, IrysAddress::from([1_u8; 20])),
             }
         }
     }
@@ -1111,13 +1111,13 @@ mod tests {
 
     mod data_retrieval_scoring_tests {
         use super::*;
-        use irys_types::Address;
+        use irys_types::IrysAddress;
         use irys_types::{PeerAddress, PeerListItem, PeerScore, RethPeerInfo};
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        fn create_test_peer(id: u8) -> (Address, PeerListItem) {
-            let mining_addr = Address::from([id; 20]);
+        fn create_test_peer(id: u8) -> (IrysAddress, PeerListItem) {
+            let mining_addr = IrysAddress::from([id; 20]);
             let peer_address = PeerAddress {
                 gossip: SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)),
@@ -1325,7 +1325,7 @@ mod tests {
 
     mod concurrent_scoring_tests {
         use super::*;
-        use irys_types::Address;
+        use irys_types::IrysAddress;
         use irys_types::{PeerListItem, PeerScore};
         use std::sync::Arc;
         use tokio::task::JoinSet;
@@ -1333,7 +1333,7 @@ mod tests {
         #[tokio::test]
         async fn test_concurrent_score_updates() {
             let peer_list = Arc::new(PeerList::test_mock().expect("to create peer list mock"));
-            let addr = Address::from([1_u8; 20]);
+            let addr = IrysAddress::from([1_u8; 20]);
             let peer = PeerListItem::default();
             peer_list.add_or_update_peer(addr, peer, true);
 
