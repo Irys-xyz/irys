@@ -795,16 +795,19 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
 
     // First, add the data transaction and ingress proofs to the database so discovery can find them
     genesis_node.node_ctx.db.update(|tx| {
-        use irys_database::tables::{
-            CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,
-        };
+        use irys_database::tables::{CompactTxHeader, IrysDataTxHeaders};
 
         // Store the data transaction
         tx.put::<IrysDataTxHeaders>(data_tx.id, CompactTxHeader(data_tx.clone()))?;
+        irys_database::cache_data_root(tx, &data_tx, None)?;
 
         // Store the ingress proofs (with duplicates from same address)
         for cached_proof in &duplicate_proofs {
-            tx.put::<IngressProofs>(data_root, CompactCachedIngressProof(cached_proof.clone()))?;
+            irys_database::store_external_ingress_proof_checked(
+                tx,
+                &cached_proof.proof,
+                cached_proof.address,
+            )?;
         }
 
         Ok::<_, eyre::Report>(())
