@@ -32,7 +32,7 @@ pub fn main() {
 
         for run in 0..runs_per {
             let mut rng = rand::thread_rng();
-            let mining_address = Address::random();
+            let mining_address = IrysAddress::random();
             let chunk_offset = rng.gen_range(1..=1000);
             let partition_hash = H256::random();
 
