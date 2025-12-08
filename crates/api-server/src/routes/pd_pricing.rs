@@ -9,8 +9,7 @@ use crate::{error::ApiError, ApiState};
 
 // Re-export response types from actors module
 pub use irys_actors::pd_pricing::{
-    BlockBaseFee, BlockPriorityFees, BlockUtilization, FeeHistoryAnalysis,
-    PdFeeHistoryResponse, PriorityFeeAtPercentile,
+    BlockPriorityFees, PdFeeHistoryResponse, PriorityFeeAtPercentile,
 };
 
 // Query Parameters
