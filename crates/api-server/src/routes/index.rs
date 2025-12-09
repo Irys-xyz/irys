@@ -17,7 +17,7 @@ pub async fn get_node_info(
     peer_list: &PeerList,
     sync_state: &ChainSyncState,
     started_at: std::time::Instant,
-    mining_address: irys_types::Address,
+    mining_address: irys_types::IrysAddress,
     chain_id: u64,
 ) -> NodeInfo {
     let (block_index_height, block_index_hash) = {

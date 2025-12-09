@@ -25,7 +25,7 @@ impl RemoteNodeClient {
 
     pub(crate) async fn is_ready(&self) -> bool {
         self.http_client
-            .get(format!("{}/v1/genesis", self.url))
+            .get(format!("{}/v1/block/0", self.url))
             .send()
             .await
             .map(|r| r.status().is_success())

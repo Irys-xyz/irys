@@ -1,7 +1,7 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::pd_base_fee::compute_base_fee_per_chunk;
 use crate::{
-    block_discovery::{get_commitment_tx_in_parallel, get_data_tx_in_parallel},
+    block_discovery::BlockTransactions,
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -28,25 +28,25 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
-use irys_types::u256_from_le_bytes as hash_to_number;
-use irys_types::CommitmentType;
 use irys_types::UnixTimestampMs;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    validate_path, Address, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysBlockHeader,
-    PoaData, UnixTimestamp, H256, U256,
+    validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
+    IrysBlockHeader, PoaData, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
+use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
 use irys_types::{BlockHash, LedgerChunkRange};
+use irys_types::{CommitmentType, IrysTransactionCommon};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
 use nodit::InclusiveInterval as _;
 use openssl::sha;
-use reth::revm::primitives::FixedBytes;
+use reth::revm::primitives::{Address, FixedBytes};
 use reth::rpc::api::EngineApiClient as _;
 use reth::rpc::types::engine::ExecutionPayload;
 use reth_db::Database as _;
@@ -78,6 +78,8 @@ pub enum PreValidationError {
     IngressProofsMissing,
     #[error("Invalid ingress proof signature: {0}")]
     IngressProofSignatureInvalid(String),
+    #[error("Invalid promotion, transaction {txid:?} data size {got:?} does not match confirmed data root size {expected:?}")]
+    InvalidPromotionDataSizeMismatch { txid: H256, expected: u64, got: u64 },
     #[error("Invalid last_diff_timestamp (expected {expected} got {got})")]
     LastDiffTimestampMismatch {
         expected: UnixTimestampMs,
@@ -222,11 +224,42 @@ pub enum PreValidationError {
     #[error("Ingress proof mismatch for transaction {tx_id}")]
     IngressProofMismatch { tx_id: H256 },
     #[error("Duplicate ingress proof signer {signer} for transaction {tx_id}")]
-    DuplicateIngressProofSigner { tx_id: H256, signer: Address },
+    DuplicateIngressProofSigner { tx_id: H256, signer: IrysAddress },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
     InvalidEpochSnapshot { error: String },
+
+    /// Too many data transactions in submit ledger
+    #[error("Too many data transactions in submit ledger: max {max}, got {got}")]
+    TooManyDataTxs { max: u64, got: usize },
+
+    /// Too many commitment transactions
+    #[error("Too many commitment transactions: max {max}, got {got}")]
+    TooManyCommitmentTxs { max: u64, got: usize },
+
+    /// Missing transactions that were expected in block header
+    #[error("Missing transactions: {0:?}")]
+    MissingTransactions(Vec<IrysTransactionId>),
+
+    /// Transaction ID mismatch between provided tx and block header
+    #[error("Transaction ID mismatch: expected {expected}, got {actual}")]
+    TransactionIdMismatch {
+        expected: IrysTransactionId,
+        actual: IrysTransactionId,
+    },
+
+    /// Invalid transaction signature
+    #[error("Invalid signature for transaction {0}")]
+    InvalidTransactionSignature(IrysTransactionId),
+
+    /// Commitment transactions provided but no commitment ledger in block header
+    #[error("Commitment transactions provided but no commitment ledger in block header")]
+    UnexpectedCommitmentTransactions,
+
+    /// Invalid data ledgers length
+    #[error("Invalid data ledgers length: expected {expected} ledgers, got {got}")]
+    InvalidDataLedgersLength { expected: u32, got: usize },
 }
 
 /// Validation error type that covers all block validation failures.
@@ -292,7 +325,7 @@ pub enum ValidationError {
     UnpledgePartitionNotOwned {
         tx_id: H256,
         partition_hash: H256,
-        signer: Address,
+        signer: IrysAddress,
     },
 
     /// Parent commitment snapshot not found
@@ -337,6 +370,7 @@ pub async fn prevalidate_block(
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
+    transactions: &BlockTransactions,
 ) -> Result<(), PreValidationError> {
     debug!(
         block.hash = ?block.block_hash,
@@ -537,6 +571,155 @@ pub async fn prevalidate_block(
     // TODO: add validation for the term ledger 'expires' field,
     // ensuring it gets properly updated on epoch boundaries, and it's
     // consistent with the block's height and parent block's height
+
+    // ========================================
+    // Transaction validation
+    // ========================================
+
+    // Validate submit ledger transactions
+    let submit_ledger = block
+        .data_ledgers
+        .get(DataLedger::Submit as usize)
+        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
+            expected: DataLedger::Submit.into(),
+            got: block.data_ledgers.len(),
+        })?;
+
+    let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+
+    // Enforce max_data_txs_per_block on submit ledger
+    let max_data_txs = config
+        .node_config
+        .consensus_config()
+        .mempool
+        .max_data_txs_per_block;
+    if submit_txs.len() > max_data_txs as usize {
+        return Err(PreValidationError::TooManyDataTxs {
+            max: max_data_txs,
+            got: submit_txs.len(),
+        });
+    }
+
+    // Validate submit transactions: count, IDs, and signatures
+    validate_transactions(submit_txs, &submit_ledger.tx_ids.0)?;
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "submit_transactions_valid",
+    );
+
+    // Validate publish ledger transactions
+    let publish_ledger = block
+        .data_ledgers
+        .get(DataLedger::Publish as usize)
+        .ok_or_else(|| PreValidationError::InvalidDataLedgersLength {
+            expected: DataLedger::Publish.into(),
+            got: block.data_ledgers.len(),
+        })?;
+
+    let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+
+    // Validate publish transactions: count, IDs, and signatures
+    validate_transactions(publish_txs, &publish_ledger.tx_ids.0)?;
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "publish_transactions_valid",
+    );
+
+    // Validate ingress proofs for published transactions
+    for tx_header in publish_txs.iter() {
+        let tx_proofs = get_ingress_proofs(publish_ledger, &tx_header.id)
+            .map_err(|_| PreValidationError::IngressProofsMissing)?;
+        for proof in tx_proofs.iter() {
+            proof
+                .pre_validate(&tx_header.data_root)
+                .map_err(|e| PreValidationError::IngressProofSignatureInvalid(e.to_string()))?;
+        }
+    }
+    debug!(
+        block.hash = ?block.block_hash,
+        block.height = ?block.height,
+        "ingress_proofs_valid",
+    );
+
+    // Validate commitment ledger transactions
+    let commitment_ledger = block
+        .system_ledgers
+        .iter()
+        .find(|b| b.ledger_id == SystemLedger::Commitment);
+
+    let commitment_txs = &transactions.commitment_txs;
+
+    if let Some(commitment_ledger) = commitment_ledger {
+        // Check commitment tx count limit (skip for epoch blocks which contain rollup of all epoch txs)
+        let is_epoch_block = block.height.is_multiple_of(
+            config
+                .node_config
+                .consensus_config()
+                .epoch
+                .num_blocks_in_epoch,
+        );
+        if !is_epoch_block {
+            let max_commitment_txs = config
+                .node_config
+                .consensus_config()
+                .mempool
+                .max_commitment_txs_per_block;
+            if commitment_txs.len() > max_commitment_txs as usize {
+                return Err(PreValidationError::TooManyCommitmentTxs {
+                    max: max_commitment_txs,
+                    got: commitment_txs.len(),
+                });
+            }
+        }
+
+        // Validate commitment transactions: count, IDs, and signatures
+        validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
+        debug!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            "commitment_transactions_valid",
+        );
+    } else if !commitment_txs.is_empty() {
+        // Commitment transactions provided but no commitment ledger in block header
+        return Err(PreValidationError::UnexpectedCommitmentTransactions);
+    }
+
+    Ok(())
+}
+
+/// Validate transactions against expected IDs from the block header.
+/// Checks: count matches, IDs match in order, signatures are valid.
+fn validate_transactions<T: IrysTransactionCommon>(
+    txs: &[T],
+    expected_ids: &[IrysTransactionId],
+) -> Result<(), PreValidationError> {
+    // Check count matches
+    if txs.len() != expected_ids.len() {
+        let provided_ids: std::collections::HashSet<_> =
+            txs.iter().map(IrysTransactionCommon::id).collect();
+        let missing: Vec<_> = expected_ids
+            .iter()
+            .filter(|id| !provided_ids.contains(id))
+            .copied()
+            .collect();
+        return Err(PreValidationError::MissingTransactions(missing));
+    }
+
+    // Check IDs match in order and signatures are valid
+    for (tx, expected_id) in txs.iter().zip(expected_ids.iter()) {
+        let actual_id = tx.id();
+        if actual_id != *expected_id {
+            return Err(PreValidationError::TransactionIdMismatch {
+                expected: *expected_id,
+                actual: actual_id,
+            });
+        }
+        if !tx.is_signature_valid() {
+            return Err(PreValidationError::InvalidTransactionSignature(actual_id));
+        }
+    }
 
     Ok(())
 }
@@ -885,7 +1068,7 @@ pub fn poa_is_valid(
     block_index_guard: &BlockIndexReadGuard,
     epoch_snapshot: &EpochSnapshot,
     config: &ConsensusConfig,
-    miner_address: &Address,
+    miner_address: &IrysAddress,
 ) -> Result<(), PreValidationError> {
     debug!("PoA validating");
     let mut poa_chunk: Vec<u8> = match &poa.chunk {
@@ -1021,7 +1204,7 @@ pub fn poa_is_valid(
 #[tracing::instrument(level = "trace", skip_all, fields(block = ?block.block_hash))]
 pub async fn shadow_transactions_are_valid(
     config: &Config,
-    service_senders: &ServiceSenders,
+    block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     parent_block: &IrysBlockHeader,
     block: &IrysBlockHeader,
@@ -1032,6 +1215,7 @@ pub async fn shadow_transactions_are_valid(
     current_ema_snapshot: Arc<EmaSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    transactions: &BlockTransactions,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
     let execution_data = payload_provider
@@ -1164,12 +1348,13 @@ pub async fn shadow_transactions_are_valid(
 
     // 3. Extract shadow transactions from the beginning of the block lazily
     let txs_slice = &evm_block.body.transactions;
+    let block_miner_address: Address = block.miner_address.into();
     let actual_shadow_txs = extract_leading_shadow_txs(txs_slice).map(|res| {
         // Verify signer for each yielded shadow tx (must be the miner)
         let (stx, tx_ref) = res?;
         let tx_signer = tx_ref.clone().into_signed().recover_signer()?;
         ensure!(
-            block.miner_address == tx_signer,
+            block_miner_address == tx_signer,
             "Shadow tx signer is not the miner"
         );
         Ok(stx)
@@ -1188,9 +1373,9 @@ pub async fn shadow_transactions_are_valid(
         sidecar: _,
     } = parent_execution_data;
     let parent_evm_block: Block = payload.try_into_block()?;
-    let expected_txs = generate_expected_shadow_transactions_from_db(
+    let expected_txs = generate_expected_shadow_transactions(
         config,
-        service_senders,
+        block_tree_guard,
         mempool_guard,
         block,
         db,
@@ -1201,6 +1386,7 @@ pub async fn shadow_transactions_are_valid(
         parent_commitment_snapshot,
         &parent_evm_block,
         block_index,
+        transactions,
     )
     .await?;
 
@@ -1313,11 +1499,11 @@ pub async fn submit_payload_to_reth(
     Ok(())
 }
 
-/// Generates expected shadow transactions by looking up required data from the mempool or database
+/// Generates expected shadow transactions
 #[tracing::instrument(level = "trace", skip_all, err)]
-async fn generate_expected_shadow_transactions_from_db(
+async fn generate_expected_shadow_transactions(
     config: &Config,
-    service_senders: &ServiceSenders,
+    block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
@@ -1328,24 +1514,34 @@ async fn generate_expected_shadow_transactions_from_db(
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
     parent_evm_block: &Block,
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
-    // Look up commitment txs
-    let commitment_txs = extract_commitment_txs(config, mempool_guard, block, db).await?;
+    // Calculate is_epoch_block early since it's needed for multiple checks
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
 
-    // Lookup data txs
-    let data_txs = extract_submit_ledger_txs(service_senders, block, db).await?;
+    // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
+    let commitment_txs: &[CommitmentTransaction] = if is_epoch_block {
+        &[]
+    } else {
+        &transactions.commitment_txs
+    };
 
-    // Lookup publish ledger for term fee rewards
-    let publish_ledger_with_txs =
-        extract_publish_ledger_with_txs(service_senders, block, db).await?;
+    // Use pre-fetched submit ledger transactions
+    let data_txs = transactions.get_ledger_txs(DataLedger::Submit).to_vec();
+
+    // Use pre-fetched publish ledger transactions with proofs from block header
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
+    let publish_ledger_with_txs = PublishLedgerWithTxs {
+        txs: transactions.get_ledger_txs(DataLedger::Publish).to_vec(),
+        proofs: publish_ledger.proofs.clone(),
+    };
 
     // Get treasury balance from previous block
     let initial_treasury_balance = parent_block.treasury;
 
     // Calculate expired ledger fees for epoch blocks
-    let is_epoch_block = block
-        .height
-        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
     let expired_ledger_fees = if is_epoch_block {
         ledger_expiry::calculate_expired_ledger_fees(
             &parent_epoch_snapshot,
@@ -1353,8 +1549,9 @@ async fn generate_expected_shadow_transactions_from_db(
             DataLedger::Submit, // Currently only Submit ledgers expire
             config,
             block_index,
-            service_senders.mempool.clone(),
-            db.clone(),
+            block_tree_guard,
+            mempool_guard,
+            db,
             true, // expect_txs_to_be_promoted: true - we expect txs to be promoted normally
         )
         .in_current_span()
@@ -1398,7 +1595,7 @@ async fn generate_expected_shadow_transactions_from_db(
         parent_block,
         &block.solution_hash,
         &config.consensus,
-        &commitment_txs,
+        commitment_txs,
         &data_txs,
         &publish_ledger_with_txs,
         initial_treasury_balance,
@@ -1428,72 +1625,6 @@ async fn generate_expected_shadow_transactions_from_db(
     );
 
     Ok(shadow_txs_vec)
-}
-
-async fn extract_commitment_txs(
-    config: &Config,
-    mempool_guard: &MempoolReadGuard,
-    block: &IrysBlockHeader,
-    db: &DatabaseProvider,
-) -> Result<Vec<CommitmentTransaction>, eyre::Error> {
-    let is_epoch_block = block
-        .height
-        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
-    let commitment_txs = if is_epoch_block {
-        // IMPORTANT: on epoch blocks we don't generate shadow txs for commitment txs
-        vec![]
-    } else {
-        match &block.system_ledgers[..] {
-            [ledger] => {
-                ensure!(
-                    ledger.ledger_id == SystemLedger::Commitment,
-                    "only commitment ledger supported"
-                );
-
-                get_commitment_tx_in_parallel(&ledger.tx_ids.0, mempool_guard, db).await?
-            }
-            [] => {
-                // this is valid as we can have a block that contains 0 system ledgers
-                vec![]
-            }
-            // this is to ensure that we don't skip system ledgers and forget to add them to validation in the future
-            [..] => eyre::bail!("Currently we support at most 1 system ledger per block"),
-        }
-    };
-    Ok(commitment_txs)
-}
-
-async fn extract_submit_ledger_txs(
-    service_senders: &ServiceSenders,
-    block: &IrysBlockHeader,
-    db: &DatabaseProvider,
-) -> Result<Vec<DataTransactionHeader>, eyre::Error> {
-    let (_publish_ledger, submit_ledger) = extract_data_ledgers(block)?;
-    // we only access the submit ledger data. Publish ledger does not require billing the user extra
-    let txs = get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-        .await?;
-    Ok(txs)
-}
-
-/// Extracts publish ledger with transactions and ingress proofs for term fee reward distribution
-async fn extract_publish_ledger_with_txs(
-    service_senders: &ServiceSenders,
-    block: &IrysBlockHeader,
-    db: &DatabaseProvider,
-) -> Result<PublishLedgerWithTxs, eyre::Error> {
-    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
-
-    // Fetch the actual transactions for the publish ledger
-    let txs = get_data_tx_in_parallel(
-        publish_ledger.tx_ids.0.clone(),
-        &service_senders.mempool,
-        db,
-    )
-    .await?;
-    Ok(PublishLedgerWithTxs {
-        txs,
-        proofs: publish_ledger.proofs.clone(),
-    })
 }
 
 /// Validates  the actual shadow transactions match the expected ones
@@ -1577,26 +1708,12 @@ pub fn is_seed_data_valid(
 #[tracing::instrument(level = "trace", skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
 pub async fn commitment_txs_are_valid(
     config: &Config,
-    mempool_guard: &MempoolReadGuard,
     block: &IrysBlockHeader,
-    db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
+    commitment_txs: &[CommitmentTransaction],
 ) -> Result<(), ValidationError> {
-    // Extract commitment transaction IDs from the block
-    let block_tx_ids = block
-        .system_ledgers
-        .iter()
-        .find(|ledger| ledger.ledger_id == SystemLedger::Commitment as u32)
-        .map(|ledger| ledger.tx_ids.0.as_slice())
-        .unwrap_or_else(|| &[]);
-
-    // Fetch all actual commitment transactions from the block
-    let actual_commitments = get_commitment_tx_in_parallel(block_tx_ids, mempool_guard, db)
-        .await
-        .map_err(|e| ValidationError::CommitmentTransactionFetchFailed(e.to_string()))?;
-
     // Validate that all commitment transactions have correct values
-    for (idx, tx) in actual_commitments.iter().enumerate() {
+    for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
             error!(
                 "Commitment transaction {} at position {} has invalid value: {}",
@@ -1639,7 +1756,7 @@ pub async fn commitment_txs_are_valid(
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
-        for (idx, pair) in actual_commitments
+        for (idx, pair) in commitment_txs
             .iter()
             .zip_longest(expected_commitments.iter())
             .enumerate()
@@ -1680,7 +1797,7 @@ pub async fn commitment_txs_are_valid(
         commitments: parent_commitment_snapshot.commitments.clone(),
     };
 
-    for tx in &actual_commitments {
+    for tx in commitment_txs {
         if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
             let owner = parent_epoch_snapshot
                 .partition_assignments
@@ -1704,29 +1821,16 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
-    // Regular block validation: check priority ordering for stake and pledge commitments
-    let stake_and_pledge_txs: Vec<&CommitmentTransaction> = actual_commitments
-        .iter()
-        .filter(|tx| {
-            matches!(
-                tx.commitment_type,
-                CommitmentType::Stake
-                    | CommitmentType::Pledge { .. }
-                    | CommitmentType::Unpledge { .. }
-            )
-        })
-        .collect();
-
-    if stake_and_pledge_txs.is_empty() {
+    if commitment_txs.is_empty() {
         return Ok(());
     }
 
     // Sort to get expected order
-    let mut expected_order = stake_and_pledge_txs.clone();
+    let mut expected_order = commitment_txs.to_vec();
     expected_order.sort();
 
     // Compare actual order vs expected order
-    for (idx, pair) in stake_and_pledge_txs
+    for (idx, pair) in commitment_txs
         .iter()
         .zip_longest(expected_order.iter())
         .enumerate()
@@ -1742,7 +1846,7 @@ pub async fn commitment_txs_are_valid(
                 }
             }
             _ => {
-                // This should never happen since we're comparing the same filtered set
+                // This should never happen since we're comparing the same set
                 error!(
                     "Internal error: commitment ordering validation mismatch for block {} (height {})",
                     block.block_hash, block.height
@@ -1811,6 +1915,8 @@ pub async fn data_txs_are_valid(
     block: &IrysBlockHeader,
     db: &DatabaseProvider,
     block_tree_guard: &BlockTreeReadGuard,
+    submit_txs: &[DataTransactionHeader],
+    publish_txs: &[DataTransactionHeader],
 ) -> Result<(), PreValidationError> {
     // Get the parent block's EMA snapshot for fee calculations
     let block_ema = block_tree_guard
@@ -1820,23 +1926,9 @@ pub async fn data_txs_are_valid(
             block_hash: block.previous_block_hash,
         })?;
 
-    // Extract data transactions from both ledgers
-    let (publish_ledger, submit_ledger) = extract_data_ledgers(block)
+    // Extract publish ledger for ingress proofs validation
+    let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)
         .map_err(|e| PreValidationError::DataLedgerExtractionFailed(e.to_string()))?;
-
-    // Get transactions from both ledgers
-    let publish_txs = get_data_tx_in_parallel(
-        publish_ledger.tx_ids.0.clone(),
-        &service_senders.mempool,
-        db,
-    )
-    .await
-    .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
-
-    let submit_txs =
-        get_data_tx_in_parallel(submit_ledger.tx_ids.0.clone(), &service_senders.mempool, db)
-            .await
-            .map_err(|e| PreValidationError::TransactionFetchFailed(e.to_string()))?;
 
     // Step 1: Identify same-block promotions (txs appearing in both ledgers of current block)
     let submit_ids: HashSet<H256> = submit_txs.iter().map(|tx| tx.id).collect();
@@ -2123,7 +2215,7 @@ pub async fn data_txs_are_valid(
             // Validate assigned ingress proofs and get counts
             let (assigned_proofs, assigned_miners) = get_assigned_ingress_proofs(
                 &tx_proofs,
-                &tx_header,
+                tx_header,
                 |hash| mempool_block_retriever(hash, service_senders),
                 block_tree_guard,
                 db,
@@ -2775,7 +2867,7 @@ where
 }
 
 fn get_submit_ledger_slot_assignments(
-    address: &Address,
+    address: &IrysAddress,
     block_tree_guard: &BlockTreeReadGuard,
 ) -> Vec<usize> {
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
@@ -2823,9 +2915,9 @@ mod tests {
     use irys_testing_utils::utils::temporary_directory;
     use irys_types::TokioServiceHandle;
     use irys_types::{
-        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Address, Base64, BlockHash,
-        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysBlockHeaderV1,
-        NodeConfig, Signature, H256, U256,
+        hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Base64, BlockHash,
+        DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
+        IrysBlockHeaderV1, NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2836,7 +2928,7 @@ mod tests {
         pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
         #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
-        pub miner_address: Address,
+        pub miner_address: IrysAddress,
         pub epoch_snapshot: EpochSnapshot,
         pub partition_hash: H256,
         pub partition_assignment: PartitionAssignment,

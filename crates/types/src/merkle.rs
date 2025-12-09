@@ -3,8 +3,8 @@
 use crate::chunked::ChunkedIterator;
 use crate::Base64;
 use crate::ChunkBytes;
+use crate::IrysAddress;
 use crate::H256;
-use alloy_primitives::Address;
 use borsh::BorshDeserialize as _;
 use borsh_derive::BorshDeserialize;
 use eyre::eyre;
@@ -424,7 +424,7 @@ pub fn generate_leaves_from_chunks(
 /// and_regular can be set to re-use the chunk iterator to produce the "standard" leaves, as well as the ingress proof specific ones for when we validate ingress proofs
 pub fn generate_ingress_leaves<C: AsRef<[u8]>>(
     chunks: impl Iterator<Item = eyre::Result<C>>,
-    address: Address,
+    address: IrysAddress,
     and_regular: bool,
 ) -> Result<(Vec<Node>, Option<Vec<Node>>), Error> {
     let mut leaves = Vec::<Node>::new();
@@ -586,7 +586,7 @@ pub fn hash_sha256(message: &[u8]) -> [u8; 32] {
     hasher.finish()
 }
 
-pub fn hash_ingress_sha256(message: &[u8], address: Address) -> [u8; 32] {
+pub fn hash_ingress_sha256(message: &[u8], address: IrysAddress) -> [u8; 32] {
     let mut hasher = sha::Sha256::new();
     hasher.update(message);
     hasher.update(address.as_slice());

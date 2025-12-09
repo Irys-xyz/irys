@@ -8,7 +8,7 @@ use irys_reth::pd_tx::{
     build_pd_access_list, detect_and_decode_pd_header, prepend_pd_header_v1_to_calldata,
     sum_pd_chunks_in_access_list, PdHeaderV1,
 };
-use irys_types::{range_specifier::ChunkRangeSpecifier, Address, NodeConfig};
+use irys_types::{range_specifier::ChunkRangeSpecifier, NodeConfig};
 
 #[test_log::test(actix_web::test)]
 async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result<()> {
@@ -85,7 +85,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         max_fee_per_gas: 1_000_000_000, // basefee=0 => effective gas price 0
         max_priority_fee_per_gas: 0,
         nonce: 0,
-        to: TxKind::Call(Address::random()),
+        to: TxKind::Call(alloy_primitives::Address::random()),
         value: U256::ZERO,
     };
     let _decoded = detect_and_decode_pd_header(&tx.input)
@@ -108,7 +108,7 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
         .expect("PD tx should be accepted by the peer node");
 
     // Mine block on genesis node containing the PD transaction
-    let (block, block_eth_payload) = peer_node.mine_block_without_gossip().await?;
+    let (block, block_eth_payload, _) = peer_node.mine_block_without_gossip().await?;
     let txs = block_eth_payload
         .block()
         .body()

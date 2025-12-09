@@ -5,7 +5,7 @@ use alloy_genesis::GenesisAccount;
 use irys_api_server::routes::tx::TxOffset;
 use irys_database::tables::IngressProofs;
 use irys_testing_utils::initialize_tracing;
-use irys_types::{irys::IrysSigner, Address, NodeConfig};
+use irys_types::{irys::IrysSigner, IrysAddress, NodeConfig};
 use reth_db::transaction::DbTx as _;
 use reth_db::Database as _;
 use std::time::Duration;
@@ -50,7 +50,7 @@ async fn external_api() -> eyre::Result<()> {
         ),
         (
             // below is the wallet hardcoded in the JS client test
-            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
+            IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice()),
             GenesisAccount {
                 balance: U256::from(42000000000000000000000000000000_u128),
                 ..Default::default()

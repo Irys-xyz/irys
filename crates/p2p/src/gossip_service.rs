@@ -19,13 +19,14 @@ use crate::{
 };
 use actix_web::dev::{Server, ServerHandle};
 use core::time::Duration;
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::PeerList;
-use irys_types::{Address, Config, DatabaseProvider, GossipBroadcastMessage, P2PGossipConfig};
+use irys_types::{Config, DatabaseProvider, GossipBroadcastMessage, IrysAddress, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -121,7 +122,7 @@ impl P2PService {
     /// Also returns a channel to send trusted gossip data to the service. Trusted data should
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
-        mining_address: Address,
+        mining_address: IrysAddress,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
@@ -159,6 +160,7 @@ impl P2PService {
         config: Config,
         service_senders: ServiceSenders,
         chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
+        mempool_guard: MempoolReadGuard,
     ) -> GossipResult<(
         ServiceHandleWithShutdownSignal,
         Arc<BlockPool<B, M>>,
@@ -181,6 +183,7 @@ impl P2PService {
             execution_payload_provider.clone(),
             config.clone(),
             service_senders,
+            mempool_guard,
         );
 
         let arc_pool = Arc::new(block_pool);

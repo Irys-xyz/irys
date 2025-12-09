@@ -19,6 +19,7 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
+use crate::block_discovery::BlockTransactions;
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
@@ -47,6 +48,7 @@ enum ParentValidationResult {
 #[derive(Clone)]
 pub(super) struct BlockValidationTask {
     pub block: Arc<IrysBlockHeader>,
+    pub transactions: Arc<BlockTransactions>,
     pub service_inner: Arc<ValidationServiceInner>,
     pub block_tree_guard: BlockTreeReadGuard,
     pub skip_vdf_validation: bool,
@@ -83,12 +85,14 @@ impl Ord for BlockValidationTask {
 impl BlockValidationTask {
     pub(super) fn new(
         block: Arc<IrysBlockHeader>,
+        transactions: Arc<BlockTransactions>,
         service_inner: Arc<ValidationServiceInner>,
         block_tree_guard: BlockTreeReadGuard,
         skip_vdf_validation: bool,
     ) -> Self {
         Self {
             block,
+            transactions,
             service_inner,
             block_tree_guard,
             skip_vdf_validation,
@@ -263,6 +267,7 @@ impl BlockValidationTask {
         let poa = self.block.poa.clone();
         let miner_address = self.block.miner_address;
         let block = &self.block;
+        let transactions = Arc::clone(&self.transactions);
 
         // Recall range validation
         let recall_task = async move {
@@ -403,6 +408,7 @@ impl BlockValidationTask {
         // Get block index (convert read guard to Arc<RwLock>)
         let block_index = self.service_inner.block_index_guard.inner();
 
+        let transactions_for_shadow = Arc::clone(&transactions);
         let shadow_tx_task = async move {
             let parent_commitment_snapshot = self
                 .block_tree_guard
@@ -427,7 +433,7 @@ impl BlockValidationTask {
                 .clone();
             shadow_transactions_are_valid(
                 config,
-                service_senders,
+                &self.block_tree_guard,
                 &self.service_inner.mempool_guard,
                 &parent_block,
                 block,
@@ -438,6 +444,7 @@ impl BlockValidationTask {
                 current_ema_snapshot,
                 parent_commitment_snapshot,
                 block_index,
+                &transactions_for_shadow,
             )
             .instrument(tracing::info_span!(
                 "shadow_tx_validation",
@@ -472,13 +479,13 @@ impl BlockValidationTask {
         };
 
         // Commitment transaction ordering validation
+        let transactions_for_commitment = Arc::clone(&transactions);
         let commitment_ordering_task = async move {
             commitment_txs_are_valid(
                 config,
-                &self.service_inner.mempool_guard,
                 block,
-                &self.service_inner.db,
                 &self.block_tree_guard,
+                &transactions_for_commitment.commitment_txs,
             )
             .instrument(tracing::info_span!("commitment_ordering_validation"))
             .await
@@ -493,6 +500,7 @@ impl BlockValidationTask {
         };
 
         // Data transaction fee validation
+        let transactions_for_data = Arc::clone(&transactions);
         let data_txs_validation_task = async move {
             data_txs_are_valid(
                 config,
@@ -500,6 +508,8 @@ impl BlockValidationTask {
                 block,
                 &self.service_inner.db,
                 &self.block_tree_guard,
+                transactions_for_data.get_ledger_txs(irys_types::DataLedger::Submit),
+                transactions_for_data.get_ledger_txs(irys_types::DataLedger::Publish),
             )
             .instrument(tracing::info_span!(
                 "data_txs_validation",

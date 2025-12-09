@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use irys_domain::{ChunkType, StorageModule};
 use irys_packing::capacity_single::compute_entropy_chunk;
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{partition::PartitionHash, Config, PartitionChunkOffset, PartitionChunkRange};
 use tokio::sync::{Notify, Semaphore};
 use tokio::task::yield_now;
@@ -43,7 +43,7 @@ impl super::PackingStrategy for CpuPackingStrategy {
         &self,
         storage_module: &Arc<StorageModule>,
         chunk_range: PartitionChunkRange,
-        mining_address: Address,
+        mining_address: IrysAddress,
         partition_hash: PartitionHash,
         storage_module_id: usize,
         short_writes_before_sync: u32,

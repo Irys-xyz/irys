@@ -1,5 +1,5 @@
 use irys_types::CommitmentType;
-use irys_types::{Address, CommitmentTransaction};
+use irys_types::{CommitmentTransaction, IrysAddress};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
@@ -22,7 +22,7 @@ pub enum CommitmentSnapshotStatus {
 
 #[derive(Debug, Default, Clone, Hash)]
 pub struct CommitmentSnapshot {
-    pub commitments: BTreeMap<Address, MinerCommitments>,
+    pub commitments: BTreeMap<IrysAddress, MinerCommitments>,
 }
 
 #[derive(Default, Debug, Clone, Hash)]
@@ -358,7 +358,7 @@ impl CommitmentSnapshot {
         all_commitments
     }
 
-    pub fn is_staked(&self, miner_address: Address) -> bool {
+    pub fn is_staked(&self, miner_address: IrysAddress) -> bool {
         let commitments_for_address = self.commitments.get_key_value(&miner_address);
         if let Some((_, commitments)) = commitments_for_address {
             if commitments.stake.is_some() {
@@ -387,7 +387,7 @@ mod tests {
     use irys_types::{partition::PartitionAssignment, IrysSignature, H256, U256};
 
     fn create_test_commitment(
-        signer: Address,
+        signer: IrysAddress,
         commitment_type: CommitmentType,
         value: U256,
     ) -> CommitmentTransaction {
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn test_pledge_count_validation_success() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Add stake first
         let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn test_pledge_count_validation_failure() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Add stake first
         let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn test_unpledge_counts_include_snapshot_changes() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
         let partition_hashes = vec![H256::random(), H256::random(), H256::random()];
 
         let mut epoch_snapshot = EpochSnapshot::default();
@@ -544,7 +544,7 @@ mod tests {
     #[test]
     fn test_pledge_after_unpledge_uses_effective_count() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
         let partition_hashes = vec![H256::random(), H256::random()];
 
         let mut epoch_snapshot = EpochSnapshot::default();
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn test_pledge_without_stake() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Try to add pledge without stake
         let pledge = create_test_commitment(
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn test_pledge_with_staked_in_epoch() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Add pledge when already staked in current epoch
         let pledge = create_test_commitment(
@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn test_duplicate_stake() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Add stake
         let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn test_duplicate_pledge() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Add stake
         let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn test_unstake_without_existing_stake_is_rejected() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Try to add unstake
         let unstake = create_test_commitment(signer, CommitmentType::Unstake, U256::from(1000));
@@ -737,9 +737,9 @@ mod tests {
         let mut snapshot = CommitmentSnapshot::default();
 
         // Create multiple signers
-        let signer1 = Address::random();
-        let signer2 = Address::random();
-        let signer3 = Address::random();
+        let signer1 = IrysAddress::random();
+        let signer2 = IrysAddress::random();
+        let signer3 = IrysAddress::random();
 
         // Add stakes with different fees
         let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake, U256::from(1000));
@@ -810,15 +810,15 @@ mod tests {
         // Create and add stakes with different amounts
         let test_cases = vec![
             (
-                Address::random(),
+                IrysAddress::random(),
                 U256::from(10_000_000_000_000_000_000_000_u128),
             ), // 10k tokens
             (
-                Address::random(),
+                IrysAddress::random(),
                 U256::from(50_000_000_000_000_000_000_000_u128),
             ), // 50k tokens
             (
-                Address::random(),
+                IrysAddress::random(),
                 U256::from(20_000_000_000_000_000_000_000_u128),
             ), // 20k tokens
         ];
@@ -840,7 +840,7 @@ mod tests {
     #[test]
     fn test_pledge_commitment_amount_tracking() {
         let mut snapshot = CommitmentSnapshot::default();
-        let signer = Address::random();
+        let signer = IrysAddress::random();
 
         // Add stake first
         let stake_amount = U256::from(20_000_000_000_000_000_000_000_u128); // 20k tokens

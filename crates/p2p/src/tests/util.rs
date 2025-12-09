@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::BlockDiscoveryError;
+use irys_actors::block_discovery::{BlockDiscoveryError, BlockTransactions};
+use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
@@ -25,7 +26,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
@@ -202,13 +203,13 @@ impl MempoolFacade for MempoolStub {
         Ok(())
     }
 
-    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address> {
+    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<IrysAddress> {
         HashSet::new()
     }
 
     async fn update_stake_and_pledge_whitelist(
         &self,
-        _new_whitelist: HashSet<Address>,
+        _new_whitelist: HashSet<IrysAddress>,
     ) -> Result<()> {
         Ok(())
     }
@@ -232,6 +233,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        _transactions: BlockTransactions,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
         self.block_status_provider
@@ -411,7 +413,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub api_port: u16,
     pub execution: RethPeerInfo,
     pub db: DatabaseProvider,
-    pub mining_address: Address,
+    pub mining_address: IrysAddress,
     pub mempool_stub: MempoolStub,
     #[expect(dead_code)]
     pub peer_network_handle: TokioServiceHandle,
@@ -611,6 +613,7 @@ impl GossipServiceTestFixture {
                 self.config.clone(),
                 self.service_senders.clone(),
                 self.sync_tx.clone(),
+                MempoolReadGuard::stub(),
             )
             .expect("failed to run the gossip service");
 
@@ -918,6 +921,7 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         execution_payload_cache.clone(),
         config.clone(),
         service_senders,
+        MempoolReadGuard::stub(),
     ));
 
     info!("Created GossipDataHandler stub");
@@ -926,7 +930,10 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
         api_client: api_client_stub.clone(),
-        gossip_client: GossipClient::new(Duration::from_millis(100000), Address::repeat_byte(2)),
+        gossip_client: GossipClient::new(
+            Duration::from_millis(100000),
+            IrysAddress::repeat_byte(2),
+        ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
         span: Span::current(),
@@ -955,7 +962,10 @@ pub(crate) async fn data_handler_with_stubbed_pool<T: ApiClient>(
         block_pool,
         cache: Arc::new(GossipCache::new()),
         api_client: api_client_stub,
-        gossip_client: GossipClient::new(Duration::from_millis(100000), Address::repeat_byte(2)),
+        gossip_client: GossipClient::new(
+            Duration::from_millis(100000),
+            IrysAddress::repeat_byte(2),
+        ),
         peer_list: peer_list_guard.clone(),
         sync_state,
         span: Span::current(),

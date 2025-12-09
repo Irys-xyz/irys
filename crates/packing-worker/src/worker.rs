@@ -58,7 +58,7 @@ mod tests {
     use irys_types::{
         ii, partition_chunk_offset_ii,
         remote_packing::{PackingWorkerConfig, RemotePackingRequest},
-        Address, InclusiveInterval as _, PartitionChunkOffset, PartitionChunkRange, H256,
+        InclusiveInterval as _, IrysAddress, PartitionChunkOffset, PartitionChunkRange, H256,
     };
     use irys_utils::listener::create_listener;
     use std::{net::SocketAddr, num::NonZero};
@@ -88,7 +88,7 @@ mod tests {
 
         // create a fake packing request
         let request = RemotePackingRequest {
-            mining_address: Address::ZERO,
+            mining_address: IrysAddress::ZERO,
             partition_hash: H256::zero(),
             chunk_range: PartitionChunkRange(partition_chunk_offset_ii!(0, 100)),
             chain_id: 1234,

@@ -3,7 +3,15 @@
 //! Provides wrapper functions for making HTTP requests to Irys node APIs.
 //! All functions use the configured API version and handle common error cases.
 
-use super::{client::RemoteNodeClient, types::*};
+use super::{
+    client::RemoteNodeClient,
+    types::{
+        AnchorResponse, BlockHeightResponse, ChunkCountsResponse, EpochInfoResponse,
+        GenesisResponse, LedgerSummary, NetworkConfigResponse, NodeInfo,
+        PartitionAssignmentsResponse, PriceResponse, SlotReplica, SlotReplicaInfo,
+        SlotReplicaSummary, StorageIntervalsResponse, TransactionStatusResponse,
+    },
+};
 use eyre::Result;
 use irys_api_server::API_VERSION;
 use irys_types::{DataLedger, H256, U256};
@@ -103,8 +111,8 @@ pub(crate) async fn fetch_data_price(
 }
 
 pub(crate) async fn get_chain_height(client: &RemoteNodeClient) -> Result<u64> {
-    let height_resp: ChainHeightResponse =
-        get_json(client, "chain/height", "Failed to get chain height").await?;
+    let height_resp: BlockHeightResponse =
+        get_json(client, "block/latest", "Failed to get chain height").await?;
     Ok(height_resp.height)
 }
 

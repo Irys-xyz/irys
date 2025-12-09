@@ -1,11 +1,11 @@
-use irys_types::Address;
+use irys_types::IrysAddress;
 use openssl::sha;
 
 pub const SHA_HASH_SIZE: usize = 32;
 
 #[inline]
 pub fn compute_seed_hash(
-    address: Address,
+    address: IrysAddress,
     partition_offset: std::ffi::c_ulong,
     hash: [u8; SHA_HASH_SIZE],
     irys_chain_id: u64,
@@ -24,7 +24,7 @@ pub fn compute_seed_hash(
 /// Precondition: `out_entropy_chunk` should have at least `chunk_size` capacity
 #[inline]
 pub fn compute_entropy_chunk(
-    mining_address: Address,
+    mining_address: IrysAddress,
     partition_chunk_offset: std::ffi::c_ulong,
     partition_hash: [u8; SHA_HASH_SIZE],
     iterations: u32,
@@ -75,8 +75,8 @@ mod tests {
         capacity::{compute_entropy_chunk, compute_seed_hash, DATA_CHUNK_SIZE},
         capacity_single::{self, SHA_HASH_SIZE},
     };
-    use irys_types::Address;
     use irys_types::ConsensusConfig;
+    use irys_types::IrysAddress;
     use rand;
     use rand::Rng as _;
     use std::time::Instant;
@@ -85,7 +85,7 @@ mod tests {
     fn test_seed_hash() {
         let testing_config = ConsensusConfig::testing();
         let mut rng = rand::thread_rng();
-        let mining_address = Address::random();
+        let mining_address = IrysAddress::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);
@@ -136,7 +136,7 @@ mod tests {
         let mut consensus_config = ConsensusConfig::testing();
         consensus_config.chunk_size = DATA_CHUNK_SIZE as u64;
         let mut rng = rand::thread_rng();
-        let mining_address = Address::random();
+        let mining_address = IrysAddress::random();
         let chunk_offset = rng.gen_range(1..=1000);
         let mut partition_hash = [0_u8; SHA_HASH_SIZE];
         rng.fill(&mut partition_hash[..]);

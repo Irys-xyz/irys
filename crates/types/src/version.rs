@@ -1,9 +1,9 @@
-use crate::{address_base58_stringify, U256};
 use crate::{
     decode_address, encode_address, serialization::string_u64, serialization::string_usize,
     Arbitrary, IrysSignature, RethPeerInfo, H256,
 };
-use alloy_primitives::{keccak256, Address};
+use crate::{IrysAddress, U256};
+use alloy_primitives::keccak256;
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use semver::Version;
@@ -121,7 +121,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 pub struct VersionRequest {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
-    pub mining_address: Address,
+    pub mining_address: IrysAddress,
     pub chain_id: u64,
     pub address: PeerAddress,
     pub timestamp: u64,
@@ -133,7 +133,7 @@ impl Default for VersionRequest {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
-            mining_address: Address::ZERO,
+            mining_address: IrysAddress::ZERO,
             protocol_version: ProtocolVersion::default(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -345,16 +345,16 @@ pub struct NodeInfo {
     pub current_sync_height: usize,
     #[serde(with = "string_u64")]
     pub uptime_secs: u64,
-    #[serde(with = "address_base58_stringify")]
-    pub mining_address: Address,
+    // #[serde(with = "address_base58_stringify")]
+    pub mining_address: IrysAddress,
     pub cumulative_difficulty: U256,
 }
 
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
-    use crate::{Address, U256};
     use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
+    use crate::{IrysAddress, U256};
     use serde_json;
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
             is_syncing: false,
             current_sync_height: 0,
             uptime_secs: 0,
-            mining_address: Address::ZERO,
+            mining_address: IrysAddress::ZERO,
             cumulative_difficulty: U256::zero(),
         };
 

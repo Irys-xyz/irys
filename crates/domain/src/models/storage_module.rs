@@ -54,10 +54,10 @@ use irys_types::{
     app_state::DatabaseProvider,
     get_leaf_proof, ledger_chunk_offset_ie,
     partition::{PartitionAssignment, PartitionHash},
-    partition_chunk_offset_ii, Address, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
-    DataLedger, DataRoot, DataTransactionHeader, LedgerChunkOffset, LedgerChunkRange, PackedChunk,
-    PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _, RelativeChunkOffset,
-    TxChunkOffset, TxPath, UnpackedChunk, H256,
+    partition_chunk_offset_ii, Base64, ChunkBytes, ChunkDataPath, ChunkPathHash, Config,
+    DataLedger, DataRoot, DataTransactionHeader, IrysAddress, LedgerChunkOffset, LedgerChunkRange,
+    PackedChunk, PartitionChunkOffset, PartitionChunkRange, ProofDeserialize as _,
+    RelativeChunkOffset, TxChunkOffset, TxPath, UnpackedChunk, H256,
 };
 use nodit::{interval::ii, InclusiveInterval as _, Interval, NoditMap, NoditSet};
 use openssl::sha;
@@ -150,7 +150,7 @@ impl StorageModuleInfo {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 pub struct PackingParams {
-    pub packing_address: Address,
+    pub packing_address: IrysAddress,
     pub partition_hash: Option<H256>,
     pub ledger: Option<u32>,
     pub slot: Option<usize>,
@@ -1224,7 +1224,18 @@ impl StorageModule {
     ) -> Result<Option<PackedChunk>> {
         let range = self.get_storage_module_ledger_offsets()?;
         let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
-        self.generate_full_chunk(partition_offset)
+
+        match self.generate_full_chunk(partition_offset) {
+            Ok(some_full_chunk) => Ok(some_full_chunk),
+            // Convert errors to Ok(None) to prevent node panics and HTTP 500 errors.
+            // Missing chunks are expected during normal operation (e.g., pruned data,
+            // gaps in storage) and should be handled gracefully by returning None
+            // rather than propagating errors up to the API layer.
+            Err(err) => {
+                debug!("Unable to find chunk at ledger offset: {err:?}");
+                Ok(None)
+            }
+        }
     }
 
     /// Constructs a Chunk struct for the given ledger offset

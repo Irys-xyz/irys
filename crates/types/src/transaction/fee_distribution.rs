@@ -29,8 +29,8 @@ use crate::ingress::IngressProof;
 use crate::storage_pricing::{mul_div, PRECISION_SCALE};
 pub use crate::CommitmentType;
 pub use crate::{
-    address_base58_stringify, optional_string_u64, string_u64, Address, Arbitrary, Base64,
-    BoundedFee, Compact, ConsensusConfig, IrysSignature, Node, Proof, Signature, H256, U256,
+    address_base58_stringify, optional_string_u64, string_u64, Arbitrary, Base64, BoundedFee,
+    Compact, ConsensusConfig, IrysAddress, IrysSignature, Node, Proof, Signature, H256, U256,
 };
 use eyre::{ensure, eyre, OptionExt as _};
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,7 @@ pub enum FeeDistribution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FeeCharge {
     /// The address involved in the charge
-    pub address: Address,
+    pub address: IrysAddress,
     /// The amount of the charge
     pub amount: U256,
 }
@@ -91,7 +91,7 @@ impl TermFeeCharges {
     }
 
     /// Returns the reward for each miner, distributing any remainder to the first miner
-    pub fn distribution_on_expiry(&self, miners: &[Address]) -> eyre::Result<Vec<U256>> {
+    pub fn distribution_on_expiry(&self, miners: &[IrysAddress]) -> eyre::Result<Vec<U256>> {
         // Check for empty miners array
         ensure!(
             !miners.is_empty(),
@@ -310,7 +310,7 @@ mod tests {
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Test with 10 miners
-        let miners: Vec<Address> = (0..10).map(|_| Address::random()).collect();
+        let miners: Vec<IrysAddress> = (0..10).map(|_| IrysAddress::random()).collect();
 
         let rewards = charges.distribution_on_expiry(&miners).unwrap();
 
@@ -341,7 +341,7 @@ mod tests {
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Test with 10 miners
-        let miners: Vec<Address> = (0..10).map(|_| Address::random()).collect();
+        let miners: Vec<IrysAddress> = (0..10).map(|_| IrysAddress::random()).collect();
 
         let rewards = charges.distribution_on_expiry(&miners).unwrap();
 
@@ -371,7 +371,7 @@ mod tests {
         let term_fee = BoundedFee::from(1000_u64);
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
-        let miners: Vec<Address> = vec![];
+        let miners: Vec<IrysAddress> = vec![];
         let result = charges.distribution_on_expiry(&miners);
 
         // Should fail with empty miners
@@ -386,8 +386,8 @@ mod tests {
         let charges = TermFeeCharges::new(term_fee, &config).unwrap();
 
         // Create miners list with duplicates
-        let addr1 = Address::random();
-        let addr2 = Address::random();
+        let addr1 = IrysAddress::random();
+        let addr2 = IrysAddress::random();
         let miners_with_duplicates = vec![addr1, addr2, addr1]; // addr1 appears twice
 
         let result = charges.distribution_on_expiry(&miners_with_duplicates);

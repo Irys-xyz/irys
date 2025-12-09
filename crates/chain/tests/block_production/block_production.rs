@@ -80,7 +80,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         .post_publish_data_tx(&user_account, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
+    let (irys_block, reth_exec_env, _block_txs) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
     let context = node.node_ctx.reth_node_adapter.clone();
     let reth_receipts = context
@@ -100,7 +100,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     assert_eq!(block_reward_receipt.cumulative_gas_used, 0);
     assert_eq!(
         block_reward_receipt.logs[0].address,
-        node.cfg.signer().address()
+        node.cfg.signer().alloy_address()
     );
 
     // storage tx
@@ -112,7 +112,10 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
         *shadow_tx_topics::STORAGE_FEES,
     );
     assert_eq!(storage_tx_receipt.cumulative_gas_used, 0);
-    assert_eq!(storage_tx_receipt.logs[0].address, user_account.address());
+    assert_eq!(
+        storage_tx_receipt.logs[0].address,
+        user_account.alloy_address()
+    );
     assert_eq!(tx.header.signer, user_account.address());
     assert_eq!(tx.header.data_size, data_bytes.len() as u64);
 
@@ -120,7 +123,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     let signer_balance = context
         .inner
         .provider
-        .basic_account(&user_account.address())
+        .basic_account(&user_account.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get signer_b balance: {}", err);
@@ -139,7 +142,7 @@ async fn heavy_test_blockprod() -> eyre::Result<()> {
     );
 
     // ensure that the block reward has increased the block reward address balance
-    let block_reward_address = node.cfg.signer().address();
+    let block_reward_address = node.cfg.signer().alloy_address();
     let block_reward_balance = context
         .inner
         .provider
@@ -282,7 +285,7 @@ async fn heavy_mine_ten_blocks() -> eyre::Result<()> {
 async fn heavy_test_basic_blockprod() -> eyre::Result<()> {
     let node = IrysNodeTest::default_async().start().await;
 
-    let (block, _, outcome) = node.mine_block_and_wait_for_validation().await?;
+    let (block, _, _, outcome) = node.mine_block_and_wait_for_validation().await?;
     assert_eq!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
@@ -344,7 +347,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .await?;
 
     let evm_tx_req = TransactionRequest {
-        to: Some(TxKind::Call(recipient.address())),
+        to: Some(TxKind::Call(recipient.alloy_address())),
         max_fee_per_gas: Some(EVM_GAS_PRICE),
         max_priority_fee_per_gas: Some(EVM_GAS_PRICE),
         gas: Some(EVM_GAS_LIMIT),
@@ -366,7 +369,7 @@ async fn heavy_test_blockprod_with_evm_txs() -> eyre::Result<()> {
         .post_publish_data_tx(&account1, data_bytes.clone())
         .await?;
 
-    let (irys_block, reth_exec_env) = node.mine_block_with_payload().await?;
+    let (irys_block, reth_exec_env, _block_txs) = node.mine_block_with_payload().await?;
     node.wait_until_height(irys_block.height, 10).await?;
 
     // Get the transaction hashes from the block in order
@@ -595,7 +598,7 @@ async fn heavy_test_unfunded_user_tx_rejected() -> eyre::Result<()> {
     let user_balance = context
         .inner
         .provider
-        .basic_account(&unfunded_user.address())
+        .basic_account(&unfunded_user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get unfunded user balance: {}", err);
@@ -689,7 +692,7 @@ async fn heavy_test_nonexistent_user_tx_rejected() -> eyre::Result<()> {
     let user_balance = context
         .inner
         .provider
-        .basic_account(&nonexistent_user.address())
+        .basic_account(&nonexistent_user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get nonexistent user balance: {}", err);
@@ -813,7 +816,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     );
     assert_eq!(
         storage_fee_receipt.logs[0].address,
-        user.address(),
+        user.alloy_address(),
         "Storage fee transaction should target the user's address"
     );
 
@@ -821,7 +824,7 @@ async fn heavy_test_just_enough_funds_tx_included() -> eyre::Result<()> {
     let user_balance = context
         .inner
         .provider
-        .basic_account(&user.address())
+        .basic_account(&user.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get user balance: {}", err);
@@ -872,7 +875,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let initial_balance = reth_context
         .inner
         .provider
-        .basic_account(&peer_signer.address())
+        .basic_account(&peer_signer.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get peer balance: {}", err);
@@ -939,7 +942,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
     assert_eq!(
         stake_receipt.logs[0].address,
-        peer_signer.address(),
+        peer_signer.alloy_address(),
         "Stake transaction should target the peer's address"
     );
 
@@ -960,7 +963,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     );
     assert_eq!(
         pledge_receipt.logs[0].address,
-        peer_signer.address(),
+        peer_signer.alloy_address(),
         "Pledge transaction should target the peer's address"
     );
 
@@ -968,7 +971,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let balance_after_block1 = reth_context
         .inner
         .provider
-        .basic_account(&peer_signer.address())
+        .basic_account(&peer_signer.alloy_address())
         .map(|account_info| account_info.map_or(ZERO_BALANCE, |acc| acc.balance))
         .unwrap_or_else(|err| {
             tracing::warn!("Failed to get peer balance: {}", err);
@@ -1079,7 +1082,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let stake_shadow_tx = ShadowTransaction::decode(&mut block_txs1[2].input().as_ref())
         .expect("Third transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
-        assert_eq!(bd.target, peer_signer.address());
+        assert_eq!(bd.target, peer_signer.alloy_address());
         let expected_stake_amount: U256 = stake_tx.deref().value.into();
         assert_eq!(
             bd.amount, expected_stake_amount,
@@ -1093,7 +1096,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     let pledge_shadow_tx = ShadowTransaction::decode(&mut block_txs1[3].input().as_ref())
         .expect("Fourth transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Pledge(bd)) = pledge_shadow_tx.as_v1() {
-        assert_eq!(bd.target, peer_signer.address());
+        assert_eq!(bd.target, peer_signer.alloy_address());
         let expected_pledge_amount: U256 = consensus_config.pledge_base_value.amount.into();
         assert_eq!(
             bd.amount, expected_pledge_amount,
@@ -1195,7 +1198,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .await?;
 
     // Produce block with valid PoA/difficulty but invalid EVM payload (subit txs tampered to not match shadow tx order)
-    let (evil_block, _eth_payload) = evil_strategy
+    let (evil_block, _eth_payload, _) = evil_strategy
         .fully_produce_new_block(solution_context(&node.node_ctx).await?)
         .await?
         .unwrap();
@@ -1209,7 +1212,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // turn back on the validation for this test
     node.node_ctx.set_validation_enabled(true);
-    let (new_block, _reth_block) = ProductionStrategy {
+    let (new_block, _reth_block, _) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)
@@ -1403,13 +1406,15 @@ async fn slow_heavy_test_always_build_on_max_difficulty_block() -> eyre::Result<
     let mut source_blocks = Vec::with_capacity(BLOCKS_TO_PIPELINE);
 
     for _ in 0..BLOCKS_TO_PIPELINE {
-        let block = source_node.mine_block().await?;
-        source_node.send_full_block(&peer_node, &block).await?;
+        let (block, payload, block_txs) = source_node.mine_block_with_payload().await?;
+        source_node
+            .send_full_block(&peer_node, &block, payload, block_txs)
+            .await?;
         tracing::error!(
             block.hash = ?block.block_hash,
             block.previous_block_hash = ?block.previous_block_hash
         );
-        source_blocks.push(block);
+        source_blocks.push((*block).clone());
     }
 
     let last_source_block = source_blocks
@@ -1589,7 +1594,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     let solution = solution_context(&node.node_ctx).await?;
 
     // Produce a block with the evil strategy (invalid solution hash)
-    let (evil_block, _eth_payload) = evil_strategy
+    let (evil_block, _eth_payload, _) = evil_strategy
         .fully_produce_new_block(solution.clone())
         .await?
         .unwrap();
@@ -1604,7 +1609,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     );
 
     // Now produce a valid block with the correct strategy to ensure the system still works
-    let (valid_block, _) = ProductionStrategy {
+    let (valid_block, _, _) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)

@@ -10,7 +10,7 @@ use crate::{
 };
 use chunk_orchestrator::ChunkOrchestrator;
 use irys_domain::{BlockTreeReadGuard, ChunkType, PeerList, StorageModule};
-use irys_types::{Address, Config, PackedChunk, PartitionChunkOffset, TokioServiceHandle};
+use irys_types::{Config, IrysAddress, PackedChunk, PartitionChunkOffset, TokioServiceHandle};
 use peer_bandwidth_manager::PeerBandwidthManager;
 use reth::tasks::shutdown::Shutdown;
 use std::{
@@ -32,7 +32,7 @@ type StorageModuleId = usize;
 pub struct DataSyncServiceInner {
     pub block_tree: BlockTreeReadGuard,
     pub storage_modules: Arc<RwLock<Vec<Arc<StorageModule>>>>,
-    pub active_peer_bandwidth_managers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+    pub active_peer_bandwidth_managers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
     pub chunk_orchestrators: HashMap<StorageModuleId, ChunkOrchestrator>,
     pub peer_list: PeerList,
     pub chunk_fetcher_factory: ChunkFetcherFactory,
@@ -45,24 +45,24 @@ pub enum DataSyncServiceMessage {
     ChunkCompleted {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_address: Address,
+        peer_address: IrysAddress,
         chunk: PackedChunk,
     },
     ChunkFailed {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_addr: IrysAddress,
     },
     ChunkTimedOut {
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_address: Address,
+        peer_address: IrysAddress,
     },
     PeerListUpdated,
     PeerDisconnected {
-        peer_address: Address,
+        peer_address: IrysAddress,
     },
-    GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>),
+    GetActivePeersList(oneshot::Sender<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>>),
 }
 
 impl DataSyncServiceInner {
@@ -229,7 +229,7 @@ impl DataSyncServiceInner {
         &mut self,
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_addr: IrysAddress,
         chunk: PackedChunk,
     ) -> eyre::Result<()> {
         // Update the orchestrator with completion tracking
@@ -275,7 +275,7 @@ impl DataSyncServiceInner {
         &mut self,
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_addr: IrysAddress,
     ) -> eyre::Result<()> {
         if let Some(orchestrator) = self.chunk_orchestrators.get_mut(&storage_module_id) {
             orchestrator.on_chunk_failed(chunk_offset, peer_addr)?;
@@ -297,7 +297,7 @@ impl DataSyncServiceInner {
         &mut self,
         storage_module_id: usize,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_addr: IrysAddress,
     ) -> eyre::Result<()> {
         // TODO: Opportunity to do custom timeout tracking/handling here
         debug!("chunk timed out: {} peer:{}", chunk_offset, peer_addr);
@@ -311,7 +311,7 @@ impl DataSyncServiceInner {
         self.sync_peer_partition_assignments();
     }
 
-    fn handle_peer_disconnection(&mut self, peer_addr: Address) {
+    fn handle_peer_disconnection(&mut self, peer_addr: IrysAddress) {
         // Remove peer from all orchestrators
         for orchestrator in self.chunk_orchestrators.values_mut() {
             orchestrator.remove_peer(peer_addr);
@@ -327,7 +327,7 @@ impl DataSyncServiceInner {
     #[tracing::instrument(level = "trace", skip_all)]
     fn handle_get_active_peers_list(
         &self,
-        tx: oneshot::Sender<Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>>,
+        tx: oneshot::Sender<Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>>,
     ) {
         if let Err(e) = tx.send(self.active_peer_bandwidth_managers.clone()) {
             tracing::error!("handle_get_active_peers_list() tx.send() error: {:?}", e);
@@ -487,7 +487,7 @@ impl DataSyncServiceInner {
         let sm_ids: Vec<StorageModuleId> = self.chunk_orchestrators.keys().copied().collect();
 
         // Get a list of the best peers (by mining address) for each storage module
-        let mut peer_updates: Vec<(StorageModuleId, Vec<Address>)> = Vec::new();
+        let mut peer_updates: Vec<(StorageModuleId, Vec<IrysAddress>)> = Vec::new();
 
         for sm_id in sm_ids {
             let Some(storage_module) = storage_modules.get(sm_id) else {
@@ -515,7 +515,7 @@ impl DataSyncServiceInner {
         &self,
         storage_module: &StorageModule,
         desired_count: usize,
-    ) -> Vec<Address> {
+    ) -> Vec<IrysAddress> {
         // Only return peers for storage modules that have active chunk orchestrators
         // This ensures we don't waste time finding peers for modules that aren't syncing
         if !self.chunk_orchestrators.contains_key(&storage_module.id) {

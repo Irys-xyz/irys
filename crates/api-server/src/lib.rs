@@ -1,6 +1,5 @@
 pub mod error;
 pub mod routes;
-pub mod utils;
 
 use actix_cors::Cors;
 use actix_web::{
@@ -16,7 +15,7 @@ use irys_actors::{
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
 use irys_reth_node_bridge::node::RethNodeProvider;
-use irys_types::{app_state::DatabaseProvider, Address, Config, PeerAddress};
+use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
     mining, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
@@ -51,7 +50,7 @@ pub struct ApiState {
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub started_at: Instant,
-    pub mining_address: Address,
+    pub mining_address: IrysAddress,
 }
 
 impl ApiState {

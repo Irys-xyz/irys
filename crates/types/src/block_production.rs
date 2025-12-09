@@ -1,6 +1,5 @@
-use crate::{partition::PartitionHash, ChunkDataPath, H256List, TxPath, H256};
+use crate::{partition::PartitionHash, ChunkDataPath, H256List, IrysAddress, TxPath, H256};
 
-use alloy_primitives::Address;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -17,7 +16,7 @@ pub struct SolutionContext {
     pub partition_hash: PartitionHash,
     pub chunk_offset: u32,
 
-    pub mining_address: Address,
+    pub mining_address: IrysAddress,
     pub tx_path: Option<TxPath>, // capacity partitions have no tx_path nor data_path
     pub data_path: Option<ChunkDataPath>,
     pub chunk: Vec<u8>,
@@ -29,7 +28,7 @@ pub struct SolutionContext {
 #[derive(Debug, Clone)]
 pub struct Partition {
     pub id: PartitionId,
-    pub mining_address: Address,
+    pub mining_address: IrysAddress,
 }
 
 pub type PartitionId = u64;
@@ -38,7 +37,7 @@ impl Default for Partition {
     fn default() -> Self {
         Self {
             id: 0,
-            mining_address: Address::random(),
+            mining_address: IrysAddress::random(),
         }
     }
 }
@@ -47,7 +46,7 @@ impl Partition {
     pub fn random_with_id(id: u64) -> Self {
         Self {
             id,
-            mining_address: Address::random(),
+            mining_address: IrysAddress::random(),
         }
     }
 }

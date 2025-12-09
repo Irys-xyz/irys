@@ -77,12 +77,12 @@ fn count_assignments_by_ledger_type(
 
 #[expect(clippy::unused_async)]
 async fn get_ledger_summary(
-    node_id: Path<String>,
+    node_id: Path<IrysAddress>,
     app_state: Data<ApiState>,
     ledger_type: DataLedger,
 ) -> Result<Json<LedgerSummary>, ApiError> {
     // Parse address before acquiring lock
-    let node_address = parse_address(node_id.as_str())?;
+    let node_address = node_id;
 
     // Minimize lock scope - get partition assignments and release lock immediately
     let partition_assignments = {

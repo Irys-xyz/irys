@@ -9,9 +9,10 @@ use actix_web::{
     Error,
 };
 use alloy_core::primitives::FixedBytes;
-use alloy_eips::{BlockHashOrNumber, BlockId};
+use alloy_eips::BlockId;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
@@ -27,7 +28,6 @@ use irys_api_server::{create_listener, routes};
 use irys_chain::{IrysNode, IrysNodeCtx};
 use irys_database::walk_all;
 use irys_database::{
-    commitment_tx_by_txid,
     db::IrysDatabaseExt as _,
     get_cache_size,
     tables::{CachedChunks, IngressProofs, IrysBlockHeaders},
@@ -46,8 +46,8 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, BlockHash, DataLedger, EvmBlockHash,
-    GossipBroadcastMessage, H256List, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockHash, DataLedger, EvmBlockHash, GossipBroadcastMessage,
+    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -60,10 +60,8 @@ use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
-    api::Block as _,
     network::{PeerInfo, Peers as _},
     payload::EthBuiltPayload,
-    providers::BlockReader as _,
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
@@ -82,7 +80,7 @@ use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument};
 
 pub async fn capacity_chunk_solution(
-    miner_addr: Address,
+    miner_addr: IrysAddress,
     vdf_steps_guard: VdfStateReadonly,
     config: &Config,
     difficulty: U256,
@@ -983,7 +981,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    /// wait for data tx to be in mempool and it's IngressProofs to be in database. does this without mining new blocks.
+    /// wait for data tx to be in mempool and its IngressProofs to be in database. does this without mining new blocks.
     pub async fn wait_for_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
@@ -1205,7 +1203,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_with_payload(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
         // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
         self.node_ctx
             .service_senders
@@ -1236,7 +1234,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_without_gossip(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
         self.with_gossip_disabled(self.mine_block_with_payload())
             .await
     }
@@ -1246,12 +1244,13 @@ impl IrysNodeTest<IrysNodeCtx> {
     ) -> eyre::Result<(
         Arc<IrysBlockHeader>,
         EthBuiltPayload,
+        BlockTransactions,
         BlockValidationOutcome,
     )> {
-        let (block, reth_payload) = self.mine_block_with_payload().await?;
+        let (block, reth_payload, block_transactions) = self.mine_block_with_payload().await?;
         let block_hash = &block.block_hash;
         let res = read_block_from_state(&self.node_ctx, block_hash).await;
-        Ok((block, reth_payload, res))
+        Ok((block, reth_payload, block_transactions, res))
     }
 
     /// Mine blocks until the next epoch boundary is reached.
@@ -1619,7 +1618,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // get account reth balance at specific block
-    pub async fn get_balance(&self, address: Address, evm_block_hash: FixedBytes<32>) -> U256 {
+    pub async fn get_balance(&self, address: IrysAddress, evm_block_hash: FixedBytes<32>) -> U256 {
         let block = Some(BlockId::Hash(RpcBlockHash {
             block_hash: evm_block_hash,
             require_canonical: Some(false),
@@ -1972,7 +1971,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 max_fee_per_gas: 20_000_000_000,
                 max_priority_fee_per_gas: 1_000_000_000,
                 nonce: tx_index as u64,
-                to: alloy_primitives::TxKind::Call(Address::random()),
+                to: alloy_primitives::TxKind::Call(alloy_primitives::Address::random()),
                 value: alloy_primitives::U256::ZERO,
             };
             let signature = local_signer
@@ -2013,25 +2012,23 @@ impl IrysNodeTest<IrysNodeCtx> {
     ///
     /// Important:
     /// - This does NOT transfer:
-    ///   - Data transaction headers beyond what the block already references
     ///   - Any data chunks for those transactions
     ///   - The EVM execution payload for this block
     /// - In contrast, `send_full_block`:
-    ///   - Ingests data tx headers on the peer
     ///   - Optionally transfers chunks (when the peer has full ingress-proof validation enabled)
-    ///   - Pushes the EVM execution payload into the peer’s cache before delivering the header
+    ///   - Pushes the EVM execution payload into the peer's cache before delivering the header
     ///
     /// When to use:
     /// - Prefer `send_block_to_peer` when you only need to deliver the header and do not require
     ///   proof/chunk verification during validation (e.g., full ingress-proof validation is disabled),
     ///   or when the receiver already has all required chunks/payloads.
-    /// - If `enable_full_ingress_proof_validation` is true on the receiving node and the block’s
+    /// - If `enable_full_ingress_proof_validation` is true on the receiving node and the block's
     ///   Publish ledger contains transactions with proofs, use `send_full_block` (or pre-ingest chunks)
     ///   so validation can verify proofs against actual chunk bytes.
     ///
     /// Execution payload note:
     /// - `send_full_block` requires that the sender has the EVM execution payload available locally
-    ///   (otherwise it will panic). For blocks produced “without gossip,” prefer:
+    ///   (otherwise it will panic). For blocks produced "without gossip," prefer:
     ///   - Using `send_block_to_peer` for the header; and, if needed,
     ///   - Pushing the EVM payload to the peer separately (e.g., gossiping the EVM block) before
     ///     attempting a full transfer.
@@ -2039,9 +2036,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
+        block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(irys_block_header.clone()), false)
+            .handle_block(
+                Arc::new(irys_block_header.clone()),
+                block_transactions,
+                false,
+            )
             .await
         {
             Ok(_) => Ok(()),
@@ -2071,93 +2073,91 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
+        eth_payload: EthBuiltPayload,
+        block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
-        // Send data txs
-        for tx_id in irys_block_header
-            .data_ledgers
-            .iter()
-            .flat_map(|l| l.tx_ids.0.iter())
-        {
-            // get tx locally from mempool or database
-            let tx_header = self
-                .get_storage_tx_header_from_mempool(tx_id)
-                .await
-                .or_else(|_| self.get_tx_header(tx_id))?;
+        // Ingest data txs into peer's mempool
+        for (ledger, txs) in block_transactions.data_txs.iter() {
+            for tx_header in txs {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                peer.node_ctx
+                    .service_senders
+                    .mempool
+                    .send(
+                        MempoolServiceMessage::IngestDataTxFromGossip(tx_header.clone(), tx).into(),
+                    )
+                    .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
+                // Ignore possible ingestion errors in tests
+                let _ = rx.await?;
 
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            peer.node_ctx
-                .service_senders
-                .mempool
-                .send(MempoolServiceMessage::IngestDataTxFromGossip(tx_header.clone(), tx).into())
-                .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
-            // Ignore possible ingestion errors in tests
-            let _ = rx.await?;
+                // Before sending the header, only transfer chunks if full validation is enabled
+                // and this is the Publish ledger
+                if *ledger == DataLedger::Publish
+                    && peer
+                        .node_ctx
+                        .config
+                        .node_config
+                        .consensus_config()
+                        .enable_full_ingress_proof_validation
+                {
+                    // Transfer chunks for this tx to the peer so block validation can verify proofs
+                    let chunk_size = self
+                        .node_ctx
+                        .config
+                        .node_config
+                        .consensus_config()
+                        .chunk_size;
+                    let expected_chunks = tx_header.data_size.div_ceil(chunk_size);
+                    for i in 0..expected_chunks {
+                        // Read chunk directly from sender's DB cache by data_root + tx-relative offset
+                        let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
+                        if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
+                            irys_database::cached_chunk_by_chunk_offset(
+                                tx,
+                                tx_header.data_root,
+                                tx_chunk_offset,
+                            )
+                        }) {
+                            if let Some(bytes) = cached_chunk.chunk {
+                                let unpacked = irys_types::UnpackedChunk {
+                                    data_root: tx_header.data_root,
+                                    data_size: tx_header.data_size,
+                                    data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
+                                    bytes,
+                                    tx_offset: tx_chunk_offset,
+                                };
+                                let verify_data_root = unpacked.data_root;
+                                let verify_tx_offset = unpacked.tx_offset;
 
-            // Before sending the header, only transfer chunks if full validation is enabled
-            if peer
-                .node_ctx
-                .config
-                .node_config
-                .consensus_config()
-                .enable_full_ingress_proof_validation
-            {
-                // Transfer chunks for this tx to the peer so block validation can verify proofs
-                let chunk_size = self
-                    .node_ctx
-                    .config
-                    .node_config
-                    .consensus_config()
-                    .chunk_size;
-                let expected_chunks = tx_header.data_size.div_ceil(chunk_size);
-                for i in 0..expected_chunks {
-                    // Read chunk directly from sender's DB cache by data_root + tx-relative offset
-                    let tx_chunk_offset = irys_types::TxChunkOffset::from(i as u32);
-                    if let Ok(Some((_meta, cached_chunk))) = self.node_ctx.db.view_eyre(|tx| {
-                        irys_database::cached_chunk_by_chunk_offset(
-                            tx,
-                            tx_header.data_root,
-                            tx_chunk_offset,
-                        )
-                    }) {
-                        if let Some(bytes) = cached_chunk.chunk {
-                            let unpacked = irys_types::UnpackedChunk {
-                                data_root: tx_header.data_root,
-                                data_size: tx_header.data_size,
-                                data_path: irys_types::Base64(cached_chunk.data_path.0.clone()),
-                                bytes,
-                                tx_offset: tx_chunk_offset,
-                            };
-                            let verify_data_root = unpacked.data_root;
-                            let verify_tx_offset = unpacked.tx_offset;
+                                let (ctx, crx) = tokio::sync::oneshot::channel();
+                                let _ =
+                                    peer.node_ctx.service_senders.mempool.send(
+                                        MempoolServiceMessage::IngestChunk(unpacked, ctx).into(),
+                                    );
+                                let _ = crx.await;
 
-                            let (ctx, crx) = tokio::sync::oneshot::channel();
-                            let _ = peer
-                                .node_ctx
-                                .service_senders
-                                .mempool
-                                .send(MempoolServiceMessage::IngestChunk(unpacked, ctx).into());
-                            let _ = crx.await;
-
-                            // Verify the chunk is present on the peer DB (small retry loop)
-                            {
-                                let mut attempts = 0_usize;
-                                loop {
-                                    let got = peer
-                                        .node_ctx
-                                        .db
-                                        .view_eyre(|tx| {
-                                            irys_database::cached_chunk_by_chunk_offset(
-                                                tx,
-                                                verify_data_root,
-                                                verify_tx_offset,
-                                            )
-                                        })
-                                        .unwrap_or(None);
-                                    if got.is_some() || attempts >= 5 {
-                                        break;
+                                // Verify the chunk is present on the peer DB (small retry loop)
+                                {
+                                    let mut attempts = 0_usize;
+                                    loop {
+                                        let got = peer
+                                            .node_ctx
+                                            .db
+                                            .view_eyre(|tx| {
+                                                irys_database::cached_chunk_by_chunk_offset(
+                                                    tx,
+                                                    verify_data_root,
+                                                    verify_tx_offset,
+                                                )
+                                            })
+                                            .unwrap_or(None);
+                                        if got.is_some() || attempts >= 5 {
+                                            break;
+                                        }
+                                        attempts += 1;
+                                        tokio::time::sleep(std::time::Duration::from_millis(50))
+                                            .await;
                                     }
-                                    attempts += 1;
-                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                                 }
                             }
                         }
@@ -2166,30 +2166,18 @@ impl IrysNodeTest<IrysNodeCtx> {
             }
         }
 
-        // Send commitment txs
-        for tx_id in irys_block_header
-            .system_ledgers
-            .iter()
-            .flat_map(|l| l.tx_ids.0.iter())
-        {
-            // get tx locally from mempool or database
-            let mut commitment_tx = self.get_commitment_tx_from_mempool(tx_id).await;
-            if commitment_tx.is_err() {
-                commitment_tx = self
-                    .node_ctx
-                    .db
-                    .view_eyre(|tx| commitment_tx_by_txid(tx, tx_id))?
-                    .ok_or_else(|| eyre::eyre!("Commitment tx not found: {:?}", tx_id));
-            }
-            let commitment_tx = commitment_tx?;
-
+        // Ingest commitment txs into peer's mempool
+        for commitment_tx in block_transactions.commitment_txs.iter() {
             tracing::error!(?commitment_tx.id);
 
             let (tx, rx) = tokio::sync::oneshot::channel();
             peer.node_ctx
                 .service_senders
                 .mempool
-                .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, tx).into())
+                .send(
+                    MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx.clone(), tx)
+                        .into(),
+                )
                 .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
             if let Err(e) = rx.await {
                 tracing::error!(
@@ -2200,26 +2188,18 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // IMPORTANT: Add execution payload to cache BEFORE sending block header
         // This prevents a race condition where validation starts before the payload is available
-
-        // Send execution payload if available
-        if let Some(evm_block) = self
-            .node_ctx
-            .reth_node_adapter
-            .inner
-            .provider
-            .block(BlockHashOrNumber::Hash(irys_block_header.evm_block_hash))?
-        {
-            peer.node_ctx
-                .block_pool
-                .add_execution_payload_to_cache(evm_block.seal_slow())
-                .await;
-        } else {
-            panic!("Full block cannot be sent to peer. Execution payload not available locally.");
-        }
+        peer.node_ctx
+            .block_pool
+            .add_execution_payload_to_cache(eth_payload.block().clone())
+            .await;
 
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(irys_block_header.clone()), false)
+            .handle_block(
+                Arc::new(irys_block_header.clone()),
+                block_transactions,
+                false,
+            )
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 
@@ -2385,11 +2365,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         );
 
         let response = client.get(&url).send().await;
-        // info!("{:#?}", response);
+        info!("{:#?}", response);
 
         if let Ok(resp) = response {
-            if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
-                return Some(packed_chunk);
+            // Only attempt to parse JSON if we got a successful HTTP status
+            if resp.status().is_success() {
+                if let Ok(packed_chunk) = resp.json::<PackedChunk>().await {
+                    return Some(packed_chunk);
+                }
             }
         }
         None
@@ -2424,6 +2407,19 @@ impl IrysNodeTest<IrysNodeCtx> {
                 ledger, chunk_offset
             );
         }
+    }
+
+    pub async fn verify_chunk_not_present(
+        &self,
+        ledger: DataLedger,
+        chunk_offset: LedgerChunkOffset,
+    ) {
+        assert!(
+            self.get_chunk(ledger, chunk_offset).await.is_none(),
+            "Expected no chunk at {} ledger chunk_offset: {}, but found one",
+            ledger,
+            chunk_offset
+        );
     }
 
     pub fn get_api_client(&self) -> IrysApiClient {
@@ -2539,7 +2535,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn get_pledge_price(
         &self,
-        user_address: Address,
+        user_address: IrysAddress,
     ) -> eyre::Result<CommitmentPriceInfo> {
         let client = reqwest::Client::new();
         let api_uri = self.node_ctx.config.node_config.local_api_url();
@@ -2734,7 +2730,10 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
-    pub fn get_partition_assignments(&self, miner_address: Address) -> Vec<PartitionAssignment> {
+    pub fn get_partition_assignments(
+        &self,
+        miner_address: IrysAddress,
+    ) -> Vec<PartitionAssignment> {
         let epoch_snapshot = self
             .node_ctx
             .block_tree_guard

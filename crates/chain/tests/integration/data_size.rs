@@ -165,19 +165,23 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
 
     // Validate the 3 wrong_data_size_tx chunks in both ledgers
     for i in 0..3 {
-        for (ledger, offset) in [
-            (DataLedger::Submit, 0),
-            (DataLedger::Publish, wrong_publish_offset),
-        ] {
-            genesis_node
-                .verify_migrated_chunk_32b(
-                    ledger,
-                    LedgerChunkOffset::from((i + offset) as u64),
-                    &chunks[i],
-                    wrong_data_size_tx.header.data_size,
-                )
-                .await;
-        }
+        // Verify presence in Submit
+        genesis_node
+            .verify_migrated_chunk_32b(
+                DataLedger::Submit,
+                LedgerChunkOffset::from(i as u64),
+                &chunks[i],
+                wrong_data_size_tx.header.data_size,
+            )
+            .await;
+
+        // Verify absence in Publish at wrong offset
+        genesis_node
+            .verify_chunk_not_present(
+                DataLedger::Publish,
+                LedgerChunkOffset::from((i + wrong_publish_offset) as u64),
+            )
+            .await;
     }
 
     // Validate the 6 valid_tx chunks in both ledgers
@@ -223,7 +227,11 @@ async fn test_overlapping_data_sizes() -> eyre::Result<()> {
             .await;
     }
 
-    // TODO: when implemented, validate that the wrong_data_size_tx2 do not promote
+    // Validate that the wrong_data_size_tx2 do not promote
+    let invalid_publish_chunk = genesis_node
+        .get_chunk(DataLedger::Publish, LedgerChunkOffset::from(9))
+        .await;
+    assert!(invalid_publish_chunk.is_none());
 
     // Graceful shutdown
     genesis_node.stop().await;
