@@ -1,8 +1,8 @@
 use crate::{
     BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
-    IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
+    IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
 };
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
@@ -158,7 +158,7 @@ impl GossipData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GossipRequest<T> {
-    pub miner_address: Address,
+    pub miner_address: IrysAddress,
     pub data: T,
 }
 

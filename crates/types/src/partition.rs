@@ -1,7 +1,7 @@
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use serde::{Deserialize, Serialize};
 
-use crate::{Address, H256};
+use crate::{IrysAddress, H256};
 
 /// A H256 hash that uniquely identifies a partition
 pub type PartitionHash = H256;
@@ -15,7 +15,7 @@ pub struct PartitionAssignment {
     /// Hash of the partition
     pub partition_hash: PartitionHash,
     /// Address of the miner pledged to store it
-    pub miner_address: Address,
+    pub miner_address: IrysAddress,
     /// If assigned to a ledger, the ledger number
     pub ledger_id: Option<u32>,
     /// If assigned to a ledger, the index in the ledger
@@ -26,7 +26,7 @@ impl Default for PartitionAssignment {
     fn default() -> Self {
         Self {
             partition_hash: PartitionHash::zero(),
-            miner_address: Address::ZERO,
+            miner_address: IrysAddress::ZERO,
             ledger_id: Some(0),
             slot_index: Some(0),
         }

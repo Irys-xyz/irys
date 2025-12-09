@@ -822,13 +822,13 @@ fn get_block_receipts(
 fn assert_no_shadow_tx_log(
     receipts: &[reth::primitives::Receipt],
     topic: &[u8; 32],
-    address: irys_types::Address,
+    address: irys_types::IrysAddress,
     context: &str,
 ) {
     let found = receipts.iter().any(|r| {
         r.logs
             .iter()
-            .any(|log| log.topics()[0] == *topic && log.address == address)
+            .any(|log| log.topics()[0] == *topic && log.address == address.to_alloy_address())
     });
     assert!(!found, "{}: shadow tx log must NOT be present", context);
 }
@@ -836,7 +836,7 @@ fn assert_no_shadow_tx_log(
 /// Assert balance equals expected value
 async fn assert_balance(
     node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
-    address: irys_types::Address,
+    address: irys_types::IrysAddress,
     block_hash: FixedBytes<32>,
     expected: U256,
     message: &str,
@@ -873,7 +873,7 @@ fn assert_commitment_not_in_ledger(
 /// Assert stake exists for address in canonical epoch snapshot
 fn assert_stake_exists_in_epoch(
     node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
-    address: irys_types::Address,
+    address: irys_types::IrysAddress,
     message: &str,
 ) {
     let epoch_snapshot = node
@@ -894,7 +894,7 @@ fn assert_stake_exists_in_epoch(
 /// Assert stake does NOT exist for address in canonical epoch snapshot
 fn assert_no_stake_in_epoch(
     node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
-    address: irys_types::Address,
+    address: irys_types::IrysAddress,
     message: &str,
 ) {
     let epoch_snapshot = node
@@ -915,14 +915,14 @@ fn assert_no_stake_in_epoch(
 /// Find and validate UnstakeDebit shadow transaction packet
 fn assert_unstake_debit_packet<T: alloy_rpc_types_eth::TransactionTrait>(
     transactions: &[T],
-    peer_addr: irys_types::Address,
+    peer_addr: irys_types::IrysAddress,
     expected_irys_ref: FixedBytes<32>,
 ) {
     let mut found = false;
     for tx in transactions {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnstakeDebit(debit)) = shadow_tx.as_v1() {
-                if debit.target == peer_addr {
+                if debit.target == peer_addr.to_alloy_address() {
                     assert_eq!(
                         debit.irys_ref, expected_irys_ref,
                         "Unstake debit irys_ref must match commitment id"
@@ -943,7 +943,7 @@ fn assert_unstake_debit_packet<T: alloy_rpc_types_eth::TransactionTrait>(
 /// Find and validate UnstakeRefund shadow transaction packet
 fn assert_unstake_refund_packet<T: alloy_rpc_types_eth::TransactionTrait>(
     transactions: &[T],
-    peer_addr: irys_types::Address,
+    peer_addr: irys_types::IrysAddress,
     expected_amount: U256,
     expected_irys_ref: FixedBytes<32>,
 ) {
@@ -951,7 +951,7 @@ fn assert_unstake_refund_packet<T: alloy_rpc_types_eth::TransactionTrait>(
     for tx in transactions {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnstakeRefund(increment)) = shadow_tx.as_v1() {
-                if increment.target == peer_addr {
+                if increment.target == peer_addr.to_alloy_address() {
                     let expected_amount_alloy: alloy_primitives::U256 = expected_amount.into();
                     assert_eq!(
                         increment.amount, expected_amount_alloy,
@@ -978,7 +978,7 @@ fn assert_unstake_refund_packet<T: alloy_rpc_types_eth::TransactionTrait>(
 fn assert_no_unstake_in_commitment_snapshot(
     node: &crate::utils::IrysNodeTest<irys_chain::IrysNodeCtx>,
     block_hash: irys_types::BlockHash,
-    address: irys_types::Address,
+    address: irys_types::IrysAddress,
     message: &str,
 ) {
     let commitment_snapshot = {
@@ -1114,13 +1114,17 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
             .logs
             .iter()
             .filter(|log| {
-                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND && log.address == peer_addr
+                log.topics()[0] == *shadow_tx_topics::UNPLEDGE_REFUND
+                    && log.address == peer_addr.to_alloy_address()
             })
             .count();
         unstake_refund_logs += receipt
             .logs
             .iter()
-            .filter(|log| log.topics()[0] == *shadow_tx_topics::UNSTAKE && log.address == peer_addr)
+            .filter(|log| {
+                log.topics()[0] == *shadow_tx_topics::UNSTAKE
+                    && log.address == peer_addr.to_alloy_address()
+            })
             .count();
     }
     assert_eq!(
@@ -1146,11 +1150,11 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     for tx in &epoch_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
             if let Some(TransactionPacket::UnpledgeRefund(refund)) = shadow_tx.as_v1() {
-                if refund.target == peer_addr {
+                if refund.target == peer_addr.to_alloy_address() {
                     found_unpledge_refunds += 1;
                 }
             } else if let Some(TransactionPacket::UnstakeRefund(refund)) = shadow_tx.as_v1() {
-                if refund.target == peer_addr {
+                if refund.target == peer_addr.to_alloy_address() {
                     let refund_amount_alloy: alloy_primitives::U256 = unstake_refund_amount.into();
                     assert_eq!(
                         refund.amount, refund_amount_alloy,

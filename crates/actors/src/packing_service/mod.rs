@@ -57,7 +57,7 @@ pub(crate) fn log_packing_progress(
     chunk_range: &irys_types::PartitionChunkRange,
     storage_module_id: usize,
     partition_hash: &irys_types::partition::PartitionHash,
-    mining_address: &Address,
+    mining_address: &IrysAddress,
 ) {
     if current_offset.is_multiple_of(LOG_PER_CHUNKS) {
         debug!(
@@ -92,7 +92,7 @@ pub use types::{PackingHandle, PackingIdleWaiter, PackingRequest};
 use dashmap::DashMap;
 use irys_packing::{PackingType, PACKING_TYPE};
 use irys_types::{
-    ii, partition_chunk_offset_ii, Address, Config, PartitionChunkOffset, PartitionChunkRange,
+    ii, partition_chunk_offset_ii, Config, IrysAddress, PartitionChunkOffset, PartitionChunkRange,
     TokioServiceHandle,
 };
 use tokio::sync::{mpsc, oneshot, Notify, Semaphore};

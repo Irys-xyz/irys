@@ -666,16 +666,16 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     //
 
     // Mine competing blocks on A and B without gossip
-    let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    let (a_block2, _, _a_block2_txs) = node_a.mine_block_without_gossip().await?; // block a2
     node_a
         .wait_until_height(a_block2.height, seconds_to_wait)
         .await?;
 
-    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    let (b_block2, b_block2_payload, b_block2_txs) = node_b.mine_block_without_gossip().await?; // block b2
     node_b
         .wait_until_height(b_block2.height, seconds_to_wait)
         .await?;
-    let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    let (b_block3, b_block3_payload, b_block3_txs) = node_b.mine_block_without_gossip().await?; // block b3
     node_b
         .wait_until_height(b_block3.height, seconds_to_wait)
         .await?;
@@ -698,9 +698,23 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
     // this will cause the txs that were previously canonical from C2 to become non canon
     {
-        node_b.send_full_block(&node_c, &b_block2).await?;
+        node_b
+            .send_full_block(
+                &node_c,
+                &b_block2,
+                b_block2_payload.clone(),
+                b_block2_txs.clone(),
+            )
+            .await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.send_full_block(&node_c, &b_block3).await?;
+        node_b
+            .send_full_block(
+                &node_c,
+                &b_block3,
+                b_block3_payload.clone(),
+                b_block3_txs.clone(),
+            )
+            .await?;
         tracing::error!("posted block 3: {:?}", b_block3.block_hash);
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
@@ -736,7 +750,7 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
         );
         Err(does_not_reach_height)?
     }
-    let (c_block4, _) = node_c.mine_block_without_gossip().await?;
+    let (c_block4, _c_block4_payload, _c_block4_txs) = node_c.mine_block_without_gossip().await?;
     if let Err(does_not_reach_height) = node_c.wait_until_height(4, seconds_to_wait).await {
         tracing::error!(
             "Node C Failed to reach block height 4: {:?}",
@@ -1089,12 +1103,12 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     //
 
     // Mine competing blocks on A and B without gossip
-    let (a_block2, _) = node_a.mine_block_without_gossip().await?; // block a2
+    let (a_block2, _, a_block2_txs) = node_a.mine_block_without_gossip().await?; // block a2
     node_a
         .wait_until_height(a_block2.height, seconds_to_wait)
         .await?;
 
-    let (b_block2, _) = node_b.mine_block_without_gossip().await?; // block b2
+    let (b_block2, b_block2_payload, b_block2_txs) = node_b.mine_block_without_gossip().await?; // block b2
     node_b
         .wait_until_height(b_block2.height, seconds_to_wait)
         .await?;
@@ -1108,7 +1122,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         .await;
 
     // Mine the heightest block on any node so far, on Node B
-    let (b_block3, _) = node_b.mine_block_without_gossip().await?; // block b3
+    let (b_block3, b_block3_payload, b_block3_txs) = node_b.mine_block_without_gossip().await?; // block b3
     node_b
         .wait_until_height(b_block3.height, seconds_to_wait)
         .await?;
@@ -1255,9 +1269,23 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // this will cause a reorg on node c (which is only height 2) to match the chain on node b (height 3)
     // this will cause the txs that were previously canonical from C2 to become non canon
     {
-        node_b.send_full_block(&node_c, &b_block2).await?;
+        node_b
+            .send_full_block(
+                &node_c,
+                &b_block2,
+                b_block2_payload.clone(),
+                b_block2_txs.clone(),
+            )
+            .await?;
         tracing::error!("posted block 2: {:?}", b_block2.block_hash);
-        node_b.send_full_block(&node_c, &b_block3).await?;
+        node_b
+            .send_full_block(
+                &node_c,
+                &b_block3,
+                b_block3_payload.clone(),
+                b_block3_txs.clone(),
+            )
+            .await?;
         tracing::error!("posted block 3: {:?}", b_block3.block_hash);
 
         node_c.wait_for_block(&b_block2.block_hash, 10).await?;
@@ -1298,7 +1326,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         );
         Err(does_not_reach_height)?
     }
-    let (c_block4, _) = node_c.mine_block_without_gossip().await?;
+    let (c_block4, c_block4_payload, c_block4_txs) = node_c.mine_block_without_gossip().await?;
     if let Err(does_not_reach_height) = node_c.wait_until_height(4, seconds_to_wait).await {
         tracing::error!(
             "Node C Failed to reach block height 4: {:?}",
@@ -1317,14 +1345,39 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         node_c.gossip_enable();
         if enable_full_validation {
             // Use full block transfer so chunks arrive before validation
-            node_b.send_full_block(&node_a, &b_block2).await?;
-            node_b.send_full_block(&node_a, &b_block3).await?;
-            node_c.send_full_block(&node_a, &c_block4).await?;
+            node_b
+                .send_full_block(
+                    &node_a,
+                    &b_block2,
+                    b_block2_payload.clone(),
+                    b_block2_txs.clone(),
+                )
+                .await?;
+            node_b
+                .send_full_block(
+                    &node_a,
+                    &b_block3,
+                    b_block3_payload.clone(),
+                    b_block3_txs.clone(),
+                )
+                .await?;
+            node_c
+                .send_full_block(
+                    &node_a,
+                    &c_block4,
+                    c_block4_payload.clone(),
+                    c_block4_txs.clone(),
+                )
+                .await?;
             // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
             // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
             // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
-            node_a.send_block_to_peer(&node_b, &a_block2).await?;
-            node_a.send_block_to_peer(&node_c, &a_block2).await?;
+            node_a
+                .send_block_to_peer(&node_b, &a_block2, a_block2_txs.clone())
+                .await?;
+            node_a
+                .send_block_to_peer(&node_c, &a_block2, a_block2_txs.clone())
+                .await?;
         } else {
             // Gossip all blocks so everyone syncs
             node_b.gossip_block_to_peers(&b_block2)?;
@@ -1610,12 +1663,12 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // Mine competing blocks on A and B without gossip
     let mut a_blocks = Vec::with_capacity(blocks_a_to_mine);
     for _ in 0..blocks_a_to_mine {
-        let (block, _) = node_a.mine_block_without_gossip().await?;
+        let (block, _, _) = node_a.mine_block_without_gossip().await?;
         a_blocks.push(block);
     }
     let mut b_blocks = Vec::with_capacity(blocks_b_to_mine);
     for _ in 0..blocks_b_to_mine {
-        let (block, _) = node_b.mine_block_without_gossip().await?;
+        let (block, _, _) = node_b.mine_block_without_gossip().await?;
         b_blocks.push(block);
     }
 

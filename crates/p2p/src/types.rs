@@ -144,7 +144,7 @@ impl GossipError {
 #[derive(Debug, Error, Clone)]
 pub enum InvalidDataError {
     #[error("Invalid transaction signature for address {0}")]
-    TransactionSignature(irys_types::Address),
+    TransactionSignature(irys_types::IrysAddress),
     #[error("Invalid transaction anchor: {0}")]
     TransactionAnchor(irys_types::H256),
     #[error("Invalid or unsupported ledger ID: {0}")]

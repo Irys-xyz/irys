@@ -1,5 +1,5 @@
-use crate::{Arbitrary, Signature};
-use alloy_primitives::{bytes, Address, U256 as RethU256};
+use crate::{Arbitrary, IrysAddress, Signature};
+use alloy_primitives::{bytes, U256 as RethU256};
 use base58::{FromBase58, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
@@ -32,13 +32,13 @@ impl IrysSignature {
 
     /// Validates this signature by performing signer recovery
     /// NOTE: This will silently short circuit to `false` if any part of the recovery operation errors
-    pub fn validate_signature(&self, prehash: [u8; 32], expected_address: Address) -> bool {
+    pub fn validate_signature(&self, prehash: [u8; 32], expected_address: IrysAddress) -> bool {
         self.recover_signer(prehash)
             .is_ok_and(|recovered_address| expected_address == recovered_address)
     }
 
-    pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<Address> {
-        Ok(recover_signer(&self.0, prehash.into())?)
+    pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<IrysAddress> {
+        Ok(recover_signer(&self.0, prehash.into())?.into())
     }
 }
 
@@ -170,11 +170,11 @@ impl alloy_rlp::Decodable for IrysSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BoundedFee, CommitmentTransaction, CommitmentType, Signable as _};
+    use crate::{BoundedFee, CommitmentTransaction, CommitmentType, IrysAddress, Signable as _};
 
     use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
-    use alloy_primitives::Address;
+
     use alloy_rlp::{Decodable as _, Encodable as _};
     use k256::ecdsa::SigningKey;
 
@@ -206,7 +206,7 @@ mod tests {
         let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
-            signer: Address::ZERO,
+            signer: IrysAddress::ZERO,
             data_root: H256::from([3_u8; 32]),
             data_size: 242,
             header_size: 0,
@@ -226,7 +226,7 @@ mod tests {
         let transaction = irys_signer.sign_transaction(transaction)?;
         assert!(transaction.header.signature.validate_signature(
             transaction.signature_hash(),
-            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
+            IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
         ));
 
         // encode and decode the signature
@@ -289,7 +289,7 @@ mod tests {
         let mut transaction = CommitmentTransaction::V1(crate::CommitmentTransactionV1 {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
-            signer: Address::ZERO,
+            signer: IrysAddress::ZERO,
             commitment_type: CommitmentType::Unpledge {
                 pledge_count_before_executing: 0,
                 partition_hash: [2_u8; 32].into(),
@@ -303,7 +303,7 @@ mod tests {
         irys_signer.sign_commitment(&mut transaction)?;
         assert!(transaction.signature.validate_signature(
             transaction.signature_hash(),
-            Address::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
+            IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
         ));
 
         // encode and decode the signature

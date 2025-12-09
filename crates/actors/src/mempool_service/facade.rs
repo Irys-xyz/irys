@@ -8,7 +8,7 @@ use eyre::eyre;
 use irys_types::{
     chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
 };
-use irys_types::{Address, IngressProof, TxKnownStatus};
+use irys_types::{IngressProof, IrysAddress, TxKnownStatus};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc::UnboundedSender};
@@ -54,11 +54,11 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
 
-    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address>;
+    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<IrysAddress>;
 
     async fn update_stake_and_pledge_whitelist(
         &self,
-        new_whitelist: HashSet<Address>,
+        new_whitelist: HashSet<IrysAddress>,
     ) -> eyre::Result<()>;
 }
 
@@ -270,7 +270,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
     }
 
-    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<Address> {
+    async fn get_stake_and_pledge_whitelist(&self) -> HashSet<IrysAddress> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
             .send(MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx).into())
@@ -282,7 +282,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
 
     async fn update_stake_and_pledge_whitelist(
         &self,
-        new_whitelist: HashSet<Address>,
+        new_whitelist: HashSet<IrysAddress>,
     ) -> eyre::Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service

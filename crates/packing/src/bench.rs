@@ -6,7 +6,7 @@ use std::time::*;
 #[cfg(feature = "nvidia")]
 pub fn main() {
     use irys_packing::CUDAConfig;
-    use irys_types::Address;
+    use irys_types::IrysAddress;
 
     // std::env::set_var("JDBG_BLOCKS", "40"); // 3090: 82, 5090: 170
     // std::env::set_var("JDBG_THREADS", "128");
@@ -32,7 +32,7 @@ pub fn main() {
 
         for run in 0..runs_per {
             let mut rng = rand::thread_rng();
-            let mining_address = Address::random();
+            let mining_address = IrysAddress::random();
             let chunk_offset = rng.gen_range(1..=1000);
             let partition_hash = H256::random();
 

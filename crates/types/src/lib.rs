@@ -43,6 +43,9 @@ pub mod h256;
 pub mod remote_packing;
 pub mod rlp;
 
+pub mod address;
+pub use address::IrysAddress;
+
 use std::sync::{atomic::AtomicU64, Arc};
 
 pub use block::*;
@@ -58,7 +61,8 @@ pub use time::*;
 pub use transaction::*;
 pub use tx_source::*;
 
-pub use alloy_primitives::{Address, Signature};
+pub use alloy_primitives::{/* Address, */ Signature};
+
 pub use app_state::*;
 pub use arbiter_handle::*;
 pub use arbitrary::Arbitrary;

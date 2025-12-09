@@ -6,7 +6,7 @@ use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, Address, CommitmentTransaction, CommitmentTransactionV1, CommitmentType,
+    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, CommitmentType, IrysAddress,
     NodeConfig, H256,
 };
 use std::sync::Arc;
@@ -559,7 +559,7 @@ async fn post_pledge_commitment(
 fn validate_pledge_assignments(
     epoch_snapshot: Arc<EpochSnapshot>,
     address_name: &str,
-    address: &Address,
+    address: &IrysAddress,
 ) -> eyre::Result<Vec<H256>> {
     // Get all partition hashes from this address's pledges
     // Each pledge contains a partition_hash that identifies which partition the pledge is for
