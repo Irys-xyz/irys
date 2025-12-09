@@ -536,7 +536,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (mut block, _adjustment_stats, _block_txs, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&peer1_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -558,7 +558,10 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![unstake_low_fee, unstake_high_fee],
+        BlockTransactions {
+            commitment_txs: vec![unstake_low_fee, unstake_high_fee],
+            data_txs: Default::default(),
+        },
         false,
     )
     .await?;
