@@ -65,20 +65,23 @@ impl PdPricing {
         validate_percentiles(reward_percentiles)?;
 
         // Get canonical blocks (acquire lock once)
+        // Following eth_feeHistory pattern: arrays ordered oldest-to-newest
         let blocks_with_ema: Vec<_> = {
             let tree = self.block_tree.read();
             let (canonical, _) = tree.get_canonical_chain();
 
-            canonical
+            let mut blocks: Vec<_> = canonical
                 .iter()
-                .rev()
+                .rev() // Start from tip (newest)
                 .take(block_count as usize)
                 .filter_map(|entry| {
                     let block = tree.get_block(&entry.block_hash)?.clone();
                     let ema = tree.get_ema_snapshot(&entry.block_hash)?.clone();
                     Some((block, ema))
                 })
-                .collect()
+                .collect();
+            blocks.reverse(); // Reverse to get oldest-first (eth_feeHistory pattern)
+            blocks
         };
 
         if blocks_with_ema.is_empty() {
@@ -119,8 +122,9 @@ impl PdPricing {
         }
 
         // Predict next block's base fee (Ethereum N+1 pattern)
+        // Use newest block (last in array after oldest-first ordering) for prediction
         let (current_irys_block, current_ema) =
-            blocks_with_ema.first().ok_or_eyre("No blocks available")?;
+            blocks_with_ema.last().ok_or_eyre("No blocks available")?;
 
         let (next_base_fee_irys, next_base_fee_usd) =
             self.predict_next_block_fees(current_irys_block, current_ema)?;
@@ -130,7 +134,8 @@ impl PdPricing {
         base_fee_usd_vec.push(next_base_fee_usd);
 
         // Build simplified response
-        let oldest_block = blocks_with_ema.last().ok_or_eyre("No oldest block")?;
+        // oldest_block is first in array after oldest-first ordering
+        let oldest_block = blocks_with_ema.first().ok_or_eyre("No oldest block")?;
 
         Ok(PdFeeHistoryResponse {
             oldest_block: oldest_block.0.height,
@@ -219,7 +224,7 @@ impl PdPricing {
     /// Block priority fees with percentile map and sample size
     ///
     /// # Examples
-    /// - Empty block (no PD txs) = empty percentile map, sample_size = 0
+    /// - Empty block (no PD txs) = empty percentile map, pd_tx_count = 0
     /// - Block with 10 PD txs, percentiles [50] = median fee
     fn calculate_priority_fee_percentiles(
         evm_block: &reth_ethereum_primitives::Block,
@@ -245,7 +250,7 @@ impl PdPricing {
 
         Ok(BlockPriorityFees {
             percentiles: percentile_map,
-            sample_size: block_priority_fees.len(),
+            pd_tx_count: block_priority_fees.len(),
         })
     }
 
@@ -345,7 +350,7 @@ pub struct BlockPriorityFees {
     pub percentiles: std::collections::HashMap<u8, PriorityFeeAtPercentile>,
 
     /// Number of PD transactions in this block
-    pub sample_size: usize,
+    pub pd_tx_count: usize,
 }
 
 #[derive(Serialize, Deserialize)]
