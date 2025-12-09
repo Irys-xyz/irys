@@ -11,6 +11,7 @@ use irys_types::{
     chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataLedger, DataRoot,
     DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
 };
+use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
 use std::{collections::HashSet, fmt::Display};
@@ -117,9 +118,9 @@ impl Inner {
                 );
                 let storage_modules_guard = self.storage_modules_guard.read();
 
-                // Collect data_size info from each storage module
+                // Collect data_size info from each storage module in parallel
                 let sm_data_sizes: Vec<DataSizeInfo> = storage_modules_guard
-                    .iter()
+                    .par_iter()
                     .filter_map(|sm| {
                         let infos = sm.collect_data_root_infos(chunk.data_root).ok()?;
                         if infos.0.is_empty() {
@@ -539,65 +540,69 @@ impl Inner {
         claimed_data_size: u64,
     ) -> bool {
         let chunk_size = self.config.consensus.chunk_size;
-        let last_chunk_offset = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
+        // Chunk index of the last chunk (0-indexed)
+        let last_chunk_index = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
+        // Byte offset for path validation (last byte position)
+        let target_byte_offset = u128::from(claimed_data_size.saturating_sub(1));
 
-        for sm in storage_modules {
-            let Some(infos) = sm
+        // Search storage modules in parallel for a valid rightmost chunk proof.
+        let confirmed_size = storage_modules.par_iter().find_map_any(|sm| {
+            let infos = sm
                 .collect_data_root_infos(data_root)
                 .ok()
-                .filter(|i| !i.0.is_empty())
-            else {
-                continue;
-            };
+                .filter(|i| !i.0.is_empty())?;
 
             for info in &infos.0 {
                 let relative_offset =
-                    (info.start_offset.0 as i64).saturating_add(last_chunk_offset as i64);
+                    (info.start_offset.0 as i64).saturating_add(last_chunk_index as i64);
                 if relative_offset < 0 {
                     continue;
                 }
 
                 let partition_offset =
                     irys_types::PartitionChunkOffset::from(relative_offset as u32);
-                let Some(chunk) = sm
+                let chunk = sm
                     .generate_full_chunk(partition_offset)
                     .ok()
                     .flatten()
-                    .filter(|c| c.data_root == data_root)
-                else {
-                    continue;
-                };
+                    .filter(|c| c.data_root == data_root)?;
 
-                // Compute end byte offset: for the last chunk, it's data_size - 1
-                let target_offset = u128::from(claimed_data_size.saturating_sub(1));
-
-                if let Ok(result) = validate_path(data_root.0, &chunk.data_path, target_offset) {
+                if let Ok(result) = validate_path(data_root.0, &chunk.data_path, target_byte_offset)
+                {
                     if result.is_rightmost_chunk {
-                        let confirmed_size = result.max_byte_range as u64;
-                        debug!(
-                            "Verified data_size {} for data_root {:?} via rightmost chunk proof",
-                            confirmed_size, data_root
-                        );
-                        // Cache the confirmed data_size so subsequent chunks skip verification
-                        if let Err(e) = self.irys_db.update_eyre(|db_tx| {
-                            confirm_data_size_for_data_root(db_tx, &data_root, confirmed_size)
-                        }) {
-                            warn!(
-                                "Failed to cache confirmed data_size for {:?}: {:?}",
-                                data_root, e
-                            );
-                        }
-                        return true;
+                        return Some(result.max_byte_range as u64);
                     }
                 }
             }
-        }
+            None
+        });
 
-        debug!(
-            "Could not verify data_size {} for data_root {:?} - no valid rightmost chunk found",
-            claimed_data_size, data_root
-        );
-        false
+        match confirmed_size {
+            Some(size) => {
+                debug!(
+                    "Verified data_size {} for data_root {:?} via rightmost chunk proof",
+                    size, data_root
+                );
+                // Cache the confirmed data_size so subsequent chunks skip verification
+                if let Err(e) = self
+                    .irys_db
+                    .update_eyre(|db_tx| confirm_data_size_for_data_root(db_tx, &data_root, size))
+                {
+                    warn!(
+                        "Failed to cache confirmed data_size for {:?}: {:?}",
+                        data_root, e
+                    );
+                }
+                true
+            }
+            None => {
+                debug!(
+                    "Could not verify data_size {} for data_root {:?} - no valid rightmost chunk found",
+                    claimed_data_size, data_root
+                );
+                false
+            }
+        }
     }
 }
 
