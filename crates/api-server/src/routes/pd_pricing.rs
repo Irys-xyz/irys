@@ -12,38 +12,29 @@ pub use irys_actors::pd_pricing::{
     BlockPriorityFees, PdFeeHistoryResponse, PriorityFeeAtPercentile,
 };
 
-// Query Parameters
+/// Hardcoded percentiles for priority fee calculations
+const REWARD_PERCENTILES: &[u8] = &[25, 50, 75];
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeeHistoryQuery {
     block_count: u64,
-    #[serde(default = "default_percentiles")]
-    reward_percentiles: Vec<u8>,
 }
 
-fn default_percentiles() -> Vec<u8> {
-    vec![25, 50, 75]
-}
-
-// API Endpoint
-
-/// GET /v1/price/pd/fee-history?blockCount=N&rewardPercentiles=25,50,75
+/// GET /v1/price/pd/fee-history?blockCount=N
 ///
 /// Returns comprehensive fee history (Ethereum eth_feeHistory style).
 ///
 /// Provides per-block data for:
 /// - Base fees (in Irys and USD)
 /// - PD utilization metrics
-/// - Priority fee percentiles
+/// - Priority fee percentiles (25th, 50th, 75th)
 /// - Next block base fee prediction (N+1)
 ///
 /// Query parameters:
 /// - `blockCount` (required): Number of recent blocks to analyze (1-1000)
-/// - `rewardPercentiles` (optional): Priority fee percentiles to calculate (0-100, max 10)
-///   Defaults to [25, 50, 75]
 ///
-/// Example: GET /v1/price/pd/fee-history?blockCount=20&rewardPercentiles=10,50,90
+/// Example: GET /v1/price/pd/fee-history?blockCount=20
 pub async fn get_fee_history(
     query: web::Query<FeeHistoryQuery>,
     state: web::Data<ApiState>,
@@ -57,34 +48,9 @@ pub async fn get_fee_history(
             .into());
     }
 
-    // Validate percentiles
-    if query.reward_percentiles.is_empty() {
-        return Err((
-            "At least one percentile must be specified".to_string(),
-            actix_web::http::StatusCode::BAD_REQUEST,
-        )
-            .into());
-    }
-    if query.reward_percentiles.len() > 10 {
-        return Err((
-            "Maximum 10 percentiles allowed".to_string(),
-            actix_web::http::StatusCode::BAD_REQUEST,
-        )
-            .into());
-    }
-    for &p in &query.reward_percentiles {
-        if p > 100 {
-            return Err((
-                format!("Percentiles must be 0-100, got {}", p),
-                actix_web::http::StatusCode::BAD_REQUEST,
-            )
-                .into());
-        }
-    }
-
     let response = state
         .pd_pricing
-        .get_fee_history(query.block_count, &query.reward_percentiles)
+        .get_fee_history(query.block_count, REWARD_PERCENTILES)
         .map_err(|e| {
             (
                 format!("Failed to get fee history: {}", e),
@@ -93,29 +59,4 @@ pub async fn get_fee_history(
         })?;
 
     Ok(HttpResponse::Ok().json(response))
-}
-
-// Tests
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_fee_history_default_percentiles() {
-        let query = FeeHistoryQuery {
-            block_count: 20,
-            reward_percentiles: default_percentiles(),
-        };
-        assert_eq!(query.reward_percentiles, vec![25, 50, 75]);
-    }
-
-    #[test]
-    fn test_fee_history_custom_percentiles() {
-        let query = FeeHistoryQuery {
-            block_count: 50,
-            reward_percentiles: vec![10, 50, 90],
-        };
-        assert_eq!(query.reward_percentiles, vec![10, 50, 90]);
-    }
 }

@@ -115,12 +115,11 @@ pub fn routes() -> impl HttpServiceFactory {
             "/price/commitment/unpledge/{user_address}",
             web::get().to(price::get_unpledge_price),
         )
-        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
-        // PD Pricing unified endpoint (Ethereum eth_feeHistory style)
         .route(
             "/price/pd/fee-history",
             web::get().to(pd_pricing::get_fee_history),
         )
+        .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
