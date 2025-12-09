@@ -8,13 +8,62 @@ use irys_database::{
     tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataRoot, DatabaseProvider,
-    GossipBroadcastMessage, IngressProof, H256,
+    chunk::{max_chunk_offset, UnpackedChunk},
+    hash_sha256,
+    irys::IrysSigner,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    H256,
 };
+use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
+
+/// Represents data_size information and if it comes from the publish ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSizeInfo {
+    /// The data_size value
+    pub data_size: u64,
+    /// Whether this data_size is from the publish ledger (trusted)
+    pub is_from_publish_ledger: bool,
+}
+
+/// Selects the authoritative data_size from multiple storage modules.
+#[must_use]
+pub fn select_data_size_from_storage_modules(
+    storage_module_data: impl IntoIterator<Item = DataSizeInfo>,
+) -> Option<DataSizeInfo> {
+    let mut submit_ledger_max: Option<u64> = None;
+    let mut publish_ledger_max: Option<u64> = None;
+
+    for sm_data in storage_module_data {
+        if sm_data.is_from_publish_ledger {
+            let current_max = publish_ledger_max.unwrap_or(0);
+            if sm_data.data_size > current_max {
+                publish_ledger_max = Some(sm_data.data_size);
+            }
+        } else {
+            let current_max = submit_ledger_max.unwrap_or(0);
+            if sm_data.data_size > current_max {
+                submit_ledger_max = Some(sm_data.data_size);
+            }
+        }
+    }
+
+    // Prefer publish ledger data_size over submit ledger
+    if let Some(ds) = publish_ledger_max {
+        Some(DataSizeInfo {
+            data_size: ds,
+            is_from_publish_ledger: true,
+        })
+    } else {
+        submit_ledger_max.map(|ds| DataSizeInfo {
+            data_size: ds,
+            is_from_publish_ledger: false,
+        })
+    }
+}
 
 impl Inner {
     #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
@@ -25,8 +74,14 @@ impl Inner {
         let mempool_state = &self.mempool_state;
         // TODO: maintain a shared read transaction so we have read isolation
         let max_chunks_per_item = self.config.node_config.mempool().max_chunks_per_item;
+        let chunk_size = self.config.consensus.chunk_size;
 
-        info!("Processing chunk");
+        info!(
+            chunk.data_root = ?chunk.data_root,
+            chunk.tx_offset = %chunk.tx_offset,
+            chunk.data_size = chunk.data_size,
+            "Processing chunk"
+        );
 
         // Early exit if we've already processed this chunk recently
         let chunk_path_hash = chunk.chunk_path_hash();
@@ -43,11 +98,10 @@ impl Inner {
         }
 
         // Check to see if we have a cached data_root for this chunk
-        let data_size = self
+        let cached_data_root = self
             .irys_db
             .view_eyre(|read_tx| {
                 irys_database::cached_data_root_by_data_root(read_tx, chunk.data_root)
-                    .map(|opt| opt.map(|cdr| cdr.data_size))
             })
             .map_err(|e| {
                 error!(
@@ -55,27 +109,58 @@ impl Inner {
                     chunk.data_root, chunk.tx_offset, e
                 );
                 CriticalChunkIngressError::DatabaseError
-            })?
-            .or_else(|| {
+            })?;
+
+        let (data_size, data_size_confirmed) = match cached_data_root {
+            Some(cdr) => (Some(cdr.data_size), cdr.data_size_confirmed),
+            None => {
                 debug!(
                     chunk.data_root = ?chunk.data_root,
                     chunk.tx_offset = ?chunk.tx_offset,
                     "Checking SMs for data_size"
                 );
-                // Get a list of all the local storage modules
-                let storage_modules = self.storage_modules_guard.read().clone();
+                let storage_modules_guard = self.storage_modules_guard.read();
 
-                // Iterate the modules - collecting and filtering any DataRootInfos for the maximum data_size
-                storage_modules
-                    .iter()
+                // Collect data_size info from each storage module in parallel
+                let sm_data_sizes: Vec<DataSizeInfo> = storage_modules_guard
+                    .par_iter()
                     .filter_map(|sm| {
-                        sm.collect_data_root_infos(chunk.data_root)
-                            .ok()
-                            .filter(|mi| !mi.0.is_empty()) // Remove empty MetadataIndex entries
+                        let infos = sm.collect_data_root_infos(chunk.data_root).ok()?;
+                        if infos.0.is_empty() {
+                            return None;
+                        }
+
+                        let is_from_publish_ledger = sm
+                            .partition_assignment()
+                            .is_some_and(|pa| pa.ledger_id == Some(DataLedger::Publish.get_id()));
+
+                        // Find max data_size within this SM's infos
+                        let max_data_size = infos.0.iter().map(|info| info.data_size).max()?;
+
+                        Some(DataSizeInfo {
+                            data_size: max_data_size,
+                            is_from_publish_ledger,
+                        })
                     })
-                    .flat_map(|m| m.0.iter().map(|md| md.data_size).collect::<Vec<_>>())
-                    .max()
-            });
+                    .collect();
+
+                match select_data_size_from_storage_modules(sm_data_sizes) {
+                    Some(selected) if selected.is_from_publish_ledger => {
+                        (Some(selected.data_size), true)
+                    }
+                    Some(selected) => {
+                        // Submit ledger data needs verification
+                        let confirmed = self.verify_data_size_from_storage_modules(
+                            &storage_modules_guard,
+                            chunk.data_root,
+                            selected.data_size,
+                        );
+                        (Some(selected.data_size), confirmed)
+                    }
+                    None => (None, false),
+                }
+            }
+        };
 
         let data_size = match data_size {
             Some(ds) => ds,
@@ -83,7 +168,6 @@ impl Inner {
                 // We don't have a data_root for this chunk but possibly the transaction containing this
                 // chunks data_root will arrive soon. Park it in the pending chunks LRU cache until it does.
                 // Pre-header sanity checks to reduce DoS risk.
-                let chunk_size = self.config.consensus.chunk_size;
                 let chunk_len_u64 = u64::try_from(chunk.bytes.len())
                     .map_err(|_| AdvisoryChunkIngressError::PreHeaderOversizedBytes)?;
                 if chunk_len_u64 > chunk_size {
@@ -110,16 +194,36 @@ impl Inner {
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOversizedDataPath.into());
                 }
-                let preheader_chunks_per_item =
-                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
-                if usize::try_from(*chunk.tx_offset).unwrap_or(usize::MAX)
-                    >= preheader_chunks_per_item
-                {
+
+                if !chunk.is_valid_offset(chunk_size) {
+                    let max_offset = chunk.max_valid_offset(chunk_size);
                     warn!(
-                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds pre-header capacity {}",
+                        "Dropping pre-header chunk for {} at offset {}: tx_offset {} exceeds max valid offset {:?} for data_size {}",
                         &chunk.data_root,
                         &chunk.tx_offset,
                         *chunk.tx_offset,
+                        max_offset,
+                        chunk.data_size
+                    );
+                    return Err(AdvisoryChunkIngressError::PreHeaderInvalidOffset(format!(
+                        "tx_offset {} exceeds max valid offset {:?} for data_size {}",
+                        *chunk.tx_offset, max_offset, chunk.data_size
+                    ))
+                    .into());
+                }
+
+                let preheader_chunks_per_item =
+                    std::cmp::min(max_chunks_per_item, preheader_chunks_per_item_cap);
+                let current_chunk_count = self
+                    .mempool_state
+                    .pending_chunk_count_for_data_root(&chunk.data_root)
+                    .await;
+                if current_chunk_count >= preheader_chunks_per_item {
+                    warn!(
+                        "Dropping pre-header chunk for {} at offset {}: cache full ({}/{})",
+                        &chunk.data_root,
+                        &chunk.tx_offset,
+                        current_chunk_count,
                         preheader_chunks_per_item
                     );
                     return Err(AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap.into());
@@ -130,33 +234,70 @@ impl Inner {
             }
         };
 
-        debug!("Got data root and data size");
-        // Validate that the data_size for this chunk is less than or equal to
-        // the largest data_size paid for by a data tx with this data_root
         if chunk.data_size > data_size {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
-                CriticalChunkIngressError::InvalidDataSize,
-                data_size,
-                chunk.data_size
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
+            if data_size_confirmed {
+                // Confirmed size is authoritative - reject mismatched chunks
+                error!(
+                    "Error: {:?}. Invalid data_size for data_root: expected: {} got:{}",
+                    CriticalChunkIngressError::InvalidDataSize,
+                    data_size,
+                    chunk.data_size
+                );
+                return Err(CriticalChunkIngressError::InvalidDataSize.into());
+            } else {
+                // Unconfirmed: chunk claims larger size than cached.
+                // This may be legitimate (tx with larger size not yet processed).
+                // Park the chunk for the time being.
+                debug!(
+                    "Chunk claims larger data_size {} than unconfirmed cached {} for data_root {:?}. Parking chunk.",
+                    chunk.data_size, data_size, chunk.data_root
+                );
+                self.mempool_state.put_chunk(chunk.clone()).await;
+                return Ok(());
+            }
         }
 
         // Validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
 
-        if data_size == 0 {
+        let Some(max_valid_offset) = max_chunk_offset(data_size, chunk_size) else {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 CriticalChunkIngressError::InvalidDataSize,
                 chunk.data_root,
             );
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
+        };
+
+        let offset_u64 = u64::from(*chunk.tx_offset);
+
+        if offset_u64 > max_valid_offset {
+            let num_chunks = data_size.div_ceil(chunk_size);
+            error!(
+                "Invalid tx_offset: {} exceeds max valid offset {} for data_size {} (num_chunks: {})",
+                offset_u64, max_valid_offset, data_size, num_chunks
+            );
+            return Err(CriticalChunkIngressError::InvalidOffset(format!(
+                "tx_offset {} exceeds max valid offset {} for data_size {}",
+                offset_u64, max_valid_offset, data_size
+            ))
+            .into());
         }
 
         let root_hash = chunk.data_root.0;
-        let target_offset = u128::from(chunk.end_byte_offset(self.config.consensus.chunk_size));
+        let target_offset = match chunk.end_byte_offset_checked(chunk_size) {
+            Some(offset) => u128::from(offset),
+            None => {
+                error!(
+                    "Byte offset calculation failed for tx_offset {} with data_size {}",
+                    *chunk.tx_offset, chunk.data_size
+                );
+                return Err(CriticalChunkIngressError::InvalidOffset(
+                    "Byte offset calculation overflow or invalid offset".to_string(),
+                )
+                .into());
+            }
+        };
         let path_buff = &chunk.data_path;
 
         info!(
@@ -203,39 +344,26 @@ impl Inner {
         // data_path is valid but the chunk size doesn't mach the protocols
         // consensus size, then the data_root is actually invalid and no future
         // chunks from that data_root should be ingressed.
-        let chunk_size = self.config.consensus.chunk_size;
 
-        // Validate that we will have chunks in the tx
-        let num_chunks_in_tx = data_size.div_ceil(chunk_size);
-        if num_chunks_in_tx == 0 {
-            error!(
-                "Error: {:?}. Invalid data_size for data_root: {:?}",
-                CriticalChunkIngressError::InvalidDataSize,
-                chunk.data_root,
-            );
-            return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        }
-        // Is this chunk index any of the chunks before the last in the tx?
-        let last_index = num_chunks_in_tx - 1;
-        if u64::from(*chunk.tx_offset) < last_index {
-            // Ensure prefix chunks are all exactly chunk_size
-            if chunk_len != chunk_size {
+        // Note: num_chunks, chunk_size, offset_u64, and max_valid_offset already
+        // computed in offset validation above
+        let is_last_chunk = offset_u64 == max_valid_offset;
+
+        if is_last_chunk {
+            // Last chunk can be <= chunk_size
+            if chunk_len > chunk_size {
                 error!(
-                    "{:?}: incomplete not last chunk, tx offset: {} chunk len: {}",
-                    CriticalChunkIngressError::InvalidChunkSize,
-                    chunk.tx_offset,
-                    chunk_len
+                    "Last chunk exceeds max size: tx_offset {} chunk_len {} max {}",
+                    chunk.tx_offset, chunk_len, chunk_size
                 );
                 return Ok(());
             }
         } else {
-            // Ensure the last chunk is no larger than chunk_size
-            if chunk_len > chunk_size {
+            // Non-last chunk must be exactly chunk_size
+            if chunk_len != chunk_size {
                 error!(
-                    "{:?}: chunk bigger than max. chunk size, tx offset: {} chunk len: {}",
-                    CriticalChunkIngressError::InvalidChunkSize,
-                    chunk.tx_offset,
-                    chunk_len
+                    "Non-last chunk has wrong size: tx_offset {} chunk_len {} expected {}",
+                    chunk.tx_offset, chunk_len, chunk_size
                 );
                 return Ok(());
             }
@@ -405,6 +533,81 @@ impl Inner {
         }
         Ok(())
     }
+
+    /// Verifies data_size by fetching the expected last chunk and validating its merkle proof.
+    fn verify_data_size_from_storage_modules(
+        &self,
+        storage_modules: &[std::sync::Arc<irys_domain::StorageModule>],
+        data_root: DataRoot,
+        claimed_data_size: u64,
+    ) -> bool {
+        let chunk_size = self.config.consensus.chunk_size;
+        // Chunk index of the last chunk (0-indexed)
+        let last_chunk_index = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
+        // Byte offset for path validation (last byte position)
+        let target_byte_offset = u128::from(claimed_data_size.saturating_sub(1));
+
+        // Search storage modules in parallel for a valid rightmost chunk proof.
+        let confirmed_size = storage_modules.par_iter().find_map_any(|sm| {
+            let infos = sm
+                .collect_data_root_infos(data_root)
+                .ok()
+                .filter(|i| !i.0.is_empty())?;
+
+            for info in &infos.0 {
+                let relative_offset =
+                    (info.start_offset.0 as i64).saturating_add(last_chunk_index as i64);
+                if relative_offset < 0 {
+                    continue;
+                }
+
+                let partition_offset =
+                    irys_types::PartitionChunkOffset::from(relative_offset as u32);
+
+                // Use get_chunk_metadata to avoid reading chunk bytes - we only need the data_path
+                let (chunk_data_root, data_path) = sm
+                    .get_chunk_metadata(partition_offset)
+                    .ok()
+                    .flatten()
+                    .filter(|(dr, _)| *dr == data_root)?;
+
+                if let Ok(result) = validate_path(chunk_data_root.0, &data_path, target_byte_offset)
+                {
+                    if result.is_rightmost_chunk {
+                        return Some(result.max_byte_range as u64);
+                    }
+                }
+            }
+            None
+        });
+
+        match confirmed_size {
+            Some(size) => {
+                debug!(
+                    "Verified data_size {} for data_root {:?} via rightmost chunk proof",
+                    size, data_root
+                );
+                // Cache the confirmed data_size so subsequent chunks skip verification
+                if let Err(e) = self
+                    .irys_db
+                    .update_eyre(|db_tx| confirm_data_size_for_data_root(db_tx, &data_root, size))
+                {
+                    warn!(
+                        "Failed to cache confirmed data_size for {:?}: {:?}",
+                        data_root, e
+                    );
+                }
+                true
+            }
+            None => {
+                debug!(
+                    "Could not verify data_size {} for data_root {:?} - no valid rightmost chunk found",
+                    claimed_data_size, data_root
+                );
+                false
+            }
+        }
+    }
 }
 
 /// Reasons why Chunk Ingress might fail
@@ -458,6 +661,8 @@ pub enum CriticalChunkIngressError {
     InvalidChunkSize,
     /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
+    /// The tx_offset exceeds valid bounds for the data_size
+    InvalidOffset(String),
     /// Some database error occurred when reading or writing the chunk
     DatabaseError,
     /// The service is uninitialized
@@ -475,12 +680,15 @@ pub enum AdvisoryChunkIngressError {
     PreHeaderOversizedDataPath,
     /// tx_offset exceeds pre-header capacity bound
     PreHeaderOffsetExceedsCap,
+    /// tx_offset exceeds valid bounds for claimed data_size (pre-header)
+    PreHeaderInvalidOffset(String),
     /// Catch-all variant for other errors.
     Other(String),
 }
 
 /// Generates an ingress proof for a specific `data_root`
 /// pulls required data from all sources
+#[must_use = "the generated ingress proof should be used or stored"]
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
     data_root: DataRoot,
@@ -566,4 +774,129 @@ pub fn generate_ingress_proof(
     db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
     Ok(proof)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    /// Helper to create a submit ledger data size entry for test cases
+    fn submit(data_size: u64) -> DataSizeInfo {
+        DataSizeInfo {
+            data_size,
+            is_from_publish_ledger: false,
+        }
+    }
+
+    /// Helper to create a publish ledger data size entry for test cases
+    fn publish(data_size: u64) -> DataSizeInfo {
+        DataSizeInfo {
+            data_size,
+            is_from_publish_ledger: true,
+        }
+    }
+
+    #[rstest]
+    #[case::empty(vec![], None)]
+    #[case::single_submit(
+        vec![submit(1000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: false })
+    )]
+    #[case::single_publish(
+        vec![publish(1000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::multiple_submit_returns_max(
+        vec![submit(500), submit(1000), submit(750)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: false })
+    )]
+    #[case::multiple_publish_returns_max(
+        vec![publish(500), publish(1000), publish(750)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::submit_only_when_no_publish(
+        vec![submit(5000), submit(10000)],
+        Some(DataSizeInfo { data_size: 10000, is_from_publish_ledger: false })
+    )]
+    // These cases test to make sure the publish ledger is preferred over the submit ledger
+    #[case::publish_preferred_over_larger_submit(
+        vec![submit(10000), publish(1000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::publish_first_still_preferred(
+        vec![publish(1000), submit(10000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::interleaved_uses_publish_max(
+        vec![submit(5000), publish(500), submit(10000), publish(1000), submit(7500)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    fn select_data_size_cases(
+        #[case] entries: Vec<DataSizeInfo>,
+        #[case] expected: Option<DataSizeInfo>,
+    ) {
+        let result = select_data_size_from_storage_modules(entries);
+        assert_eq!(result, expected);
+    }
+
+    proptest! {
+        /// Property: publish ledger data_size is ALWAYS preferred over submit ledger,
+        /// regardless of the relative sizes.
+        #[test]
+        fn publish_ledger_always_preferred_over_submit(
+            publish_size in 1..u64::MAX,
+            submit_size in 1..u64::MAX,
+        ) {
+            let result = select_data_size_from_storage_modules(vec![
+                submit(submit_size),
+                publish(publish_size),
+            ]);
+
+            let selected = result.expect("Should return Some when data exists");
+            prop_assert_eq!(selected.data_size, publish_size);
+            prop_assert!(selected.is_from_publish_ledger);
+        }
+
+        /// Property: single ledger type always selects max size
+        #[test]
+        fn single_ledger_type_selects_max(
+            sizes in prop::collection::vec(1..u64::MAX, 1..10),
+            is_publish in any::<bool>(),
+        ) {
+            let expected_max = *sizes.iter().max().unwrap();
+            let entries: Vec<_> = sizes
+                .into_iter()
+                .map(|ds| DataSizeInfo {
+                    data_size: ds,
+                    is_from_publish_ledger: is_publish,
+                })
+                .collect();
+
+            let result = select_data_size_from_storage_modules(entries);
+
+            let selected = result.expect("Should return Some when data exists");
+            prop_assert_eq!(selected.data_size, expected_max);
+            prop_assert_eq!(selected.is_from_publish_ledger, is_publish);
+        }
+
+        /// Property: with mixed ledgers, publish ledger max is always selected
+        #[test]
+        fn mixed_ledgers_selects_publish_max(
+            publish_sizes in prop::collection::vec(1..u64::MAX, 1..5),
+            submit_sizes in prop::collection::vec(1..u64::MAX, 1..5),
+        ) {
+            let expected_publish_max = *publish_sizes.iter().max().unwrap();
+
+            let mut entries: Vec<_> = publish_sizes.into_iter().map(publish).collect();
+            entries.extend(submit_sizes.into_iter().map(submit));
+
+            let result = select_data_size_from_storage_modules(entries);
+
+            let selected = result.expect("Should return Some when data exists");
+            prop_assert_eq!(selected.data_size, expected_publish_max);
+            prop_assert!(selected.is_from_publish_ledger);
+        }
+    }
 }

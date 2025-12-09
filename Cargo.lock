@@ -5126,6 +5126,7 @@ dependencies = [
  "priority-queue",
  "proptest",
  "rand 0.8.5",
+ "rayon",
  "reqwest 0.12.24",
  "reth",
  "reth-db",

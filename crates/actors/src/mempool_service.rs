@@ -1954,6 +1954,15 @@ impl AtomicMempoolState {
         mempool_state_write_guard.pending_chunks.put(chunk);
     }
 
+    pub async fn pending_chunk_count_for_data_root(&self, data_root: &DataRoot) -> usize {
+        self.read()
+            .await
+            .pending_chunks
+            .get(data_root)
+            .map(lru::LruCache::len)
+            .unwrap_or(0)
+    }
+
     pub async fn record_recent_valid_chunk(&self, chunk_path_hash: ChunkPathHash) {
         let mut mempool_state_guard = self.write().await;
         mempool_state_guard

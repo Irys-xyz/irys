@@ -44,6 +44,7 @@ alloy-eips.workspace = true
 reth-transaction-pool.workspace = true
 reth-payload-primitives.workspace = true
 itertools.workspace = true
+rayon.workspace = true
 reth-ethereum-primitives.workspace = true
 thiserror.workspace = true
 

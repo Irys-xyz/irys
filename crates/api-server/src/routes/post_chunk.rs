@@ -74,11 +74,13 @@ pub async fn post_chunk(
                 )
                     .into()),
                 CriticalChunkIngressError::InvalidDataSize => Err((
-                    format!("Invalid data_size field : {err:?}"),
+                    format!("Invalid data_size field: {err:?}"),
                     StatusCode::BAD_REQUEST,
                 )
                     .into()),
-
+                CriticalChunkIngressError::InvalidOffset(ref msg) => {
+                    Err((format!("Invalid tx_offset: {msg}"), StatusCode::BAD_REQUEST).into())
+                }
                 CriticalChunkIngressError::ServiceUninitialized => Err((
                     format!("Internal service error: {err:?}"),
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -95,28 +97,26 @@ pub async fn post_chunk(
                 )
                     .into()),
             },
-            ChunkIngressError::Advisory(err) => match err {
-                AdvisoryChunkIngressError::PreHeaderOversizedBytes => Ok(ApiStatusResponse(
-                    format!("Pre-header chunk oversized bytes: {err:?}"),
-                    StatusCode::OK,
-                )
-                .into()),
-                AdvisoryChunkIngressError::PreHeaderOversizedDataPath => Ok(ApiStatusResponse(
-                    format!("Pre-header chunk oversized data_path: {err:?}"),
-                    StatusCode::OK,
-                )
-                .into()),
-                AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => Ok(ApiStatusResponse(
-                    format!("Pre-header chunk tx_offset exceeds cap: {err:?}"),
-                    StatusCode::OK,
-                )
-                .into()),
-                AdvisoryChunkIngressError::Other(err) => Ok(ApiStatusResponse(
-                    format!("Internal error: {err:?}"),
-                    StatusCode::OK,
-                )
-                .into()),
-            },
+            ChunkIngressError::Advisory(err) => {
+                let msg = match err {
+                    AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
+                        format!("Pre-header chunk oversized bytes: {err:?}")
+                    }
+                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
+                        format!("Pre-header chunk oversized data_path: {err:?}")
+                    }
+                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
+                        format!("Pre-header chunk tx_offset exceeds cap: {err:?}")
+                    }
+                    AdvisoryChunkIngressError::PreHeaderInvalidOffset(ref msg) => {
+                        format!("Pre-header chunk invalid tx_offset: {msg}")
+                    }
+                    AdvisoryChunkIngressError::Other(ref msg) => {
+                        format!("Internal advisory error: {msg:?}")
+                    }
+                };
+                Ok(ApiStatusResponse(msg, StatusCode::OK).into())
+            }
         };
     }
 
