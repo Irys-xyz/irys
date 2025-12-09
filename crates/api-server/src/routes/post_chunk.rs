@@ -111,7 +111,9 @@ pub async fn post_chunk(
                     AdvisoryChunkIngressError::PreHeaderInvalidOffset(ref msg) => {
                         format!("Pre-header chunk invalid tx_offset: {msg}")
                     }
-                    AdvisoryChunkIngressError::Other(ref msg) => format!("Internal error: {msg:?}"),
+                    AdvisoryChunkIngressError::Other(ref msg) => {
+                        format!("Internal advisory error: {msg:?}")
+                    }
                 };
                 Ok(ApiStatusResponse(msg, StatusCode::OK).into())
             }
