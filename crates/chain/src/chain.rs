@@ -1373,7 +1373,7 @@ impl IrysNode {
 
         let red_data = combined.iter().fold(
             Default::default(),
-            |mut acc: std::collections::BTreeMap<irys_types::Address, Vec<H256>>, c| {
+            |mut acc: std::collections::BTreeMap<irys_types::IrysAddress, Vec<H256>>, c| {
                 acc.entry(c.1.miner_address)
                     .or_default()
                     .push(c.1.partition_hash);
