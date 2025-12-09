@@ -97,41 +97,24 @@ pub async fn post_chunk(
                 )
                     .into()),
             },
-            ChunkIngressError::Advisory(err) => match err {
-                AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
-                    Ok(ApiStatusResponse::from((
-                        format!("Pre-header chunk oversized bytes: {err:?}"),
-                        StatusCode::OK,
-                    ))
-                    .into())
-                }
-                AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
-                    Ok(ApiStatusResponse::from((
-                        format!("Pre-header chunk oversized data_path: {err:?}"),
-                        StatusCode::OK,
-                    ))
-                    .into())
-                }
-                AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
-                    Ok(ApiStatusResponse::from((
-                        format!("Pre-header chunk tx_offset exceeds cap: {err:?}"),
-                        StatusCode::OK,
-                    ))
-                    .into())
-                }
-                AdvisoryChunkIngressError::PreHeaderInvalidOffset(ref msg) => {
-                    Ok(ApiStatusResponse::from((
-                        format!("Pre-header chunk invalid tx_offset: {msg}"),
-                        StatusCode::OK,
-                    ))
-                    .into())
-                }
-                AdvisoryChunkIngressError::Other(ref msg) => Ok(ApiStatusResponse::from((
-                    format!("Internal error: {msg:?}"),
-                    StatusCode::OK,
-                ))
-                .into()),
-            },
+            ChunkIngressError::Advisory(err) => {
+                let msg = match err {
+                    AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
+                        format!("Pre-header chunk oversized bytes: {err:?}")
+                    }
+                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
+                        format!("Pre-header chunk oversized data_path: {err:?}")
+                    }
+                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
+                        format!("Pre-header chunk tx_offset exceeds cap: {err:?}")
+                    }
+                    AdvisoryChunkIngressError::PreHeaderInvalidOffset(ref msg) => {
+                        format!("Pre-header chunk invalid tx_offset: {msg}")
+                    }
+                    AdvisoryChunkIngressError::Other(ref msg) => format!("Internal error: {msg:?}"),
+                };
+                Ok(ApiStatusResponse(msg, StatusCode::OK).into())
+            }
         };
     }
 
