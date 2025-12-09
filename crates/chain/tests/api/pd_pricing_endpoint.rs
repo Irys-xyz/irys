@@ -140,7 +140,10 @@ async fn setup_pd_fee_history_test_chain(
         }
 
         // Mine the block
-        let (_irys_block, eth_payload) = node.mine_block_without_gossip().await?;
+        let (irys_block, eth_payload) = node.mine_block_without_gossip().await?;
+
+        // Wait for the block to be validated and tip updated
+        node.wait_until_height(irys_block.height, 10).await?;
 
         // Extract the PD base fee from the block
         let sealed_block = eth_payload.block();
@@ -225,32 +228,25 @@ async fn heavy_pd_fee_history_base_fee_progression() -> eyre::Result<()> {
         "reward should have N elements"
     );
 
-    // Response is oldest-first. Map block heights to response indices using oldest_block.
-    let oldest = fee_history.oldest_block;
+    // Verify oldest_block is 1 (excludes genesis)
+    assert_eq!(fee_history.oldest_block, 1, "oldest_block should be 1 (excludes genesis)");
+
+    // Response is oldest-first. block_metadata[i] corresponds to response[i].
     let max_chunks = U256::from(max_pd_chunks);
     for (i, metadata) in block_metadata.iter().enumerate() {
-        let block_height = (i + 1) as u64;
-        if block_height < oldest {
-            continue;
-        }
-        let idx = (block_height - oldest) as usize;
-        if idx >= fee_history.gas_used_ratio.len() {
-            continue;
-        }
-
         assert_eq!(
-            fee_history.base_fee_per_chunk_irys[idx].amount,
+            fee_history.base_fee_per_chunk_irys[i].amount,
             metadata.base_fee,
             "Block {} base fee mismatch",
-            block_height
+            i + 1
         );
 
         let expected_ratio = U256::from(metadata.chunks_used) * PRECISION_SCALE / max_chunks;
         assert_eq!(
-            fee_history.gas_used_ratio[idx].amount,
+            fee_history.gas_used_ratio[i].amount,
             expected_ratio,
             "Block {} utilization mismatch: expected {}%",
-            block_height,
+            i + 1,
             metadata.chunks_used
         );
     }
@@ -298,31 +294,18 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
     assert_eq!(response.status(), reqwest::StatusCode::OK);
 
     let fee_history: PdFeeHistoryResponse = response.json().await?;
-    let oldest = fee_history.oldest_block;
 
-    // Verify percentiles for each block using block_metadata
+    // Verify oldest_block is 1 (excludes genesis)
+    assert_eq!(fee_history.oldest_block, 1, "oldest_block should be 1 (excludes genesis)");
+
+    // Verify percentiles for each block. block_metadata[i] corresponds to response[i].
     for (i, metadata) in block_metadata.iter().enumerate() {
-        let block_height = (i + 1) as u64;
-        if block_height < oldest {
-            continue;
-        }
-        let idx = (block_height - oldest) as usize;
-        if idx >= fee_history.reward.len() {
-            continue;
-        }
-
-        let reward = &fee_history.reward[idx];
+        let reward = &fee_history.reward[i];
 
         if metadata.priority_fees.is_empty() {
-            // Empty blocks should have no percentiles
-            assert!(
-                reward.percentiles.is_empty(),
-                "Block {} should have no percentiles",
-                block_height
-            );
+            assert!(reward.percentiles.is_empty(), "Block {} should have no percentiles", i + 1);
             assert_eq!(reward.pd_tx_count, 0);
         } else {
-            // Compute expected percentiles from metadata
             let mut sorted_fees = metadata.priority_fees.clone();
             sorted_fees.sort();
 
@@ -333,16 +316,14 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
                 let fee_data = reward
                     .percentiles
                     .get(&percentile)
-                    .unwrap_or_else(|| panic!("Block {} missing percentile {}", block_height, percentile));
+                    .unwrap_or_else(|| panic!("Block {} missing percentile {}", i + 1, percentile));
 
                 assert_eq!(
                     fee_data.fee_irys.amount,
                     U256::from(expected),
-                    "Block {} percentile {} mismatch: expected {}, got {:?}",
-                    block_height,
-                    percentile,
-                    expected,
-                    fee_data.fee_irys.amount
+                    "Block {} percentile {} mismatch",
+                    i + 1,
+                    percentile
                 );
             }
         }
@@ -352,71 +333,3 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Test that gas_used_ratio accurately reflects block utilization.
-///
-/// Verifies utilization calculation: (chunks_used * PRECISION_SCALE) / max_chunks
-#[test_log::test(tokio::test)]
-async fn heavy_pd_fee_history_utilization_accuracy() -> eyre::Result<()> {
-    let (node, address, _block_metadata, _max_pd_chunks) = setup_pd_fee_history_test_chain().await?;
-
-    let response = pd_fee_history_request(&address, 6).await;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-
-    let fee_history: PdFeeHistoryResponse = response.json().await?;
-
-    // Verify we got the expected number of utilization values
-    assert_eq!(
-        fee_history.gas_used_ratio.len(),
-        6,
-        "gas_used_ratio should have 6 elements"
-    );
-
-    // Verify all utilization values are within valid range (0% to 100%)
-    let max_utilization = PRECISION_SCALE;
-    for (i, ratio) in fee_history.gas_used_ratio.iter().enumerate() {
-        assert!(
-            ratio.amount <= max_utilization,
-            "Utilization at index {} should be <= 100%, got {:?}",
-            i,
-            ratio.amount
-        );
-    }
-
-    // Collect unique utilization values
-    let actual_ratios: std::collections::HashSet<U256> = fee_history
-        .gas_used_ratio
-        .iter()
-        .map(|r| r.amount)
-        .collect();
-
-    // We created blocks with utilization [0%, 50%, 80%, 0%, 100%, 25%]
-    // Verify we have variety in utilization - at least 0% and some non-zero values
-    let zero_util = U256::from(0);
-    let has_zero = actual_ratios.contains(&zero_util);
-    let has_nonzero = actual_ratios.iter().any(|&r| r > zero_util);
-
-    assert!(has_zero, "Should have at least one 0% utilization block");
-    assert!(
-        has_nonzero,
-        "Should have at least one block with non-zero utilization"
-    );
-
-    // Verify we have multiple distinct utilization values (blocks with different usage)
-    assert!(
-        actual_ratios.len() >= 3,
-        "Should have at least 3 distinct utilization levels, got {} ({:?})",
-        actual_ratios.len(),
-        actual_ratios
-    );
-
-    // Verify we have at least one high utilization block (>= 50%)
-    let fifty_percent = PRECISION_SCALE / U256::from(2);
-    let has_high_util = actual_ratios.iter().any(|&r| r >= fifty_percent);
-    assert!(
-        has_high_util,
-        "Should have at least one block with >= 50% utilization"
-    );
-
-    node.stop().await;
-    Ok(())
-}

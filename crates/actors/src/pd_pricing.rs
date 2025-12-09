@@ -64,24 +64,16 @@ impl PdPricing {
         // Validate inputs
         validate_percentiles(reward_percentiles)?;
 
-        // Get canonical blocks (acquire lock once)
-        // Following eth_feeHistory pattern: arrays ordered oldest-to-newest
+        // Get recent blocks from tip (oldest-first, eth_feeHistory pattern)
         let blocks_with_ema: Vec<_> = {
             let tree = self.block_tree.read();
-            let (canonical, _) = tree.get_canonical_chain();
-
-            let mut blocks: Vec<_> = canonical
-                .iter()
-                .rev() // Start from tip (newest)
-                .take(block_count as usize)
-                .filter_map(|entry| {
-                    let block = tree.get_block(&entry.block_hash)?.clone();
-                    let ema = tree.get_ema_snapshot(&entry.block_hash)?.clone();
-                    Some((block, ema))
+            tree.get_recent_blocks_from_tip(block_count as usize)
+                .into_iter()
+                .filter_map(|block| {
+                    let ema = tree.get_ema_snapshot(&block.block_hash)?.clone();
+                    Some((block.clone(), ema))
                 })
-                .collect();
-            blocks.reverse(); // Reverse to get oldest-first (eth_feeHistory pattern)
-            blocks
+                .collect()
         };
 
         if blocks_with_ema.is_empty() {
