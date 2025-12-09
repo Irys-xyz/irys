@@ -12,6 +12,17 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, Deref, DerefMut};
 
+/// Returns the maximum valid chunk offset (0-indexed) for a given data_size and chunk_size.
+/// Returns None if data_size is 0.
+#[must_use]
+pub fn max_chunk_offset(data_size: u64, chunk_size: u64) -> Option<u64> {
+    if data_size == 0 {
+        return None;
+    }
+    let num_chunks = data_size.div_ceil(chunk_size);
+    Some(num_chunks.saturating_sub(1))
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 // tag is to produce better JSON serialization, it flattens { "Packed": {...}} to {type: "packed", ... }
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -98,12 +109,7 @@ impl UnpackedChunk {
     /// Returns the maximum valid tx_offset for this chunk's data_size.
     /// Returns None if data_size is 0.
     pub fn max_valid_offset(&self, chunk_size: u64) -> Option<u64> {
-        if self.data_size == 0 {
-            return None;
-        }
-
-        let num_chunks = self.data_size.div_ceil(chunk_size);
-        Some(num_chunks.saturating_sub(1))
+        max_chunk_offset(self.data_size, chunk_size)
     }
 
     /// Validates that tx_offset is within valid bounds for the claimed data_size.

@@ -8,8 +8,11 @@ use irys_database::{
     tables::{CachedChunks, CachedChunksIndex},
 };
 use irys_types::{
-    chunk::UnpackedChunk, hash_sha256, irys::IrysSigner, validate_path, DataLedger, DataRoot,
-    DatabaseProvider, GossipBroadcastMessage, IngressProof, H256,
+    chunk::{max_chunk_offset, UnpackedChunk},
+    hash_sha256,
+    irys::IrysSigner,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    H256,
 };
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
@@ -257,20 +260,19 @@ impl Inner {
         // Validate the data_path/proof for the chunk, linking
         // data_root->chunk_hash
 
-        if data_size == 0 {
+        let Some(max_valid_offset) = max_chunk_offset(data_size, chunk_size) else {
             error!(
                 "Error: {:?}. Invalid data_size for data_root: {:?}. got 0 bytes",
                 CriticalChunkIngressError::InvalidDataSize,
                 chunk.data_root,
             );
             return Err(CriticalChunkIngressError::InvalidDataSize.into());
-        }
+        };
 
-        let num_chunks = data_size.div_ceil(chunk_size);
-        let max_valid_offset = num_chunks.saturating_sub(1);
         let offset_u64 = u64::from(*chunk.tx_offset);
 
         if offset_u64 > max_valid_offset {
+            let num_chunks = data_size.div_ceil(chunk_size);
             error!(
                 "Invalid tx_offset: {} exceeds max valid offset {} for data_size {} (num_chunks: {})",
                 offset_u64, max_valid_offset, data_size, num_chunks
