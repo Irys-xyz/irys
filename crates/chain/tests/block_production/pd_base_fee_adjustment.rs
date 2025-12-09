@@ -44,9 +44,18 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     // Total: 4 * 20 = 80 chunks = 80% of max_pd_chunks_per_block (100)
     let num_transactions = 4;
     let chunks_per_tx = 20;
-    let tx_hashes = node
-        .create_and_inject_pd_transactions(&pd_tx_signer, num_transactions, chunks_per_tx)
-        .await?;
+    let mut tx_hashes = Vec::new();
+    for i in 0..num_transactions {
+        let tx_hash = node
+            .create_and_inject_pd_transaction_with_optimal_fees(
+                &pd_tx_signer,
+                chunks_per_tx,
+                i as u64,                          // nonce
+                (i * chunks_per_tx as u32) as u32, // offset_base
+            )
+            .await?;
+        tx_hashes.push(tx_hash);
+    }
 
     // Mine block 2 containing the PD transactions
     let (_block2, eth_payload2) = node.mine_block_without_gossip().await?;

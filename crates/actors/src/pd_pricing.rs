@@ -70,7 +70,7 @@ impl PdPricing {
             tree.get_recent_blocks_from_tip(block_count as usize)
                 .into_iter()
                 .filter_map(|block| {
-                    let ema = tree.get_ema_snapshot(&block.block_hash)?.clone();
+                    let ema = tree.get_ema_snapshot(&block.block_hash)?;
                     Some((block.clone(), ema))
                 })
                 .collect()
@@ -108,8 +108,11 @@ impl PdPricing {
             gas_used_ratio_vec.push(utilization_percent);
 
             // Extract priority fees and calculate percentiles
-            let block_priority_fees =
-                Self::calculate_priority_fee_percentiles(&evm_block, reward_percentiles, &ema_price)?;
+            let block_priority_fees = Self::calculate_priority_fee_percentiles(
+                &evm_block,
+                reward_percentiles,
+                &ema_price,
+            )?;
             reward_vec.push(block_priority_fees);
         }
 
@@ -306,7 +309,6 @@ impl PdPricing {
         Ok((next_base_fee_irys, next_base_fee_usd))
     }
 }
-
 
 /// Simplified fee history response following Ethereum's eth_feeHistory structure.
 ///

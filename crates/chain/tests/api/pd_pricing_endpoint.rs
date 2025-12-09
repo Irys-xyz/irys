@@ -79,12 +79,7 @@ async fn setup_pd_fee_history_test_chain(
         // Block 3: 80% utilization - 4 txs × 20 chunks, fees [1,1,5,5] × 1e9
         BlockSpec {
             chunks: 80,
-            priority_fees: vec![
-                1_000_000_000,
-                1_000_000_000,
-                5_000_000_000,
-                5_000_000_000,
-            ],
+            priority_fees: vec![1_000_000_000, 1_000_000_000, 5_000_000_000, 5_000_000_000],
         },
         // Block 4: 0% utilization - no PD txs
         BlockSpec {
@@ -180,7 +175,11 @@ async fn setup_pd_fee_history_test_chain(
         });
     }
 
-    let max_pd_chunks = config.consensus.get_mut().programmable_data.max_pd_chunks_per_block;
+    let max_pd_chunks = config
+        .consensus
+        .get_mut()
+        .programmable_data
+        .max_pd_chunks_per_block;
     Ok((node, address, block_metadata, max_pd_chunks))
 }
 
@@ -222,14 +221,13 @@ async fn heavy_pd_fee_history_base_fee_progression() -> eyre::Result<()> {
         6,
         "gas_used_ratio should have N elements"
     );
-    assert_eq!(
-        fee_history.reward.len(),
-        6,
-        "reward should have N elements"
-    );
+    assert_eq!(fee_history.reward.len(), 6, "reward should have N elements");
 
     // Verify oldest_block is 1 (excludes genesis)
-    assert_eq!(fee_history.oldest_block, 1, "oldest_block should be 1 (excludes genesis)");
+    assert_eq!(
+        fee_history.oldest_block, 1,
+        "oldest_block should be 1 (excludes genesis)"
+    );
 
     // Response is oldest-first. block_metadata[i] corresponds to response[i].
     let max_chunks = U256::from(max_pd_chunks);
@@ -296,14 +294,21 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
     let fee_history: PdFeeHistoryResponse = response.json().await?;
 
     // Verify oldest_block is 1 (excludes genesis)
-    assert_eq!(fee_history.oldest_block, 1, "oldest_block should be 1 (excludes genesis)");
+    assert_eq!(
+        fee_history.oldest_block, 1,
+        "oldest_block should be 1 (excludes genesis)"
+    );
 
     // Verify percentiles for each block. block_metadata[i] corresponds to response[i].
     for (i, metadata) in block_metadata.iter().enumerate() {
         let reward = &fee_history.reward[i];
 
         if metadata.priority_fees.is_empty() {
-            assert!(reward.percentiles.is_empty(), "Block {} should have no percentiles", i + 1);
+            assert!(
+                reward.percentiles.is_empty(),
+                "Block {} should have no percentiles",
+                i + 1
+            );
             assert_eq!(reward.pd_tx_count, 0);
         } else {
             let mut sorted_fees = metadata.priority_fees.clone();
@@ -332,4 +337,3 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
     node.stop().await;
     Ok(())
 }
-
