@@ -16,6 +16,51 @@ use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _}
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
+/// Represents data_size information and if it comes from the publish ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataSizeInfo {
+    /// The data_size value
+    pub data_size: u64,
+    /// Whether this data_size is from the publish ledger (trusted)
+    pub is_from_publish_ledger: bool,
+}
+
+/// Selects the authoritative data_size from multiple storage modules.
+#[must_use]
+pub fn select_data_size_from_storage_modules(
+    storage_module_data: impl IntoIterator<Item = DataSizeInfo>,
+) -> Option<DataSizeInfo> {
+    let mut submit_ledger_max: Option<u64> = None;
+    let mut publish_ledger_max: Option<u64> = None;
+
+    for sm_data in storage_module_data {
+        if sm_data.is_from_publish_ledger {
+            let current_max = publish_ledger_max.unwrap_or(0);
+            if sm_data.data_size > current_max {
+                publish_ledger_max = Some(sm_data.data_size);
+            }
+        } else {
+            let current_max = submit_ledger_max.unwrap_or(0);
+            if sm_data.data_size > current_max {
+                submit_ledger_max = Some(sm_data.data_size);
+            }
+        }
+    }
+
+    // Prefer publish ledger data_size over submit ledger
+    if let Some(ds) = publish_ledger_max {
+        Some(DataSizeInfo {
+            data_size: ds,
+            is_from_publish_ledger: true,
+        })
+    } else {
+        submit_ledger_max.map(|ds| DataSizeInfo {
+            data_size: ds,
+            is_from_publish_ledger: false,
+        })
+    }
+}
+
 impl Inner {
     #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
@@ -70,46 +115,46 @@ impl Inner {
                     chunk.tx_offset = ?chunk.tx_offset,
                     "Checking SMs for data_size"
                 );
-                let storage_modules = self.storage_modules_guard.read().clone();
+                let storage_modules_guard = self.storage_modules_guard.read();
 
-                let mut sm_data_size: Option<u64> = None;
-                let mut from_publish_ledger = false;
-
-                for sm in storage_modules.iter() {
-                    let infos = match sm.collect_data_root_infos(chunk.data_root) {
-                        Ok(i) if !i.0.is_empty() => i,
-                        _ => continue,
-                    };
-
-                    for info in &infos.0 {
-                        let current_max = sm_data_size.unwrap_or(0);
-                        if info.data_size > current_max {
-                            sm_data_size = Some(info.data_size);
+                // Collect data_size info from each storage module
+                let sm_data_sizes: Vec<DataSizeInfo> = storage_modules_guard
+                    .iter()
+                    .filter_map(|sm| {
+                        let infos = sm.collect_data_root_infos(chunk.data_root).ok()?;
+                        if infos.0.is_empty() {
+                            return None;
                         }
-                    }
 
-                    // Publish ledger data can be trusted - chunks verified before tx accepted
-                    if sm
-                        .partition_assignment()
-                        .is_some_and(|pa| pa.ledger_id == Some(DataLedger::Publish.get_id()))
-                    {
-                        from_publish_ledger = true;
-                    }
-                }
+                        let is_from_publish_ledger = sm
+                            .partition_assignment()
+                            .is_some_and(|pa| pa.ledger_id == Some(DataLedger::Publish.get_id()));
 
-                // Publish ledger data is trusted; submit ledger needs verification
-                let confirmed = from_publish_ledger
-                    || sm_data_size
-                        .map(|ds| {
-                            self.verify_data_size_from_storage_modules(
-                                &storage_modules,
-                                chunk.data_root,
-                                ds,
-                            )
+                        // Find max data_size within this SM's infos
+                        let max_data_size = infos.0.iter().map(|info| info.data_size).max()?;
+
+                        Some(DataSizeInfo {
+                            data_size: max_data_size,
+                            is_from_publish_ledger,
                         })
-                        .unwrap_or(false);
+                    })
+                    .collect();
 
-                (sm_data_size, confirmed)
+                match select_data_size_from_storage_modules(sm_data_sizes) {
+                    Some(selected) if selected.is_from_publish_ledger => {
+                        (Some(selected.data_size), true)
+                    }
+                    Some(selected) => {
+                        // Submit ledger data needs verification
+                        let confirmed = self.verify_data_size_from_storage_modules(
+                            &storage_modules_guard,
+                            chunk.data_root,
+                            selected.data_size,
+                        );
+                        (Some(selected.data_size), confirmed)
+                    }
+                    None => (None, false),
+                }
             }
         };
 
@@ -497,9 +542,12 @@ impl Inner {
         let last_chunk_offset = claimed_data_size.div_ceil(chunk_size).saturating_sub(1);
 
         for sm in storage_modules {
-            let infos = match sm.collect_data_root_infos(data_root) {
-                Ok(i) if !i.0.is_empty() => i,
-                _ => continue,
+            let Some(infos) = sm
+                .collect_data_root_infos(data_root)
+                .ok()
+                .filter(|i| !i.0.is_empty())
+            else {
+                continue;
             };
 
             for info in &infos.0 {
@@ -511,9 +559,13 @@ impl Inner {
 
                 let partition_offset =
                     irys_types::PartitionChunkOffset::from(relative_offset as u32);
-                let chunk = match sm.generate_full_chunk(partition_offset) {
-                    Ok(Some(c)) if c.data_root == data_root => c,
-                    _ => continue,
+                let Some(chunk) = sm
+                    .generate_full_chunk(partition_offset)
+                    .ok()
+                    .flatten()
+                    .filter(|c| c.data_root == data_root)
+                else {
+                    continue;
                 };
 
                 // Compute end byte offset: for the last chunk, it's data_size - 1
@@ -627,6 +679,7 @@ pub enum AdvisoryChunkIngressError {
 
 /// Generates an ingress proof for a specific `data_root`
 /// pulls required data from all sources
+#[must_use = "the generated ingress proof should be used or stored"]
 pub fn generate_ingress_proof(
     db: DatabaseProvider,
     data_root: DataRoot,
@@ -712,4 +765,129 @@ pub fn generate_ingress_proof(
     db.update(|rw_tx| irys_database::store_ingress_proof_checked(rw_tx, &proof, &signer))??;
 
     Ok(proof)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    /// Helper to create a submit ledger data size entry for test cases
+    fn submit(data_size: u64) -> DataSizeInfo {
+        DataSizeInfo {
+            data_size,
+            is_from_publish_ledger: false,
+        }
+    }
+
+    /// Helper to create a publish ledger data size entry for test cases
+    fn publish(data_size: u64) -> DataSizeInfo {
+        DataSizeInfo {
+            data_size,
+            is_from_publish_ledger: true,
+        }
+    }
+
+    #[rstest]
+    #[case::empty(vec![], None)]
+    #[case::single_submit(
+        vec![submit(1000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: false })
+    )]
+    #[case::single_publish(
+        vec![publish(1000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::multiple_submit_returns_max(
+        vec![submit(500), submit(1000), submit(750)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: false })
+    )]
+    #[case::multiple_publish_returns_max(
+        vec![publish(500), publish(1000), publish(750)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::submit_only_when_no_publish(
+        vec![submit(5000), submit(10000)],
+        Some(DataSizeInfo { data_size: 10000, is_from_publish_ledger: false })
+    )]
+    // These cases test to make sure the publish ledger is preferred over the submit ledger
+    #[case::publish_preferred_over_larger_submit(
+        vec![submit(10000), publish(1000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::publish_first_still_preferred(
+        vec![publish(1000), submit(10000)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    #[case::interleaved_uses_publish_max(
+        vec![submit(5000), publish(500), submit(10000), publish(1000), submit(7500)],
+        Some(DataSizeInfo { data_size: 1000, is_from_publish_ledger: true })
+    )]
+    fn select_data_size_cases(
+        #[case] entries: Vec<DataSizeInfo>,
+        #[case] expected: Option<DataSizeInfo>,
+    ) {
+        let result = select_data_size_from_storage_modules(entries);
+        assert_eq!(result, expected);
+    }
+
+    proptest! {
+        /// Property: publish ledger data_size is ALWAYS preferred over submit ledger,
+        /// regardless of the relative sizes.
+        #[test]
+        fn publish_ledger_always_preferred_over_submit(
+            publish_size in 1..u64::MAX,
+            submit_size in 1..u64::MAX,
+        ) {
+            let result = select_data_size_from_storage_modules(vec![
+                submit(submit_size),
+                publish(publish_size),
+            ]);
+
+            let selected = result.expect("Should return Some when data exists");
+            prop_assert_eq!(selected.data_size, publish_size);
+            prop_assert!(selected.is_from_publish_ledger);
+        }
+
+        /// Property: single ledger type always selects max size
+        #[test]
+        fn single_ledger_type_selects_max(
+            sizes in prop::collection::vec(1..u64::MAX, 1..10),
+            is_publish in any::<bool>(),
+        ) {
+            let expected_max = *sizes.iter().max().unwrap();
+            let entries: Vec<_> = sizes
+                .into_iter()
+                .map(|ds| DataSizeInfo {
+                    data_size: ds,
+                    is_from_publish_ledger: is_publish,
+                })
+                .collect();
+
+            let result = select_data_size_from_storage_modules(entries);
+
+            let selected = result.expect("Should return Some when data exists");
+            prop_assert_eq!(selected.data_size, expected_max);
+            prop_assert_eq!(selected.is_from_publish_ledger, is_publish);
+        }
+
+        /// Property: with mixed ledgers, publish ledger max is always selected
+        #[test]
+        fn mixed_ledgers_selects_publish_max(
+            publish_sizes in prop::collection::vec(1..u64::MAX, 1..5),
+            submit_sizes in prop::collection::vec(1..u64::MAX, 1..5),
+        ) {
+            let expected_publish_max = *publish_sizes.iter().max().unwrap();
+
+            let mut entries: Vec<_> = publish_sizes.into_iter().map(publish).collect();
+            entries.extend(submit_sizes.into_iter().map(submit));
+
+            let result = select_data_size_from_storage_modules(entries);
+
+            let selected = result.expect("Should return Some when data exists");
+            prop_assert_eq!(selected.data_size, expected_publish_max);
+            prop_assert!(selected.is_from_publish_ledger);
+        }
+    }
 }
