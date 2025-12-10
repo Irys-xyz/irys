@@ -19,7 +19,9 @@ use crate::{
 use eyre::{bail, ensure};
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
-use irys_types::{app_state::DatabaseProvider, BlockTransactions, Config, IrysBlockHeader, TokioServiceHandle};
+use irys_types::{
+    app_state::DatabaseProvider, BlockTransactions, Config, IrysBlockHeader, TokioServiceHandle,
+};
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
 use irys_vdf::vdf_utils::fast_forward_vdf_steps_from_block;

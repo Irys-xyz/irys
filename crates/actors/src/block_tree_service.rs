@@ -16,7 +16,10 @@ use irys_domain::{
     create_epoch_snapshot_for_block, forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry,
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
-use irys_types::{BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader, TokioServiceHandle, H256};
+use irys_types::{
+    BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
+    H256List, IrysAddress, IrysBlockHeader, TokioServiceHandle, H256,
+};
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,

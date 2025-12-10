@@ -21,6 +21,7 @@ use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ing
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
+use crate::MempoolReadGuard;
 use eyre::{eyre, OptionExt as _};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
@@ -277,6 +278,7 @@ pub enum MempoolServiceMessage {
     CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<IrysAddress>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
+    GetReadGuard(oneshot::Sender<MempoolReadGuard>),
 }
 
 impl Inner {
@@ -420,6 +422,12 @@ impl Inner {
             MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx) => {
                 let whitelist = self.get_stake_and_pledge_whitelist_cloned().await;
                 if let Err(e) = tx.send(whitelist) {
+                    tracing::error!("response.send() error: {:?}", e);
+                };
+            }
+            MempoolServiceMessage::GetReadGuard(tx) => {
+                let guard = MempoolReadGuard::new(self.mempool_state.clone());
+                if let Err(e) = tx.send(guard) {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }

@@ -26,7 +26,11 @@ use irys_actors::{
 };
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
-use irys_types::{BlockTransactions, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger, H256};
+use irys_types::{
+    BlockTransactions, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
+    H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger,
+    H256,
+};
 
 // Helper function to send a block directly to the block tree service for validation
 pub async fn send_block_to_block_tree(

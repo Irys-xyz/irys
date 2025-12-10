@@ -16,7 +16,10 @@ use actix_web::{
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
-use irys_types::{BlockBody, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof, IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk};
+use irys_types::{
+    BlockBody, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
+    IngressProof, IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk,
+};
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -242,7 +245,8 @@ where
         tokio::spawn(
             async move {
                 // TODO: implement
-            }.in_current_span(),
+            }
+            .in_current_span(),
         );
 
         debug!(

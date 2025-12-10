@@ -14,7 +14,9 @@
 //! OS scheduling congestion from concurrent test execution.
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
-use irys_types::{block_production::SolutionContext, BlockTransactions, IrysBlockHeader, NodeConfig, H256};
+use irys_types::{
+    block_production::SolutionContext, BlockTransactions, IrysBlockHeader, NodeConfig, H256,
+};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;

@@ -5,7 +5,10 @@ use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
-use irys_types::{BlockTransactions, CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, UnixTimestampMs, H256, U256};
+use irys_types::{
+    BlockTransactions, CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader,
+    NodeConfig, UnixTimestampMs, H256, U256,
+};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 

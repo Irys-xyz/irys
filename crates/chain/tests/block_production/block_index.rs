@@ -87,7 +87,7 @@ async fn heavy_mine_ten_blocks_with_migration_depth_two() -> eyre::Result<()> {
         let block_from_block_pool = node
             .node_ctx
             .block_pool
-            .get_block_data(&migrated_block.block_hash)
+            .get_block_header(&migrated_block.block_hash)
             .await
             .unwrap_or_else(|_| {
                 panic!(

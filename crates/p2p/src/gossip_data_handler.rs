@@ -7,9 +7,10 @@ use crate::{
 };
 use core::net::SocketAddr;
 use futures::stream::{self, StreamExt as _};
+use irys_actors::block_discovery::build_block_body_for_processed_block;
 use irys_actors::{
-    block_discovery::{BlockDiscoveryFacade},
-    AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    CriticalChunkIngressError, MempoolFacade,
 };
 use irys_api_client::ApiClient;
 use irys_database::reth_db::Database as _;
@@ -23,6 +24,7 @@ use irys_types::{
 };
 use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
+use reth::core::primitives::BlockHeader;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -348,7 +350,7 @@ where
         debug!("Pulling block {} from the network", block_hash);
         let (source_address, irys_block) = self
             .gossip_client
-            .pull_block_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
+            .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
             .await?;
 
         let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
@@ -532,11 +534,18 @@ where
 
     pub async fn handle_block_body(
         &self,
-       block_header_request: GossipRequest<BlockBody>,
-       source_api_address: SocketAddr,
-       data_source_ip: SocketAddr,
+        block_header_request: GossipRequest<BlockBody>,
+        source_api_address: SocketAddr,
+        data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
-        // TODO: Implement handling of block bodies
+        // TODO: Implement handling of block bodies.
+        // The logic should be the following:
+        // 1. Check that the block has been already processed - check the tree and the db. BlockPool
+        //  is likely already has a method for that. It also should be able to check that the block
+        //  has been already cached.
+        // 2. If not, pull the header and send it to the block pool for processing.
+        // 3. If yes, skip processing.
+        unimplemented!();
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -665,7 +674,7 @@ where
 
         match request.data {
             GossipDataRequest::BlockHeader(block_hash) => {
-                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
+                let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
 
                 match maybe_block {
                     Some(block) => {
@@ -694,9 +703,68 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequest::BlockBody(_block_hash) => {
-                // TODO: Implement BlockBody retrieval
-                unimplemented!();
+            GossipDataRequest::BlockBody(block_hash) => {
+                debug!(
+                    "Node {}: handling block body request for block {:?}",
+                    self.gossip_client.mining_address, block_hash
+                );
+                let block_body = if let Some(block_body) =
+                    self.block_pool.get_cached_block_body(&block_hash).await
+                {
+                    Some(block_body)
+                } else {
+                    let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
+                    if let Some(block) = &maybe_block {
+                        let data_tx_ids = block
+                            .data_ledgers
+                            .iter()
+                            .flat_map(|data_ledger| &data_ledger.tx_ids.0)
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let commitment_tx_ids = block
+                            .system_ledgers
+                            .iter()
+                            .flat_map(|commitment_ledger| &commitment_ledger.tx_ids.0)
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let block_body = build_block_body_for_processed_block(
+                            block_hash,
+                            &data_tx_ids,
+                            &commitment_tx_ids,
+                            &self.mempool.get_internal_read_guard().await,
+                            &self.block_pool.db,
+                        )
+                        .await
+                        .map_err(|err| {
+                            GossipError::Internal(InternalGossipError::Unknown(format!(
+                                "Error building block body for block {}: {}",
+                                block_hash, err
+                            )))
+                        })?;
+                        Some(Arc::new(block_body))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(block_body) = block_body {
+                    let data = Arc::new(GossipData::BlockBody(block_body));
+                    if check_result.should_update_score() {
+                        self.gossip_client.send_data_and_update_score_for_request(
+                            (&request.miner_address, peer_info),
+                            data,
+                            &self.peer_list,
+                        );
+                    } else {
+                        self.gossip_client.send_data_without_score_update(
+                            (&request.miner_address, peer_info),
+                            data,
+                        );
+                    }
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 debug!(
@@ -739,7 +807,7 @@ where
     ) -> GossipResult<Option<GossipData>> {
         match request.data {
             GossipDataRequest::BlockHeader(block_hash) => {
-                let maybe_block = self.block_pool.get_block_data(&block_hash).await?;
+                let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
                 if let Some(block) = &maybe_block {
                     if block.poa.chunk.is_none() {
                         error!(
@@ -751,9 +819,46 @@ where
                 }
                 Ok(maybe_block.map(GossipData::BlockHeader))
             }
-            GossipDataRequest::BlockBody(_block_hash) => {
-                // TODO: Implement BlockBody retrieval
-                Ok(None)
+            GossipDataRequest::BlockBody(block_hash) => {
+                let maybe_block_body = if let Some(block_body) =
+                    self.block_pool.get_cached_block_body(&block_hash).await
+                {
+                    Some(block_body)
+                } else {
+                    let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
+                    if let Some(block) = &maybe_block {
+                        let data_tx_ids = block
+                            .data_ledgers
+                            .iter()
+                            .flat_map(|data_ledger| &data_ledger.tx_ids.0)
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let commitment_tx_ids = block
+                            .system_ledgers
+                            .iter()
+                            .flat_map(|commitment_ledger| &commitment_ledger.tx_ids.0)
+                            .copied()
+                            .collect::<Vec<_>>();
+                        let block_body = build_block_body_for_processed_block(
+                            block_hash,
+                            &data_tx_ids,
+                            &commitment_tx_ids,
+                            &self.mempool.get_internal_read_guard().await,
+                            &self.block_pool.db,
+                        )
+                        .await
+                        .map_err(|err| {
+                            GossipError::Internal(InternalGossipError::Unknown(format!(
+                                "Error building block body for block {}: {}",
+                                block_hash, err
+                            )))
+                        })?;
+                        Some(Arc::new(block_body))
+                    } else {
+                        None
+                    }
+                };
+                Ok(maybe_block_body.map(GossipData::BlockBody))
             }
             GossipDataRequest::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
@@ -1003,6 +1108,39 @@ where
             fetched_data_txs,
             fetched_commitment_txs,
         ))
+    }
+
+    async fn pull_block_body(
+        &self,
+        header: &IrysBlockHeader,
+        use_trusted_peers_only: bool,
+    ) -> GossipResult<Arc<BlockBody>> {
+        let block_hash = header.block_hash;
+        debug!(
+            "Fetching block body for block {} height {} from the network",
+            block_hash, header.height
+        );
+
+        let (source_address, irys_block_body) = self
+            .gossip_client
+            .pull_block_body_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
+            .await?;
+
+        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+            // This shouldn't happen, but we still should have a safeguard just in case
+            error!(
+                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
+                source_address
+            );
+            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block body from it, but it was not found".into()));
+        };
+
+        debug!(
+            "Fetched block body for block {} from peer {}",
+            block_hash, source_address
+        );
+
+        Ok(irys_block_body)
     }
 
     /// Fetch missing transactions from the network with peer fallback.

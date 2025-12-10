@@ -16,7 +16,11 @@ use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
 };
 use irys_reward_curve::HalvingCurve;
-use irys_types::{get_ingress_proofs, BlockHash, BlockTransactions, CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader, IrysTransactionId, TokioServiceHandle, H256};
+use irys_types::{
+    get_ingress_proofs, BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config,
+    DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
+    IrysTransactionId, IrysTransactionResponse, TokioServiceHandle, H256,
+};
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
@@ -882,6 +886,29 @@ pub async fn get_data_tx_in_parallel(
     };
 
     get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
+}
+
+pub async fn build_block_body_for_processed_block(
+    block_hash: BlockHash,
+    commitment_transaction_ids: &[IrysTransactionId],
+    data_transaction_ids: &[IrysTransactionId],
+    mempool_read_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<BlockBody> {
+    let (data_txs, commitment_txs) = tokio::join!(
+        get_data_tx_in_parallel(data_transaction_ids.to_vec(), mempool_read_guard, db),
+        get_commitment_tx_in_parallel(commitment_transaction_ids, mempool_read_guard, db)
+    );
+    let data_txs = data_txs?;
+    let commitment_txs = commitment_txs?;
+
+    let block_body = BlockBody {
+        block_hash,
+        data_transactions: data_txs,
+        commitment_transactions: commitment_txs,
+    };
+
+    Ok(block_body)
 }
 
 /// Get all data transactions from the mempool and database

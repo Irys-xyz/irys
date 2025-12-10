@@ -10,13 +10,14 @@ use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::{eyre, Result};
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::{BlockDiscoveryError};
+use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade,
+    create_state,
     mempool_service::{TxIngressError, TxReadError},
-    ChunkIngressError, IngressProofError, MempoolFacade,
+    AtomicMempoolState, ChunkIngressError, IngressProofError, MempoolFacade,
 };
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
@@ -26,7 +27,6 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
-use irys_types::{BlockTransactions, IrysAddress};
 use irys_types::{
     AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
@@ -35,6 +35,7 @@ use irys_types::{
     PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
     TxKnownStatus, UnpackedChunk, VersionRequest, H256,
 };
+use irys_types::{BlockTransactions, IrysAddress};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::{HashMap, HashSet};
@@ -212,6 +213,12 @@ impl MempoolFacade for MempoolStub {
         _new_whitelist: HashSet<IrysAddress>,
     ) -> Result<()> {
         Ok(())
+    }
+
+    async fn get_internal_read_guard(&self) -> MempoolReadGuard {
+        // Stub for testing
+        let config = Config::new(NodeConfig::testing());
+        MempoolReadGuard::new(AtomicMempoolState::new(create_state(&config.mempool, &[])))
     }
 }
 

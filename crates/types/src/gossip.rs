@@ -1,4 +1,7 @@
-use crate::{BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256};
+use crate::{
+    BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
+    IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
+};
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
@@ -111,7 +114,7 @@ pub enum GossipData {
     Transaction(DataTransactionHeader),
     CommitmentTransaction(CommitmentTransaction),
     BlockHeader(Arc<IrysBlockHeader>),
-    BlockBody(BlockBody),
+    BlockBody(Arc<BlockBody>),
     ExecutionPayload(Block),
     IngressProof(IngressProof),
 }

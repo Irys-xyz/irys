@@ -2,7 +2,7 @@ use crate::block_status_provider::{BlockStatus, BlockStatusProvider};
 use crate::chain_sync::SyncChainServiceMessage;
 use crate::types::InternalGossipError;
 use crate::{GossipDataHandler, GossipError, GossipResult};
-use irys_actors::block_discovery::{BlockDiscoveryFacade};
+use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::reth_service::{ForkChoiceUpdateMessage, RethServiceMessage};
 use irys_actors::services::ServiceSenders;
@@ -18,7 +18,10 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
-use irys_types::{BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash, GossipBroadcastMessage, IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256};
+use irys_types::{
+    BlockBody, BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash,
+    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
+};
 use lru::LruCache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -129,6 +132,7 @@ pub(crate) struct CachedBlock {
     pub(crate) header: Arc<IrysBlockHeader>,
     pub(crate) is_processing: bool,
     pub(crate) is_fast_tracking: bool,
+    pub(crate) block_body: Arc<BlockBody>,
 }
 
 #[derive(Clone, Debug)]
@@ -201,12 +205,13 @@ impl BlockCacheGuard {
     async fn add_block(
         &self,
         block_header: Arc<IrysBlockHeader>,
+        block_body: Arc<BlockBody>,
         is_fast_tracking: bool,
     ) -> Option<(BlockHash, CachedBlock)> {
         self.inner
             .write()
             .await
-            .add_block(block_header, is_fast_tracking)
+            .add_block(block_header, block_body, is_fast_tracking)
     }
 
     async fn remove_block(&self, block_hash: &BlockHash, reason: BlockRemovalReason) {
@@ -214,7 +219,7 @@ impl BlockCacheGuard {
         self.inner.write().await.remove_block(block_hash);
     }
 
-    async fn get_block_header_cloned(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
+    async fn get_block_cloned(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
         self.inner.write().await.get_block_header_cloned(block_hash)
     }
 
@@ -286,6 +291,7 @@ impl BlockCacheInner {
     fn add_block(
         &mut self,
         block_header: Arc<IrysBlockHeader>,
+        block_body: Arc<BlockBody>,
         fast_track: bool,
     ) -> Option<(BlockHash, CachedBlock)> {
         let block_hash = block_header.block_hash;
@@ -296,6 +302,7 @@ impl BlockCacheInner {
                 header: block_header,
                 is_processing: true,
                 is_fast_tracking: fast_track,
+                block_body,
             },
         );
 
@@ -543,7 +550,7 @@ where
 
         loop {
             let block = self
-                .get_block_data(&block_hash)
+                .get_block_header(&block_hash)
                 .await?
                 .ok_or(CriticalBlockPoolError::PreviousBlockNotFound(block_hash))?;
 
@@ -627,7 +634,11 @@ where
 
         let maybe_evicted_or_updated = self
             .blocks_cache
-            .add_block(Arc::clone(&block_header), skip_validation_for_fast_track)
+            .add_block(
+                Arc::clone(&block_header),
+                Default::default(),
+                skip_validation_for_fast_track,
+            )
             .await;
 
         if let Some((evicted_hash, _)) = maybe_evicted_or_updated {
@@ -1069,11 +1080,11 @@ where
             .await;
     }
 
-    pub async fn get_block_data(
+    pub async fn get_block_header(
         &self,
         block_hash: &BlockHash,
     ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {
-        if let Some(header) = self.blocks_cache.get_block_header_cloned(block_hash).await {
+        if let Some(header) = self.blocks_cache.get_block_cloned(block_hash).await {
             return Ok(Some(Arc::clone(&header.header)));
         }
 
@@ -1097,6 +1108,13 @@ where
             .map(|block| block.map(Arc::new))
     }
 
+    pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<Arc<BlockBody>> {
+        self.blocks_cache
+            .get_block_cloned(block_hash)
+            .await
+            .map(|block| block.block_body)
+    }
+
     /// Get orphaned block by parent hash - for orphan block processing
     pub(crate) async fn get_orphaned_blocks_by_parent(
         &self,
@@ -1110,7 +1128,7 @@ where
         if let Some(hashes) = orphaned_hashes {
             let mut orphaned_blocks = Vec::new();
             for hash in hashes {
-                if let Some(block) = self.blocks_cache.get_block_header_cloned(&hash).await {
+                if let Some(block) = self.blocks_cache.get_block_cloned(&hash).await {
                     orphaned_blocks.push(block);
                 }
             }
@@ -1162,7 +1180,7 @@ where
     /// Get a cached block header by hash.
     /// Used by GossipDataHandler for network-enabled tx fetching.
     pub(crate) async fn get_cached_block(&self, block_hash: &BlockHash) -> Option<CachedBlock> {
-        self.blocks_cache.get_block_header_cloned(block_hash).await
+        self.blocks_cache.get_block_cloned(block_hash).await
     }
 }
 
@@ -1310,7 +1328,7 @@ mod tests {
         let parent = BlockHash::repeat_byte(0xAA);
         let child1 = make_header(0x01, 0xAA, 10);
 
-        cache.add_block(child1.clone(), false);
+        cache.add_block(child1.clone(), Default::default(), false);
 
         // parent -> set contains child1
         let set = cache
@@ -1335,8 +1353,8 @@ mod tests {
         let child1 = make_header(0x02, 0xBB, 11);
         let child2 = make_header(0x03, 0xBB, 12);
 
-        cache.add_block(child1.clone(), true); // fast track first
-        cache.add_block(child2.clone(), false); // second sibling
+        cache.add_block(child1.clone(), Default::default(), true); // fast track first
+        cache.add_block(child2.clone(), Default::default(), false); // second sibling
 
         let set = cache
             .orphaned_blocks_by_parent
@@ -1365,8 +1383,8 @@ mod tests {
         let parent = BlockHash::repeat_byte(0xCC);
         let child1 = make_header(0x10, 0xCC, 20);
         let child2 = make_header(0x11, 0xCC, 21);
-        cache.add_block(child1.clone(), false);
-        cache.add_block(child2.clone(), false);
+        cache.add_block(child1.clone(), Default::default(), false);
+        cache.add_block(child2.clone(), Default::default(), false);
 
         // Remove first child
         cache.remove_block(&child1.block_hash);
@@ -1388,7 +1406,7 @@ mod tests {
     fn change_processing_status() {
         let mut cache = BlockCacheInner::new();
         let block = make_header(0x20, 0xDD, 30);
-        cache.add_block(block.clone(), false);
+        cache.add_block(block.clone(), Default::default(), false);
 
         assert!(
             cache
@@ -1424,7 +1442,7 @@ mod tests {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xAB);
         let child = make_header(0xCD, 0xAB, 42);
-        cache.add_block(child.clone(), false);
+        cache.add_block(child.clone(), Default::default(), false);
         // Sanity: parent entry exists
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
         // Remove only child

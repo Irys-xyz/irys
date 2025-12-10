@@ -15,7 +15,13 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, BlockTransactions, CombinedBlockHeader, CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, VersionRequest, H256};
+use irys_types::{
+    AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, BlockTransactions,
+    CombinedBlockHeader, CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider,
+    GossipData, GossipDataRequest, IrysAddress, IrysTransactionResponse, NodeConfig, NodeInfo,
+    PeerAddress, PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo,
+    VersionRequest, H256,
+};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;

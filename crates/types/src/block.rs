@@ -8,7 +8,6 @@ use crate::versioning::{
     compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
     VersioningError,
 };
-use crate::{CommitmentTransaction, IrysAddress};
 use crate::{decode_rlp_version, encode_rlp_version};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
@@ -20,6 +19,7 @@ use crate::{
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
+use crate::{CommitmentTransaction, IrysAddress};
 
 use alloy_primitives::{keccak256, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
@@ -1067,7 +1067,8 @@ impl BlockTransactions {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BlockBody {
     pub block_hash: BlockHash,
-    pub transactions: BlockTransactions
+    pub data_transactions: Vec<DataTransactionHeader>,
+    pub commitment_transactions: Vec<CommitmentTransaction>,
 }
 
 #[cfg(test)]
