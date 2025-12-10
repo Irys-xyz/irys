@@ -401,6 +401,26 @@ pub mod option_address_base58_stringify {
     }
 }
 
+// for backwards compatability
+pub mod irys_address_hex_stringify {
+    use crate::IrysAddress;
+    use serde::{self, Deserialize as _, Deserializer, Serialize as _, Serializer};
+
+    pub fn serialize<S>(value: &IrysAddress, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.0.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<IrysAddress, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        crate::IrysAddress::deserialize(deserializer)
+    }
+}
+
 //==============================================================================
 // Option<u64>
 //------------------------------------------------------------------------------
