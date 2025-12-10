@@ -114,6 +114,9 @@ where
                             CriticalChunkIngressError::InvalidDataSize => Err(
                                 GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
                             ),
+                            CriticalChunkIngressError::InvalidOffset(msg) => Err(
+                                GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg)),
+                            ),
                             // ===== Internal errors
                             CriticalChunkIngressError::DatabaseError => {
                                 Err(GossipError::Internal(InternalGossipError::Database(
@@ -145,6 +148,11 @@ where
                             AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
                                 Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
                                     AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
+                                )))
+                            }
+                            AdvisoryChunkIngressError::PreHeaderInvalidOffset(msg) => {
+                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
+                                    AdvisoryChunkIngressError::PreHeaderInvalidOffset(msg),
                                 )))
                             }
                             AdvisoryChunkIngressError::Other(other) => {
