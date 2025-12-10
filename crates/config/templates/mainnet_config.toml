@@ -75,9 +75,6 @@ gpu_packing_batch_size = 1024
 
 [cache]
 cache_clean_lag = 2
-
-[cache.eviction_strategy]
-type = "size_based"
 max_cache_size_bytes = 10737418240 # 10 GB
 
 [[oracles]]
@@ -107,6 +104,9 @@ max_chunks_per_item = 500
 max_valid_items = 10000
 max_invalid_items = 10000
 max_valid_chunks = 10000
+max_valid_submit_txs = 3000
+max_valid_commitment_addresses = 300
+max_commitments_per_address = 20
 
 [vdf]
 parallel_verification_thread_limit = 4

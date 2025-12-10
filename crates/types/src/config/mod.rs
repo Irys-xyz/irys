@@ -740,4 +740,29 @@ mod tests {
         let consensus = config.consensus_config();
         assert_eq!(consensus.chain_id, 1270);
     }
+
+    #[test]
+    fn test_parse_mainnet_config_template() {
+        let template_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config")
+            .join("templates")
+            .join("mainnet_config.toml");
+
+        println!("path: {template_path:?}");
+
+        let template_content = std::fs::read_to_string(&template_path)
+            .expect("Failed to read mainnet_config.toml template");
+
+        let config = toml::from_str::<NodeConfig>(&template_content)
+            .expect("Failed to parse mainnet_config.toml template");
+
+        // Basic sanity checks - just verify it parsed successfully
+        assert!(matches!(config.node_mode, NodeMode::Peer));
+
+        // Check consensus config fields
+        let consensus = config.consensus_config();
+        assert_eq!(consensus.chain_id, 3282);
+    }
 }
