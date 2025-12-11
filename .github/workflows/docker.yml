@@ -19,7 +19,6 @@ on:
         default: false
 
 env:
-  IMAGE_NAME: ghcr.io/${{ toLower(github.repository_owner) }}/irys
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -36,6 +35,12 @@ jobs:
 
       - name: Setup repo
         uses: ./.github/actions/setup-repo
+
+      - name: Set lowercase image name
+        id: image
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> $GITHUB_OUTPUT
 
       - name: Extract version from tag
         id: version
@@ -72,10 +77,10 @@ jobs:
             --file ./docker/Dockerfile.release \
             --build-arg GIT_COMMIT=${{ github.sha }} \
             --build-arg BINARY_MD5=${BINARY_MD5} \
-            --tag ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} \
+            --tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} \
             .
 
-          docker push ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+          docker push ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }}
 
           # Clean up
           rm ./irys
@@ -83,8 +88,8 @@ jobs:
       - name: Tag as latest
         if: ${{ inputs.tag_latest || (startsWith(github.ref_name, 'mainnet-') && !contains(github.ref_name, '-rc') && github.event_name == 'push') }}
         run: |
-          docker tag ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} ${{ env.IMAGE_NAME }}:latest
-          docker push ${{ env.IMAGE_NAME }}:latest
+          docker tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} ${{ steps.image.outputs.name }}:latest
+          docker push ${{ steps.image.outputs.name }}:latest
 
       - name: Cleanup Docker
         if: always()  # run even if build/test fails
