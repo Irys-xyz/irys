@@ -1,0 +1,82 @@
+name: Docker Release
+
+on:
+  push:
+    tags:
+      - mainnet-*
+      - testnet-*
+      - nightly-*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (e.g., mainnet-0.1.0, testnet-0.2.0, nightly-20250611)'
+        required: true
+        type: string
+      tag_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/irys
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-push:
+    name: build and push docker image
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup repo
+        uses: ./.github/actions/setup-repo
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build release binary
+        run: |
+          # Override target-cpu for portable binary (removes -C target-cpu=native from .cargo/config.toml)
+          RUSTFLAGS="-C target-cpu=x86-64" cargo build --release --bin irys -p irys-chain --locked
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Build and push Docker image
+        run: |
+          # Copy binary to workspace root for Docker build context
+          cp target/release/irys ./irys
+
+          # Compute binary MD5
+          BINARY_MD5=$(md5sum ./irys | awk '{print $1}')
+
+          docker build \
+            --file ./docker/Dockerfile.release \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --build-arg BINARY_MD5=${BINARY_MD5} \
+            --tag ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} \
+            .
+
+          docker push ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }}
+
+          # Clean up
+          rm ./irys
+
+      - name: Tag as latest
+        if: ${{ inputs.tag_latest || (startsWith(github.ref_name, 'mainnet-') && !contains(github.ref_name, '-rc') && github.event_name == 'push') }}
+        run: |
+          docker tag ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} ${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.IMAGE_NAME }}:latest
