@@ -101,6 +101,9 @@ jobs:
           # kill daemon
           pkill -f dockerd-rootless.sh || true
 
-          # remove runtime data
-          rm -rf ${XDG_RUNTIME_DIR}/*
-          rm -rf ~/.local/share/docker/*
+          # Wait a moment for cleanup
+          sleep 2
+
+          # remove runtime data (ignoring errors)
+          rm -rf ${XDG_RUNTIME_DIR}/* || true
+          rm -rf ~/.local/share/docker/* || true
