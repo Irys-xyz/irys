@@ -266,7 +266,7 @@ impl EmaSnapshot {
         blocks_in_interval: u64,
     ) -> IrysTokenPrice {
         let crossing_interval_boundary =
-            new_block_height % blocks_in_interval == 0 && new_block_height > 0;
+            new_block_height.is_multiple_of(blocks_in_interval) && new_block_height > 0;
 
         if crossing_interval_boundary {
             // At interval boundary: shift intervals forward

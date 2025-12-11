@@ -30,7 +30,7 @@ pub fn log_packing_progress(
     partition_hash: &irys_types::partition::PartitionHash,
     mining_address: &[u8; 20],
 ) {
-    if current_offset % LOG_PER_CHUNKS == 0 {
+    if current_offset.is_multiple_of(LOG_PER_CHUNKS) {
         debug!(
             target: "irys::packing::update",
             "{} packed chunks {} - {} / {} for SM {} partition_hash {} mining_address {:?}",

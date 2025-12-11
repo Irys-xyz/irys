@@ -18,7 +18,7 @@ use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
-    mining, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    mining, pd_pricing, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -49,6 +49,7 @@ pub struct ApiState {
     pub block_index: BlockIndexReadGuard,
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub pd_pricing: Arc<irys_actors::pd_pricing::PdPricing>,
     pub started_at: Instant,
     pub mining_address: IrysAddress,
 }
@@ -112,6 +113,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route(
             "/price/commitment/unpledge/{user_address}",
             web::get().to(price::get_unpledge_price),
+        )
+        .route(
+            "/price/pd/fee-history",
+            web::get().to(pd_pricing::get_fee_history),
         )
         .route("/price/{ledger}/{size}", web::get().to(price::get_price))
         .route("/tx", web::post().to(tx::post_tx))

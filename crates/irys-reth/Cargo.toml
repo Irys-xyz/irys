@@ -33,7 +33,6 @@ reth-transaction-pool.workspace = true
 reth-primitives-traits.workspace = true
 reth-e2e-test-utils = { workspace = true, optional = true }
 reth-engine-local.workspace = true
-reth-trie-db.workspace = true
 serde_json.workspace = true
 revm.workspace = true
 reth-storage-api.workspace = true
@@ -55,7 +54,6 @@ serde.workspace = true
 tracing.workspace = true
 arbitrary.workspace = true
 bytes.workspace = true
-lru.workspace = true
 parking_lot = "0.12"
 thiserror.workspace = true
 either = "1.15"

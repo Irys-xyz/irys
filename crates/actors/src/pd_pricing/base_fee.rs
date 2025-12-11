@@ -1,14 +1,8 @@
-//! PD (Programmable Data) base fee calculation logic.
-//!
-//! This module provides functionality to calculate the PD base fee for new blocks
-//! based on utilization and market conditions. The fee is calculated per chunk and
-//! denominated in Irys tokens.
-
 use irys_domain::EmaSnapshot;
 use irys_types::{
     storage_pricing::{
         mul_div,
-        phantoms::{CostPerChunk, Irys, Usd},
+        phantoms::{CostPerChunk, Irys, Percentage, Usd},
         Amount, PRECISION_SCALE,
     },
     Config, IrysBlockHeader, ProgrammableDataConfig, U256,
@@ -51,7 +45,7 @@ pub fn compute_base_fee_per_chunk(
 /// 2. Adjusting the USD fee based on block utilization (target: 50%, range: +-12.5%)
 ///    - The floor is converted from per-MB to per-chunk for comparison
 /// 3. Converting the adjusted per-chunk USD fee back to per-chunk Irys using the current block's EMA price
-fn calculate_pd_base_fee_for_new_block(
+pub fn calculate_pd_base_fee_for_new_block(
     parent_block_ema_snapshot: &EmaSnapshot,
     current_block_ema_price: &irys_types::IrysTokenPrice,
     parent_chunks_used_in_block: u32,
@@ -99,7 +93,7 @@ fn calculate_pd_base_fee_for_new_block(
 ///
 /// The PD base fee is stored in the PdBaseFeeUpdate transaction, which is always
 /// the 2nd transaction in a block (after BlockReward at position 0).
-fn extract_pd_base_fee_from_block(
+pub fn extract_pd_base_fee_from_block(
     irys_block_header: &irys_types::IrysBlockHeader,
     evm_block: &reth_ethereum_primitives::Block,
     pd_config: &ProgrammableDataConfig,
@@ -163,7 +157,7 @@ fn extract_pd_base_fee_from_block(
 ///
 /// This function iterates through all transactions in the block, detects PD transactions
 /// by their header, and sums up the chunk counts from their access lists.
-fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 {
+pub fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 {
     use alloy_consensus::Transaction as _;
     use irys_reth::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 
@@ -181,6 +175,52 @@ fn count_pd_chunks_in_block(evm_block: &reth_ethereum_primitives::Block) -> u64 
     }
 
     total_pd_chunks
+}
+
+/// Extract priority fees from all PD transactions in an EVM block.
+///
+/// This function iterates through all transactions in the block, detects PD transactions
+/// by their header, and collects their max_priority_fee_per_chunk values.
+/// Returns a vector of priority fees as typed Amount values.
+pub fn extract_priority_fees_from_block(
+    evm_block: &reth_ethereum_primitives::Block,
+) -> Vec<Amount<(CostPerChunk, Irys)>> {
+    use alloy_consensus::Transaction as _;
+    use irys_reth::pd_tx::detect_and_decode_pd_header;
+
+    let mut priority_fees = Vec::new();
+    for tx in evm_block.body.transactions.iter() {
+        // Try to detect PD header in transaction input
+        let input = tx.input();
+        if let Ok(Some((header, _))) = detect_and_decode_pd_header(input) {
+            // Convert alloy U256 to irys U256 and create typed Amount
+            let priority_fee_irys =
+                Amount::<(CostPerChunk, Irys)>::new(header.max_priority_fee_per_chunk.into());
+            priority_fees.push(priority_fee_irys);
+        }
+    }
+
+    priority_fees
+}
+
+/// Calculate PD utilization as a percentage using fixed-point arithmetic.
+///
+/// Returns utilization as `Amount<Percentage>` where PRECISION_SCALE = 100%.
+pub fn calculate_utilization_percent(
+    chunks_used: u64,
+    max_chunks: u64,
+) -> eyre::Result<Amount<Percentage>> {
+    if max_chunks == 0 {
+        return Ok(Amount::<Percentage>::new(U256::from(0)));
+    }
+
+    let percent_amount = mul_div(
+        U256::from(chunks_used),
+        PRECISION_SCALE,
+        U256::from(max_chunks),
+    )?;
+
+    Ok(Amount::<Percentage>::new(percent_amount))
 }
 
 /// Convert a per-chunk USD amount to per-chunk Irys tokens using a given price.
@@ -284,12 +324,11 @@ pub(crate) mod pd_fee_adjustments {
         let target_utilization = Amount::<Percentage>::percentage(dec!(0.5))?; // 50%
 
         // Calculate utilization as a ratio in PRECISION_SCALE
-        // utilization = (chunks_used * PRECISION_SCALE) / max_chunks
-        let utilization = mul_div(
-            U256::from(chunks_used_in_block),
-            PRECISION_SCALE,
-            U256::from(max_pd_chunks_per_block),
-        )?;
+        let utilization = super::calculate_utilization_percent(
+            chunks_used_in_block as u64,
+            max_pd_chunks_per_block,
+        )?
+        .amount;
 
         // Calculate adjustment percentage based on utilization vs target
         let adjustment_pct = if utilization > target_utilization.amount {

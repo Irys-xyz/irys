@@ -1,5 +1,5 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
-use crate::pd_base_fee::compute_base_fee_per_chunk;
+use crate::pd_pricing::base_fee::compute_base_fee_per_chunk;
 use crate::{
     block_discovery::BlockTransactions,
     block_producer::ledger_expiry,

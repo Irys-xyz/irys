@@ -3195,11 +3195,7 @@ pub mod test_utils {
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
         chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
-    ) -> eyre::Result<(
-        Vec<NodeHelperType<IrysEthereumNode>>,
-        TaskManager,
-        Wallet,
-    )>
+    ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
             PayloadAttributesBuilder<

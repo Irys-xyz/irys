@@ -123,6 +123,7 @@ pub struct IrysNodeCtx {
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub pd_pricing: Arc<irys_actors::pd_pricing::PdPricing>,
     pub sync_service_facade: SyncChainServiceFacade,
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
@@ -143,6 +144,7 @@ impl IrysNodeCtx {
             block_index: self.block_index_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
+            pd_pricing: self.pd_pricing.clone(),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
         }
@@ -1301,6 +1303,13 @@ impl IrysNode {
             block_tree_guard.clone(),
         ));
 
+        // Initialize PD pricing service
+        let pd_pricing = Arc::new(irys_actors::pd_pricing::PdPricing::new(
+            block_tree_guard.clone(),
+            reth_node.clone(),
+            Arc::new(config.clone()),
+        ));
+
         // spawn the chunk migration service
         let chunk_migration_handle = ChunkMigrationService::spawn_service(
             receivers.chunk_migration,
@@ -1526,6 +1535,7 @@ impl IrysNode {
             validation_enabled,
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),
+            pd_pricing: pd_pricing.clone(),
             sync_service_facade,
             is_vdf_mining_enabled,
             started_at: Instant::now(),
@@ -1619,6 +1629,7 @@ impl IrysNode {
                     .expect("Missing reth rpc url!"),
                 sync_state,
                 mempool_pledge_provider,
+                pd_pricing: irys_node_ctx.pd_pricing.clone(),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
             },

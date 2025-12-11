@@ -1,6 +1,6 @@
 use crate::utils::IrysNodeTest;
 use alloy_consensus::Transaction as _;
-use irys_actors::{pd_base_fee::PD_BASE_FEE_INDEX, reth_ethereum_primitives};
+use irys_actors::{pd_pricing::base_fee::PD_BASE_FEE_INDEX, reth_ethereum_primitives};
 use irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{NodeConfig, U256};
 use reth::primitives::SealedBlock;
@@ -38,15 +38,24 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Establish baseline: mine first block and extract initial PD base fee
-    let _ = node.mine_block_without_gossip().await?;
+    let _ = node.mine_block().await?;
 
     // Create high utilization: inject 4 PD transactions with 20 chunks each
     // Total: 4 * 20 = 80 chunks = 80% of max_pd_chunks_per_block (100)
     let num_transactions = 4;
     let chunks_per_tx = 20;
-    let tx_hashes = node
-        .create_and_inject_pd_transactions(&pd_tx_signer, num_transactions, chunks_per_tx)
-        .await?;
+    let mut tx_hashes = Vec::new();
+    for i in 0..num_transactions {
+        let tx_hash = node
+            .create_and_inject_pd_transaction_with_optimal_fees(
+                &pd_tx_signer,
+                chunks_per_tx,
+                i as u64,                 // nonce
+                i * chunks_per_tx as u32, // offset_base
+            )
+            .await?;
+        tx_hashes.push(tx_hash);
+    }
 
     // Mine block 2 containing the PD transactions
     let (_block2, eth_payload2, _) = node.mine_block_without_gossip().await?;

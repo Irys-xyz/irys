@@ -5,6 +5,7 @@ use crate::{
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
+    pd_pricing::base_fee,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -38,10 +39,10 @@ use irys_types::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
-    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
-    IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, GossipBroadcastMessage, H256List, IrysAddress, IrysBlockHeader,
+    IrysTokenPrice, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp,
+    UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -99,7 +100,6 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
 
 mod block_validation_tracker;
 pub mod ledger_expiry;
-pub mod pd_base_fee;
 pub use block_validation_tracker::BlockValidationTracker;
 
 /// Result of checking parent validity and solution compatibility
@@ -1341,7 +1341,7 @@ pub trait BlockProdStrategy {
         prev_block_ema_snapshot: &EmaSnapshot,
         current_ema_price: &irys_types::IrysTokenPrice,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-        pd_base_fee::compute_base_fee_per_chunk(
+        base_fee::compute_base_fee_per_chunk(
             &self.inner().config,
             prev_block_header,
             prev_block_ema_snapshot,
