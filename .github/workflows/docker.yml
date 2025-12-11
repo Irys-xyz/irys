@@ -50,6 +50,11 @@ jobs:
         run: |
           # Override target-cpu for portable binary (removes -C target-cpu=native from .cargo/config.toml)
           RUSTFLAGS="-C target-cpu=x86-64" cargo build --release --bin irys -p irys-chain --locked
+      
+      - name: Start rootless Docker
+        run: |
+          dockerd-rootless.sh &
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done'
 
       - name: Log in to GitHub Container Registry
         run: |
@@ -80,3 +85,17 @@ jobs:
         run: |
           docker tag ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} ${{ env.IMAGE_NAME }}:latest
           docker push ${{ env.IMAGE_NAME }}:latest
+
+      - name: Cleanup Docker
+        if: always()  # run even if build/test fails
+        run: |
+          # stop all containers
+          docker stop $(docker ps -aq) 2>/dev/null || true
+          docker system prune -a -f --volumes
+
+          # kill daemon
+          pkill -f dockerd-rootless.sh || true
+
+          # remove runtime data
+          rm -rf ${XDG_RUNTIME_DIR}/*
+          rm -rf ~/.local/share/docker/*
