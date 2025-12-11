@@ -269,6 +269,7 @@ impl InnerCacheTask {
         // We'll do deletions in a write tx per batch to keep lock times short
         let mut pending_roots: Vec<DataRoot> = Vec::new();
 
+        // TODO: try to deprioritise data_roots that almost have all their chunks, as we want as many full data_roots as possible so we can provide proofs
         while let Some((data_root, _cached)) = cdr_walk.next().transpose()? {
             if evictions_performed >= MAX_EVICTIONS_PER_RUN {
                 warn!(
@@ -1104,7 +1105,7 @@ mod tests {
             irys_database::store_external_ingress_proof_checked(
                 wtx,
                 &ingress_proof,
-                irys_types::Address::random(),
+                irys_types::IrysAddress::random(),
             )?;
             eyre::Ok(())
         })??;

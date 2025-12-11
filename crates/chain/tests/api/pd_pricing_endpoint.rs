@@ -135,7 +135,7 @@ async fn setup_pd_fee_history_test_chain(
         }
 
         // Mine the block
-        let (irys_block, eth_payload) = node.mine_block_without_gossip().await?;
+        let (irys_block, eth_payload, _block_txs) = node.mine_block_without_gossip().await?;
 
         // Wait for the block to be validated and tip updated
         node.wait_until_height(irys_block.height, 10).await?;

@@ -87,7 +87,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -142,11 +142,11 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    let (_block, eth_payload_other) = block_prod_strategy
+    let (_block, eth_payload_other, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -253,7 +253,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -355,7 +355,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     };
 
     peer_node.gossip_disable();
-    let (block, eth_payload) = block_prod_strategy
+    let (block, eth_payload, _) = block_prod_strategy
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -546,7 +546,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, _) = block_prod_strategy
+    let (block, _, transactions, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -555,7 +555,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
     // dbg!(&preval_res);
@@ -579,7 +579,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, _) = block_prod_strategy
+    let (block, _, transactions, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -588,7 +588,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
     // dbg!(&preval_res);
@@ -615,7 +615,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     };
 
     genesis_node.gossip_disable();
-    let (block, _, _) = block_prod_strategy
+    let (block, _, transactions, _) = block_prod_strategy
         .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -624,7 +624,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     let preval_res = block_prod_strategy
         .inner()
         .block_discovery
-        .handle_block(Arc::clone(&block), false)
+        .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
     // dbg!(&preval_res);

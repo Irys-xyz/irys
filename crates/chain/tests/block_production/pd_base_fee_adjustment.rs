@@ -38,7 +38,7 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     let node = IrysNodeTest::new_genesis(config.clone()).start().await;
 
     // Establish baseline: mine first block and extract initial PD base fee
-    let _ = node.mine_block_without_gossip().await?;
+    let _ = node.mine_block().await?;
 
     // Create high utilization: inject 4 PD transactions with 20 chunks each
     // Total: 4 * 20 = 80 chunks = 80% of max_pd_chunks_per_block (100)
@@ -58,7 +58,7 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     }
 
     // Mine block 2 containing the PD transactions
-    let (_block2, eth_payload2) = node.mine_block_without_gossip().await?;
+    let (_block2, eth_payload2, _) = node.mine_block_without_gossip().await?;
 
     // Verify all PD transactions were included
     verify_pd_transactions_included(eth_payload2.block(), &tx_hashes, 2)?;
@@ -67,7 +67,7 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     let block2_pd_base_fee: U256 = extract_pd_base_fee_from_block(eth_payload2.block())?.into();
 
     // Mine block 3 to observe fee adjustment based on block 2's 80% utilization
-    let (_block3, eth_payload3) = node.mine_block_without_gossip().await?;
+    let (_block3, eth_payload3, _) = node.mine_block_without_gossip().await?;
     let block3_pd_base_fee: U256 = extract_pd_base_fee_from_block(eth_payload3.block())?.into();
 
     // Calculate expected fee increase using exact U256 arithmetic

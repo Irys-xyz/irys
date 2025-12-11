@@ -1,18 +1,22 @@
 use crate::data_sync_service::peer_stats::PeerStats;
 use irys_domain::ChunkTimeRecord;
-use irys_types::{partition::PartitionAssignment, Address, Config, PeerAddress, PeerListItem};
+use irys_types::{partition::PartitionAssignment, Config, IrysAddress, PeerAddress, PeerListItem};
 
 #[derive(Debug)]
 pub struct PeerBandwidthManager {
     pub partition_assignments: Vec<PartitionAssignment>,
     pub peer_address: PeerAddress,
-    pub miner_address: Address,
+    pub miner_address: IrysAddress,
     pub config: Config,
     peer_stats: PeerStats, // private - external access only through wrapper methods
 }
 
 impl PeerBandwidthManager {
-    pub fn new(miner_address: &Address, peer_list_item: &PeerListItem, config: &Config) -> Self {
+    pub fn new(
+        miner_address: &IrysAddress,
+        peer_list_item: &PeerListItem,
+        config: &Config,
+    ) -> Self {
         let chunk_size = config.consensus.chunk_size;
         let timeout = config.node_config.data_sync.chunk_request_timeout;
         let target_bandwidth_mbps = 100; // Default target, adjust as needed

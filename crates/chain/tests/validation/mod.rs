@@ -8,12 +8,14 @@ mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::utils::{
     assert_validation_error, gossip_commitment_to_node, read_block_from_state, solution_context,
     BlockValidationOutcome, IrysNodeTest,
 };
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_tree_service::ValidationResult;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
@@ -29,16 +31,16 @@ use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_types::{
     CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
-    IrysBlockHeader, NodeConfig, SystemTransactionLedger, H256,
+    IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger, H256,
 };
 
 // Helper function to send a block directly to the block tree service for validation
 pub async fn send_block_to_block_tree(
     node_ctx: &IrysNodeCtx,
     block: Arc<IrysBlockHeader>,
-    commitment_txs: Vec<CommitmentTransaction>,
+    transactions: BlockTransactions,
     skip_vdf_validation: bool,
-) -> Result<(), PreValidationError> {
+) -> eyre::Result<()> {
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
     node_ctx
@@ -46,13 +48,13 @@ pub async fn send_block_to_block_tree(
         .block_tree
         .send(BlockTreeServiceMessage::BlockPreValidated {
             block,
-            commitment_txs: Arc::new(commitment_txs),
+            transactions,
             skip_vdf_validation,
             response: response_tx,
-        })
-        .unwrap();
+        })?;
 
-    response_rx.await.unwrap()
+    response_rx.await??;
+    Ok(())
 }
 
 // This test creates a malicious block producer that includes a stake commitment with invalid value.
@@ -131,7 +133,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -142,18 +144,18 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![invalid_pledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_pledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    // Note: The block is rejected with ShadowTransactionInvalid("Missing transactions")
-    // because we can't gossip invalid commitments to mempool (mempool validates them),
-    // but validation needs to look them up. In production, this scenario wouldn't occur.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block with invalid stake value should be rejected",
     );
 
@@ -239,7 +241,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -250,18 +252,18 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![invalid_pledge],
+        BlockTransactions {
+            commitment_txs: vec![invalid_pledge],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
-    // Note: The block is rejected with ShadowTransactionInvalid("Missing transactions")
-    // because we can't gossip invalid commitments to mempool (mempool validates them),
-    // but validation needs to look them up. In production, this scenario wouldn't occur.
     assert_validation_error(
         outcome,
-        |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
+        |e| matches!(e, ValidationError::CommitmentValueInvalid { .. }),
         "block with invalid pledge value should be rejected",
     );
 
@@ -349,7 +351,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         },
     };
 
-    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (mut block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -371,7 +373,10 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![pledge, stake],
+        BlockTransactions {
+            commitment_txs: vec![pledge, stake],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await?;
@@ -383,6 +388,174 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         "block with wrong commitment order should be rejected",
     );
 
+    genesis_node.stop().await;
+
+    Ok(())
+}
+
+// This test validates fee-based ordering for two Unstake commitments.
+// Creates 2 peers with assignments, unpledges all their partitions, mines to next
+// epoch to clear pledges. Each peer then creates an unstake with different fees.
+// The evil block swaps the order (low fee before high fee), violating the
+// canonical fee-descending ordering.
+#[test_log::test(tokio::test)]
+async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
+    struct EvilBlockProdStrategy {
+        pub prod: ProductionStrategy,
+        pub commitments: Vec<CommitmentTransaction>,
+    }
+
+    #[async_trait::async_trait]
+    impl BlockProdStrategy for EvilBlockProdStrategy {
+        fn inner(&self) -> &BlockProducerInner {
+            &self.prod.inner
+        }
+
+        async fn get_mempool_txs(
+            &self,
+            _prev_block_header: &IrysBlockHeader,
+        ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
+            let commitments = self.commitments.clone();
+            Ok(irys_actors::block_producer::MempoolTxsBundle {
+                commitment_txs: commitments.clone(),
+                commitment_txs_to_bill: commitments,
+                submit_txs: vec![],
+                publish_txs: PublishLedgerWithTxs {
+                    txs: vec![],
+                    proofs: None,
+                },
+                aggregated_miner_fees: LedgerExpiryBalanceDelta {
+                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    user_perm_fee_refunds: Vec::new(),
+                },
+                commitment_refund_events: vec![],
+                unstake_refund_events: vec![],
+            })
+        }
+    }
+
+    // Setup network with short epochs
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+
+    // Create and fund 2 peer signers BEFORE starting genesis node
+    let test_signer = genesis_config.new_random_signer();
+    let peer1_signer = genesis_config.new_random_signer();
+    let peer2_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer, &peer1_signer, &peer2_signer]);
+
+    // Start genesis node
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+
+    // Create 2 peers with assignments (both auto-stake and auto-pledge)
+    let peer1_node = genesis_node
+        .testing_peer_with_assignments(&peer1_signer)
+        .await?;
+    let peer2_node = genesis_node
+        .testing_peer_with_assignments(&peer2_signer)
+        .await?;
+
+    let consensus_config = &peer1_node.node_ctx.config.consensus;
+
+    // Unpledge all partitions for both peers
+    for (peer_node, peer_signer) in [(&peer1_node, &peer1_signer), (&peer2_node, &peer2_signer)] {
+        let partitions: Vec<_> = {
+            let sms = peer_node.node_ctx.storage_modules_guard.read();
+            sms.iter()
+                .filter_map(|sm| sm.partition_assignment())
+                .collect()
+        };
+        for assignment in &partitions {
+            let mut unpledge = CommitmentTransaction::new_unpledge(
+                consensus_config,
+                peer_node.get_anchor().await?,
+                peer_node.node_ctx.mempool_pledge_provider.as_ref(),
+                peer_signer.address(),
+                assignment.partition_hash,
+            )
+            .await;
+            peer_signer.sign_commitment(&mut unpledge)?;
+            genesis_node.post_commitment_tx(&unpledge).await?;
+        }
+    }
+
+    // Mine a block to include unpledges
+    genesis_node.mine_block().await?;
+
+    // Mine to next epoch to process unpledge refunds and clear pledges
+    genesis_node.mine_until_next_epoch().await?;
+
+    // Wait for epoch processing
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    let base_fee = consensus_config.mempool.commitment_fee;
+
+    // Peer 1: Create unstake with HIGH fee (should come FIRST)
+    let mut unstake_high_fee =
+        CommitmentTransaction::new_unstake(consensus_config, peer1_node.get_anchor().await?);
+    unstake_high_fee.signer = peer1_signer.address();
+    unstake_high_fee.fee = base_fee * 2; // HIGH fee
+    peer1_signer.sign_commitment(&mut unstake_high_fee)?;
+
+    // Peer 2: Create unstake with LOW fee (should come SECOND)
+    let mut unstake_low_fee =
+        CommitmentTransaction::new_unstake(consensus_config, peer2_node.get_anchor().await?);
+    unstake_low_fee.signer = peer2_signer.address();
+    unstake_low_fee.fee = base_fee; // LOW fee
+    peer2_signer.sign_commitment(&mut unstake_low_fee)?;
+
+    // Create evil block with WRONG order: [low fee, high fee]
+    // Canonical order should be: [high fee, low fee]
+    let block_prod_strategy = EvilBlockProdStrategy {
+        commitments: vec![unstake_low_fee.clone(), unstake_high_fee.clone()], // WRONG!
+        prod: ProductionStrategy {
+            inner: peer1_node.node_ctx.block_producer_inner.clone(),
+        },
+    };
+
+    let (mut block, _adjustment_stats, _block_txs, _eth_payload) = block_prod_strategy
+        .fully_produce_new_block_without_gossip(&solution_context(&peer1_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    // Manually override commitment order in block
+    let mut irys_block = (*block).clone();
+    irys_block.system_ledgers = vec![SystemTransactionLedger {
+        ledger_id: SystemLedger::Commitment as u32,
+        tx_ids: H256List(vec![unstake_low_fee.id, unstake_high_fee.id]), // WRONG order!
+    }];
+    peer1_signer.sign_block_header(&mut irys_block)?;
+    block = Arc::new(irys_block);
+
+    // Gossip both commitments to genesis node
+    gossip_commitment_to_node(&genesis_node, &unstake_low_fee).await?;
+    gossip_commitment_to_node(&genesis_node, &unstake_high_fee).await?;
+
+    // Validate the malicious block on genesis node
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions {
+            commitment_txs: vec![unstake_low_fee, unstake_high_fee],
+            data_txs: Default::default(),
+        },
+        false,
+    )
+    .await?;
+
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    assert_validation_error(
+        outcome,
+        |e| matches!(e, ValidationError::CommitmentWrongOrder { .. }),
+        "block with unstakes in wrong fee order should be rejected",
+    );
+
+    peer1_node.stop().await;
+    peer2_node.stop().await;
     genesis_node.stop().await;
 
     Ok(())
@@ -455,7 +628,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         },
     };
 
-    let (block, _adj_stats, _eth_payload) = block_prod_strategy
+    let (block, _adj_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -471,12 +644,16 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     let err = send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        vec![wrong_commitment],
+        BlockTransactions {
+            commitment_txs: vec![wrong_commitment],
+            data_txs: HashMap::new(),
+        },
         false,
     )
     .await
-    .unwrap_err();
+    .expect_err("block with wrong commitment should be rejected");
 
+    let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
         err,
         PreValidationError::InvalidEpochSnapshot { .. }
@@ -510,7 +687,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (mut block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (mut block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -528,7 +705,9 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .block_discovery
             .clone(),
     );
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), transactions, false)
+        .await;
     assert!(
         matches!(
             result,
@@ -558,7 +737,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (block_after_epoch, _adjustment_stats2, _eth_payload2) = block_prod_strategy
+    let (block_after_epoch, _adjustment_stats2, transactions, _eth_payload2) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -590,7 +769,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
             .clone(),
     );
     let result = block_discovery
-        .handle_block(block_after_epoch.clone(), false)
+        .handle_block(block_after_epoch.clone(), transactions, false)
         .await;
     assert!(
         matches!(
@@ -706,9 +885,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let root = irys_types::generate_data_root(leaves)?;
     let data_root = H256(root.id);
 
-    // Create data transaction header
+    // Create data transaction header and sign it
     let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::random(),
+        id: H256::zero(),
         anchor,
         signer: test_signer.address(),
         data_root,
@@ -721,7 +900,8 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         chain_id: 1,
         promoted_height: Some(1),
         signature: Default::default(),
-    });
+    })
+    .sign(&test_signer)?;
 
     // Generate two ingress proofs from the SAME signer (duplicate!)
     let chain_id = 1_u64;
@@ -791,7 +971,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -806,7 +986,9 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     );
 
     // This should fail during prevalidation due to duplicate signers
-    let result = block_discovery.handle_block(block.clone(), false).await;
+    let result = block_discovery
+        .handle_block(block.clone(), transactions, false)
+        .await;
 
     // Assert that the block was rejected due to duplicate ingress proof signers
     assert!(
@@ -891,7 +1073,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -904,9 +1086,16 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     );
     dbg!(&block);
 
-    let err = send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false)
-        .await
-        .unwrap_err();
+    let err = send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await
+    .expect_err("block with missing commitments should be rejected");
+
+    let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
         err,
         PreValidationError::InvalidEpochSnapshot { .. }
@@ -953,9 +1142,9 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
     fork_creator_1.gossip_disable();
     genesis_node.gossip_disable();
 
-    let block = fork_creator_1.mine_block_without_gossip().await?;
-    send_block_to_block_tree(&genesis_node.node_ctx, block.0.clone(), vec![], false).await?;
-    let root_block_of_fork = block.0;
+    let (block, _, txs) = fork_creator_1.mine_block_without_gossip().await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), txs, false).await?;
+    let root_block_of_fork = block;
 
     genesis_node.node_ctx.set_validation_enabled(true);
     let mut block_state_rx = genesis_node
@@ -963,9 +1152,9 @@ async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Resul
         .service_senders
         .subscribe_block_state_updates();
     for _ in 0..10 {
-        let (block, eth_block) = fork_creator_2.mine_block_without_gossip().await?;
+        let (block, eth_block, txs) = fork_creator_2.mine_block_without_gossip().await?;
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
-        send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+        send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), txs, false).await?;
         genesis_node
             .node_ctx
             .block_pool

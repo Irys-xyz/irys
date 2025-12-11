@@ -1,5 +1,8 @@
 use crate::{
-    block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
+    block_discovery::{
+        BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl, BlockTransactions,
+    },
+    mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
     pd_pricing::base_fee,
@@ -36,9 +39,9 @@ use irys_types::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
-    Address, AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
+    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
-    IrysBlockHeader, IrysTokenPrice, PoaData, Signature, SystemTransactionLedger,
+    IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature, SystemTransactionLedger,
     TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -54,7 +57,7 @@ use reth::{
 };
 use reth_payload_primitives::{PayloadBuilderAttributes as _, PayloadBuilderError};
 use reth_transaction_pool::EthPooledTransaction;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, error_span, info, warn, Instrument as _};
 
@@ -130,7 +133,13 @@ pub enum BlockProducerCommand {
     SolutionFound {
         solution: SolutionContext,
         response: oneshot::Sender<
-            eyre::Result<Option<(Arc<irys_types::IrysBlockHeader>, EthBuiltPayload)>>,
+            eyre::Result<
+                Option<(
+                    Arc<irys_types::IrysBlockHeader>,
+                    EthBuiltPayload,
+                    BlockTransactions,
+                )>,
+            >,
         >,
     },
     /// Set the test blocks remaining (for testing)
@@ -178,12 +187,14 @@ pub struct BlockProducerInner {
     pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
     pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    /// Read guard for mempool state
+    pub mempool_guard: MempoolReadGuard,
 }
 
 /// Event emitted on epoch blocks to refund Unpledge commitments (fee charged at inclusion; value refunded at epoch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnpledgeRefundEvent {
-    pub account: Address,
+    pub account: IrysAddress,
     pub amount: U256,
     pub irys_ref_txid: H256,
 }
@@ -205,7 +216,7 @@ impl PartialOrd for UnpledgeRefundEvent {
 /// Event emitted on epoch blocks to refund Unstake commitments (fee charged at inclusion; value refunded at epoch).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnstakeRefundEvent {
-    pub account: Address,
+    pub account: IrysAddress,
     pub amount: U256,
     pub irys_ref_txid: H256,
 }
@@ -348,7 +359,7 @@ impl BlockProducerService {
                     .fully_produce_new_block(solution)
                     .await?;
 
-                if let Some((irys_block_header, eth_built_payload)) = result {
+                if let Some((irys_block_header, eth_built_payload, block_transactions)) = result {
                     // Final guard: ensure tests haven't exhausted quota
                     if matches!(self.blocks_remaining_for_test, Some(0)) {
                         info!("Test guard exhausted; dropping candidate block before publication");
@@ -367,7 +378,11 @@ impl BlockProducerService {
                         debug!("Test blocks remaining after publication: {}", *remaining);
                     }
 
-                    let _ = response.send(Ok(Some((irys_block_header, eth_built_payload))));
+                    let _ = response.send(Ok(Some((
+                        irys_block_header,
+                        eth_built_payload,
+                        block_transactions,
+                    ))));
                     return Ok(());
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
@@ -489,6 +504,7 @@ pub trait BlockProdStrategy {
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
+            BlockTransactions,
             EthBuiltPayload,
         )>,
         BlockProductionError,
@@ -557,11 +573,11 @@ pub trait BlockProdStrategy {
             )
             .await?;
 
-        let Some((block, stats)) = block_result else {
+        let Some((block, stats, transactions)) = block_result else {
             return Ok(None);
         };
 
-        Ok(Some((block, stats, eth_built_payload)))
+        Ok(Some((block, stats, transactions, eth_built_payload)))
     }
 
     /// Selects the parent block for new block production.
@@ -600,6 +616,7 @@ pub trait BlockProdStrategy {
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
+            BlockTransactions,
             EthBuiltPayload,
         )>,
         BlockProductionError,
@@ -688,6 +705,7 @@ pub trait BlockProdStrategy {
         Option<(
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
+            BlockTransactions,
             EthBuiltPayload,
         )>,
         BlockProductionError,
@@ -700,7 +718,7 @@ pub trait BlockProdStrategy {
             .await?;
 
         // Check if we need to rebuild on a new parent
-        while let Some((ref block, _, _)) = result {
+        while let Some((ref block, _, _, _)) = result {
             let parent_hash = &block.previous_block_hash;
 
             match self
@@ -752,7 +770,7 @@ pub trait BlockProdStrategy {
             }
         }
 
-        let Some((block, stats, eth_built_payload)) = result else {
+        let Some((block, stats, transactions, eth_built_payload)) = result else {
             return Ok(None);
         };
 
@@ -778,25 +796,25 @@ pub trait BlockProdStrategy {
             );
         }
 
-        Ok(Some((block, stats, eth_built_payload)))
+        Ok(Some((block, stats, transactions, eth_built_payload)))
     }
 
     /// Produces and broadcasts a new block. Kept for tests and direct strategies.
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload)>> {
-        let Some((block, stats, eth_built_payload)) =
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)>> {
+        let Some((block, stats, transactions, eth_built_payload)) =
             self.fully_produce_new_block_candidate(solution).await?
         else {
             return Ok(None);
         };
 
         let block = self
-            .broadcast_block(block, stats, &eth_built_payload)
+            .broadcast_block(block, stats, transactions.clone(), &eth_built_payload)
             .await?;
         let Some(block) = block else { return Ok(None) };
-        Ok(Some((block, eth_built_payload)))
+        Ok(Some((block, eth_built_payload, transactions)))
     }
 
     /// Extracts and collects all transactions that should be included in a block
@@ -887,7 +905,7 @@ pub trait BlockProdStrategy {
             inner: PayloadAttributes {
                 timestamp: timestamp_ms.to_secs().as_secs(), // **THIS HAS TO BE SECONDS**
                 prev_randao: parent_mix_hash,
-                suggested_fee_recipient: self.inner().config.node_config.reward_address,
+                suggested_fee_recipient: self.inner().config.node_config.reward_address.into(),
                 withdrawals: None, // these should ALWAYS be none
                 parent_beacon_block_root: Some(prev_block_header.block_hash.into()),
             },
@@ -986,7 +1004,13 @@ pub trait BlockProdStrategy {
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
         ema_calculation: ExponentialMarketAvgCalculation,
         final_treasury: U256,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, Option<AdjustmentStats>)>> {
+    ) -> eyre::Result<
+        Option<(
+            Arc<IrysBlockHeader>,
+            Option<AdjustmentStats>,
+            BlockTransactions,
+        )>,
+    > {
         let prev_block_hash = prev_block_header.block_hash;
         let block_height = prev_block_header.height + 1;
         let evm_block_hash = eth_built_payload.hash();
@@ -1166,7 +1190,17 @@ pub trait BlockProdStrategy {
         block_signer.sign_block_header(&mut irys_block)?;
 
         let block = Arc::new(irys_block);
-        Ok(Some((block, stats)))
+
+        // Build BlockTransactions from the mempool bundle
+        let block_transactions = BlockTransactions {
+            commitment_txs: mempool_bundle.commitment_txs,
+            data_txs: HashMap::from([
+                (DataLedger::Submit, mempool_bundle.submit_txs),
+                (DataLedger::Publish, mempool_bundle.publish_txs.txs),
+            ]),
+        };
+
+        Ok(Some((block, stats, block_transactions)))
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -1174,6 +1208,7 @@ pub trait BlockProdStrategy {
         &self,
         block: Arc<IrysBlockHeader>,
         stats: Option<AdjustmentStats>,
+        transactions: BlockTransactions,
         eth_built_payload: &EthBuiltPayload,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let mut is_difficulty_updated = false;
@@ -1207,7 +1242,7 @@ pub trait BlockProdStrategy {
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block), false)
+            .handle_block(Arc::clone(&block), transactions, false)
             .await
         {
             Ok(()) => Ok(()),
@@ -1543,8 +1578,9 @@ pub trait BlockProdStrategy {
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
             Arc::clone(&self.inner().block_index),
-            self.inner().service_senders.mempool.clone(),
-            self.inner().db.clone(),
+            &self.inner().block_tree_guard,
+            &self.inner().mempool_guard,
+            &self.inner().db,
             true, // we expect the txs to be promoted otherwise return perm fee
         )
         .in_current_span()

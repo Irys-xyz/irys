@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use irys_types::Address;
+use irys_types::IrysAddress;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -107,7 +107,7 @@ impl DataRequestRecord {
 #[derive(Clone, Debug)]
 pub struct DataRequestTracker {
     /// Per-peer request history
-    request_history: Arc<DashMap<Address, DataRequestRecord>>,
+    request_history: Arc<DashMap<IrysAddress, DataRequestRecord>>,
     /// Maximum score points a peer can gain per minute from data requests
     max_score_per_minute: u32,
     /// Maximum requests per minute before blocking
@@ -134,7 +134,7 @@ impl DataRequestTracker {
     /// Check if score should be increased for this peer's data request
     pub fn check_request(
         &self,
-        peer_address: &Address,
+        peer_address: &IrysAddress,
         duplicate_request_milliseconds: u128,
     ) -> RequestCheckResult {
         // Perform cleanup if needed
@@ -215,7 +215,7 @@ impl DataRequestTracker {
     }
 
     /// Get request statistics for a peer
-    pub fn get_peer_stats(&self, peer_address: &Address) -> Option<DataRequestRecord> {
+    pub fn get_peer_stats(&self, peer_address: &IrysAddress) -> Option<DataRequestRecord> {
         self.request_history
             .get(peer_address)
             .map(|entry| entry.clone())
@@ -284,7 +284,7 @@ impl Default for DataRequestTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::Address;
+    use irys_types::IrysAddress;
 
     const TEST_DEDUP_WINDOW_MS: u128 = 10_000; // Test deduplication window
     const TEST_SLEEP_MS: u64 = 11_000; // Test sleep duration
@@ -292,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn slow_test_data_request_tracker_score_limiting() {
         let tracker = DataRequestTracker::new();
-        let peer_addr = Address::from([1_u8; 20]);
+        let peer_addr = IrysAddress::from([1_u8; 20]);
 
         // First 5 requests should allow score updates
         for i in 1..=5 {
@@ -336,7 +336,7 @@ mod tests {
     #[tokio::test]
     async fn test_data_request_deduplication() {
         let tracker = DataRequestTracker::new();
-        let peer_addr = Address::from([2_u8; 20]);
+        let peer_addr = IrysAddress::from([2_u8; 20]);
 
         // First request
         let result1 = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS);

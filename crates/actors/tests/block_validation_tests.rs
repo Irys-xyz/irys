@@ -3,8 +3,8 @@ use irys_actors::block_validation::{
 };
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
-    compute_solution_hash, partition::PartitionAssignment, Address, Base64, BlockIndexItem,
-    ConsensusConfig, DataLedger, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    compute_solution_hash, partition::PartitionAssignment, Base64, BlockIndexItem, ConsensusConfig,
+    DataLedger, IrysAddress, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
 };
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -87,7 +87,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         partition_hash,
         PartitionAssignment {
             partition_hash,
-            miner_address: Address::ZERO,
+            miner_address: IrysAddress::ZERO,
             ledger_id: Some(DataLedger::Publish as u32),
             slot_index: Some(0),
         },
@@ -107,7 +107,7 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
         &block_index_guard,
         &epoch_snapshot,
         &config,
-        &Address::ZERO,
+        &IrysAddress::ZERO,
     );
 
     assert!(matches!(

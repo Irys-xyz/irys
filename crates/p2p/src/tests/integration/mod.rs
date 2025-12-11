@@ -248,12 +248,13 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
         block_hash: BlockHash::random(),
         ..IrysBlockHeaderV1::new_mock_header()
     });
-    let mut ledger = DataTransactionLedger::default();
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
-    ledger.tx_ids = H256List(vec![tx1.id, tx2.id]);
-    debug!("Added transactions to ledger: {:?}", ledger.tx_ids);
-    block.data_ledgers.push(ledger);
+    block.data_ledgers[1].tx_ids = H256List(vec![tx1.id, tx2.id]);
+    debug!(
+        "Added transactions to Submit ledger: {:?}",
+        block.data_ledgers[1].tx_ids
+    );
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
     signer
         .sign_block_header(&mut block)

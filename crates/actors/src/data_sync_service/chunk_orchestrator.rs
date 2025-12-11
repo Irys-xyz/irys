@@ -5,7 +5,7 @@ use crate::{
     DataSyncServiceMessage,
 };
 use irys_domain::{BlockTreeReadGuard, ChunkTimeRecord, ChunkType, CircularBuffer, StorageModule};
-use irys_types::{Address, LedgerChunkOffset, NodeConfig, PartitionChunkOffset};
+use irys_types::{IrysAddress, LedgerChunkOffset, NodeConfig, PartitionChunkOffset};
 use std::{
     collections::{hash_map, HashMap, HashSet},
     sync::{Arc, RwLock},
@@ -20,13 +20,13 @@ pub enum ChunkRequestState {
 
     /// Chunk has been requested from the specified peer at the given timestamp.
     /// Used for tracking timeouts and preventing duplicate requests.
-    Requested(Address, Instant),
+    Requested(IrysAddress, Instant),
 
     /// Chunk has been successfully retrieved and stored.
     Completed,
 }
 
-type ExcludedPeerAddresses = HashSet<Address>;
+type ExcludedPeerAddresses = HashSet<IrysAddress>;
 #[derive(Debug)]
 pub struct ChunkRequest {
     pub ledger_id: usize,
@@ -46,12 +46,12 @@ pub struct ChunkRequest {
 #[derive(Debug)]
 pub struct ChunkOrchestrator {
     pub chunk_requests: HashMap<PartitionChunkOffset, ChunkRequest>,
-    pub current_peers: Vec<Address>,
+    pub current_peers: Vec<IrysAddress>,
     block_tree: BlockTreeReadGuard,
     pub storage_module: Arc<StorageModule>,
     recent_chunk_times: CircularBuffer<ChunkTimeRecord>, // Performance tracking for observability
     // Shared reference to peer bandwidth managers maintained by DataSyncService
-    active_sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+    active_sync_peers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
     service_senders: ServiceSenders,
     slot_index: usize,
     ledger_id: u32,
@@ -61,7 +61,7 @@ pub struct ChunkOrchestrator {
 impl ChunkOrchestrator {
     pub fn new(
         storage_module: Arc<StorageModule>,
-        sync_peers: Arc<RwLock<HashMap<Address, PeerBandwidthManager>>>,
+        sync_peers: Arc<RwLock<HashMap<IrysAddress, PeerBandwidthManager>>>,
         block_tree: BlockTreeReadGuard,
         service_senders: &ServiceSenders,
         chunk_fetcher: Arc<dyn ChunkFetcher>,
@@ -360,7 +360,7 @@ impl ChunkOrchestrator {
         result
     }
 
-    fn find_best_peer(&self, excluding: Option<&ExcludedPeerAddresses>) -> Option<Address> {
+    fn find_best_peer(&self, excluding: Option<&ExcludedPeerAddresses>) -> Option<IrysAddress> {
         let peers = self.active_sync_peers.read().ok()?;
 
         let mut candidates: Vec<&PeerBandwidthManager> = self
@@ -396,7 +396,11 @@ impl ChunkOrchestrator {
     }
 
     #[tracing::instrument(skip_all)]
-    fn dispatch_chunk_request(&mut self, chunk_offset: PartitionChunkOffset, peer_addr: Address) {
+    fn dispatch_chunk_request(
+        &mut self,
+        chunk_offset: PartitionChunkOffset,
+        peer_addr: IrysAddress,
+    ) {
         let request = match self.chunk_requests.get_mut(&chunk_offset) {
             Some(req) => req,
             None => return,
@@ -476,7 +480,7 @@ impl ChunkOrchestrator {
     pub fn on_chunk_completed(
         &mut self,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_addr: IrysAddress,
     ) -> eyre::Result<ChunkTimeRecord> {
         let request = self.chunk_requests.get_mut(&chunk_offset).ok_or_else(|| {
             eyre::eyre!("Chunk completion for unknown offset: {:?}", chunk_offset)
@@ -527,7 +531,7 @@ impl ChunkOrchestrator {
     pub fn on_chunk_failed(
         &mut self,
         chunk_offset: PartitionChunkOffset,
-        peer_addr: Address,
+        peer_addr: IrysAddress,
     ) -> eyre::Result<()> {
         let request = self
             .chunk_requests
@@ -570,13 +574,13 @@ impl ChunkOrchestrator {
         Ok(())
     }
 
-    pub fn add_peer(&mut self, peer_addr: Address) {
+    pub fn add_peer(&mut self, peer_addr: IrysAddress) {
         if !self.current_peers.contains(&peer_addr) {
             self.current_peers.push(peer_addr);
         }
     }
 
-    pub fn remove_peer(&mut self, peer_addr: Address) {
+    pub fn remove_peer(&mut self, peer_addr: IrysAddress) {
         self.current_peers.retain(|&addr| addr != peer_addr);
 
         for request in self.chunk_requests.values_mut() {

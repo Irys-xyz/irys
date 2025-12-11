@@ -21,7 +21,7 @@ echo "========================================"
 # Check if containers are already running
 echo "Checking if containers are running..."
 containers_running=true
-for container in irys-node-1 irys-node-2 irys-node-3; do
+for container in test-irys-1 test-irys-2 test-irys-3; do
     if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
         containers_running=false
         break
@@ -30,7 +30,13 @@ done
 
 if [ "$containers_running" = false ]; then
     echo "Containers not running. Starting Docker Compose..."
-    docker compose up -d --build
+    # Only build if --build flag is passed or image doesn't exist
+    BUILD_FLAG=""
+    if [[ " $* " == *" --build "* ]] || ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^irys-test:latest$"; then
+        BUILD_FLAG="--build"
+        echo "Building image (use existing with --no-build to skip)..."
+    fi
+    DOCKER_BUILDKIT=0 docker compose up -d $BUILD_FLAG
 
     # Wait for nodes to be ready
     echo "Waiting for nodes to initialize..."

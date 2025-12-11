@@ -7,11 +7,11 @@ use irys_types::{
     serialization::string_u64,
     storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee},
     transaction::{CommitmentTransaction, PledgeDataProvider as _},
-    Address, DataLedger, U256,
+    DataLedger, IrysAddress, U256,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{error::ApiError, utils::address::parse_address, ApiState};
+use crate::{error::ApiError, ApiState};
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -28,7 +28,7 @@ pub struct PriceInfo {
 pub struct CommitmentPriceInfo {
     pub value: U256,
     pub fee: U256,
-    pub user_address: Option<Address>,
+    pub user_address: Option<IrysAddress>,
     #[serde(default, with = "irys_types::serialization::optional_string_u64")]
     pub pledge_count: Option<u64>,
 }
@@ -175,11 +175,10 @@ pub async fn get_unstake_price(state: web::Data<ApiState>) -> ActixResult<HttpRe
 }
 
 pub async fn get_pledge_price(
-    path: Path<String>,
+    address: Path<IrysAddress>,
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
-    let user_address_str = path.into_inner();
-    let user_address = parse_address(&user_address_str).map_err(actix_web::Error::from)?;
+    let user_address = address.into_inner();
 
     // Use the MempoolPledgeProvider to get accurate pledge count
     let pledge_count = state
@@ -204,11 +203,10 @@ pub async fn get_pledge_price(
 }
 
 pub async fn get_unpledge_price(
-    path: Path<String>,
+    address: Path<IrysAddress>,
     state: web::Data<ApiState>,
 ) -> ActixResult<HttpResponse> {
-    let user_address_str = path.into_inner();
-    let user_address = parse_address(&user_address_str).map_err(actix_web::Error::from)?;
+    let user_address = address.into_inner();
 
     // Use the MempoolPledgeProvider to get accurate pledge count
     let pledge_count = state

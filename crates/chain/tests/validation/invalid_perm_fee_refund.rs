@@ -4,13 +4,14 @@ use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
 use crate::validation::send_block_to_block_tree;
+use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::Address;
+use irys_types::IrysAddress;
 use irys_types::{
     DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
     U256,
@@ -24,7 +25,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
         pub data_tx: DataTransactionHeader,
-        pub invalid_refund: (H256, U256, Address),
+        pub invalid_refund: (H256, U256, IrysAddress),
     }
 
     #[async_trait::async_trait]
@@ -109,13 +110,19 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block to the Genesis node for validation (not the genesis node)
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
         outcome,
@@ -124,7 +131,13 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     );
 
     // Send block to the PEER node for validation (not the genesis node)
-    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &peer_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     // Verify the PEER node rejected the block
     let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
@@ -155,7 +168,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
 pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> eyre::Result<()> {
     struct PhantomRefundStrategy {
         pub prod: ProductionStrategy,
-        pub invalid_refund: (H256, U256, Address),
+        pub invalid_refund: (H256, U256, IrysAddress),
     }
 
     #[async_trait::async_trait]
@@ -220,13 +233,19 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         },
     };
 
-    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block to the Genesis node for validation (not the genesis node)
-    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &genesis_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
         outcome,
@@ -235,7 +254,13 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
     );
 
     // Send block to the PEER node for validation (not the genesis node)
-    send_block_to_block_tree(&peer_node.node_ctx, block.clone(), vec![], false).await?;
+    send_block_to_block_tree(
+        &peer_node.node_ctx,
+        block.clone(),
+        BlockTransactions::default(),
+        false,
+    )
+    .await?;
 
     // Verify the PEER node rejected the block
     let outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;

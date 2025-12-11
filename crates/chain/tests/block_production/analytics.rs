@@ -155,13 +155,17 @@ async fn test_blockprod_with_evm_txs() -> eyre::Result<()> {
 
             let evm_tx_req = TransactionRequest {
                 to: Some(TxKind::Call(
-                    accounts.get(to_index).unwrap().address(), /* config.mining_signer.address() */
+                    accounts.get(to_index).unwrap().alloy_address(), /* config.mining_signer.address() */
                 )),
                 max_fee_per_gas: Some(20e9 as u128),
                 max_priority_fee_per_gas: Some(20e9 as u128),
                 gas: Some(21000),
                 value: Some(U256::from(simple_rng.next_range(20_000))),
-                nonce: Some(alloy_provider.get_transaction_count(a.address()).await?),
+                nonce: Some(
+                    alloy_provider
+                        .get_transaction_count(a.alloy_address())
+                        .await?,
+                ),
                 chain_id: Some(node.node_ctx.config.consensus.chain_id),
                 ..Default::default()
             };

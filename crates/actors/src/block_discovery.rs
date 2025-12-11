@@ -1,16 +1,16 @@
 use crate::{
     block_tree_service::BlockTreeServiceMessage,
     block_validation::{prevalidate_block, PreValidationError},
+    mempool_guard::MempoolReadGuard,
     services::ServiceSenders,
-    MempoolServiceMessage, MempoolServiceMessageWithSpan,
+    MempoolServiceMessage,
 };
 
-use crate::mempool_guard::MempoolReadGuard;
 use async_trait::async_trait;
-use futures::{future::BoxFuture, FutureExt as _};
+use futures::future::BoxFuture;
 use irys_database::{
-    block_header_by_hash, commitment_tx_by_txid, db::IrysDatabaseExt as _, tx_header_by_txid,
-    SystemLedger,
+    block_header_by_hash, cached_data_root_by_data_root, commitment_tx_by_txid,
+    db::IrysDatabaseExt as _, tx_header_by_txid,
 };
 use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
@@ -26,7 +26,7 @@ use reth::tasks::shutdown::Shutdown;
 use reth_db::Database as _;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{
-    mpsc::{self, error::SendError, UnboundedSender},
+    mpsc::{self, error::SendError},
     oneshot::{self, error::RecvError},
 };
 use tracing::{debug, error, info, trace, warn, Instrument as _};
@@ -57,6 +57,13 @@ pub enum BlockDiscoveryError {
         item_type: AnchorItemType,
         anchor: BlockHash,
     },
+    #[error("Invalid signature for transaction {0}")]
+    InvalidSignature(IrysTransactionId),
+    #[error("Transaction ID mismatch: expected {expected}, got {actual}")]
+    TransactionIdMismatch {
+        expected: IrysTransactionId,
+        actual: IrysTransactionId,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,6 +71,31 @@ pub enum AnchorItemType {
     DataTransaction { tx_id: H256 },
     IngressProof { promotion_target_id: H256 },
     SystemTransaction { tx_id: H256 },
+}
+
+/// Transactions for a block, organized by ledger type.
+/// Used to pass pre-fetched transactions to block discovery.
+#[derive(Debug, Clone, Default)]
+pub struct BlockTransactions {
+    /// Commitment ledger transactions
+    pub commitment_txs: Vec<CommitmentTransaction>,
+    /// Data transactions organized by ledger type
+    pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
+}
+
+impl BlockTransactions {
+    /// Get transactions for a specific data ledger
+    pub fn get_ledger_txs(&self, ledger: DataLedger) -> &[DataTransactionHeader] {
+        self.data_txs
+            .get(&ledger)
+            .map(std::vec::Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Iterate over all data transactions across all ledgers
+    pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
+        self.data_txs.values().flatten()
+    }
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -93,6 +125,7 @@ pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError>;
 }
@@ -113,15 +146,17 @@ impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(
         &self,
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
-            .send(BlockDiscoveryMessage::BlockDiscovered(
+            .send(BlockDiscoveryMessage::BlockDiscovered {
                 block,
+                transactions,
                 skip_vdf,
-                Some(tx),
-            ))
+                response: Some(tx),
+            })
             .map_err(BlockDiscoveryInternalError::SenderError)?;
 
         rx.await.map_err(BlockDiscoveryInternalError::RecvError)?
@@ -225,15 +260,20 @@ impl BlockDiscoveryService {
     #[tracing::instrument(level = "trace", skip_all)]
     async fn handle_message(&self, msg: BlockDiscoveryMessage) -> eyre::Result<()> {
         match msg {
-            BlockDiscoveryMessage::BlockDiscovered(irys_block_header, skip_vdf, sender) => {
-                let block_hash = irys_block_header.block_hash;
-                let block_height = irys_block_header.height;
+            BlockDiscoveryMessage::BlockDiscovered {
+                block,
+                transactions,
+                skip_vdf,
+                response,
+            } => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
                 let result = self
                     .inner
                     .clone()
-                    .block_discovered(irys_block_header, skip_vdf)
+                    .block_discovered(block, transactions, skip_vdf)
                     .await;
-                if let Some(sender) = sender {
+                if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
                         tracing::error!(
                             "Block discovery sender error for block {} (height {}): {:?}",
@@ -251,13 +291,13 @@ impl BlockDiscoveryService {
 }
 
 #[derive(Debug)]
-
 pub enum BlockDiscoveryMessage {
-    BlockDiscovered(
-        Arc<IrysBlockHeader>,
-        bool,
-        Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
-    ),
+    BlockDiscovered {
+        block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
+        skip_vdf: bool,
+        response: Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
+    },
 }
 
 impl BlockDiscoveryServiceInner {
@@ -265,6 +305,7 @@ impl BlockDiscoveryServiceInner {
     pub async fn block_discovered(
         &self,
         block: Arc<IrysBlockHeader>,
+        transactions: BlockTransactions,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
@@ -299,7 +340,6 @@ impl BlockDiscoveryServiceInner {
 
         let gossip_sender = self.service_senders.gossip_broadcast.clone();
         let reward_curve = Arc::clone(&self.reward_curve);
-        let mempool = self.service_senders.mempool.clone();
         let mempool_config = self.config.consensus.mempool.clone();
 
         let previous_block_header = {
@@ -330,60 +370,6 @@ impl BlockDiscoveryServiceInner {
         //------------------------------------
         // Get all the submit ledger transactions for the new block, error if not found
         // this is how we validate that the TXIDs in the Submit Ledger are real transactions.
-        // If they are in our mempool and validated we know they are real, if not we have
-        // to retrieve and validate them from the block producer.
-        // TODO: in the future we'll retrieve the missing transactions from the block
-        // producer and validate them.
-        //
-        let submit_ledger = new_block_header
-            .data_ledgers
-            .get(DataLedger::Submit as usize)
-            .ok_or_else(|| {
-                BlockDiscoveryError::InvalidDataLedgersLength(
-                    DataLedger::Submit.into(),
-                    new_block_header.data_ledgers.len(),
-                )
-            })?;
-
-        let submit_tx_ids_to_check = submit_ledger.tx_ids.0.clone();
-
-        let (tx, rx) = oneshot::channel();
-        mempool
-            .send(MempoolServiceMessage::GetDataTxs(submit_tx_ids_to_check.clone(), tx).into())
-            .map_err(|channel_error| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-            })?;
-
-        let submit_txs = rx
-            .await
-            .map_err(|e| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                    "Mempool response error: {}",
-                    e
-                ))
-            })?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
-
-        if submit_txs.len() != submit_tx_ids_to_check.len() {
-            return Err(BlockDiscoveryError::MissingTransactions(
-                submit_tx_ids_to_check
-                    .into_iter()
-                    .filter(|id| !submit_txs.iter().any(|tx| tx.id == *id))
-                    .collect(),
-            ));
-        }
-
-        //====================================
-        // Publish ledger TX Validation
-        //------------------------------------
-        // 1. Validate the proof
-        // 2. Validate the transaction
-        // 3. Update the local tx headers index to include the ingress-proof.
-        //    This keeps the transaction from getting re-promoted each block.
-        //    (this last step performed in mempool after the block is confirmed)
-
         let publish_ledger = new_block_header
             .data_ledgers
             .get(DataLedger::Publish as usize)
@@ -394,26 +380,11 @@ impl BlockDiscoveryServiceInner {
                 )
             })?;
 
+        // Get references to transactions for anchor validation
+        let submit_txs = transactions.get_ledger_txs(DataLedger::Submit);
+        let publish_txs = transactions.get_ledger_txs(DataLedger::Publish);
+        let commitment_txs = &transactions.commitment_txs;
         let publish_tx_ids_to_check = publish_ledger.tx_ids.0.clone();
-
-        let (tx, rx) = oneshot::channel();
-        mempool
-            .send(MempoolServiceMessage::GetDataTxs(publish_tx_ids_to_check.clone(), tx).into())
-            .map_err(|channel_error| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
-            })?;
-
-        let publish_txs = rx
-            .await
-            .map_err(|e| {
-                BlockDiscoveryInternalError::MempoolRequestFailed(format!(
-                    "Mempool response error: {}",
-                    e
-                ))
-            })?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
 
         if publish_txs.len() != publish_tx_ids_to_check.len() {
             let missing_txs = publish_tx_ids_to_check
@@ -440,50 +411,26 @@ impl BlockDiscoveryServiceInner {
                             PreValidationError::IngressProofSignatureInvalid(e.to_string()),
                         )
                     })?;
-                }
-            }
-        }
 
-        //====================================
-        // Commitment ledger TX Validation
-        //------------------------------------
-        // Extract the Commitment ledger from the block
-        let commitment_ledger = new_block_header
-            .system_ledgers
-            .iter()
-            .find(|b| b.ledger_id == SystemLedger::Commitment);
+                    // Check to see if we have a confirmed data_size for the data_root
+                    let cdr = self
+                        .db
+                        .view_eyre(|tx| cached_data_root_by_data_root(tx, tx_header.data_root))
+                        .map_err(BlockDiscoveryInternalError::DatabaseError)?;
 
-        // Validate commitments transactions exist (if there are commitment txids in the block)
-        let mut commitments: Vec<CommitmentTransaction> = Vec::new();
-        if let Some(commitment_ledger) = commitment_ledger {
-            debug!(
-                "incoming block commitment txids, height {} hash {}\n{:#?}",
-                new_block_header.height, new_block_header.block_hash, commitment_ledger
-            );
-            // TODO: we can't get these from the database
-            // if we can, something has gone wrong!
-            match get_commitment_tx_in_parallel(
-                &commitment_ledger.tx_ids.0,
-                &self.mempool_guard,
-                &db,
-            )
-            .await
-            {
-                Ok(tx) => {
-                    commitments = tx;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to collect commitment transactions for block {} (height {}): {:?}. Missing {} tx(s): {:?}",
-                        new_block_header.block_hash,
-                        new_block_header.height,
-                        e,
-                        commitment_ledger.tx_ids.0.len(),
-                        commitment_ledger.tx_ids.0
-                    );
-                    return Err(BlockDiscoveryError::MissingTransactions(
-                        commitment_ledger.tx_ids.0.clone(),
-                    ));
+                    // If so, compare it with the data_size in the tx
+                    if let Some(cdr) = cdr {
+                        // If the tx data_size doesn't match the confirmed size, this is an invalid promotion
+                        if cdr.data_size_confirmed && cdr.data_size != tx_header.data_size {
+                            return Err(BlockDiscoveryError::BlockValidationError(
+                                PreValidationError::InvalidPromotionDataSizeMismatch {
+                                    txid: tx_header.id,
+                                    got: tx_header.data_size,
+                                    expected: cdr.data_size,
+                                },
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -630,7 +577,7 @@ impl BlockDiscoveryServiceInner {
         // for commitments, only validate if we're not an epoch block
         // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
         if !is_epoch_block {
-            for tx in commitments.iter() {
+            for tx in commitment_txs.iter() {
                 if !valid_tx_anchor_blocks.contains(&tx.anchor) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
@@ -690,19 +637,14 @@ impl BlockDiscoveryServiceInner {
             config,
             reward_curve,
             &parent_ema_snapshot,
+            &transactions,
         )
         .in_current_span()
         .await;
 
         match validation_result {
             Ok(()) => {
-                // all txs
-                let mut all_txs = submit_txs;
-                all_txs.extend_from_slice(&publish_txs);
-
                 // Check if we've reached the end of an epoch and should finalize commitments
-
-                let arc_commitment_txs = Arc::new(commitments);
 
                 let (epoch_snapshot, mut parent_commitment_snapshot) = {
                     let read = block_tree_guard.read();
@@ -735,13 +677,13 @@ impl BlockDiscoveryServiceInner {
                     let commitments_match = expected_commitment_tx
                         .iter()
                         .map(|c| &**c) // Deref to inner CommitmentTransaction
-                        .eq(arc_commitment_txs.iter().map(|v| &**v));
+                        .eq(commitment_txs.iter().map(|v| &**v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
                                 new_block_header.block_hash,
                                 expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
-                                arc_commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
+                                commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
                             );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),
@@ -749,7 +691,7 @@ impl BlockDiscoveryServiceInner {
                     }
                 } else {
                     // Validate and add each commitment transaction for non-epoch blocks
-                    for commitment_tx in arc_commitment_txs.iter() {
+                    for commitment_tx in commitment_txs.iter() {
                         let status = parent_commitment_snapshot
                             .get_commitment_status(commitment_tx, &epoch_snapshot);
 
@@ -819,7 +761,7 @@ impl BlockDiscoveryServiceInner {
                 block_tree_sender
                     .send(BlockTreeServiceMessage::BlockPreValidated {
                         block: new_block_header.clone(),
-                        commitment_txs: arc_commitment_txs,
+                        transactions,
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })
@@ -945,26 +887,30 @@ pub async fn get_commitment_tx_in_parallel(
     merge_commitment_tx_results(commitment_tx_ids, mempool_result?, db_result?)
 }
 
-/// Get all data transactions from the mempool and database
+/// Get all data transactions from the mempool and database using direct read guard access.
 pub async fn get_data_tx_in_parallel(
     data_tx_ids: Vec<IrysTransactionId>,
-    mempool_sender: &UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<Vec<DataTransactionHeader>> {
-    get_data_tx_in_parallel_inner(
-        data_tx_ids,
-        |tx_ids| {
-            let sender = mempool_sender.clone();
-            async move {
-                let (tx, rx) = oneshot::channel();
-                sender.send(MempoolServiceMessage::GetDataTxs(tx_ids, tx).into())?;
-                Ok(rx.await?)
-            }
-            .boxed()
-        },
-        db,
-    )
-    .await
+    let guard = mempool_guard.clone();
+
+    let get_data_txs = move |tx_ids: Vec<IrysTransactionId>| -> BoxFuture<
+        'static,
+        eyre::Result<Vec<Option<DataTransactionHeader>>>,
+    > {
+        let guard = guard.clone();
+        Box::pin(async move {
+            let mempool_map = guard.get_data_txs(&tx_ids).await;
+            let results: Vec<Option<DataTransactionHeader>> = tx_ids
+                .iter()
+                .map(|id| mempool_map.get(id).cloned())
+                .collect();
+            Ok(results)
+        })
+    };
+
+    get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
 }
 
 /// Get all data transactions from the mempool and database

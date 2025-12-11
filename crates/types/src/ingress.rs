@@ -1,9 +1,9 @@
 use crate::irys::IrysSigner;
 use crate::{
     decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves, DataRoot,
-    IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
+    IrysAddress, IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
 };
-use alloy_primitives::{Address, ChainId};
+use alloy_primitives::ChainId;
 use alloy_rlp::Encodable as _;
 use arbitrary::Arbitrary;
 use bytes::BufMut;
@@ -90,14 +90,14 @@ impl VersionDiscriminant for IngressProof {
 }
 
 impl IngressProof {
-    pub fn recover_signer(&self) -> eyre::Result<Address> {
+    pub fn recover_signer(&self) -> eyre::Result<IrysAddress> {
         let prehash = self.signature_hash();
         self.signature.recover_signer(prehash)
     }
 
     /// Validates that the proof matches the provided data_root and recovers the signer address
     /// This method ensures the proof is for the correct data_root before validating the signature
-    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<Address> {
+    pub fn pre_validate(&self, data_root: &H256) -> eyre::Result<IrysAddress> {
         // Validate that the data_root matches
         if self.data_root != *data_root {
             return Err(eyre::eyre!("Ingress proof data_root mismatch"));
@@ -109,7 +109,7 @@ impl IngressProof {
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Compact, Arbitrary)]
 pub struct CachedIngressProof {
-    pub address: Address, // subkey
+    pub address: IrysAddress, // subkey
     pub proof: IngressProof,
 }
 
@@ -155,7 +155,7 @@ impl Decompress for IngressProofV1 {
 
 pub fn generate_ingress_proof_tree<C: AsRef<[u8]>>(
     chunks: impl Iterator<Item = eyre::Result<C>>,
-    address: Address,
+    address: IrysAddress,
     and_regular: bool,
 ) -> eyre::Result<(Node, Option<Node>)> {
     let (ingress_leaves, regular_leaves) = generate_ingress_leaves(chunks, address, and_regular)?;
@@ -205,7 +205,7 @@ pub fn verify_ingress_proof<C: AsRef<[u8]>>(
 
     // re-compute the ingress proof & regular trees & roots
     let (proof_root, regular_root) =
-        generate_ingress_proof_tree(chunks.into_iter().map(Ok), recovered_address, true)?;
+        generate_ingress_proof_tree(chunks.into_iter().map(Ok), recovered_address.into(), true)?;
 
     let data_root = H256(
         regular_root

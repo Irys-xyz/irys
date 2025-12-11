@@ -72,7 +72,7 @@ async fn heavy_test_block_with_incorrect_pd_base_fee_gets_rejected() -> eyre::Re
     // Mine a block on the peer node with its different base_fee_floor
     // This block will contain a PdBaseFeeUpdate shadow transaction calculated
     // using the peer's higher floor value
-    let (block, block_eth_payload) = peer_node.mine_block_without_gossip().await?;
+    let (block, block_eth_payload, _) = peer_node.mine_block_without_gossip().await?;
 
     // Gossip the block to the genesis node
     peer_node.gossip_block_to_peers(&block)?;

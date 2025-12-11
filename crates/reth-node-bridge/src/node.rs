@@ -1,8 +1,9 @@
 use alloy_eips::BlockNumberOrTag;
+use alloy_primitives::Address;
 use alloy_rpc_types_engine::PayloadAttributes;
 use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEngineValidatorBuilder, IrysEthereumNode, IrysPayloadBuilderAttributes};
-use irys_types::{Address, NetworkConfigWithDefaults as _};
+use irys_types::NetworkConfigWithDefaults as _;
 use reth::{
     args::DatabaseArgs,
     prometheus_exporter::install_prometheus_recorder,
