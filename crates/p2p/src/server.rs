@@ -179,7 +179,7 @@ where
                 let block_hash_string = gossip_request.data.block_hash;
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
+                    .handle_block_header(gossip_request, source_socket_addr)
                     .in_current_span()
                     .await
                 {
@@ -242,9 +242,16 @@ where
         let this_node_id = server.data_handler.gossip_client.mining_address;
         let block_hash = gossip_request.data.block_hash;
 
+        let handler = server.data_handler.clone();
+
         tokio::spawn(
             async move {
-                // TODO: implement
+                handler.handle_block_body(
+                    gossip_request,
+                    source_socket_addr,
+                )
+                // If we already processed this block, don't do anything
+                // If we haven't, fetch the header and send it to the block pool.
             }
             .in_current_span(),
         );

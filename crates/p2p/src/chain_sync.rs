@@ -329,7 +329,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                 futures.push(async move {
                     // Fetch transactions using unified method (cache + mempool + network)
                     let block_transactions = gossip_data_handler
-                        .fetch_and_build_block_transactions(&header, None)
+                        .pull_block_body(&header, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!(
@@ -624,31 +624,16 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                     // Get cached block header from block_pool
                     if let Some(cached_block) = inner.block_pool.get_cached_block(&block_hash).await
                     {
-                        // Use GossipDataHandler for network-enabled tx fetching
-                        match inner
-                            .gossip_data_handler
-                            .fetch_and_build_block_transactions(&cached_block.header, None)
+                        if let Err(e) = inner
+                            .block_pool
+                            .process_block::<T>(
+                                cached_block.header,
+                                cached_block.block_body,
+                                cached_block.is_fast_tracking,
+                            )
                             .await
                         {
-                            Ok(block_transactions) => {
-                                if let Err(e) = inner
-                                    .block_pool
-                                    .process_block::<T>(
-                                        cached_block.header,
-                                        block_transactions,
-                                        cached_block.is_fast_tracking,
-                                    )
-                                    .await
-                                {
-                                    error!("Failed to reprocess block {:?}: {:?}", block_hash, e);
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to fetch transactions for reprocessing block {:?}: {:?}",
-                                    block_hash, e
-                                );
-                            }
+                            error!("Failed to reprocess block {:?}: {:?}", block_hash, e);
                         }
                     } else {
                         error!(

@@ -8,7 +8,7 @@ use crate::versioning::{
     compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
     VersioningError,
 };
-use crate::{decode_rlp_version, encode_rlp_version};
+use crate::{decode_rlp_version, encode_rlp_version, IrysTransactionCommon as _};
 use crate::{
     generate_data_root, generate_leaves_from_data_roots, option_u64_stringify,
     partition::PartitionHash,
@@ -21,6 +21,7 @@ use crate::{
 };
 use crate::{CommitmentTransaction, IrysAddress};
 
+use alloy_primitives::map::foldhash::HashSet;
 use alloy_primitives::{keccak256, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
@@ -1069,6 +1070,54 @@ pub struct BlockBody {
     pub block_hash: BlockHash,
     pub data_transactions: Vec<DataTransactionHeader>,
     pub commitment_transactions: Vec<CommitmentTransaction>,
+}
+
+impl BlockBody {
+    /// Verify all transaction signatures and ids
+    pub fn verify_tx_signatures(&self) -> bool {
+        for tx in &self.data_transactions {
+            if !tx.is_signature_valid() {
+                return false;
+            }
+        }
+
+        for tx in &self.commitment_transactions {
+            if !tx.is_signature_valid() {
+                return false;
+            }
+        }
+
+        true
+    }
+    pub fn tx_ids_match_the_header(&self, header: &IrysBlockHeader) -> eyre::Result<bool> {
+        let res = self.verify_tx_signatures();
+
+        if !res {
+            return Ok(false);
+        }
+
+        let expected_commitment_tx_ids: HashSet<H256> = header
+            .get_commitment_ledger_tx_ids()
+            .iter()
+            .copied()
+            .collect();
+        let expected_data_tx_ids: HashSet<H256> = header
+            .data_ledgers
+            .iter()
+            .flat_map(|ledger| ledger.tx_ids.0.clone())
+            .collect();
+
+        let actual_commitment_tx_ids: HashSet<H256> = self
+            .commitment_transactions
+            .iter()
+            .map(super::transaction::IrysTransactionCommon::id)
+            .collect();
+        let actual_data_tx_ids: HashSet<H256> =
+            self.data_transactions.iter().map(super::transaction::IrysTransactionCommon::id).collect();
+
+        Ok(expected_commitment_tx_ids == actual_commitment_tx_ids
+            && expected_data_tx_ids == actual_data_tx_ids)
+    }
 }
 
 #[cfg(test)]

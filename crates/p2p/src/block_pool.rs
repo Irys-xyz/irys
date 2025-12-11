@@ -609,7 +609,7 @@ where
     pub(crate) async fn process_block<A: ApiClient>(
         &self,
         block_header: Arc<IrysBlockHeader>,
-        block_transactions: BlockTransactions,
+        block_body: Arc<BlockBody>,
         skip_validation_for_fast_track: bool,
     ) -> Result<ProcessBlockResult, BlockPoolError> {
         check_block_status(
@@ -636,7 +636,7 @@ where
             .blocks_cache
             .add_block(
                 Arc::clone(&block_header),
-                Default::default(),
+                Arc::clone(&block_body),
                 skip_validation_for_fast_track,
             )
             .await;
@@ -681,6 +681,11 @@ where
         }
 
         if !previous_block_status.is_processed() {
+            let block_transactions = order_transactions_for_block(
+                &block_header,
+                block_body.data_transactions.clone(),
+                block_body.commitment_transactions.clone(),
+            );
             self.blocks_cache
                 .change_block_processing_status(block_header.block_hash, false)
                 .await;
@@ -820,6 +825,12 @@ where
         self.block_status_provider
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;
+
+        let block_transactions = order_transactions_for_block(
+            &block_header,
+            block_body.data_transactions.clone(),
+            block_body.commitment_transactions.clone(),
+        );
 
         debug!(
             "Block pool: Processing block {:?} with {} submit, {} publish, {} commitment txs",
@@ -1191,26 +1202,26 @@ where
 /// Transactions are returned in the exact order specified in the block header,
 /// which is critical for commitment transaction validation (e.g., stake must come before pledge).
 pub(crate) fn order_transactions_for_block(
-    block: &IrysBlockHeader,
+    block_header: &IrysBlockHeader,
     data_txs: Vec<irys_types::DataTransactionHeader>,
     commitment_txs: Vec<irys_types::CommitmentTransaction>,
 ) -> BlockTransactions {
     use std::collections::HashMap;
 
     // Extract required IDs from block header (preserving order)
-    let submit_ids: Vec<H256> = block
+    let submit_ids: Vec<H256> = block_header
         .data_ledgers
         .get(DataLedger::Submit as usize)
         .map(|l| l.tx_ids.0.clone())
         .unwrap_or_default();
 
-    let publish_ids: Vec<H256> = block
+    let publish_ids: Vec<H256> = block_header
         .data_ledgers
         .get(DataLedger::Publish as usize)
         .map(|l| l.tx_ids.0.clone())
         .unwrap_or_default();
 
-    let commitment_ids: Vec<H256> = block
+    let commitment_ids: Vec<H256> = block_header
         .system_ledgers
         .iter()
         .find(|l| l.ledger_id == SystemLedger::Commitment as u32)

@@ -19,7 +19,7 @@ use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config,
     DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionId, IrysTransactionResponse, TokioServiceHandle, H256,
+    IrysTransactionId, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
