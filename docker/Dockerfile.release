@@ -1,0 +1,27 @@
+# Release Dockerfile for pre-built x86_64 binary
+# Binary is built by CI and copied in at build time
+
+FROM debian:bookworm-slim
+
+ARG GIT_COMMIT=unknown
+ARG BINARY_MD5=unknown
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libgmp10 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built binary from CI build step
+COPY irys /app/irys
+COPY docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/irys /app/entrypoint.sh
+
+# Write build info
+RUN echo "commit=${GIT_COMMIT}" > /app/build-info.txt && \
+    echo "binary_md5=${BINARY_MD5}" >> /app/build-info.txt
+
+ENTRYPOINT ["/app/entrypoint.sh"]
