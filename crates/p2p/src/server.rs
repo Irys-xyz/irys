@@ -133,7 +133,7 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_block(
+    async fn handle_block_header(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
         req: actix_web::HttpRequest,
@@ -157,9 +157,10 @@ where
             ));
         };
 
-        let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
-            Err(error_response) => return error_response,
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
+        {
+            return error_response;
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
@@ -607,7 +608,7 @@ where
                         .route("/transaction", web::post().to(Self::handle_transaction))
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
-                        .route("/block", web::post().to(Self::handle_block))
+                        .route("/block", web::post().to(Self::handle_block_header))
                         .route("/block_body", web::post().to(Self::handle_block_body))
                         .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
                         .route(

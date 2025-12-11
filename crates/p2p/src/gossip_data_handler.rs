@@ -1135,15 +1135,6 @@ where
             .pull_block_body_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
             .await?;
 
-        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
-            // This shouldn't happen, but we still should have a safeguard just in case
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_address
-            );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block body from it, but it was not found".into()));
-        };
-
         debug!(
             "Fetched block body for block {} from peer {}",
             block_hash, source_address
