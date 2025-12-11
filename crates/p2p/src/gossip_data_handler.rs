@@ -6,7 +6,7 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::block_discovery::build_block_body_for_processed_block;
+use irys_actors::block_discovery::build_block_body_for_processed_block_header;
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
     CriticalChunkIngressError, MempoolFacade,
@@ -524,14 +524,15 @@ where
             {
                 Ok(body) => match body.tx_ids_match_the_header(&block_header) {
                     Ok(true) => {
+                        debug!("Fetched block body matches header transactions");
                         block_body = Some(body);
                         break;
                     }
                     Ok(false) => {
                         warn!(
-                                "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
-                                self.gossip_client.mining_address, block_header.block_hash, block_header.height, attempt, HEADER_AND_BODY_RETRIES
-                            );
+                            "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
+                            self.gossip_client.mining_address, block_header.block_hash, block_header.height, attempt, HEADER_AND_BODY_RETRIES
+                        );
                         last_error = Some(GossipError::InvalidData(
                             InvalidDataError::BlockBodyTransactionsMismatch,
                         ));
@@ -929,24 +930,10 @@ where
                 {
                     Some(block_body)
                 } else {
-                    let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
-                    if let Some(block) = &maybe_block {
-                        let data_tx_ids = block
-                            .data_ledgers
-                            .iter()
-                            .flat_map(|data_ledger| &data_ledger.tx_ids.0)
-                            .copied()
-                            .collect::<Vec<_>>();
-                        let commitment_tx_ids = block
-                            .system_ledgers
-                            .iter()
-                            .flat_map(|commitment_ledger| &commitment_ledger.tx_ids.0)
-                            .copied()
-                            .collect::<Vec<_>>();
-                        let block_body = build_block_body_for_processed_block(
-                            block_hash,
-                            &data_tx_ids,
-                            &commitment_tx_ids,
+                    let maybe_block_header = self.block_pool.get_block_header(&block_hash).await?;
+                    if let Some(block_header) = &maybe_block_header {
+                        let block_body = build_block_body_for_processed_block_header(
+                            block_header,
                             &self.mempool.get_internal_read_guard().await,
                             &self.block_pool.db,
                         )
@@ -1041,24 +1028,10 @@ where
                 {
                     Some(block_body)
                 } else {
-                    let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
-                    if let Some(block) = &maybe_block {
-                        let data_tx_ids = block
-                            .data_ledgers
-                            .iter()
-                            .flat_map(|data_ledger| &data_ledger.tx_ids.0)
-                            .copied()
-                            .collect::<Vec<_>>();
-                        let commitment_tx_ids = block
-                            .system_ledgers
-                            .iter()
-                            .flat_map(|commitment_ledger| &commitment_ledger.tx_ids.0)
-                            .copied()
-                            .collect::<Vec<_>>();
-                        let block_body = build_block_body_for_processed_block(
-                            block_hash,
-                            &data_tx_ids,
-                            &commitment_tx_ids,
+                    let maybe_block_header = self.block_pool.get_block_header(&block_hash).await?;
+                    if let Some(block_header) = &maybe_block_header {
+                        let block_body = build_block_body_for_processed_block_header(
+                            block_header,
                             &self.mempool.get_internal_read_guard().await,
                             &self.block_pool.db,
                         )

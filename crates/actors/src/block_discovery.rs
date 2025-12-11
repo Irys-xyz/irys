@@ -888,22 +888,33 @@ pub async fn get_data_tx_in_parallel(
     get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
 }
 
-pub async fn build_block_body_for_processed_block(
-    block_hash: BlockHash,
-    commitment_transaction_ids: &[IrysTransactionId],
-    data_transaction_ids: &[IrysTransactionId],
+pub async fn build_block_body_for_processed_block_header(
+    block_header: &IrysBlockHeader,
     mempool_read_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
 ) -> eyre::Result<BlockBody> {
+    let data_transaction_ids = block_header
+        .data_ledgers
+        .iter()
+        .flat_map(|data_ledger| &data_ledger.tx_ids.0)
+        .copied()
+        .collect::<Vec<_>>();
+    let commitment_transaction_ids = block_header
+        .system_ledgers
+        .iter()
+        .flat_map(|commitment_ledger| &commitment_ledger.tx_ids.0)
+        .copied()
+        .collect::<Vec<_>>();
+
     let (data_txs, commitment_txs) = tokio::join!(
-        get_data_tx_in_parallel(data_transaction_ids.to_vec(), mempool_read_guard, db),
-        get_commitment_tx_in_parallel(commitment_transaction_ids, mempool_read_guard, db)
+        get_data_tx_in_parallel(data_transaction_ids.clone(), mempool_read_guard, db),
+        get_commitment_tx_in_parallel(&commitment_transaction_ids, mempool_read_guard, db)
     );
     let data_txs = data_txs?;
     let commitment_txs = commitment_txs?;
 
     let block_body = BlockBody {
-        block_hash,
+        block_hash: block_header.block_hash,
         data_transactions: data_txs,
         commitment_transactions: commitment_txs,
     };
