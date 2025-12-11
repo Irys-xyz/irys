@@ -60,8 +60,13 @@ jobs:
           # Copy binary to workspace root for Docker build context
           cp target/release/irys ./irys
 
+          # Compute binary MD5
+          BINARY_MD5=$(md5sum ./irys | awk '{print $1}')
+
           docker build \
             --file ./docker/Dockerfile.release \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --build-arg BINARY_MD5=${BINARY_MD5} \
             --tag ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.VERSION }} \
             .
 
