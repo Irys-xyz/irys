@@ -1,0 +1,20 @@
+# Release Dockerfile for pre-built x86_64 binary
+# Binary is built by CI and copied in at build time
+
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libgmp10 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy pre-built binary from CI build step
+COPY irys /app/irys
+COPY docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/irys /app/entrypoint.sh
+
+ENTRYPOINT ["/app/entrypoint.sh"]
