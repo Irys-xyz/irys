@@ -150,7 +150,7 @@ parallel_verification_thread_limit = 4
 [[oracles]]
 ```
 <!-- TODO: update below & config template once mainnet is updated with https://github.com/Irys-xyz/irys/pull/1046 -->
-The `[[oracles]]` sections control the $IRYS price oracles your node will consult when producing a block. By default, the `mock` oracle is specified, but we support both Coingecko and Coinmarketcap as price sources - simply fill out the api_key and other configuaration parameters and then uncomment the block to activate the oracle. Multiple oracles are supported, and the node will use the most recent price info out of all of them.
+The `[[oracles]]` sections control the $IRYS price oracles your node will consult when producing a block. By default, the `mock` oracle is specified, but we support both Coingecko and Coinmarketcap as price sources - simply fill out the api_key and other configuration parameters and then uncomment the block to activate the oracle. Multiple oracles are supported, and the node will use the most recent price info out of all of them.
 
 ## Storage Configuration
 To participate in mining on Irys you must provide drives for your assigned partitions to be stored on. Once provided and pledged the protocol will assign a partition hash which your node will use to pack your partition. Once packed the Irys node software will begin to mine the storage and you will be able to earn block rewards for any blocks you produce.
