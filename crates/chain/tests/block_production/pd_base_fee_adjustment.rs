@@ -50,8 +50,8 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
             .create_and_inject_pd_transaction_with_optimal_fees(
                 &pd_tx_signer,
                 chunks_per_tx,
-                i as u64,                          // nonce
-                (i * chunks_per_tx as u32) as u32, // offset_base
+                i as u64,                 // nonce
+                i * chunks_per_tx as u32, // offset_base
             )
             .await?;
         tx_hashes.push(tx_hash);

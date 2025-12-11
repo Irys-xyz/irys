@@ -39,10 +39,10 @@ use irys_types::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
-    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage, H256List,
-    IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature, SystemTransactionLedger,
-    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, GossipBroadcastMessage, H256List, IrysAddress, IrysBlockHeader,
+    IrysTokenPrice, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp,
+    UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;

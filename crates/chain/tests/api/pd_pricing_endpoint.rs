@@ -59,7 +59,7 @@ async fn setup_pd_fee_history_test_chain(
 
     // Define block specifications
     // Block utilizations: 0%, 50%, 80%, 0%, 100%, 25%
-    let block_specs = vec![
+    let block_specs = [
         // Block 1: 0% utilization - no PD txs
         BlockSpec {
             chunks: 0,
@@ -111,8 +111,8 @@ async fn setup_pd_fee_history_test_chain(
     ];
 
     let mut block_metadata = Vec::new();
-    let mut nonce = 0u64;
-    let mut offset_base = 0u32;
+    let mut nonce = 0_u64;
+    let mut offset_base = 0_u32;
 
     for (block_idx, spec) in block_specs.iter().enumerate() {
         // Inject PD transactions if this block has any
@@ -316,7 +316,7 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
 
             assert_eq!(reward.pd_tx_count, sorted_fees.len());
 
-            for percentile in [25u8, 50, 75] {
+            for percentile in [25_u8, 50, 75] {
                 let expected = compute_percentile(&sorted_fees, percentile);
                 let fee_data = reward
                     .percentiles

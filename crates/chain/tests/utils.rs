@@ -10,8 +10,8 @@ use actix_web::{
 };
 use alloy_consensus::{SignableTransaction as _, TxEip1559, TxEnvelope as EthereumTxEnvelope};
 use alloy_core::primitives::FixedBytes;
-use alloy_eips::Encodable2718 as _;
 use alloy_eips::BlockId;
+use alloy_eips::Encodable2718 as _;
 use alloy_network::TxSignerSync as _;
 use alloy_primitives::Address;
 use alloy_signer_local::LocalSigner;
