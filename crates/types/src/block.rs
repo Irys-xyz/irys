@@ -1112,8 +1112,11 @@ impl BlockBody {
             .iter()
             .map(super::transaction::IrysTransactionCommon::id)
             .collect();
-        let actual_data_tx_ids: HashSet<H256> =
-            self.data_transactions.iter().map(super::transaction::IrysTransactionCommon::id).collect();
+        let actual_data_tx_ids: HashSet<H256> = self
+            .data_transactions
+            .iter()
+            .map(super::transaction::IrysTransactionCommon::id)
+            .collect();
 
         Ok(expected_commitment_tx_ids == actual_commitment_tx_ids
             && expected_data_tx_ids == actual_data_tx_ids)

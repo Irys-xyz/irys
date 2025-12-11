@@ -17,7 +17,8 @@ use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
 use irys_types::{BlockBody, IrysAddress};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem,
+    UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -587,17 +588,180 @@ where
     pub async fn handle_block_body(
         &self,
         block_body_request: GossipRequest<BlockBody>,
-        source_api_address: SocketAddr,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
-        // TODO: Implement handling of block bodies.
-        // The logic should be the following:
-        // 1. Check that the block has been already processed - check the tree and the db. BlockPool
-        //  is likely already has a method for that. It also should be able to check that the block
-        //  has been already cached.
-        // 2. If not, pull the header and send it to the block pool for processing.
-        // 3. If yes, skip processing.
-        unimplemented!();
+        let source_miner_address = block_body_request.miner_address;
+        let block_body = block_body_request.data;
+        let block_hash = block_body.block_hash;
+
+        debug!(
+            "Node {}: Gossip block body received from peer {}: {}",
+            self.gossip_client.mining_address, source_miner_address, block_hash
+        );
+
+        let is_block_requested_by_the_pool = self.block_pool.is_block_requested(&block_hash).await;
+        let has_block_already_been_received = self.cache.seen_block_from_any_peer(&block_hash)?;
+
+        if has_block_already_been_received && !is_block_requested_by_the_pool {
+            debug!(
+                "Node {}: Block {} already seen and not requested by the pool, skipping",
+                self.gossip_client.mining_address, block_hash
+            );
+            return Ok(());
+        }
+
+        let maybe_header = self.block_pool.get_block_header(&block_hash).await?;
+
+        let block_header = if let Some(header) = maybe_header {
+            header
+        } else {
+            let mut fetched_header = None;
+            let mut last_error = None;
+
+            for _ in 1..=HEADER_AND_BODY_RETRIES {
+                match self.pull_block_header(block_hash, false).await {
+                    Ok((source, header)) => {
+                        if !header.is_signature_valid() {
+                            warn!(
+                                "Node: {}: Block {} fetched from {} has an invalid signature",
+                                self.gossip_client.mining_address, header.block_hash, source
+                            );
+                            self.peer_list.decrease_peer_score(
+                                &source,
+                                ScoreDecreaseReason::BogusData("Invalid block signature".into()),
+                            );
+                            last_error = Some(GossipError::InvalidData(
+                                InvalidDataError::InvalidBlockSignature,
+                            ));
+                            continue;
+                        }
+                        fetched_header = Some(header);
+                        break;
+                    }
+                    Err(e) => {
+                        last_error = Some(e);
+                    }
+                }
+            }
+
+            match fetched_header {
+                Some(h) => h,
+                None => {
+                    return Err(last_error.unwrap_or_else(|| {
+                        GossipError::Internal(InternalGossipError::Unknown(
+                            "Failed to pull block header".to_string(),
+                        ))
+                    }))
+                }
+            }
+        };
+
+        // Check sync range
+        let sync_target = self.sync_state.sync_target_height();
+        if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
+            debug!(
+                "Node {}: Block {} height {} is out of the sync range (target: {}, highest processed: {}), skipping",
+                self.gossip_client.mining_address, block_hash, block_header.height, &sync_target, &self.sync_state.highest_processed_block()
+            );
+            return Ok(());
+        }
+
+        let has_block_already_been_processed = self
+            .block_pool
+            .is_block_processing_or_processed(&block_header.block_hash, block_header.height)
+            .await;
+
+        if has_block_already_been_processed {
+            debug!(
+                "Node {}: Block {} height {} has already been processed, skipping",
+                self.gossip_client.mining_address, block_header.block_hash, block_header.height
+            );
+            return Ok(());
+        }
+
+        debug!(
+            "Node {}: Block {} height {} has not been processed yet, starting processing",
+            self.gossip_client.mining_address, block_header.block_hash, block_header.height
+        );
+
+        let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
+        let is_in_the_trusted_sync_range = self
+            .sync_state
+            .is_in_trusted_sync_range(block_header.height as usize);
+
+        let skip_block_validation = is_syncing_from_a_trusted_peer
+            && is_in_the_trusted_sync_range
+            && self
+                .peer_list
+                .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
+
+        match block_body.tx_ids_match_the_header(&block_header) {
+            Ok(true) => {}
+            Ok(false) => {
+                warn!(
+                    "Node {}: Block {} height {} has mismatching transactions between header and body",
+                    self.gossip_client.mining_address, block_header.block_hash, block_header.height
+                );
+
+                self.peer_list.decrease_peer_score(
+                    &source_miner_address,
+                    ScoreDecreaseReason::BogusData(
+                        "Mismatching transactions between header and body".into(),
+                    ),
+                );
+                return Err(GossipError::InvalidData(
+                    InvalidDataError::BlockBodyTransactionsMismatch,
+                ));
+            }
+            Err(err) => {
+                return Err(GossipError::Internal(InternalGossipError::Unknown(
+                    format!(
+                        "Error when comparing block body transactions with header for block {}: {}",
+                        block_header.block_hash, err
+                    ),
+                )));
+            }
+        }
+
+        // Record block in cache
+        self.cache
+            .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
+
+        self.block_pool
+            .process_block::<A>(block_header, Arc::new(block_body), skip_block_validation)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn pull_block_header(
+        &self,
+        block_hash: BlockHash,
+        use_trusted_peers_only: bool,
+    ) -> GossipResult<(IrysAddress, Arc<IrysBlockHeader>)> {
+        debug!(
+            "Fetching block header for block {} from the network",
+            block_hash
+        );
+
+        let (source_address, irys_block_header) = self
+            .gossip_client
+            .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
+            .await?;
+
+        let Some(_peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+            error!(
+                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
+                source_address
+            );
+            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block header from it, but it was not found".into()));
+        };
+
+        debug!(
+            "Fetched block header for block {} from peer {}",
+            block_hash, source_address
+        );
+
+        Ok((source_address, irys_block_header))
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]

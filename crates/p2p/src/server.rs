@@ -233,9 +233,10 @@ where
             ));
         };
 
-        let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
-            Err(error_response) => return error_response,
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
+        {
+            return error_response;
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
@@ -246,12 +247,21 @@ where
 
         tokio::spawn(
             async move {
-                handler.handle_block_body(
-                    gossip_request,
-                    source_socket_addr,
-                )
-                // If we already processed this block, don't do anything
-                // If we haven't, fetch the header and send it to the block pool.
+                if let Err(e) = handler
+                    .handle_block_body(gossip_request, source_socket_addr)
+                    .await
+                {
+                    Self::handle_invalid_data(&source_miner_address, &e, &server.peer_list);
+                    error!(
+                        "Node {:?}: Failed to process the block body {}: {:?}",
+                        this_node_id, block_hash, e
+                    );
+                } else {
+                    info!(
+                        "Node {:?}: Server handler handled block body {}",
+                        this_node_id, block_hash
+                    );
+                }
             }
             .in_current_span(),
         );
