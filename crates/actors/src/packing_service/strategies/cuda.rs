@@ -89,9 +89,8 @@ impl super::PackingStrategy for CudaPackingStrategy {
             let handle = runtime_handle.clone().spawn(async move {
                 let out = runtime_handle
                     .spawn_blocking(move || -> eyre::Result<Vec<u8>> {
-                        let mut out: Vec<u8> = Vec::with_capacity(
-                            (num_chunks * chunk_size).try_into().unwrap(),
-                        );
+                        let mut out: Vec<u8> =
+                            Vec::with_capacity((num_chunks * chunk_size).try_into().unwrap());
                         capacity_pack_range_cuda_c(
                             num_chunks,
                             mining_address,

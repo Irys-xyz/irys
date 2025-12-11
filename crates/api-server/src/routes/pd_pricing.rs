@@ -32,17 +32,19 @@ pub struct FeeHistoryQuery {
 /// - Next block base fee prediction (N+1)
 ///
 /// Query parameters:
-/// - `blockCount` (required): Number of recent blocks to analyze (1-1000)
+/// - `blockCount` (required): Number of recent blocks to analyze (1 to block_tree_depth)
 ///
 /// Example: GET /v1/price/pd/fee-history?blockCount=20
 pub async fn get_fee_history(
     query: web::Query<FeeHistoryQuery>,
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
+    let max_block_count = state.config.consensus.block_tree_depth;
+
     // Validate block_count
-    if query.block_count == 0 || query.block_count > 1000 {
+    if query.block_count == 0 || query.block_count > max_block_count {
         return Err((
-            "block_count must be between 1 and 1000".to_string(),
+            format!("block_count must be between 1 and {}", max_block_count),
             actix_web::http::StatusCode::BAD_REQUEST,
         )
             .into());
