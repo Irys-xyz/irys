@@ -1331,6 +1331,35 @@ impl StorageModule {
         }))
     }
 
+    /// Returns chunk metadata (data_root and data_path) without reading chunk bytes.
+    ///
+    /// This is more efficient than `generate_full_chunk` when only the merkle proof
+    /// metadata is needed (e.g., for path validation).
+    pub fn get_chunk_metadata(
+        &self,
+        partition_offset: PartitionChunkOffset,
+    ) -> Result<Option<(DataRoot, Base64)>> {
+        self.query_submodule_db_by_offset(partition_offset, |tx| {
+            let Some(tx_path) = get_tx_path_by_offset(tx, partition_offset)? else {
+                return Ok(None);
+            };
+
+            // Extract the data_root from the tx_path leaf node
+            let path_buff = Base64::from(tx_path);
+            let proof = get_leaf_proof(&path_buff)?;
+            let data_root = proof
+                .hash()
+                .map(H256::from)
+                .ok_or_eyre("Unable to parse data_root from tx_path")?;
+
+            let Some(data_path) = get_data_path_by_offset(tx, partition_offset)? else {
+                return Ok(None);
+            };
+
+            Ok(Some((data_root, Base64::from(data_path))))
+        })
+    }
+
     /// Gets the tx_path and data_path for a chunk using its ledger relative offset
     pub fn read_tx_data_path(
         &self,
