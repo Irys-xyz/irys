@@ -65,27 +65,30 @@ impl PdPricing {
                 .ok_or_eyre("No tip block found in block tree")?
                 .timestamp_secs()
         };
-        if !self
-            .config
-            .consensus
-            .hardforks
-            .is_sprite_active(current_timestamp)
-        {
-            eyre::bail!("PD pricing unavailable: Sprite hardfork not active");
-        }
+        eyre::ensure!(
+            self.config
+                .consensus
+                .hardforks
+                .is_sprite_active(current_timestamp),
+            "PD pricing unavailable: Sprite hardfork not active"
+        );
 
         // Validate inputs
         validate_percentiles(reward_percentiles)?;
 
         // Get recent blocks from tip (oldest-first, eth_feeHistory pattern)
+        // Filter out pre-Sprite blocks from the beginning of the range
         let blocks_with_ema: Vec<_> = {
             let tree = self.block_tree.read();
+            let hardforks = &self.config.consensus.hardforks;
             tree.get_recent_blocks_from_tip(block_count as usize)
                 .into_iter()
                 .filter_map(|block| {
                     let ema = tree.get_ema_snapshot(&block.block_hash)?;
                     Some((block.clone(), ema))
                 })
+                // Skip pre-Sprite blocks (oldest-first order, so skip_while removes leading non-Sprite)
+                .skip_while(|(block, _)| hardforks.sprite_at(block.timestamp_secs()).is_none())
                 .collect()
         };
 
@@ -103,21 +106,15 @@ impl PdPricing {
             // Get EVM block
             let evm_block = self.get_evm_block_for_irys_block(irys_block)?;
 
-            // Extract base fee - Sprite must be active for all blocks in range
             let block_timestamp = irys_block.timestamp_secs();
             let chunk_size = self.config.consensus.chunk_size;
+            // Safe to unwrap: pre-Sprite blocks were filtered out above
             let sprite = self
                 .config
                 .consensus
                 .hardforks
                 .sprite_at(block_timestamp)
-                .ok_or_else(|| {
-                    eyre::eyre!(
-                        "Block {} at height {} is pre-Sprite hardfork",
-                        irys_block.block_hash,
-                        irys_block.height
-                    )
-                })?;
+                .expect("pre-Sprite blocks filtered");
             let base_fee_irys =
                 extract_pd_base_fee_from_block(irys_block, &evm_block, sprite, chunk_size)?;
 
