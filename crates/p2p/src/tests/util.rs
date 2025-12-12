@@ -292,14 +292,19 @@ impl GossipServiceTestFixture {
     pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
+        let api_port = random_free_port();
+
         warn!("Random port for gossip: {}", gossip_port);
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = temp_dir.path().to_path_buf();
+        node_config.gossip.public_port = gossip_port;
+        node_config.gossip.bind_port = gossip_port;
+        node_config.http.public_port = gossip_port;
+        node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
         node_config.mining_key = random_signer.signer;
         let config = Config::new(node_config);
 
-        let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
@@ -509,7 +514,6 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub(crate) fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
-
         debug!(
             "Adding peer {:?}: {:?} to gossip service {:?}",
             other.mining_address, peer, self.gossip_port
