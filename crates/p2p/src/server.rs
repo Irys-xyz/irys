@@ -431,14 +431,14 @@ where
             .json(GossipResponse::Accepted(node_info))
     }
 
-    async fn handle_peer_list(server: Data<Self>) -> HttpResponse {
+    fn handle_peer_list(server: Data<Self>) -> HttpResponse {
         let ips = server.peer_list.all_known_peers();
         HttpResponse::Ok()
             .content_type(ContentType::json())
             .json(GossipResponse::Accepted(ips))
     }
 
-    async fn handle_version(
+    fn handle_version(
         server: Data<Self>,
         req: actix_web::HttpRequest,
         body: web::Json<VersionRequest>,
@@ -477,7 +477,12 @@ where
 
         let mut peers = server.peer_list.all_known_peers();
         peers.shuffle(&mut rand::thread_rng());
-        let cap = server.data_handler.config.node_config.p2p_handshake.server_peer_list_cap;
+        let cap = server
+            .data_handler
+            .config
+            .node_config
+            .p2p_handshake
+            .server_peer_list_cap;
         if peers.len() > cap {
             peers.truncate(cap);
         }
@@ -521,7 +526,7 @@ where
             .json(GossipResponse::Accepted(response))
     }
 
-    async fn handle_block_index(
+    fn handle_block_index(
         server: Data<Self>,
         query: web::Query<BlockIndexQuery>,
     ) -> HttpResponse {
@@ -534,9 +539,8 @@ where
             query.limit
         };
         if limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
-             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::InvalidData,
-            ));
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
         }
         let height = query.height;
 

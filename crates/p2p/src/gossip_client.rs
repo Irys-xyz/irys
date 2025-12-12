@@ -110,10 +110,7 @@ impl GossipClient {
         res
     }
 
-    pub async fn get_info(
-        &self,
-        peer: SocketAddr,
-    ) -> Result<NodeInfo, GossipClientError> {
+    pub async fn get_info(&self, peer: SocketAddr) -> Result<NodeInfo, GossipClientError> {
         let url = format!("http://{}/gossip/info", peer);
         let response = self
             .internal_client()
@@ -161,9 +158,10 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<Vec<PeerAddress>> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
-        })?;
+        let response: GossipResponse<Vec<PeerAddress>> =
+            response.json().await.map_err(|error| {
+                GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+            })?;
 
         match response {
             GossipResponse::Accepted(peers) => Ok(peers),
@@ -229,9 +227,10 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<Vec<BlockIndexItem>> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
-        })?;
+        let response: GossipResponse<Vec<BlockIndexItem>> =
+            response.json().await.map_err(|error| {
+                GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+            })?;
 
         match response {
             GossipResponse::Accepted(index) => Ok(index),
@@ -783,7 +782,8 @@ impl GossipClient {
                                     )),
                                 ));
                             }
-                            RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                            RejectionReason::InvalidCredentials
+                            | RejectionReason::ProtocolMismatch => {
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} rejected with {:?}",
@@ -960,14 +960,14 @@ impl GossipClient {
                                         ),
                                     )));
                             }
-                            RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
-                                last_error =
-                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
-                                        format!(
-                                            "{}: Peer {:?} rejected with {:?}",
-                                            url, peer.0, reason
-                                        ),
-                                    )));
+                            RejectionReason::InvalidCredentials
+                            | RejectionReason::ProtocolMismatch => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "{}: Peer {:?} rejected with {:?}",
+                                        url, peer.0, reason
+                                    )),
+                                ));
                             }
                         },
                     },

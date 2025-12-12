@@ -767,7 +767,8 @@ where
                                     )),
                                 ));
                             }
-                            RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                            RejectionReason::InvalidCredentials
+                            | RejectionReason::ProtocolMismatch => {
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Peer {:?} rejected data request {:?} with {:?}",
