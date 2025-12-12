@@ -431,14 +431,14 @@ where
             .json(GossipResponse::Accepted(node_info))
     }
 
-    fn handle_peer_list(server: Data<Self>) -> HttpResponse {
+    async fn handle_peer_list(server: Data<Self>) -> HttpResponse {
         let ips = server.peer_list.all_known_peers();
         HttpResponse::Ok()
             .content_type(ContentType::json())
             .json(GossipResponse::Accepted(ips))
     }
 
-    fn handle_version(
+    async fn handle_version(
         server: Data<Self>,
         req: actix_web::HttpRequest,
         body: web::Json<VersionRequest>,
@@ -526,7 +526,7 @@ where
             .json(GossipResponse::Accepted(response))
     }
 
-    fn handle_block_index(
+    async fn handle_block_index(
         server: Data<Self>,
         query: web::Query<BlockIndexQuery>,
     ) -> HttpResponse {
