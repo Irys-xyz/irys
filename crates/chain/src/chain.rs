@@ -1729,32 +1729,34 @@ impl IrysNode {
             .filter(|sm| sm.partition_assignment().is_some())
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-            for interval in uninitialized {
-                let sender = service_senders.packing_sender();
-                if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
-                    match sender.try_send(req) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::event!(
-                                target: "irys::packing",
-                                tracing::Level::WARN,
-                                storage_module.id = %sm.id,
-                                packing.interval = ?interval,
-                                "Dropping packing request due to a saturated channel"
-                            );
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+            let sender = service_senders.packing_sender();
+            let sm = sm.clone();
+
+            debug!(
+                "SM {} has {} Uninitialized intervals",
+                &sm.id,
+                &uninitialized.len()
+            );
+            // spawn a thread per SM (as packing queues are per-partition)
+            // this is to prevent packing requests getting dropped
+            // note: once we support submodules, this will probably need to change
+            runtime_handle.spawn(async move {
+                for interval in uninitialized {
+                    if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval))
+                    {
+                        if let Err(e) = sender.send(req).await {
                             tracing::event!(
                                 target: "irys::packing",
                                 tracing::Level::ERROR,
                                 storage_module.id = %sm.id,
                                 packing.interval = ?interval,
-                                "Packing channel closed; failed to enqueue repacking request"
+                                "Packing channel closed - {e}; failed to enqueue repacking request"
                             );
+                            return; // assume this is unrecoverable
                         }
                     }
                 }
-            }
+            });
         }
         (controllers, handles)
     }

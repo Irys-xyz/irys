@@ -1232,7 +1232,7 @@ impl StorageModule {
             // gaps in storage) and should be handled gracefully by returning None
             // rather than propagating errors up to the API layer.
             Err(err) => {
-                debug!("Unable to find chunk at ledger offset: {err:?}");
+                debug!("Unable to find chunk at ledger offset: {err}");
                 Ok(None)
             }
         }
