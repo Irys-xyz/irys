@@ -46,6 +46,9 @@ pub struct ShadowTxGenerator<'a> {
     // PD base fee per chunk (for PdBaseFeeUpdate shadow tx)
     pd_base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
 
+    // Whether Sprite hardfork is active (enables PdBaseFeeUpdate shadow tx)
+    is_sprite_active: bool,
+
     // Iterator state
     treasury_balance: U256,
     phase: Phase,
@@ -82,16 +85,20 @@ impl Iterator for ShadowTxGenerator<'_> {
                 Phase::PdBaseFee => {
                     self.phase = Phase::Commitments;
                     self.index = 0;
-                    // PD base fee update has no treasury impact
-                    return Some(Ok(ShadowMetadata {
-                        shadow_tx: ShadowTransaction::new_v1(
-                            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
-                                per_chunk: self.pd_base_fee_per_chunk.amount.into(),
-                            }),
-                            (*self.solution_hash).into(),
-                        ),
-                        transaction_fee: 0,
-                    }));
+                    // Only emit PdBaseFeeUpdate if Sprite hardfork is active
+                    if self.is_sprite_active {
+                        // PD base fee update has no treasury impact
+                        return Some(Ok(ShadowMetadata {
+                            shadow_tx: ShadowTransaction::new_v1(
+                                TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                                    per_chunk: self.pd_base_fee_per_chunk.amount.into(),
+                                }),
+                                (*self.solution_hash).into(),
+                            ),
+                            transaction_fee: 0,
+                        }));
+                    }
+                    // Pre-Sprite: skip PdBaseFeeUpdate and continue to next phase
                 }
 
                 Phase::Commitments => {
@@ -152,6 +159,7 @@ impl Iterator for ShadowTxGenerator<'_> {
 
 impl<'a> ShadowTxGenerator<'a> {
     #[tracing::instrument(level = "trace", skip_all, err)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         block_height: &'a u64,
         reward_address: &'a IrysAddress,
@@ -164,10 +172,13 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         pd_base_fee_per_chunk: Amount<(CostPerChunk, Irys)>,
+        block_timestamp: UnixTimestamp,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
         unstake_refund_events: &[UnstakeRefundEvent],
     ) -> Result<Self> {
+        // Determine if Sprite hardfork is active at this block timestamp
+        let is_sprite_active = config.hardforks.is_sprite_active(block_timestamp);
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
         for tx in &publish_ledger.txs {
@@ -199,6 +210,7 @@ impl<'a> ShadowTxGenerator<'a> {
             commitment_txs,
             submit_txs,
             pd_base_fee_per_chunk,
+            is_sprite_active,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -261,6 +273,7 @@ impl<'a> ShadowTxGenerator<'a> {
             commitment_txs,
             submit_txs,
             pd_base_fee_per_chunk,
+            is_sprite_active,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -911,6 +924,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
             &[],
@@ -1053,6 +1067,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
             &[],
@@ -1146,6 +1161,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
             &[],
@@ -1368,6 +1384,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
             &[],
@@ -1474,6 +1491,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
             &[],
@@ -1586,6 +1604,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
             &[],
@@ -1661,6 +1680,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Amount::new(U256::from(1000000_u64)),
+            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
             &[],

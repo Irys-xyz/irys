@@ -1,11 +1,12 @@
 use irys_domain::EmaSnapshot;
 use irys_types::{
+    hardfork_config::Sprite,
     storage_pricing::{
         mul_div,
         phantoms::{CostPerChunk, Irys, Percentage, Usd},
         Amount, PRECISION_SCALE,
     },
-    Config, IrysBlockHeader, ProgrammableDataConfig, U256,
+    Config, IrysBlockHeader, UnixTimestamp, U256,
 };
 
 const MB_SIZE: u64 = 1024 * 1024;
@@ -19,11 +20,19 @@ pub fn compute_base_fee_per_chunk(
     parent_evm_block: &alloy_consensus::Block<
         alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844>,
     >,
+    block_timestamp: UnixTimestamp,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+    // Caller must ensure Sprite hardfork is active before calling this function
+    let sprite = config
+        .consensus
+        .hardforks
+        .sprite_at(block_timestamp)
+        .expect("Sprite hardfork must be active - caller should check before calling");
+
     let current_pd_base_fee_irys = extract_pd_base_fee_from_block(
         parent_block,
         parent_evm_block,
-        &config.consensus.programmable_data,
+        sprite,
         config.consensus.chunk_size,
     )?;
     let total_pd_chunks = count_pd_chunks_in_block(parent_evm_block);
@@ -32,7 +41,7 @@ pub fn compute_base_fee_per_chunk(
         current_ema_price,
         total_pd_chunks as u32,
         current_pd_base_fee_irys,
-        &config.consensus.programmable_data,
+        sprite,
         config.consensus.chunk_size,
     )?;
     Ok(pd_base_fee)
@@ -50,7 +59,7 @@ pub fn calculate_pd_base_fee_for_new_block(
     current_block_ema_price: &irys_types::IrysTokenPrice,
     parent_chunks_used_in_block: u32,
     parent_pd_base_fee_irys: Amount<(CostPerChunk, Irys)>,
-    pd_config: &ProgrammableDataConfig,
+    sprite_config: &Sprite,
     chunk_size: u64,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
     let parent_ema_price = parent_block_ema_snapshot.ema_for_public_pricing();
@@ -67,7 +76,7 @@ pub fn calculate_pd_base_fee_for_new_block(
     // The config floor is in USD per-MB, but we're working with per-chunk values
     // floor_per_chunk = floor_per_mb * (chunk_size / MB_SIZE)
     let floor_per_chunk_usd = Amount::new(mul_div(
-        pd_config.base_fee_floor.amount,
+        sprite_config.base_fee_floor.amount,
         U256::from(chunk_size),
         U256::from(MB_SIZE),
     )?);
@@ -76,7 +85,7 @@ pub fn calculate_pd_base_fee_for_new_block(
     let new_fee_per_chunk_usd = pd_fee_adjustments::calculate_new_base_fee(
         current_fee_per_chunk_usd,
         parent_chunks_used_in_block,
-        pd_config.max_pd_chunks_per_block,
+        sprite_config.max_pd_chunks_per_block,
         floor_per_chunk_usd,
     )?;
 
@@ -96,20 +105,18 @@ pub fn calculate_pd_base_fee_for_new_block(
 pub fn extract_pd_base_fee_from_block(
     irys_block_header: &irys_types::IrysBlockHeader,
     evm_block: &reth_ethereum_primitives::Block,
-    pd_config: &ProgrammableDataConfig,
+    sprite_config: &Sprite,
     chunk_size: u64,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
     use eyre::{eyre, OptionExt as _};
     use irys_reth::shadow_tx::{detect_and_decode, TransactionPacket};
 
-    // Special case: Genesis block (height 0) should use the minimum base fee
+    // Special case: Genesis block (height 0) or first Sprite block should use the minimum base fee
     // The genesis block doesn't have the standard transaction structure
-    // TODO: instead of using the genesis block, we MUST hardcode the block height/timestamp in our hardfork config
-    //       This is just a temp measurement until we hardfork-guard PD functionality
     if irys_block_header.height == 0 {
         // Convert the floor from per-MB to per-chunk
         let floor_per_chunk_usd = Amount::new(mul_div(
-            pd_config.base_fee_floor.amount,
+            sprite_config.base_fee_floor.amount,
             U256::from(chunk_size),
             U256::from(MB_SIZE),
         )?);
@@ -276,7 +283,8 @@ mod tests {
 
         let parent_pd_base_fee_irys = Amount::token(dec!(1.5))?;
 
-        let pd_config = ProgrammableDataConfig {
+        let sprite_config = Sprite {
+            activation_timestamp: irys_types::UnixTimestamp::from_secs(0),
             cost_per_mb: Amount::token(dec!(0.001))?,
             base_fee_floor: Amount::token(dec!(0.001))?,
             max_pd_chunks_per_block: max_chunks,
@@ -287,7 +295,7 @@ mod tests {
             &current_ema_price,
             chunks_used,
             parent_pd_base_fee_irys,
-            &pd_config,
+            &sprite_config,
             chunk_size,
         )?;
 
@@ -371,7 +379,6 @@ pub(crate) mod pd_fee_adjustments {
     mod tests {
         use super::*;
         use eyre::Result;
-        use irys_types::ProgrammableDataConfig;
         use rust_decimal::Decimal;
         use rust_decimal_macros::dec;
 
@@ -403,7 +410,8 @@ pub(crate) mod pd_fee_adjustments {
         ) -> Result<()> {
             // Setup
             let current_base_fee = Amount::token(current_fee_usd)?;
-            let pd_config = ProgrammableDataConfig {
+            let sprite_config = Sprite {
+                activation_timestamp: irys_types::UnixTimestamp::from_secs(0),
                 cost_per_mb: Amount::token(dec!(0.01))?,
                 base_fee_floor: Amount::token(dec!(0.01))?,
                 max_pd_chunks_per_block: max_chunks_per_block,
@@ -413,8 +421,8 @@ pub(crate) mod pd_fee_adjustments {
             let new_fee = calculate_new_base_fee(
                 current_base_fee,
                 chunks_used,
-                pd_config.max_pd_chunks_per_block,
-                pd_config.base_fee_floor,
+                sprite_config.max_pd_chunks_per_block,
+                sprite_config.base_fee_floor,
             )?;
 
             // Assert

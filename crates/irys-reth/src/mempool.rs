@@ -1,7 +1,10 @@
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::pd_tx::sum_pd_chunks_in_access_list;
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
+use irys_types::hardfork_config::IrysHardforkConfig;
+use irys_types::UnixTimestamp;
 use reth::{
     api::FullNodeTypes,
     builder::{components::PoolBuilder, BuilderContext},
@@ -24,9 +27,19 @@ use tracing::info;
 use crate::IrysEthereumNode;
 
 /// A custom pool builder for Irys shadow transaction validation and pool configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct IrysPoolBuilder;
+pub struct IrysPoolBuilder {
+    /// Hardfork configuration for checking Sprite activation.
+    hardfork_config: Arc<IrysHardforkConfig>,
+}
+
+impl IrysPoolBuilder {
+    /// Creates a new pool builder with the given hardfork configuration.
+    pub fn new(hardfork_config: Arc<IrysHardforkConfig>) -> Self {
+        Self { hardfork_config }
+    }
+}
 
 /// Implement the [`PoolBuilder`] trait for the Irys pool builder
 ///
@@ -78,6 +91,7 @@ where
             DiskFileBlobStoreConfig::default().with_max_cached_entries(blob_cache_size);
 
         let blob_store = DiskFileBlobStore::open(data_dir.blobstore(), custom_config)?;
+        let hardfork_config = self.hardfork_config;
         let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
             .with_head_timestamp(ctx.head().timestamp)
             .kzg_settings(ctx.kzg_settings()?)
@@ -87,9 +101,10 @@ where
             .build_with_tasks(ctx.task_executor().clone(), blob_store.clone())
             .map(|eth_validator| IrysShadowTxValidator {
                 eth_tx_validator: eth_validator,
+                hardfork_config: hardfork_config.clone(),
             });
 
-        let ordering = PdAwareCoinbaseTipOrdering::default();
+        let ordering = PdAwareCoinbaseTipOrdering::new(hardfork_config);
         let transaction_pool =
             reth_transaction_pool::Pool::new(validator, ordering, blob_store, pool_config);
         info!(target: "reth::cli", "Transaction pool initialized");
@@ -155,12 +170,24 @@ where
 #[derive(Debug)]
 pub struct IrysShadowTxValidator<Client, T> {
     eth_tx_validator: EthTransactionValidator<Client, T>,
+    /// Hardfork configuration for checking Sprite activation.
+    hardfork_config: Arc<IrysHardforkConfig>,
 }
 
 impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
 where
     Tx: EthPoolTransaction,
 {
+    /// Returns true if Sprite hardfork is currently active based on system time.
+    fn is_sprite_active(&self) -> bool {
+        let current_time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.hardfork_config
+            .is_sprite_active(UnixTimestamp::from_secs(current_time))
+    }
+
     /// Irys-specific prefilter to reject transactions we never accept in the mempool.
     ///
     /// Returns `Ok(tx)` if the tx should continue to normal eth validation,
@@ -185,6 +212,23 @@ where
                 ));
             }
             Ok(None) => {}
+        }
+
+        // Reject PD transactions before Sprite hardfork is active
+        if !self.is_sprite_active() {
+            if let Ok(Some(_)) = crate::pd_tx::detect_and_decode_pd_header(input) {
+                tracing::trace!(
+                    sender = ?tx.sender(),
+                    tx_hash = ?tx.hash(),
+                    "PD transaction rejected: Sprite hardfork not active"
+                );
+                return Err(TransactionValidationOutcome::Invalid(
+                    tx,
+                    reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                        InvalidTransactionError::TxTypeNotSupported,
+                    ),
+                ));
+            }
         }
 
         // once we support blobs, we can start accepting eip4844 txs
@@ -246,17 +290,38 @@ where
 /// PD-aware ordering that ranks transactions by effective fee rate, combining the regular gas
 /// priority fee per gas and the PD priority fee per chunk (if a PD header is present).
 #[derive(Debug)]
-pub struct PdAwareCoinbaseTipOrdering<T>(PhantomData<T>);
+pub struct PdAwareCoinbaseTipOrdering<T> {
+    /// Hardfork configuration for checking Sprite activation.
+    hardfork_config: Arc<IrysHardforkConfig>,
+    _phantom: PhantomData<T>,
+}
 
-impl<T> Default for PdAwareCoinbaseTipOrdering<T> {
-    fn default() -> Self {
-        Self(PhantomData)
+impl<T> PdAwareCoinbaseTipOrdering<T> {
+    /// Creates a new ordering with the given hardfork configuration.
+    pub fn new(hardfork_config: Arc<IrysHardforkConfig>) -> Self {
+        Self {
+            hardfork_config,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Returns true if Sprite hardfork is currently active based on system time.
+    fn is_sprite_active(&self) -> bool {
+        let current_time = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.hardfork_config
+            .is_sprite_active(UnixTimestamp::from_secs(current_time))
     }
 }
 
 impl<T> Clone for PdAwareCoinbaseTipOrdering<T> {
     fn clone(&self) -> Self {
-        Self::default()
+        Self {
+            hardfork_config: self.hardfork_config.clone(),
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -278,18 +343,23 @@ where
             .map(alloy_primitives::U256::from)
             .unwrap_or_default();
 
-        // PD header max priority fee per chunk and chunk count, if present
-        let pd_total_tip = match crate::pd_tx::detect_and_decode_pd_header(transaction.input()) {
-            Ok(Some((hdr, _))) => {
-                let pd_tip_per_chunk = hdr.max_priority_fee_per_chunk;
-                // Always infer PD chunk count from the access list.
-                let chunks_u64 = transaction
-                    .access_list()
-                    .map(sum_pd_chunks_in_access_list)
-                    .unwrap_or(0_u64);
-                alloy_primitives::U256::from(chunks_u64).saturating_mul(pd_tip_per_chunk)
+        // PD header max priority fee per chunk and chunk count, if present.
+        // Only consider PD tips when Sprite hardfork is active.
+        let pd_total_tip = if self.is_sprite_active() {
+            match crate::pd_tx::detect_and_decode_pd_header(transaction.input()) {
+                Ok(Some((hdr, _))) => {
+                    let pd_tip_per_chunk = hdr.max_priority_fee_per_chunk;
+                    // Always infer PD chunk count from the access list.
+                    let chunks_u64 = transaction
+                        .access_list()
+                        .map(sum_pd_chunks_in_access_list)
+                        .unwrap_or(0_u64);
+                    alloy_primitives::U256::from(chunks_u64).saturating_mul(pd_tip_per_chunk)
+                }
+                _ => alloy_primitives::U256::ZERO,
             }
-            _ => alloy_primitives::U256::ZERO,
+        } else {
+            alloy_primitives::U256::ZERO
         };
 
         // Effective priority: gas tip + total PD tip (per-chunk tip * chunk count).

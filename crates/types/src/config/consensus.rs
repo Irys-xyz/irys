@@ -1,4 +1,4 @@
-use crate::hardfork_config::{FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{FrontierParams, IrysHardforkConfig, Sprite};
 use crate::serde_utils;
 use crate::{
     storage_pricing::{
@@ -8,7 +8,7 @@ use crate::{
         },
         Amount,
     },
-    IrysAddress, H256,
+    IrysAddress, UnixTimestamp, H256,
 };
 use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
@@ -169,9 +169,6 @@ pub struct ConsensusConfig {
     )]
     /// Tolerance for future block timestamps due to clock drift (ms)
     pub max_future_timestamp_drift_millis: u128,
-
-    /// Configuration for Programmable Data (PD) transactions
-    pub programmable_data: ProgrammableDataConfig,
 }
 
 /// Default for `max_future_timestamp_drift_millis` when the field is not
@@ -384,34 +381,6 @@ pub struct DifficultyAdjustmentConfig {
     pub min_difficulty_adjustment_factor: Decimal,
 }
 
-// todo move this to a hardfork configuration
-/// # Programmable Data Configuration
-///
-/// Controls pricing and cost parameters for Programmable Data (PD) transactions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProgrammableDataConfig {
-    /// Cost per 1MB of Programmable Data in USD
-    #[serde(
-        deserialize_with = "serde_utils::token_amount",
-        serialize_with = "serde_utils::serializes_token_amount"
-    )]
-    pub cost_per_mb: Amount<Usd>,
-
-    /// Floor for base fee - base fee cannot drop below this value in USD
-    /// (expressed as USD per mb)
-    #[serde(
-        deserialize_with = "serde_utils::token_amount",
-        serialize_with = "serde_utils::serializes_token_amount"
-    )]
-    pub base_fee_floor: Amount<Usd>,
-
-    /// Maximum number of PD (Programmable Data) chunks that can be included in a single block.
-    /// PD-aware transactions embed a PD header and list required data chunks in their access list.
-    /// This limit prevents exceeding the network's chunk processing capacity per block.
-    pub max_pd_chunks_per_block: u64,
-}
-
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
@@ -618,11 +587,6 @@ impl ConsensusConfig {
             expected_genesis_hash: Some(H256::from_base58(
                 "2Pgf5vJvvFifTnyJy9gTg31Yba2HFh2hC6imqsmJqdF7",
             )),
-            programmable_data: ProgrammableDataConfig {
-                cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
-                base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
-                max_pd_chunks_per_block: 7_500,
-            },
             // Hardfork configuration - mainnet values
             hardforks: IrysHardforkConfig {
                 frontier: FrontierParams {
@@ -630,6 +594,8 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None, // Disabled on mainnet
+                // Sprite hardfork enables Programmable Data - not yet activated on mainnet
+                sprite: None,
             },
         }
     }
@@ -661,10 +627,16 @@ impl ConsensusConfig {
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             difficulty_adjustment,
             vdf,
-            programmable_data: ProgrammableDataConfig {
-                cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
-                base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
-                max_pd_chunks_per_block: 7_500,
+            // Enable Sprite hardfork from genesis for testing
+            hardforks: IrysHardforkConfig {
+                frontier: base.hardforks.frontier.clone(),
+                next_name_tbd: base.hardforks.next_name_tbd.clone(),
+                sprite: Some(Sprite {
+                    activation_timestamp: UnixTimestamp::from_secs(0), // Active from genesis for tests
+                    cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
+                    base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
+                    max_pd_chunks_per_block: 7_500,
+                }),
             },
             ..base
         }
@@ -775,11 +747,6 @@ impl ConsensusConfig {
             minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
             enable_full_ingress_proof_validation: false,
             max_future_timestamp_drift_millis: 15_000,
-            programmable_data: ProgrammableDataConfig {
-                cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
-                base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
-                max_pd_chunks_per_block: 7_500,
-            },
             // Hardfork configuration - testnet uses 1 proof for easier testing
             hardforks: IrysHardforkConfig {
                 frontier: FrontierParams {
@@ -787,6 +754,8 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None, // Can be enabled for testnet experiments
+                // Sprite hardfork enables Programmable Data - not yet activated on testnet
+                sprite: None,
             },
         }
     }

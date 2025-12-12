@@ -58,6 +58,22 @@ impl PdPricing {
         block_count: u64,
         reward_percentiles: &[u8],
     ) -> eyre::Result<PdFeeHistoryResponse> {
+        // Check if Sprite hardfork is active at the current tip
+        let current_timestamp = {
+            let tree = self.block_tree.read();
+            tree.get_block(&tree.tip)
+                .ok_or_eyre("No tip block found in block tree")?
+                .timestamp_secs()
+        };
+        if !self
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(current_timestamp)
+        {
+            eyre::bail!("PD pricing unavailable: Sprite hardfork not active");
+        }
+
         // Validate inputs
         validate_percentiles(reward_percentiles)?;
 
@@ -87,11 +103,23 @@ impl PdPricing {
             // Get EVM block
             let evm_block = self.get_evm_block_for_irys_block(irys_block)?;
 
-            // Extract base fee
-            let pd_config = &self.config.consensus.programmable_data;
+            // Extract base fee - Sprite must be active for all blocks in range
+            let block_timestamp = irys_block.timestamp_secs();
             let chunk_size = self.config.consensus.chunk_size;
+            let sprite = self
+                .config
+                .consensus
+                .hardforks
+                .sprite_at(block_timestamp)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Block {} at height {} is pre-Sprite hardfork",
+                        irys_block.block_hash,
+                        irys_block.height
+                    )
+                })?;
             let base_fee_irys =
-                extract_pd_base_fee_from_block(irys_block, &evm_block, pd_config, chunk_size)?;
+                extract_pd_base_fee_from_block(irys_block, &evm_block, sprite, chunk_size)?;
 
             let ema_price = ema_snapshot.ema_for_public_pricing();
             let base_fee_usd = convert_irys_to_usd(base_fee_irys, &ema_price)?;
@@ -101,7 +129,8 @@ impl PdPricing {
             base_fee_usd_vec.push(base_fee_usd);
 
             // Calculate utilization (deterministic fixed-point arithmetic)
-            let utilization_percent = self.calculate_pd_utilization_percent(&evm_block)?;
+            let utilization_percent =
+                self.calculate_pd_utilization_percent(&evm_block, block_timestamp)?;
             gas_used_ratio_vec.push(utilization_percent);
 
             // Extract priority fees and calculate percentiles
@@ -162,13 +191,15 @@ impl PdPricing {
     fn calculate_pd_utilization_percent(
         &self,
         evm_block: &reth_ethereum_primitives::Block,
+        block_timestamp: irys_types::UnixTimestamp,
     ) -> eyre::Result<Amount<Percentage>> {
         let pd_chunks_used = count_pd_chunks_in_block(evm_block);
         let max_pd_chunks = self
             .config
             .consensus
-            .programmable_data
-            .max_pd_chunks_per_block;
+            .hardforks
+            .max_pd_chunks_per_block_at(block_timestamp)
+            .unwrap_or(0);
 
         base_fee::calculate_utilization_percent(pd_chunks_used, max_pd_chunks)
     }
@@ -224,12 +255,19 @@ impl PdPricing {
         let current_evm_block = self.get_evm_block_for_irys_block(current_irys_block)?;
         let current_ema_price = current_ema.ema_for_public_pricing();
 
+        // Estimate next block timestamp by adding block time to current block
+        let block_time = self.config.consensus.difficulty_adjustment.block_time;
+        let next_block_timestamp = irys_types::UnixTimestamp::from_secs(
+            current_irys_block.timestamp_secs().as_secs() + block_time,
+        );
+
         let next_base_fee_irys = base_fee::compute_base_fee_per_chunk(
             &self.config,
             current_irys_block,
             current_ema,
             &current_ema_price,
             &current_evm_block,
+            next_block_timestamp,
         )?;
 
         let next_base_fee_usd = convert_irys_to_usd(next_base_fee_irys, &current_ema_price)?;

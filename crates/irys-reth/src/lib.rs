@@ -96,12 +96,14 @@ pub fn compose_shadow_tx(
 pub struct IrysEthereumNode {
     pub max_pd_chunks_per_block: u64,
     pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    pub hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
 }
 
 impl std::fmt::Debug for IrysEthereumNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysEthereumNode")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .field("hardfork_config", &self.hardfork_config)
             .finish()
     }
 }
@@ -136,9 +138,10 @@ impl IrysEthereumNode {
     {
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(IrysPoolBuilder::default())
+            .pool(IrysPoolBuilder::new(self.hardfork_config.clone()))
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
+                hardfork_config: self.hardfork_config.clone(),
             })
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
@@ -217,12 +220,14 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
 #[derive(Clone)]
 pub struct IrysExecutorBuilder {
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
 }
 
 impl std::fmt::Debug for IrysExecutorBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IrysExecutorBuilder")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .field("hardfork_config", &self.hardfork_config)
             .finish()
     }
 }
@@ -239,7 +244,7 @@ where
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new(self.chunk_provider);
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider, self.hardfork_config);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -3235,6 +3240,12 @@ pub mod test_utils {
                     // Use default value for tests
                     max_pd_chunks_per_block: 7_500,
                     chunk_provider: chunk_provider.clone(),
+                    // Use testing hardfork config with Sprite enabled from genesis
+                    hardfork_config: std::sync::Arc::new(
+                        irys_types::config::ConsensusConfig::testing()
+                            .hardforks
+                            .clone(),
+                    ),
                 })
                 .launch()
                 .await?;

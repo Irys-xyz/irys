@@ -43,7 +43,10 @@ async fn setup_pd_fee_history_test_chain(
     config
         .consensus
         .get_mut()
-        .programmable_data
+        .hardforks
+        .sprite
+        .as_mut()
+        .expect("Sprite hardfork must be configured for testing")
         .max_pd_chunks_per_block = 100; // 100 chunks for easy percentage calculations
 
     // Create and fund a test account for PD transactions
@@ -178,7 +181,10 @@ async fn setup_pd_fee_history_test_chain(
     let max_pd_chunks = config
         .consensus
         .get_mut()
-        .programmable_data
+        .hardforks
+        .sprite
+        .as_ref()
+        .expect("Sprite hardfork must be configured")
         .max_pd_chunks_per_block;
     Ok((node, address, block_metadata, max_pd_chunks))
 }

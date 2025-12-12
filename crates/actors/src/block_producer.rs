@@ -545,6 +545,7 @@ pub trait BlockProdStrategy {
             &prev_evm_block,
             &prev_block_ema_snapshot,
             &current_ema_for_pricing,
+            current_timestamp.to_secs(),
         )?;
 
         let (eth_built_payload, final_treasury) = self
@@ -848,6 +849,7 @@ pub trait BlockProdStrategy {
             &mempool.publish_txs,
             initial_treasury_balance,
             pd_base_fee,
+            timestamp_ms.to_secs(),
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
@@ -1340,6 +1342,7 @@ pub trait BlockProdStrategy {
         prev_evm_block: &reth_ethereum_primitives::Block,
         prev_block_ema_snapshot: &EmaSnapshot,
         current_ema_price: &irys_types::IrysTokenPrice,
+        block_timestamp: irys_types::UnixTimestamp,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
         base_fee::compute_base_fee_per_chunk(
             &self.inner().config,
@@ -1347,6 +1350,7 @@ pub trait BlockProdStrategy {
             prev_block_ema_snapshot,
             current_ema_price,
             prev_evm_block,
+            block_timestamp,
         )
     }
 
