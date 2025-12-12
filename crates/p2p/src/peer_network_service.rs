@@ -475,11 +475,14 @@ impl PeerNetworkService {
                 .sign_p2p_handshake(&mut version_request)
                 .expect("Failed to sign version request");
 
-            let gossip_address = if let Some(peer) = self.inner.peer_list().peer_by_api_address(api_address) {
-                Some(peer.address.gossip)
-            } else {
-                self.inner.peer_list().get_trusted_peer_gossip_address(api_address)
-            };
+            let gossip_address =
+                if let Some(peer) = self.inner.peer_list().peer_by_api_address(api_address) {
+                    Some(peer.address.gossip)
+                } else {
+                    self.inner
+                        .peer_list()
+                        .get_trusted_peer_gossip_address(api_address)
+                };
 
             let task = if let Some(gossip_address) = gossip_address {
                 Some(HandshakeTask {

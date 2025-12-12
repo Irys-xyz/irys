@@ -414,10 +414,7 @@ impl PeerList {
 
     pub fn peer_by_api_address(&self, address: SocketAddr) -> Option<PeerListItem> {
         let binding = self.read();
-        let mining_address = binding
-            .api_addr_to_mining_addr_map
-            .get(&address)
-            .copied()?;
+        let mining_address = binding.api_addr_to_mining_addr_map.get(&address).copied()?;
         binding
             .persistent_peers_cache
             .get(&mining_address)

@@ -8,9 +8,10 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData, GossipDataRequest,
-    GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkError, PeerResponse, VersionRequest, DATA_REQUEST_RETRIES, H256,
+    AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData,
+    GossipDataRequest, GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
+    NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, VersionRequest,
+    DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -193,16 +194,35 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<PeerResponse> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
-        })?;
+        let response: GossipResponse<AcceptedResponse> =
+            response.json().await.map_err(|error| {
+                GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+            })?;
 
         match response {
-            GossipResponse::Accepted(version_response) => Ok(version_response),
-            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
-                peer.to_string(),
-                format!("Request rejected: {:?}", reason),
-            )),
+            GossipResponse::Accepted(version_response) => {
+                Ok(PeerResponse::Accepted(version_response))
+            }
+            GossipResponse::Rejected(reason) => match reason {
+                RejectionReason::InvalidCredentials => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::InvalidCredentials,
+                        message: Some("Invalid credentials provided".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                RejectionReason::ProtocolMismatch => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::ProtocolMismatch,
+                        message: Some("Protocol mismatch".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                _ => Err(GossipClientError::GetRequest(
+                    peer.to_string(),
+                    format!("Unexpected rejection reason: {:?}", reason),
+                )),
+            },
         }
     }
 
