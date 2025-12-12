@@ -1352,6 +1352,17 @@ where
                     ))
                 }
                 shadow_tx::TransactionPacket::PdBaseFeeUpdate(update) => {
+                    // PdBaseFeeUpdate is a PD feature - only allow when Sprite hardfork is active.
+                    // This provides defense-in-depth; the consensus layer already guards generation.
+                    if !self.is_sprite_active {
+                        tracing::warn!(
+                            "PdBaseFeeUpdate shadow transaction received before Sprite hardfork is active"
+                        );
+                        return Err(Self::create_internal_error(
+                            "PdBaseFeeUpdate not allowed before Sprite hardfork".to_string(),
+                        ));
+                    }
+
                     // Write the per-chunk base fee into the PD base fee account balance.
                     let target = *PD_BASE_FEE_ACCOUNT;
 
