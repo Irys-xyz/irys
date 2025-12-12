@@ -14,10 +14,9 @@ pub const PD_BASE_FEE_INDEX: usize = 1;
 
 /// Compute the PD base fee per chunk for a new block.
 ///
-/// Handles all three cases:
-/// - Pre-Sprite: returns zero (no PD fees)
-/// - First Sprite block (parent is pre-Sprite): returns floor base fee
-/// - Normal Sprite block (parent is post-Sprite): computes from parent utilization
+/// Returns:
+/// - `None` for pre-Sprite blocks (no PD fees)
+/// - `Some(amount)` for Sprite blocks (floor for first block, computed for subsequent)
 pub fn compute_pd_base_fee_for_block(
     config: &Config,
     parent_block: &IrysBlockHeader,
@@ -27,28 +26,32 @@ pub fn compute_pd_base_fee_for_block(
         alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844>,
     >,
     block_timestamp: UnixTimestamp,
-) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+) -> eyre::Result<Option<Amount<(CostPerChunk, Irys)>>> {
     let Some(sprite) = config.consensus.hardforks.sprite_at(block_timestamp) else {
         // Pre-Sprite: no PD fees
-        return Ok(Amount::new(U256::from(0)));
+        return Ok(None);
     };
 
     // Sprite is active - check if parent is pre-Sprite
     let parent_is_pre_sprite = parent_block.timestamp_secs() < sprite.activation_timestamp;
     if parent_is_pre_sprite {
         // First Sprite block: parent doesn't have PdBaseFeeUpdate, use floor
-        return compute_floor_base_fee_per_chunk(sprite, current_ema_price, config.consensus.chunk_size);
+        return Ok(Some(compute_floor_base_fee_per_chunk(
+            sprite,
+            current_ema_price,
+            config.consensus.chunk_size,
+        )?));
     }
 
     // Normal case: compute from parent's utilization
-    compute_base_fee_per_chunk(
+    Ok(Some(compute_base_fee_per_chunk(
         config,
         parent_block,
         parent_ema_snapshot,
         current_ema_price,
         parent_evm_block,
         block_timestamp,
-    )
+    )?))
 }
 
 /// Compute the floor PD base fee per chunk.

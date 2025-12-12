@@ -827,7 +827,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-        pd_base_fee: Amount<(CostPerChunk, Irys)>,
+        pd_base_fee: Option<Amount<(CostPerChunk, Irys)>>,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {

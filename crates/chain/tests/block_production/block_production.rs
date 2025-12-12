@@ -1131,10 +1131,12 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            pd_base_fee: Amount<(
-                irys_types::storage_pricing::phantoms::CostPerChunk,
-                irys_types::storage_pricing::phantoms::Irys,
-            )>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
         ) -> Result<
@@ -1552,10 +1554,12 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             prev_evm_block: &reth_ethereum_primitives::Block,
             mempool: &irys_actors::block_producer::MempoolTxsBundle,
             reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            pd_base_fee: Amount<(
-                irys_types::storage_pricing::phantoms::CostPerChunk,
-                irys_types::storage_pricing::phantoms::Irys,
-            )>,
+            pd_base_fee: Option<
+                Amount<(
+                    irys_types::storage_pricing::phantoms::CostPerChunk,
+                    irys_types::storage_pricing::phantoms::Irys,
+                )>,
+            >,
             timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
         ) -> Result<
