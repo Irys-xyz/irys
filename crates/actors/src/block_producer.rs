@@ -5,6 +5,7 @@ use crate::{
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
+    pd_pricing::base_fee,
     services::ServiceSenders,
     shadow_tx_generator::{PublishLedgerWithTxs, ShadowTxGenerator},
 };
@@ -31,12 +32,17 @@ use irys_reth::{
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
-    app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
-    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
-    H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo,
-    H256, U256,
+    app_state::DatabaseProvider,
+    block_production::SolutionContext,
+    calculate_difficulty, next_cumulative_diff,
+    storage_pricing::{
+        phantoms::{CostPerChunk, Irys},
+        Amount,
+    },
+    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, GossipBroadcastMessage, H256List, IrysAddress, IrysBlockHeader,
+    IrysTokenPrice, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp,
+    UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -520,12 +526,34 @@ pub trait BlockProdStrategy {
 
         let block_reward = self.block_reward(&prev_block_header)?;
 
+        // Calculate the new EMA for block header (stored in block, used for next calculations)
+        let ema_calculation = self
+            .get_ema_price(&prev_block_header, &prev_block_ema_snapshot)
+            .await?;
+
+        // Get the EMA price that will be used for public pricing in this new block
+        // This accounts for interval boundary crossings
+        let current_ema_for_pricing = prev_block_ema_snapshot
+            .calculate_public_pricing_ema_for_height(
+                prev_block_header.height + 1,
+                self.inner().config.consensus.ema.price_adjustment_interval,
+            );
+
+        // Calculate PD base fee for the new block using both parent and current pricing EMA
+        let pd_base_fee = self.calculate_pd_base_fee_for_new_block(
+            &prev_block_header,
+            &prev_evm_block,
+            &prev_block_ema_snapshot,
+            &current_ema_for_pricing,
+        )?;
+
         let (eth_built_payload, final_treasury) = self
             .create_evm_block(
                 &prev_block_header,
                 &prev_evm_block,
                 &mempool_bundle,
                 block_reward,
+                pd_base_fee,
                 current_timestamp,
                 solution.solution_hash,
             )
@@ -540,7 +568,7 @@ pub trait BlockProdStrategy {
                 current_timestamp,
                 block_reward,
                 evm_block,
-                &prev_block_ema_snapshot,
+                ema_calculation,
                 final_treasury,
             )
             .await?;
@@ -797,6 +825,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
+        pd_base_fee: Amount<(CostPerChunk, Irys)>,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
@@ -818,6 +847,7 @@ pub trait BlockProdStrategy {
             &mempool.submit_txs,
             &mempool.publish_txs,
             initial_treasury_balance,
+            pd_base_fee,
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
@@ -972,7 +1002,7 @@ pub trait BlockProdStrategy {
         current_timestamp: UnixTimestampMs,
         block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
         eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
-        perv_block_ema_snapshot: &EmaSnapshot,
+        ema_calculation: ExponentialMarketAvgCalculation,
         final_treasury: U256,
     ) -> eyre::Result<
         Option<(
@@ -1036,10 +1066,6 @@ pub trait BlockProdStrategy {
                 .map_err(|e| eyre!("VDF step range {} unavailable while producing block {}, reason: {:?}, aborting", solution.vdf_step, &block_height, e))?
         };
         steps.push(solution.seed.0);
-
-        let ema_calculation = self
-            .get_ema_price(prev_block_header, perv_block_ema_snapshot)
-            .await?;
 
         // Update the last_epoch_hash field, which tracks the most recent epoch boundary
         //
@@ -1305,6 +1331,23 @@ pub trait BlockProdStrategy {
             .reward_curve
             .reward_between(previous_block_seconds, current_block_seconds)?;
         Ok(reward_amount)
+    }
+
+    /// Calculate the new PD base fee for a new block based on utilization.
+    fn calculate_pd_base_fee_for_new_block(
+        &self,
+        prev_block_header: &IrysBlockHeader,
+        prev_evm_block: &reth_ethereum_primitives::Block,
+        prev_block_ema_snapshot: &EmaSnapshot,
+        current_ema_price: &irys_types::IrysTokenPrice,
+    ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+        base_fee::compute_base_fee_per_chunk(
+            &self.inner().config,
+            prev_block_header,
+            prev_block_ema_snapshot,
+            current_ema_price,
+            prev_evm_block,
+        )
     }
 
     async fn get_ema_price(

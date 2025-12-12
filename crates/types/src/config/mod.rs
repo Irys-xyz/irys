@@ -533,7 +533,10 @@ mod tests {
         ingress_proof_anchor_expiry_depth = 200
         commitment_fee = 100
 
-
+        [programmable_data]
+        cost_per_mb = 0.01
+        base_fee_floor = 0.01
+        max_pd_chunks_per_block = 7500
 
         [difficulty_adjustment]
         block_time = 1
@@ -628,6 +631,7 @@ mod tests {
 
         [packing.local]
         cpu_packing_concurrency = 4
+        cpu_unpacking_concurrency = 4
         gpu_packing_batch_size = 1024
 
         [cache]

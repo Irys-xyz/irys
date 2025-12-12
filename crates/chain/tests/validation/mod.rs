@@ -2,6 +2,8 @@ mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
+mod pd_base_fee_mismatch;
+mod pd_chunk_limit_per_block;
 mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
@@ -14,8 +16,8 @@ use crate::utils::{
     BlockValidationOutcome, IrysNodeTest,
 };
 use irys_actors::block_discovery::BlockTransactions;
+use irys_actors::block_tree_service::ValidationResult;
 use irys_actors::block_validation::ValidationError;
-use irys_actors::validation_service::ValidationServiceMessage;
 use irys_actors::{
     async_trait,
     block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
@@ -52,27 +54,6 @@ pub async fn send_block_to_block_tree(
         })?;
 
     response_rx.await??;
-    Ok(())
-}
-
-fn send_block_to_block_validation(
-    node_ctx: &IrysNodeCtx,
-    block: Arc<IrysBlockHeader>,
-) -> Result<(), PreValidationError> {
-    let transactions = BlockTransactions {
-        commitment_txs: vec![],
-        data_txs: HashMap::new(),
-    };
-
-    node_ctx
-        .service_senders
-        .validation_service
-        .send(ValidationServiceMessage::ValidateBlock {
-            block,
-            transactions,
-            skip_vdf_validation: false,
-        })
-        .unwrap();
     Ok(())
 }
 
@@ -1127,48 +1108,75 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
 
 /// Peer mines a block on top of common state with genesis
 /// But peer does not broadcast execution payload (effectively, block is stuck in validation on the genesis)
+/// Whilst another peer mines & broadcasts blocks, advancing the canonical chain on genesis
 ///
 /// Expectation: genesis mines ahead, and the block validation task for the block that's stuck gets cancelled
 #[test_log::test(tokio::test)]
 async fn heavy_block_validation_discards_a_block_if_its_too_old() -> eyre::Result<()> {
+    // max time to wait for block validations
+    let max_seconds = 10;
     let num_blocks_in_epoch = 2;
-    let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
-    genesis_config.consensus.get_mut().block_tree_depth = 3;
-    genesis_config.consensus.get_mut().block_migration_depth = 1;
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    genesis_config.consensus.get_mut().block_migration_depth = 2;
+    genesis_config.consensus.get_mut().block_tree_depth = 5;
     let test_signer = genesis_config.new_random_signer();
-    genesis_config.fund_genesis_accounts(vec![&test_signer]);
-
+    let test_signer_2 = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer, &test_signer_2]);
     let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
-        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .start_and_wait_for_packing("GENESIS", max_seconds)
         .await;
-    let peer_node = genesis_node
+    let fork_creator_1 = genesis_node
         .testing_peer_with_assignments(&test_signer)
         .await?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    peer_node.gossip_disable();
-    let (block, _payload, _) = peer_node.mine_block_without_gossip().await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash);
+    let fork_creator_2 = genesis_node
+        .testing_peer_with_assignments(&test_signer_2)
+        .await?;
 
-    // send directly to validation service, otherwise (if we send to block tree) block producer of genesis
-    // node will wait for this block to be validated for quite a while until it starts mining
-    send_block_to_block_validation(&genesis_node.node_ctx, block.clone())?;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    genesis_node.mine_blocks_without_gossip(3).await?;
-    genesis_node.gossip_enable();
-    peer_node.gossip_enable();
-    peer_node.gossip_block_to_peers(&block)?;
+    // temp disable block validation
+    genesis_node.node_ctx.set_validation_enabled(false);
 
-    // Send block for validation
-    let outcome = outcome.await;
+    fork_creator_2.gossip_disable();
+    fork_creator_1.gossip_disable();
+    genesis_node.gossip_disable();
 
-    assert_validation_error(
-        outcome,
-        |e| matches!(e, ValidationError::ValidationCancelled { .. }),
-        "block with versioned_hashes should be rejected",
-    );
+    let (block, _, txs) = fork_creator_1.mine_block_without_gossip().await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), txs, false).await?;
+    let root_block_of_fork = block;
+
+    genesis_node.node_ctx.set_validation_enabled(true);
+    let mut block_state_rx = genesis_node
+        .node_ctx
+        .service_senders
+        .subscribe_block_state_updates();
+    for _ in 0..10 {
+        let (block, eth_block, txs) = fork_creator_2.mine_block_without_gossip().await?;
+        tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
+        send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), txs, false).await?;
+        genesis_node
+            .node_ctx
+            .block_pool
+            .execution_payload_provider
+            .add_payload_to_cache(eth_block.block().clone())
+            .await;
+    }
+    tracing::error!("waiting for event");
+    while let Ok(event) = block_state_rx.recv().await {
+        tracing::warn!(?event, desired_hash = ? root_block_of_fork.block_hash, "block");
+        if event.block_hash == root_block_of_fork.block_hash {
+            assert!(matches!(
+                event.validation_result,
+                ValidationResult::Invalid(ValidationError::ValidationCancelled { .. })
+            ));
+            break;
+        }
+    }
+
+    // Shut down the node to clean up the test environment.
+    fork_creator_2.stop().await;
+    fork_creator_1.stop().await;
     genesis_node.stop().await;
-    peer_node.stop().await;
-
     Ok(())
 }

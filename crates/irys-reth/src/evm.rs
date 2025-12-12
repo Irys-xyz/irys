@@ -10,7 +10,8 @@ use alloy_eips::eip2718::EIP4844_TX_TYPE_ID;
 use alloy_evm::block::{BlockExecutionError, BlockExecutor, ExecutableTx, OnStateHook};
 use alloy_evm::eth::EthBlockExecutor;
 use alloy_evm::{Database, Evm, FromRecoveredTx, FromTxWithEncoded};
-use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, U256};
+use alloy_primitives::{keccak256, Address, Bytes, FixedBytes, Log, LogData, U256};
+use std::sync::LazyLock;
 
 use reth::primitives::{SealedBlock, SealedHeader};
 use reth::providers::BlockExecutionResult;
@@ -36,11 +37,13 @@ use revm::inspector::NoOpInspector;
 use revm::precompile::{PrecompileSpecId, Precompiles};
 use revm::state::{Account, AccountStatus};
 use revm::{MainBuilder as _, MainContext as _};
-use tracing::{trace, warn};
+use tracing::trace;
 
 // External crate imports - Other
 
 use super::*;
+use crate::precompiles::pd::context::PdContext;
+use crate::precompiles::pd::precompile::register_irys_precompiles_if_active;
 use crate::shadow_tx::{self, ShadowTransaction};
 
 /// Constants for shadow transaction processing
@@ -51,6 +54,11 @@ mod constants {
     /// Gas refunded for shadow transactions (always 0)
     pub(super) const SHADOW_TX_GAS_REFUNDED: u64 = 0;
 }
+
+/// Account address used to store the PD base fee per chunk in EVM state.
+/// The balance of this account represents the current PD base fee.
+pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_pd_base_fee_account")));
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
@@ -194,7 +202,7 @@ where
 /// This factory produces [`IrysBlockExecutor`] instances that can handle both
 /// regular Ethereum transactions and Irys-specific shadow transactions. It wraps
 /// the standard Ethereum block executor factory with Irys-specific configuration.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct IrysBlockExecutorFactory {
     inner: EthBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, IrysEvmFactory>,
 }
@@ -334,13 +342,22 @@ impl ConfigureEvm for IrysEvmConfig {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct IrysEvmFactory {}
+pub struct IrysEvmFactory {
+    context: PdContext,
+}
 
 impl IrysEvmFactory {
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>) -> Self {
+        let context = PdContext::new(chunk_provider);
+        Self { context }
+    }
+
+    /// Provides access to the PdContext for test setup.
+    #[cfg(test)]
+    pub fn context(&self) -> &PdContext {
+        &self.context
     }
 }
 
@@ -356,7 +373,7 @@ impl EvmFactory for IrysEvmFactory {
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
-        IrysEvm::new(
+        let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
                 .with_cfg(input.cfg_env)
@@ -366,7 +383,14 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             false,
-        )
+            self.context.clone_for_new_evm(),
+        );
+
+        // Register Irys custom precompiles depending on active hardfork (Frontier+).
+        let pd_context = evm.pd_context().clone();
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+
+        evm
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -376,7 +400,7 @@ impl EvmFactory for IrysEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
-        IrysEvm::new(
+        let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
                 .with_cfg(input.cfg_env)
@@ -386,7 +410,14 @@ impl EvmFactory for IrysEvmFactory {
                     PrecompileSpecId::from_spec_id(spec_id),
                 ))),
             true,
-        )
+            self.context.clone_for_new_evm(),
+        );
+
+        // Register Irys custom precompiles depending on active hardfork (Frontier+).
+        let pd_context = evm.pd_context().clone();
+        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+
+        evm
     }
 }
 
@@ -433,6 +464,8 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     >,
     inspect: bool,
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
+    // Shared context for accessing Irys data
+    context: PdContext,
 }
 
 impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
@@ -449,11 +482,13 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             EthFrame,
         >,
         inspect: bool,
+        context: PdContext,
     ) -> Self {
         Self {
             inner: evm,
             inspect,
             state: Default::default(),
+            context,
         }
     }
 
@@ -478,6 +513,11 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
     /// Provides a mutable reference to the EVM context.
     pub fn ctx_mut(&mut self) -> &mut EthEvmContext<DB> {
         &mut self.inner.ctx
+    }
+
+    /// Provides a reference to the PD context.
+    pub const fn pd_context(&self) -> &PdContext {
+        &self.context
     }
 }
 
@@ -543,6 +583,84 @@ where
             Either::Left(res) => return Ok(res),
             Either::Right(tx) => tx,
         };
+
+        // Update EVM's PdContext with transaction access_list for PD precompile
+        // Each EVM has its own PdContext (via clone), so this is thread-safe
+        let access_list = tx.access_list.to_vec();
+        self.context.update_access_list(access_list);
+        tracing::debug!(
+            access_list_items = tx.access_list.len(),
+            "Updated PdContext with transaction access_list for this EVM instance"
+        );
+
+        // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
+        // Layout: [magic][version:u16][borsh header][rest]
+        if let Some((pd_header, consumed)) =
+            crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
+        {
+            // Compute PD fees based on header values. Always derive PD chunk count from access list.
+            let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
+            let chunks = U256::from(chunks_u64);
+            // Read the actual PD base fee from EVM state and cap by user's max.
+            let actual_per_chunk = self.read_pd_base_fee_per_chunk();
+            let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
+                // TODO: reject the tx!!!
+                pd_header.max_base_fee_per_chunk
+            } else {
+                actual_per_chunk
+            };
+            let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
+
+            let base_total = chunks.saturating_mul(base_per_chunk);
+            let prio_total = chunks.saturating_mul(prio_per_chunk);
+
+            // Fee payer is the transaction caller; priority recipient is block beneficiary.
+            let fee_payer = tx.caller;
+            let beneficiary = self.block().beneficiary;
+            // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
+            // that will also make accounting easier on irys side
+            let treasury = Address::ZERO;
+
+            // Strip the PD header from calldata before executing the tx logic.
+            let stripped: Bytes = tx.data.slice(consumed..);
+            let mut tx = tx;
+            tx.data = stripped;
+
+            let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
+            {
+                // deduct fees from payer
+                // TODO: if user does not have enough fees then we extract all the funds we can from him
+                if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                    &mut self.inner.ctx.journaled_state.database,
+                    fee_payer,
+                    treasury,
+                    base_total,
+                )? {
+                    return Err(EVMError::Custom(
+                        "insufficient balance for PD base fees".to_string(),
+                    ));
+                }
+                if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                    &mut self.inner.ctx.journaled_state.database,
+                    fee_payer,
+                    beneficiary,
+                    prio_total,
+                )? {
+                    return Err(EVMError::Custom(
+                        "insufficient balance for PD priority fees".to_string(),
+                    ));
+                }
+            }
+            self.inner.ctx.journaled_state.checkpoint_commit();
+
+            let res = if self.inspect {
+                self.inner.inspect_tx(tx)
+            } else {
+                self.inner.transact(tx)
+            }?;
+
+            return Ok(res);
+        }
 
         if self.inspect {
             self.inner.inspect_tx(tx)
@@ -770,29 +888,8 @@ where
         // at this point, the shadow tx has been processed, and it was valid *enough*
         // that we should generate a receipt for it even in a failure state
         let execution_result = match new_account_state {
-            Ok((mut account, execution_result, account_existed)) => {
-                self.commit_account_change(target, account.clone());
-
-                let state_acc = self.state.get(&target).unwrap().clone();
-
-                account.status = AccountStatus::Touched;
-                // let mut status = AccountStatus::Touched;
-                if account.info.is_empty() {
-                    // Existing account that is still empty after increment - don't touch it
-                    // This handles the case where increment amount is 0 or results in 0 balance
-                    account.status |= AccountStatus::SelfDestructed;
-                } else if !account_existed {
-                    // New account being created with non-zero balance - mark as created and touched
-                    account.status |= AccountStatus::Created;
-                } else {
-                    account.status = AccountStatus::Touched
-                }
-
-                // ensure status changing logic as part of `commit_account_change` is sane
-                if state_acc.status != account.status {
-                    warn!("Potentially invalid account status flags: from commit {:?}, from prev: {:?}", &state_acc.status, &account.status);
-                }
-
+            Ok((account, execution_result, _account_existed)) => {
+                self.commit_account_change(target, account);
                 execution_result
             }
             Err(execution_result) => execution_result,
@@ -848,6 +945,15 @@ where
         }
 
         Ok(Either::Left(result_state))
+    }
+
+    /// Reads the current PD base fee per chunk from the EVM state.
+    /// The fee is stored as the balance of the PD_BASE_FEE_ACCOUNT.
+    pub fn read_pd_base_fee_per_chunk(&mut self) -> U256 {
+        match self.load_account(*PD_BASE_FEE_ACCOUNT) {
+            Ok(Some(acc)) => acc.info.balance,
+            _ => U256::ZERO,
+        }
     }
 
     /// Loads an account from the underlying state, or the database if there are no preexisting changes.
@@ -1198,6 +1304,29 @@ where
                         target,
                     ))
                 }
+                shadow_tx::TransactionPacket::PdBaseFeeUpdate(update) => {
+                    // Write the per-chunk base fee into the PD base fee account balance.
+                    let target = *PD_BASE_FEE_ACCOUNT;
+
+                    // Load existing or create new account
+                    let existed;
+                    let mut account = if let Some(acc) = self.load_account(target)? {
+                        existed = true;
+                        acc
+                    } else {
+                        existed = false;
+                        Account::new_not_existing(0)
+                    };
+                    account.info.balance = update.per_chunk;
+
+                    let log = Self::create_shadow_log(
+                        target,
+                        vec![topic],
+                        vec![DynSolValue::Uint(update.per_chunk, 256)],
+                    );
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Ok((account, execution_result, existed)), target))
+                }
             },
         }
     }
@@ -1326,17 +1455,75 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
+    use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
+    use crate::test_utils::{
+        advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
+        DEFAULT_PRIORITY_FEE,
+    };
+    use alloy_consensus::TxEip1559;
+    use alloy_eips::eip2930::AccessListItem as AlItem;
     use alloy_primitives::{Address, B256, U256};
+    use alloy_primitives::{Bytes, FixedBytes};
+    use reth::rpc::api::eth::EthApiServer as _;
     use reth_evm::EvmEnv;
+    use reth_provider::ReceiptProvider as _;
+
+    use alloy_primitives::aliases::U200;
+    use irys_types::range_specifier::{ChunkRangeSpecifier, PdAccessListArgSerde as _};
+    use reth_transaction_pool::{PoolTransaction as _, TransactionOrigin, TransactionPool as _};
     use revm::context::result::{EVMError, InvalidTransaction};
     use revm::context::{BlockEnv, CfgEnv, TxEnv};
     use revm::database_interface::EmptyDB;
+
+    fn tx_request_base() -> alloy_rpc_types::TransactionRequest {
+        alloy_rpc_types::TransactionRequest {
+            chain_id: Some(1),
+            max_fee_per_gas: Some(1_000_000_000),
+            max_priority_fee_per_gas: Some(1_000_000),
+            gas: Some(100_000),
+            ..Default::default()
+        }
+    }
+
+    fn tx_eip1559_base() -> TxEip1559 {
+        TxEip1559 {
+            chain_id: 1,
+            gas_limit: 100_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            to: TxKind::Call(Address::random()),
+            value: U256::ZERO,
+            nonce: 0,
+            access_list: Default::default(),
+            input: Bytes::new(),
+        }
+    }
+
+    /// Helper to build PD access list with N chunks
+    fn build_pd_access_list(num_chunks: usize) -> alloy_eips::eip2930::AccessList {
+        let keys: Vec<_> = (0..num_chunks)
+            .map(|i| {
+                let spec = ChunkRangeSpecifier {
+                    partition_index: U200::ZERO,
+                    offset: i as u32,
+                    chunk_count: 1,
+                };
+                B256::from(spec.encode())
+            })
+            .collect();
+        alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: keys,
+        }])
+    }
 
     /// Ensure EVM layer rejects EIP-4844 blob-carrying transactions regardless of mempool filters.
     #[test]
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
-        let factory = IrysEvmFactory::new();
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
+        let factory = IrysEvmFactory::new(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
@@ -1373,7 +1560,8 @@ mod tests {
     /// Ensure a regular non-shadow, non-blob transaction executes successfully at the EVM layer.
     #[test]
     fn evm_processes_normal_tx_success() {
-        let factory = IrysEvmFactory::new();
+        let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
+        let factory = IrysEvmFactory::new(mock_chunk_provider);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit
         let mut cfg_env = CfgEnv::default();
@@ -1409,5 +1597,434 @@ mod tests {
         assert!(res.is_ok(), "expected Ok, got: {:?}", res);
         let result = res.unwrap().result;
         assert!(result.is_success(), "expected success, got: {:?}", result);
+    }
+
+    /// Ensure a PD-shaped transaction with header charges base and priority fees end-to-end via node execution.
+    /// Tests with different transfer values (0, 1, 2, 3) to ensure proper accounting across all scenarios.
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(1)]
+    #[case(2)]
+    #[case(3)]
+    #[test_log::test(tokio::test)]
+    async fn evm_pd_header_tx_charges_fees(#[case] transfer_value: u64) -> eyre::Result<()> {
+        // Spin up a single node and set PD base fee via shadow transaction
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+
+        let payer = ctx.normal_signer.address();
+        let beneficiary = ctx.block_producer_a.address();
+        let treasury = Address::ZERO;
+
+        let pd_base_fee = U256::from(7_u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: pd_base_fee,
+            }),
+            solution_hash,
+        );
+        // Priority fee ignored for PdBaseFeeUpdate (no payer address)
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
+
+        // Capture initial balances and nonce
+        let payer_initial = get_balance(&node.inner, payer);
+        let beneficiary_initial = get_balance(&node.inner, beneficiary);
+        let sink_initial = get_balance(&node.inner, treasury);
+        let payer_initial_nonce = get_nonce(&node.inner, payer);
+
+        // Build and submit a PD-header transaction: 3 chunks, prio=10, base<=7
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: U256::from(10_u64),
+            max_base_fee_per_chunk: U256::from(7_u64),
+        };
+        let user_calldata = Bytes::from(vec![0xAA, 0xBB]);
+        let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
+
+        // PD access list: 3 storage keys at PD precompile address
+        use crate::test_utils::chunk_spec_with_params;
+
+        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
+        let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());
+        let key3 = B256::from(chunk_spec_with_params([0; 25], 2, 1).encode());
+        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![key1, key2, key3],
+        }]);
+
+        // Compose EIP-1559 tx with zero priority gas fee so only PD fees affect balances
+        let value = U256::from(transfer_value);
+        let tx_raw = TxEip1559 {
+            access_list,
+            input,
+            max_priority_fee_per_gas: 0,
+            nonce: payer_initial_nonce,
+            value,
+            ..tx_eip1559_base()
+        };
+        let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
+        let tx_hash = *pooled.hash();
+        let _add_result = node
+            .inner
+            .pool
+            .add_transaction(TransactionOrigin::Local, pooled)
+            .await?;
+
+        // Mine a block including the PD-header tx
+        let payload = advance_block(&mut node, vec![]).await?;
+
+        // Query the receipt to get actual gas used
+        let receipt = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .receipt_by_hash(tx_hash)
+            .unwrap()
+            .expect("Receipt should exist for mined transaction");
+        let gas_used = receipt.cumulative_gas_used;
+
+        // Get the block basefee
+        let block = payload.block();
+        let block_basefee = block.header().base_fee_per_gas.unwrap_or(0);
+
+        // Calculate PD fees
+        let pd_base_total = U256::from(3_u64) * pd_base_fee; // 3 chunks * 7 = 21
+        let pd_prio_total = U256::from(3_u64) * U256::from(10_u64); // 3 chunks * 10 = 30
+
+        // Calculate EVM gas costs
+        // Note: max_priority_fee_per_gas = 0 in this test, so only base fee matters
+        let evm_base_cost = U256::from(gas_used) * U256::from(block_basefee);
+        let evm_priority_cost = U256::ZERO; // max_priority_fee_per_gas is 0
+
+        // Total expected deduction: PD fees + EVM gas + tx.value
+        let expected_total =
+            pd_base_total + pd_prio_total + evm_base_cost + evm_priority_cost + value;
+
+        // Validate payer balance deduction
+        let payer_final = get_balance(&node.inner, payer);
+        let deducted = payer_initial.saturating_sub(payer_final);
+        assert_eq!(
+            deducted,
+            expected_total,
+            "Payer balance deduction mismatch. Expected: {} (PD base: {} + PD prio: {} + EVM base: {} + EVM prio: {}), Got: {}",
+            expected_total,
+            pd_base_total,
+            pd_prio_total,
+            evm_base_cost,
+            evm_priority_cost,
+            deducted
+        );
+
+        // Beneficiary should receive: PD priority fees + EVM priority tips
+        // In this test, EVM priority tip = 0, so only PD priority fees
+        let beneficiary_final = get_balance(&node.inner, beneficiary);
+        let expected_beneficiary_gain = pd_prio_total + evm_priority_cost;
+        assert_eq!(
+            beneficiary_final,
+            beneficiary_initial + expected_beneficiary_gain,
+            "Beneficiary balance mismatch. Expected gain: {} (PD prio: {} + EVM prio: {}), Got: {}",
+            expected_beneficiary_gain,
+            pd_prio_total,
+            evm_priority_cost,
+            beneficiary_final.saturating_sub(beneficiary_initial)
+        );
+
+        // Sink should receive: PD base fees
+        let sink_final = get_balance(&node.inner, treasury);
+        let expected_sink_gain = pd_base_total;
+        assert_eq!(
+            sink_final,
+            sink_initial + expected_sink_gain,
+            "Sink balance mismatch. Expected gain: {} (PD base: {} + EVM base: {}), Got: {}",
+            expected_sink_gain,
+            pd_base_total,
+            evm_base_cost,
+            sink_final.saturating_sub(sink_initial)
+        );
+
+        // Verify nonce was incremented
+        let payer_final_nonce = get_nonce(&node.inner, payer);
+        assert_eq!(
+            payer_final_nonce,
+            payer_initial_nonce + 1,
+            "Nonce should increment after transaction execution. Expected: {}, Got: {}",
+            payer_initial_nonce + 1,
+            payer_final_nonce
+        );
+
+        Ok(())
+    }
+
+    /// Validates that batch simulation via eth_simulateV1 does not modify chain state.
+    ///
+    /// This test simulates a PD transaction using the batch simulation API and verifies
+    /// that account balances and nonces remain unchanged after simulation completes.
+    #[test_log::test(tokio::test)]
+    async fn test_pd_tx_batch_simulation_doesnt_modify_state() -> eyre::Result<()> {
+        use alloy_rpc_types::simulate::{SimBlock, SimulatePayload};
+
+        // Spin up a single node and set PD base fee
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+
+        let payer = ctx.normal_signer.address();
+
+        // Set PD base fee to a known value
+        let pd_base_fee = U256::from(100_u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x44; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: pd_base_fee,
+            }),
+            solution_hash,
+        );
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
+
+        // Capture pre-simulation state
+        let balance_before = get_balance(&node.inner, payer);
+        let nonce_before = get_nonce(&node.inner, payer);
+        println!(
+            "Pre-simulation: balance={}, nonce={}",
+            balance_before, nonce_before
+        );
+
+        // Build single PD transaction with 2 chunks
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: U256::from(50_u64),
+            max_base_fee_per_chunk: U256::from(100_u64),
+        };
+        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xAA]));
+
+        let tx_request = alloy_rpc_types::TransactionRequest {
+            from: Some(payer),
+            to: Some(TxKind::Call(Address::random())),
+            value: Some(U256::from(100_u64)),
+            input: alloy_rpc_types::TransactionInput::new(input),
+            nonce: Some(nonce_before),
+            access_list: Some(build_pd_access_list(2)),
+            ..tx_request_base()
+        };
+
+        // Build simulation payload
+        let payload = SimulatePayload {
+            block_state_calls: vec![SimBlock {
+                block_overrides: None,
+                state_overrides: None,
+                calls: vec![tx_request],
+            }],
+            trace_transfers: true,
+            validation: true,
+            return_full_transactions: false,
+        };
+
+        // Get the eth API and simulate
+        let eth_api = node.rpc.inner.eth_api();
+        let simulation_result = eth_api
+            .simulate_v1(payload, Some(alloy_rpc_types::BlockId::latest()))
+            .await;
+
+        // Validate simulation succeeded
+        let simulated_blocks = simulation_result?;
+        assert_eq!(simulated_blocks.len(), 1, "Expected 1 simulated block");
+        assert_eq!(simulated_blocks[0].calls.len(), 1, "Expected 1 call result");
+        assert!(
+            simulated_blocks[0].calls[0].status,
+            "Simulation should succeed"
+        );
+
+        // Verify state unchanged
+        let balance_after = get_balance(&node.inner, payer);
+        let nonce_after = get_nonce(&node.inner, payer);
+        println!(
+            "Post-simulation: balance={}, nonce={}",
+            balance_after, nonce_after
+        );
+
+        assert_eq!(
+            balance_before, balance_after,
+            "Balance changed after simulation"
+        );
+        assert_eq!(nonce_before, nonce_after, "Nonce changed after simulation");
+
+        Ok(())
+    }
+
+    /// Validates that PD fees are deducted even when the transaction execution fails.
+    ///
+    /// This test ensures that PD fees are charged upfront regardless of transaction success:
+    /// 1. Creates a PD transaction that calls a non-existent contract (will fail)
+    /// 2. Executes the transaction in a block (not simulation)
+    /// 3. Verifies the transaction failed
+    /// 4. Verifies PD fees were still deducted from payer
+    /// 5. Verifies PD fees were distributed to beneficiary and treasury
+    /// 6. Verifies nonce was incremented (even failed txs increment nonce)
+    ///
+    /// This is critical for the protocol's fee model - PD fees must be charged
+    /// regardless of execution outcome to prevent spam attacks.
+    #[test_log::test(tokio::test)]
+    async fn test_pd_tx_failed_execution_still_charges_fees() -> eyre::Result<()> {
+        // Spin up a single node and set PD base fee
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+
+        let payer = ctx.normal_signer.address();
+        let beneficiary = ctx.block_producer_a.address();
+        let treasury = Address::ZERO;
+
+        // Set PD base fee to a known value
+        let pd_base_fee = U256::from(100_u64);
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x44; 32]);
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: pd_base_fee,
+            }),
+            solution_hash,
+        );
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
+
+        // Capture initial state
+        let payer_initial_balance = get_balance(&node.inner, payer);
+        let payer_initial_nonce = get_nonce(&node.inner, payer);
+        let beneficiary_initial_balance = get_balance(&node.inner, beneficiary);
+        let treasury_initial_balance = get_balance(&node.inner, treasury);
+
+        println!(
+            "Initial: payer={}, beneficiary={}, treasury={}, nonce={}",
+            payer_initial_balance,
+            beneficiary_initial_balance,
+            treasury_initial_balance,
+            payer_initial_nonce
+        );
+
+        // Build PD transaction header (3 chunks with fees)
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: U256::from(50_u64),
+            max_base_fee_per_chunk: U256::from(100_u64),
+        };
+
+        // Reverting initcode: PUSH1 0 PUSH1 0 REVERT (0x60006000fd)
+        let reverting_initcode = Bytes::from(vec![0x60, 0x00, 0x60, 0x00, 0xfd]);
+        let input = prepend_pd_header_v1_to_calldata(&header, &reverting_initcode);
+
+        let access_list = build_pd_access_list(3);
+
+        // CREATE transaction with reverting init code (will fail)
+        let nonce = payer_initial_nonce;
+        let tx_raw = TxEip1559 {
+            access_list,
+            input,
+            max_priority_fee_per_gas: 0, // Zero priority fee to simplify calculations
+            nonce,
+            to: TxKind::Create,
+            ..tx_eip1559_base()
+        };
+        let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
+        let tx_hash = *pooled.hash();
+
+        // Submit transaction to mempool
+        let _add_result = node
+            .inner
+            .pool
+            .add_transaction(TransactionOrigin::Local, pooled)
+            .await?;
+
+        // Mine block including the transaction
+        let payload = advance_block(&mut node, vec![]).await?;
+
+        // Query the receipt
+        let receipt = node
+            .inner
+            .provider
+            .consistent_provider()
+            .unwrap()
+            .receipt_by_hash(tx_hash)
+            .unwrap()
+            .expect("Receipt should exist for mined transaction");
+
+        let gas_used = receipt.cumulative_gas_used;
+        let tx_success = receipt.success;
+        println!("TX failed: {}, gas_used: {}", !tx_success, gas_used);
+
+        // CRITICAL ASSERTION: Transaction should have FAILED
+        assert!(
+            !tx_success,
+            "Transaction should have failed due to reverting init code in CREATE transaction"
+        );
+
+        // Get block basefee for gas cost calculation
+        let block = payload.block();
+        let block_basefee = block.header().base_fee_per_gas.unwrap_or(0);
+
+        // Calculate expected PD fees
+        let num_chunks = 3_u64;
+        let pd_base_total = U256::from(num_chunks) * pd_base_fee; // 3 * 100 = 300
+        let pd_prio_total = U256::from(num_chunks) * U256::from(50_u64); // 3 * 50 = 150
+
+        // Calculate EVM gas costs
+        let evm_base_cost = U256::from(gas_used) * U256::from(block_basefee);
+        let evm_priority_cost = U256::ZERO; // max_priority_fee_per_gas is 0
+
+        // Note: Failed transactions don't transfer value but still charge fees
+        let expected_total_deduction =
+            pd_base_total + pd_prio_total + evm_base_cost + evm_priority_cost;
+
+        // Capture final state
+        let payer_final_balance = get_balance(&node.inner, payer);
+        let payer_final_nonce = get_nonce(&node.inner, payer);
+        let beneficiary_final_balance = get_balance(&node.inner, beneficiary);
+        let treasury_final_balance = get_balance(&node.inner, treasury);
+
+        let actual_deduction = payer_initial_balance.saturating_sub(payer_final_balance);
+
+        println!(
+            "Final: payer={}, beneficiary={}, treasury={}, nonce={}",
+            payer_final_balance,
+            beneficiary_final_balance,
+            treasury_final_balance,
+            payer_final_nonce
+        );
+        println!(
+            "Fees: PD_base={}, PD_prio={}, EVM={}, expected={}, actual={}",
+            pd_base_total, pd_prio_total, evm_base_cost, expected_total_deduction, actual_deduction
+        );
+
+        // Verify fees charged correctly despite transaction failure
+        assert_eq!(
+            actual_deduction, expected_total_deduction,
+            "Payer deduction: expected {}, got {}",
+            expected_total_deduction, actual_deduction
+        );
+
+        let beneficiary_gain =
+            beneficiary_final_balance.saturating_sub(beneficiary_initial_balance);
+        assert_eq!(
+            beneficiary_gain, pd_prio_total,
+            "Beneficiary gain: expected {}, got {}",
+            pd_prio_total, beneficiary_gain
+        );
+
+        let treasury_gain = treasury_final_balance.saturating_sub(treasury_initial_balance);
+        assert_eq!(
+            treasury_gain, pd_base_total,
+            "Treasury gain: expected {}, got {}",
+            pd_base_total, treasury_gain
+        );
+
+        assert_eq!(
+            payer_final_nonce,
+            payer_initial_nonce + 1,
+            "Nonce should increment despite failure"
+        );
+
+        println!("Fees charged correctly despite failure");
+
+        Ok(())
     }
 }

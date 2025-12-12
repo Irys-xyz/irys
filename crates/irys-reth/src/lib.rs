@@ -11,27 +11,25 @@
 //! - Balance increments correspond to rewards
 //! - Balance decrements correspond to storage transaction fees
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 
 use alloy_consensus::TxEip1559;
-use alloy_eips::{eip2930::AccessList, eip7840::BlobParams, merge::EPOCH_SLOTS};
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{TxKind, U256};
 use evm::{IrysBlockAssembler, IrysEvmFactory};
 pub use reth::primitives::EthPrimitives;
 use reth::{
     api::{FullNodeComponents, FullNodeTypes, NodeTypes, PayloadTypes},
     builder::{
-        components::{ComponentsBuilder, ExecutorBuilder, PoolBuilder},
+        components::{ComponentsBuilder, ExecutorBuilder},
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
         PayloadBuilderConfig as _,
     },
     payload::EthBuiltPayload,
-    primitives::{InvalidTransactionError, SealedBlock},
-    providers::{providers::ProviderFactoryBuilder, EthStorage, StateProviderFactory},
+    providers::{providers::ProviderFactoryBuilder, EthStorage},
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
-    transaction_pool::TransactionValidationTaskExecutor,
 };
-use reth_chainspec::{ChainSpec, ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 pub use reth_ethereum_engine_primitives;
 use reth_ethereum_primitives::TransactionSigned;
@@ -45,24 +43,21 @@ use reth_node_ethereum::{
 use reth_primitives_traits::constants::MINIMUM_GAS_LIMIT;
 pub use reth_provider::{providers::BlockchainProvider, BlockReaderIdExt};
 use reth_tracing::tracing;
-use reth_transaction_pool::{
-    blobstore::DiskFileBlobStore, EthPoolTransaction, EthPooledTransaction,
-    EthTransactionValidator, Pool, TransactionOrigin, TransactionValidator,
-};
-use reth_transaction_pool::{CoinbaseTipOrdering, TransactionValidationOutcome};
 use shadow_tx::ShadowTransaction;
-use tracing::{debug, info};
 
 use crate::{
-    payload_builder_builder::IrysPayloadBuilderBuilder,
+    mempool::IrysPoolBuilder, payload_builder_builder::IrysPayloadBuilderBuilder,
     payload_service_builder::IyrsPayloadServiceBuilder,
 };
 
 pub mod engine;
 pub mod evm;
+pub mod mempool;
 pub mod payload;
 pub mod payload_builder_builder;
 pub mod payload_service_builder;
+pub mod pd_tx;
+pub mod precompiles;
 pub mod shadow_tx;
 pub mod validator;
 
@@ -97,8 +92,19 @@ pub fn compose_shadow_tx(
 }
 
 /// Type configuration for an Irys-Ethereum node.
-#[derive(Debug, Clone, Default)]
-pub struct IrysEthereumNode;
+#[derive(Clone)]
+pub struct IrysEthereumNode {
+    pub max_pd_chunks_per_block: u64,
+    pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+}
+
+impl std::fmt::Debug for IrysEthereumNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrysEthereumNode")
+            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .finish()
+    }
+}
 
 impl NodeTypes for IrysEthereumNode {
     type Primitives = EthPrimitives;
@@ -131,8 +137,12 @@ impl IrysEthereumNode {
         ComponentsBuilder::default()
             .node_types::<Node>()
             .pool(IrysPoolBuilder::default())
-            .executor(IrysExecutorBuilder)
-            .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder))
+            .executor(IrysExecutorBuilder {
+                chunk_provider: self.chunk_provider.clone(),
+            })
+            .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
+                max_pd_chunks_per_block: self.max_pd_chunks_per_block,
+            }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
     }
@@ -203,196 +213,19 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for IrysEthereumNode {
     }
 }
 
-/// A custom pool builder for Irys shadow transaction validation and pool configuration.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct IrysPoolBuilder;
-
-/// Implement the [`PoolBuilder`] trait for the Irys pool builder
-///
-/// This will be used to build the transaction pool and its maintenance tasks during launch.
-///
-/// Original code from:
-/// <https://github.com/Irys-xyz/reth-irys/blob/6c892d38bfcd6689c618386bd7ccc6fde7fbb64e/crates/ethereum/node/src/node.rs?plain=1#L453>
-///
-/// Notable changes from the original: we reject all shadow txs, as they are not allowed to land in a the pool.
-impl<Node> PoolBuilder<Node> for IrysPoolBuilder
-where
-    Node: FullNodeTypes<Types = IrysEthereumNode>,
-{
-    type Pool = Pool<
-        TransactionValidationTaskExecutor<
-            IrysShadowTxValidator<Node::Provider, EthPooledTransaction>,
-        >,
-        CoinbaseTipOrdering<EthPooledTransaction>,
-        DiskFileBlobStore,
-    >;
-
-    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
-        let pool_config = ctx.pool_config();
-
-        let blobs_disabled = ctx.config().txpool.disable_blobs_support
-            || ctx.config().txpool.blobpool_max_count == 0;
-
-        let blob_cache_size = if let Some(blob_cache_size) = pool_config.blob_cache_size {
-            Some(blob_cache_size)
-        } else {
-            // get the current blob params for the current timestamp, fallback to default Cancun
-            // params
-            let current_timestamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_secs();
-            let blob_params = ctx
-                .chain_spec()
-                .blob_params_at_timestamp(current_timestamp)
-                .unwrap_or_else(BlobParams::cancun);
-
-            // Derive the blob cache size from the target blob count, to auto scale it by
-            // multiplying it with the slot count for 2 epochs: 384 for pectra
-            Some((blob_params.target_blob_count * EPOCH_SLOTS * 2) as u32)
-        };
-
-        let blob_store =
-            reth_node_builder::components::create_blob_store_with_cache(ctx, blob_cache_size)?;
-
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
-            .with_head_timestamp(ctx.head().timestamp)
-            .set_eip4844(!blobs_disabled)
-            .kzg_settings(ctx.kzg_settings()?)
-            .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-            .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
-        let validator = TransactionValidationTaskExecutor {
-            validator: Arc::new(IrysShadowTxValidator {
-                eth_tx_validator: validator.validator,
-            }),
-            to_validation_task: validator.to_validation_task,
-        };
-
-        if validator.validator().eth_tx_validator.eip4844() {
-            // initializing the KZG settings can be expensive, this should be done upfront so that
-            // it doesn't impact the first block or the first gossiped blob transaction, so we
-            // initialize this in the background
-            let kzg_settings = validator
-                .validator()
-                .eth_tx_validator
-                .kzg_settings()
-                .clone();
-            ctx.task_executor().spawn_blocking(async move {
-                let _ = kzg_settings.get();
-                tracing::debug!(target: "reth::cli", "Initialized KZG settings");
-            });
-        }
-
-        let transaction_pool = reth_node_builder::components::TxPoolBuilder::new(ctx)
-            .with_validator(validator)
-            .build_and_spawn_maintenance_task(blob_store, pool_config)?;
-
-        info!(target: "reth::cli", "Transaction pool initialized");
-        debug!(target: "reth::cli", "Spawned txpool maintenance task");
-
-        Ok(transaction_pool)
-    }
-}
-
-#[derive(Debug)]
-pub struct IrysShadowTxValidator<Client, T> {
-    eth_tx_validator: Arc<EthTransactionValidator<Client, T>>,
-}
-
-impl<Client, Tx> IrysShadowTxValidator<Client, Tx>
-where
-    Tx: EthPoolTransaction,
-{
-    /// Irys-specific prefilter to reject transactions we never accept in the mempool.
-    ///
-    /// Returns `Ok(tx)` if the tx should continue to normal eth validation,
-    /// or `Err(outcome)` if the tx is invalid for Irys-specific reasons.
-    #[expect(clippy::result_large_err, reason = "to comply with reth api")]
-    fn prefilter_tx(&self, tx: Tx) -> Result<Tx, TransactionValidationOutcome<Tx>> {
-        let input = tx.input();
-        let to = tx.to();
-
-        match crate::shadow_tx::detect_and_decode_from_parts(to, input) {
-            Ok(Some(_)) | Err(_) => {
-                tracing::trace!(
-                    shadow_tx.sender = ?tx.sender(),
-                    shadow_tx.hash = ?tx.hash(),
-                    "shadow tx submitted to the pool. Not supported. Likely via gossip post-block"
-                );
-                return Err(TransactionValidationOutcome::Invalid(
-                    tx,
-                    reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                        InvalidTransactionError::SignerAccountHasBytecode,
-                    ),
-                ));
-            }
-            Ok(None) => {}
-        }
-
-        // once we support blobs, we can start accepting eip4844 txs
-        if tx.is_eip4844() {
-            return Err(TransactionValidationOutcome::Invalid(
-                tx,
-                reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::Eip4844Disabled,
-                ),
-            ));
-        }
-
-        Ok(tx)
-    }
-}
-
-impl<Client, Tx> TransactionValidator for IrysShadowTxValidator<Client, Tx>
-where
-    Client: ChainSpecProvider<ChainSpec: EthereumHardforks> + StateProviderFactory,
-    Tx: EthPoolTransaction,
-{
-    type Transaction = Tx;
-
-    async fn validate_transaction(
-        &self,
-        origin: TransactionOrigin,
-        transaction: Self::Transaction,
-    ) -> TransactionValidationOutcome<Self::Transaction> {
-        let transaction = match self.prefilter_tx(transaction) {
-            Ok(tx) => tx,
-            Err(outcome) => return outcome,
-        };
-
-        tracing::trace!(shadow_tx.hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
-        self.eth_tx_validator.validate_one(origin, transaction)
-    }
-
-    async fn validate_transactions(
-        &self,
-        transactions: Vec<(TransactionOrigin, Self::Transaction)>,
-    ) -> Vec<TransactionValidationOutcome<Self::Transaction>> {
-        transactions
-            .into_iter()
-            .map(|(origin, tx)| match self.prefilter_tx(tx) {
-                Ok(tx) => self.eth_tx_validator.validate_one(origin, tx),
-                Err(outcome) => outcome,
-            })
-            .collect()
-    }
-
-    fn on_new_head_block<B>(&self, new_tip_block: &SealedBlock<B>)
-    where
-        B: reth_primitives_traits::Block,
-    {
-        self.eth_tx_validator.on_new_head_block(new_tip_block);
-    }
-}
-
 /// A regular ethereum evm and executor builder.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct IrysExecutorBuilder;
+#[derive(Clone)]
+pub struct IrysExecutorBuilder {
+    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+}
+
+impl std::fmt::Debug for IrysExecutorBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrysExecutorBuilder")
+            .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
+            .finish()
+    }
+}
 
 impl<Types, Node> ExecutorBuilder<Node> for IrysExecutorBuilder
 where
@@ -406,7 +239,7 @@ where
             .with_extra_data(ctx.payload_builder_config().extra_data_bytes());
 
         let spec = ctx.chain_spec();
-        let evm_factory = IrysEvmFactory::new();
+        let evm_factory = IrysEvmFactory::new(self.chunk_provider);
         let evm_config = evm::IrysEvmConfig {
             inner: evm_config,
             assembler: IrysBlockAssembler::new(ctx.chain_spec()),
@@ -2581,9 +2414,11 @@ pub mod test_utils {
     use alloy_rpc_types::engine::PayloadAttributes;
     use reth::providers::CanonStateSubscriptions;
     use reth_payload_primitives::PayloadBuilderAttributes as _;
+    use reth_transaction_pool::EthPooledTransaction;
 
     /// Default priority fee for shadow transactions in tests (1 Gwei)
     pub const DEFAULT_PRIORITY_FEE: u128 = 1_000_000_000;
+    use alloy_primitives::aliases::U200;
     use reth::{
         api::PayloadAttributesBuilder,
         args::{DiscoveryArgs, NetworkArgs, RpcServerArgs},
@@ -2637,11 +2472,14 @@ pub mod test_utils {
 
             let block_producer_addresses =
                 vec![block_producer_a.address(), block_producer_b.address()];
+            let mock_chunk_provider =
+                std::sync::Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
             let (nodes, tasks, ..) = setup_irys_reth(
                 &block_producer_addresses,
                 custom_chain(),
                 false,
                 payload_attributes,
+                mock_chunk_provider,
             )
             .await?;
 
@@ -2934,9 +2772,8 @@ pub mod test_utils {
         shadow_txs: Vec<EthPooledTransaction>,
     ) -> Result<EthBuiltPayload, eyre::Error> {
         node.payload.timestamp += 1;
-        // Get base attributes from generator
         let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
-        // Create attributes with shadow_txs included
+        // Create attributes with shadow transactions
         let attributes = IrysPayloadBuilderAttributes {
             inner: base_attributes.inner,
             id: base_attributes.id,
@@ -3346,6 +3183,7 @@ pub mod test_utils {
     /// - `chain_spec`: Chain spec to use
     /// - `is_dev`: Whether to run in dev mode
     /// - `attributes_generator`: Function to generate payload attributes
+    /// - `chunk_provider`: Implementation of RethChunkProvider to use for all nodes
     ///
     /// # Returns
     /// - `Vec<NodeHelperType<IrysEthereumNode>>`: Test node handles
@@ -3356,6 +3194,7 @@ pub mod test_utils {
         chain_spec: Arc<<IrysEthereumNode as NodeTypes>::ChainSpec>,
         is_dev: bool,
         attributes_generator: impl Fn(u64, Address) -> <<IrysEthereumNode as NodeTypes>::Payload as PayloadTypes>::PayloadBuilderAttributes + Send + Sync + Clone + 'static,
+        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     ) -> eyre::Result<(Vec<NodeHelperType<IrysEthereumNode>>, TaskManager, Wallet)>
     where
         LocalPayloadAttributesBuilder<<IrysEthereumNode as NodeTypes>::ChainSpec>:
@@ -3392,7 +3231,11 @@ pub mod test_utils {
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
                 .testing_node(exec.clone())
-                .node(IrysEthereumNode)
+                .node(IrysEthereumNode {
+                    // Use default value for tests
+                    max_pd_chunks_per_block: 7_500,
+                    chunk_provider: chunk_provider.clone(),
+                })
                 .launch()
                 .await?;
 
@@ -3425,5 +3268,18 @@ pub mod test_utils {
             tasks,
             Wallet::default().with_chain_id(chain_spec.chain().into()),
         ))
+    }
+
+    /// Helper to create a ChunkRangeSpecifier with custom parameters for testing
+    pub fn chunk_spec_with_params(
+        partition_index: [u8; 25],
+        offset: u32,
+        chunk_count: u16,
+    ) -> irys_types::range_specifier::ChunkRangeSpecifier {
+        irys_types::range_specifier::ChunkRangeSpecifier {
+            partition_index: U200::from_le_bytes(partition_index),
+            offset,
+            chunk_count,
+        }
     }
 }

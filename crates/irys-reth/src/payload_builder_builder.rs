@@ -15,8 +15,10 @@ use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 use crate::{IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 
 /// A basic ethereum payload service.
-#[derive(Clone, Debug, Default)]
-pub struct IrysPayloadBuilderBuilder;
+#[derive(Clone, Debug)]
+pub struct IrysPayloadBuilderBuilder {
+    pub max_pd_chunks_per_block: u64,
+}
 
 impl<Types, Node, Pool, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for IrysPayloadBuilderBuilder
 where
@@ -50,6 +52,7 @@ where
             pool,
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
+            self.max_pd_chunks_per_block,
         ))
     }
 }
