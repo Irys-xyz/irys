@@ -2,7 +2,6 @@ use crate::types::{GossipResponse, RejectionReason};
 use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
 use eyre::{Report, Result as EyreResult};
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
-use irys_api_client::{ApiClient, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
@@ -37,34 +36,24 @@ fn send_message_and_log_error(sender: &PeerNetworkSender, message: PeerNetworkSe
     }
 }
 type RethPeerSender = Arc<dyn Fn(RethPeerInfo) -> BoxFuture<'static, ()> + Send + Sync>;
-struct PeerNetworkService<A>
-where
-    A: ApiClient,
-{
+struct PeerNetworkService {
     shutdown: Shutdown,
     msg_rx: UnboundedReceiver<PeerNetworkServiceMessage>,
-    inner: Arc<PeerNetworkServiceInner<A>>,
+    inner: Arc<PeerNetworkServiceInner>,
 }
 
-struct PeerNetworkServiceInner<A>
-where
-    A: ApiClient,
-{
+struct PeerNetworkServiceInner {
     peer_list: PeerList,
-    state: Mutex<PeerNetworkServiceState<A>>,
+    state: Mutex<PeerNetworkServiceState>,
     sender: PeerNetworkSender,
 }
 
-struct PeerNetworkServiceState<A>
-where
-    A: ApiClient,
-{
+struct PeerNetworkServiceState {
     db: DatabaseProvider,
     currently_running_announcements: HashSet<SocketAddr>,
     successful_announcements: Cache<SocketAddr, AnnouncementFinishedMessage>,
     failed_announcements: HashMap<SocketAddr, AnnouncementFinishedMessage>,
     gossip_client: GossipClient,
-    irys_api_client: A,
     chain_id: u64,
     peer_address: PeerAddress,
     reth_peer_sender: RethPeerSender,
@@ -77,16 +66,13 @@ where
     handshake_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
-struct HandshakeTask<A>
-where
-    A: ApiClient,
-{
+struct HandshakeTask {
     api_address: SocketAddr,
     version_request: VersionRequest,
     is_trusted_peer: bool,
     peer_filter_mode: PeerFilterMode,
     peer_list: PeerList,
-    api_client: A,
+    gossip_client: GossipClient,
     sender: PeerNetworkSender,
     semaphore: Arc<tokio::sync::Semaphore>,
     peers_limit: usize,
@@ -150,14 +136,10 @@ fn build_peer_address(config: &Config) -> PeerAddress {
         },
     }
 }
-impl<A> PeerNetworkServiceInner<A>
-where
-    A: ApiClient,
-{
+impl PeerNetworkServiceInner {
     fn new(
         db: DatabaseProvider,
         config: Config,
-        irys_api_client: A,
         reth_peer_sender: RethPeerSender,
         peer_list: PeerList,
         sender: PeerNetworkSender,
@@ -179,7 +161,6 @@ where
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
             ),
-            irys_api_client,
             chain_id: config.consensus.chain_id,
             peer_address,
             reth_peer_sender,
@@ -248,14 +229,11 @@ where
         self.peer_list.clone()
     }
 }
-impl<A> PeerNetworkService<A>
-where
-    A: ApiClient,
-{
+impl PeerNetworkService {
     fn new(
         shutdown: Shutdown,
         msg_rx: UnboundedReceiver<PeerNetworkServiceMessage>,
-        inner: Arc<PeerNetworkServiceInner<A>>,
+        inner: Arc<PeerNetworkServiceInner>,
     ) -> Self {
         Self {
             shutdown,
@@ -398,10 +376,10 @@ where
 
         let version_request = self.inner.create_version_request().await;
         let is_trusted_peer = self.inner.peer_list().is_trusted_peer(&peer_api_addr);
-        let (api_client, peer_filter_mode, peer_list, sender, reth_peer_sender, peers_limit) = {
+        let (gossip_client, peer_filter_mode, peer_list, sender, reth_peer_sender, peers_limit) = {
             let state = self.inner.state.lock().await;
             (
-                state.irys_api_client.clone(),
+                state.gossip_client.clone(),
                 state.config.node_config.peer_filter_mode,
                 self.inner.peer_list(),
                 self.inner.sender(),
@@ -411,7 +389,7 @@ where
         };
 
         tokio::spawn(Self::announce_yourself_to_address_task(
-            api_client,
+            gossip_client,
             peer_api_addr,
             version_request,
             sender,
@@ -500,7 +478,7 @@ where
                 is_trusted_peer: self.inner.peer_list().is_trusted_peer(&api_address),
                 peer_filter_mode: state.config.node_config.peer_filter_mode,
                 peer_list: self.inner.peer_list(),
-                api_client: state.irys_api_client.clone(),
+                gossip_client: state.gossip_client.clone(),
                 sender: self.inner.sender(),
                 semaphore: state.handshake_semaphore.clone(),
                 peers_limit: state.peers_limit,
@@ -514,12 +492,12 @@ where
         }
     }
 
-    fn spawn_handshake_task(&self, task: HandshakeTask<A>) {
+    fn spawn_handshake_task(&self, task: HandshakeTask) {
         let semaphore = task.semaphore.clone();
         tokio::spawn(async move {
             let _permit = semaphore.acquire().await.expect("semaphore closed");
             Self::announce_yourself_to_address_task(
-                task.api_client,
+                task.gossip_client,
                 task.api_address,
                 task.version_request,
                 task.sender,
@@ -832,7 +810,7 @@ where
         }
     }
     async fn announce_yourself_to_address_task(
-        api_client: A,
+        gossip_client: GossipClient,
         api_address: SocketAddr,
         version_request: VersionRequest,
         sender: PeerNetworkSender,
@@ -842,7 +820,7 @@ where
         peers_limit: usize,
     ) {
         match Self::announce_yourself_to_address(
-            api_client,
+            gossip_client,
             api_address,
             version_request,
             sender.clone(),
@@ -866,7 +844,7 @@ where
     }
 
     async fn announce_yourself_to_address(
-        api_client: A,
+        gossip_client: GossipClient,
         api_address: SocketAddr,
         version_request: VersionRequest,
         sender: PeerNetworkSender,
@@ -875,7 +853,7 @@ where
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
-        let peer_response_result = api_client
+        let peer_response_result = gossip_client
             .post_version(api_address, version_request)
             .await
             .map_err(|e| {
@@ -963,7 +941,6 @@ pub fn spawn_peer_network_service(
     spawn_peer_network_service_with_client(
         db,
         config,
-        IrysApiClient::new(),
         reth_peer_sender,
         service_receiver,
         service_sender,
@@ -972,26 +949,21 @@ pub fn spawn_peer_network_service(
     )
 }
 
-pub(crate) fn spawn_peer_network_service_with_client<A>(
+pub(crate) fn spawn_peer_network_service_with_client(
     db: DatabaseProvider,
     config: &Config,
-    irys_api_client: A,
     reth_peer_sender: RethPeerSender,
     service_receiver: UnboundedReceiver<PeerNetworkServiceMessage>,
     service_sender: PeerNetworkSender,
     peer_events: broadcast::Sender<PeerEvent>,
     runtime_handle: Handle,
-) -> (TokioServiceHandle, PeerList)
-where
-    A: ApiClient,
-{
+) -> (TokioServiceHandle, PeerList) {
     let peer_list = PeerList::new(config, &db, service_sender.clone(), peer_events)
         .expect("Failed to load peer list data");
 
     let inner = Arc::new(PeerNetworkServiceInner::new(
         db,
         config.clone(),
-        irys_api_client,
         reth_peer_sender,
         peer_list.clone(),
         service_sender,
@@ -1070,126 +1042,10 @@ mod tests {
         ))
     }
 
-    #[derive(Clone)]
-    struct TestApiClient {
-        inner: Arc<TestApiClientInner>,
-    }
-
-    #[derive(Default)]
-    struct TestApiClientInner {
-        responses: AsyncMutex<VecDeque<EyreResult<PeerResponse>>>,
-        calls: AsyncMutex<Vec<SocketAddr>>,
-    }
-
-    impl Default for TestApiClient {
-        fn default() -> Self {
-            Self {
-                inner: Arc::new(TestApiClientInner::default()),
-            }
-        }
-    }
-
-    impl TestApiClient {
-        async fn push_response(&self, response: EyreResult<PeerResponse>) {
-            self.inner.responses.lock().await.push_back(response);
-        }
-
-        async fn calls(&self) -> Vec<SocketAddr> {
-            self.inner.calls.lock().await.clone()
-        }
-    }
-
-    #[async_trait]
-    impl ApiClient for TestApiClient {
-        async fn get_transaction(
-            &self,
-            _peer: SocketAddr,
-            _tx_id: H256,
-        ) -> EyreResult<IrysTransactionResponse> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn post_transaction(
-            &self,
-            _peer: SocketAddr,
-            _transaction: DataTransactionHeader,
-        ) -> EyreResult<()> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn post_commitment_transaction(
-            &self,
-            _peer: SocketAddr,
-            _transaction: CommitmentTransaction,
-        ) -> EyreResult<()> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_transactions(
-            &self,
-            _peer: SocketAddr,
-            _tx_ids: &[H256],
-        ) -> EyreResult<Vec<IrysTransactionResponse>> {
-            Ok(Vec::new())
-        }
-
-        async fn post_version(
-            &self,
-            peer: SocketAddr,
-            _version: VersionRequest,
-        ) -> EyreResult<PeerResponse> {
-            self.inner.calls.lock().await.push(peer);
-            if let Some(response) = self.inner.responses.lock().await.pop_front() {
-                response
-            } else {
-                Ok(PeerResponse::Accepted(AcceptedResponse::default()))
-            }
-        }
-
-        async fn get_block_by_hash(
-            &self,
-            _peer: SocketAddr,
-            _block_hash: H256,
-            _with_poa: bool,
-        ) -> EyreResult<Option<CombinedBlockHeader>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_latest_block(
-            &self,
-            _peer: SocketAddr,
-            _with_poa: bool,
-        ) -> EyreResult<Option<CombinedBlockHeader>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_block_by_height(
-            &self,
-            _peer: SocketAddr,
-            _block_height: u64,
-            _with_poa: bool,
-        ) -> EyreResult<Option<CombinedBlockHeader>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn get_block_index(
-            &self,
-            _peer: SocketAddr,
-            _block_index_query: BlockIndexQuery,
-        ) -> EyreResult<Vec<BlockIndexItem>> {
-            Err(eyre!("not implemented"))
-        }
-
-        async fn node_info(&self, _peer: SocketAddr) -> EyreResult<NodeInfo> {
-            Err(eyre!("not implemented"))
-        }
-    }
-
     struct TestHarness {
         config: Config,
-        api_client: TestApiClient,
-        inner: Arc<PeerNetworkServiceInner<TestApiClient>>,
-        service: PeerNetworkService<TestApiClient>,
+        inner: Arc<PeerNetworkServiceInner>,
+        service: PeerNetworkService,
         reth_calls: Arc<AsyncMutex<Vec<RethPeerInfo>>>,
     }
 
@@ -1197,7 +1053,6 @@ mod tests {
         fn new(temp_dir: &std::path::Path, config: Config) -> Self {
             let db = open_db(temp_dir);
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let api_client = TestApiClient::default();
             let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
             let reth_sender = {
                 let reth_calls = reth_calls.clone();
@@ -1219,7 +1074,6 @@ mod tests {
             let inner = Arc::new(PeerNetworkServiceInner::new(
                 db,
                 config.clone(),
-                api_client.clone(),
                 reth_sender,
                 peer_list,
                 sender,
@@ -1228,7 +1082,6 @@ mod tests {
             let service = PeerNetworkService::new(shutdown_rx, receiver, inner.clone());
             Self {
                 config,
-                api_client,
                 inner,
                 service,
                 reth_calls,
@@ -1321,7 +1174,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        PeerNetworkService::<IrysApiClient>::trusted_peers_handshake_task(sender, peers);
+        PeerNetworkService::trusted_peers_handshake_task(sender, peers);
         let mut messages = Vec::new();
         while let Ok(msg) = receiver.try_recv() {
             messages.push(msg);
@@ -1356,10 +1209,7 @@ mod tests {
             (IrysAddress::repeat_byte(0xAA), peer1.clone()),
             (IrysAddress::repeat_byte(0xBB), peer2.clone()),
         ]);
-        PeerNetworkService::<IrysApiClient>::spawn_announce_yourself_to_all_peers_task(
-            known_peers,
-            sender,
-        );
+        PeerNetworkService::spawn_announce_yourself_to_all_peers_task(known_peers, sender);
         let mut api_addrs = Vec::new();
         while let Ok(message) = receiver.try_recv() {
             match message {
@@ -1502,10 +1352,9 @@ mod tests {
             })
         };
         let runtime_handle = tokio::runtime::Handle::current();
-        let (service_handle, peer_list) = spawn_peer_network_service_with_client(
+        let (service_handle, peer_list) = spawn_peer_network_service(
             db.clone(),
             &config,
-            CountingMockClient::default(),
             reth_sender,
             receiver,
             sender,
@@ -1541,10 +1390,9 @@ mod tests {
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let runtime_handle = tokio::runtime::Handle::current();
         let reth_sender = { Arc::new(move |_info: RethPeerInfo| async {}.boxed()) };
-        let (service_handle, peer_list) = spawn_peer_network_service_with_client(
+        let (service_handle, peer_list) = spawn_peer_network_service(
             db.clone(),
             &config,
-            CountingMockClient::default(),
             reth_sender.clone(),
             receiver,
             sender,
@@ -1574,10 +1422,9 @@ mod tests {
         shutdown_signal.fire();
         let _ = handle.await;
         let (sender2, receiver2) = PeerNetworkSender::new_with_receiver();
-        let (new_handle, new_peer_list) = spawn_peer_network_service_with_client(
+        let (new_handle, new_peer_list) = spawn_peer_network_service(
             db,
             &config,
-            CountingMockClient::default(),
             reth_sender,
             receiver2,
             sender2,

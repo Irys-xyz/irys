@@ -15,7 +15,6 @@ use actix_web::{
     App, HttpResponse, HttpServer,
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
-use irys_api_client::ApiClient;
 use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::{
     parse_user_agent, AcceptedResponse, BlockIndexQuery, CommitmentTransaction,
@@ -36,21 +35,19 @@ use tracing_actix_web::TracingLogger;
 const DEFAULT_DUPLICATE_REQUEST_MILLISECONDS: u128 = 10_000; // 10 seconds
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B, A>
+pub(crate) struct GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
-    data_handler: Arc<GossipDataHandler<M, B, A>>,
+    data_handler: Arc<GossipDataHandler<M, B>>,
     peer_list: PeerList,
 }
 
-impl<M, B, A> Clone for GossipServer<M, B, A>
+impl<M, B> Clone for GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     fn clone(&self) -> Self {
         Self {
@@ -60,14 +57,13 @@ where
     }
 }
 
-impl<M, B, A> GossipServer<M, B, A>
+impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: Arc<GossipDataHandler<M, B, A>>,
+        gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
     ) -> Self {
         Self {
@@ -596,6 +592,7 @@ where
                 GossipDataRequest::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
+                GossipDataRequest::Transaction(hash) => format!("transaction {:?}", hash),
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
@@ -729,7 +726,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::util::{ApiClientStub, BlockDiscoveryStub, MempoolStub};
+    use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{Config, DatabaseProvider, NodeConfig, PeerNetworkSender, PeerScore};
@@ -759,7 +756,7 @@ mod tests {
         peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
 
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
-        GossipServer::<MempoolStub, BlockDiscoveryStub, ApiClientStub>::handle_invalid_data(
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
             &miner, &error, &peer_list,
         );
 

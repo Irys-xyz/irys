@@ -2,8 +2,8 @@ use crate::block_pool::{BlockPool, BlockPoolError, CriticalBlockPoolError};
 use crate::chain_sync::{ChainSyncService, ChainSyncServiceInner};
 use crate::peer_network_service::spawn_peer_network_service_with_client;
 use crate::tests::util::{
-    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, ApiClientStub,
-    BlockDiscoveryStub, FakeGossipServer, MempoolStub,
+    data_handler_stub, data_handler_with_stubbed_pool, wait_for_block, BlockDiscoveryStub,
+    FakeGossipServer, MempoolStub,
 };
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
@@ -11,16 +11,14 @@ use futures::{future, FutureExt as _};
 use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
-use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData,
-    GossipDataRequest, IrysAddress, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, VersionRequest, H256,
+    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
+    GossipDataRequest, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerScore, RethPeerInfo,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -29,92 +27,6 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tracing::{debug, error, info};
-
-#[derive(Clone, Default, Debug)]
-struct MockApiClient {
-    pub block_response: Option<CombinedBlockHeader>,
-}
-
-#[async_trait::async_trait]
-impl ApiClient for MockApiClient {
-    async fn get_transaction(
-        &self,
-        _peer: SocketAddr,
-        _tx_id: H256,
-    ) -> eyre::Result<IrysTransactionResponse> {
-        Err(eyre::eyre!("not implemented"))
-    }
-
-    async fn post_transaction(
-        &self,
-        _peer: SocketAddr,
-        _transaction: DataTransactionHeader,
-    ) -> eyre::Result<()> {
-        Ok(())
-    }
-
-    async fn post_commitment_transaction(
-        &self,
-        _peer: SocketAddr,
-        _transaction: CommitmentTransaction,
-    ) -> eyre::Result<()> {
-        Ok(())
-    }
-
-    async fn get_transactions(
-        &self,
-        _peer: SocketAddr,
-        _tx_ids: &[H256],
-    ) -> eyre::Result<Vec<IrysTransactionResponse>> {
-        Ok(vec![])
-    }
-
-    async fn post_version(
-        &self,
-        _peer: SocketAddr,
-        _version: VersionRequest,
-    ) -> eyre::Result<PeerResponse> {
-        Ok(PeerResponse::Accepted(AcceptedResponse::default()))
-    }
-
-    async fn get_block_by_hash(
-        &self,
-        _peer: SocketAddr,
-        _block_hash: BlockHash,
-        _with_poa: bool,
-    ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
-        Ok(self.block_response.clone())
-    }
-
-    async fn get_latest_block(
-        &self,
-        _peer: SocketAddr,
-        _with_poa: bool,
-    ) -> Result<Option<CombinedBlockHeader>, eyre::Error> {
-        Ok(None)
-    }
-
-    async fn get_block_by_height(
-        &self,
-        _peer: SocketAddr,
-        _block_height: u64,
-        _with_poa: bool,
-    ) -> eyre::Result<Option<CombinedBlockHeader>> {
-        Ok(None)
-    }
-
-    async fn get_block_index(
-        &self,
-        _peer: SocketAddr,
-        _block_index_query: BlockIndexQuery,
-    ) -> eyre::Result<Vec<BlockIndexItem>> {
-        Ok(vec![])
-    }
-
-    async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
-        Ok(NodeInfo::default())
-    }
-}
 
 fn create_test_config() -> Config {
     let temp_dir = setup_tracing_and_temp_dir(None, false);
@@ -142,10 +54,6 @@ impl MockedServices {
                 .expect("can't open temp dir"),
         ));
 
-        let mock_client = MockApiClient {
-            block_response: None,
-        };
-
         let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
 
         let block_discovery_stub = BlockDiscoveryStub {
@@ -169,7 +77,6 @@ impl MockedServices {
         let (_peer_network_handle, peer_list_data_guard) = spawn_peer_network_service_with_client(
             db.clone(),
             config,
-            mock_client.clone(),
             reth_peer_sender,
             receiver,
             sender,
@@ -268,7 +175,7 @@ async fn should_process_block() {
     let test_header = Arc::new(test_header.clone());
 
     service
-        .process_block::<ApiClientStub>(
+        .process_block(
             Arc::clone(&test_header),
             BlockTransactions::default(),
             false,
@@ -358,13 +265,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         true,
     );
 
-    let api_client_stub = MockApiClient {
-        block_response: Some(CombinedBlockHeader {
-            irys: block2.clone(),
-            execution: Default::default(),
-        }),
-    };
-
     let sync_state = ChainSyncState::new(false, false);
 
     let block_pool = Arc::new(BlockPool::new(
@@ -380,18 +280,11 @@ async fn should_process_block_with_intermediate_block_in_api() {
         MempoolReadGuard::stub(),
     ));
 
-    let data_handler = data_handler_stub(
-        &config,
-        &peer_list_guard,
-        db.clone(),
-        api_client_stub.clone(),
-        sync_state.clone(),
-    )
-    .await;
+    let data_handler =
+        data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
 
-    let sync_service_inner = ChainSyncServiceInner::new_with_client(
+    let sync_service_inner = ChainSyncServiceInner::new(
         sync_state.clone(),
-        api_client_stub.clone(),
         peer_list_guard.clone(),
         config.clone(),
         block_status_provider_mock.block_index(),
@@ -419,17 +312,14 @@ async fn should_process_block_with_intermediate_block_in_api() {
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                pool.process_block::<ApiClientStub>(
-                    Arc::new(block.clone()),
-                    BlockTransactions::default(),
-                    false,
-                )
-                .await
-                .expect("to process block");
+                pool.process_block(Arc::new(block.clone()), BlockTransactions::default(), false)
+                    .await
+                    .expect("to process block");
             });
             GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
         }
         GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+        GossipDataRequest::Transaction(_) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -440,7 +330,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     // Process block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block3), BlockTransactions::default(), false)
+        .process_block(Arc::clone(&block3), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -543,13 +433,6 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         true,
     );
 
-    let api_client_stub = MockApiClient {
-        block_response: Some(CombinedBlockHeader {
-            irys: block2.clone(),
-            execution: Default::default(),
-        }),
-    };
-
     let sync_state = ChainSyncState::new(false, false);
 
     let block_pool = Arc::new(BlockPool::new(
@@ -567,15 +450,14 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     let data_handler = data_handler_with_stubbed_pool(
         &peer_list_guard,
-        api_client_stub.clone(),
         sync_state.clone(),
         block_pool.clone(),
+        &config,
     )
     .await;
 
-    let sync_service_inner = ChainSyncServiceInner::new_with_client(
+    let sync_service_inner = ChainSyncServiceInner::new(
         sync_state.clone(),
-        api_client_stub.clone(),
         peer_list_guard.clone(),
         config.clone(),
         block_status_provider_mock.block_index(),
@@ -606,6 +488,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
             GossipResponse::Accepted(block_for_server)
         }
         GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+        GossipDataRequest::Transaction(_) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -618,7 +501,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     // Process block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block3), BlockTransactions::default(), false)
+        .process_block(Arc::clone(&block3), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -638,7 +521,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
     // Process block4 to trigger reprocessing of block2 and then block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block4), BlockTransactions::default(), false)
+        .process_block(Arc::clone(&block4), BlockTransactions::default(), false)
         .await
         .expect("can't process block");
 
@@ -731,7 +614,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     );
 
     let res = block_pool
-        .process_block::<ApiClientStub>(
+        .process_block(
             Arc::new(header_building_on_very_old_block.clone()),
             BlockTransactions::default(),
             false,
@@ -807,22 +690,11 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         MempoolReadGuard::stub(),
     ));
 
-    let api_client_stub = MockApiClient {
-        block_response: None,
-    };
+    let data_handler =
+        data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
 
-    let data_handler = data_handler_stub(
-        &config,
-        &peer_list_guard,
-        db.clone(),
-        api_client_stub.clone(),
+    let sync_service_inner = ChainSyncServiceInner::new(
         sync_state.clone(),
-    )
-    .await;
-
-    let sync_service_inner = ChainSyncServiceInner::new_with_client(
-        sync_state.clone(),
-        api_client_stub.clone(),
         peer_list_guard.clone(),
         config.clone(),
         block_status_provider_mock.block_index(),
@@ -892,11 +764,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
                 let res = pool
-                    .process_block::<ApiClientStub>(
-                        Arc::new(block.clone()),
-                        BlockTransactions::default(),
-                        false,
-                    )
+                    .process_block(Arc::new(block.clone()), BlockTransactions::default(), false)
                     .await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
@@ -921,7 +789,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool
-        .process_block::<ApiClientStub>(Arc::new(bogus_block), BlockTransactions::default(), false)
+        .process_block(Arc::new(bogus_block), BlockTransactions::default(), false)
         .await;
 
     sync_service_handle.shutdown_signal.fire();
@@ -979,7 +847,7 @@ async fn should_not_fast_track_block_already_in_index() {
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
     let err = service
-        .process_block::<ApiClientStub>(
+        .process_block(
             Arc::new(test_header.clone()),
             BlockTransactions::default(),
             true,

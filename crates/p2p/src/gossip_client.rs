@@ -9,8 +9,8 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData, GossipDataRequest,
-    GossipRequest, IrysAddress, IrysBlockHeader, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkError, PeerResponse, VersionRequest, DATA_REQUEST_RETRIES,
+    GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse, NodeInfo, PeerAddress,
+    PeerListItem, PeerNetworkError, PeerResponse, VersionRequest, DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -587,6 +587,22 @@ impl GossipClient {
         .await
     }
 
+    pub async fn pull_transaction_from_network(
+        &self,
+        tx_id: H256,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+    ) -> Result<(IrysAddress, IrysTransactionResponse), PeerNetworkError> {
+        let data_request = GossipDataRequest::Transaction(tx_id);
+        self.pull_data_from_network(
+            data_request,
+            use_trusted_peers_only,
+            peer_list,
+            Self::transaction,
+        )
+        .await
+    }
+
     /// Pull a block from a specific peer, updating its score accordingly.
     pub async fn pull_block_from_peer(
         &self,
@@ -636,6 +652,57 @@ impl GossipClient {
         }
     }
 
+    pub async fn pull_transaction_from_peer(
+        &self,
+        tx_id: H256,
+        peer: &(IrysAddress, PeerListItem),
+        peer_list: &PeerList,
+    ) -> Result<(IrysAddress, IrysTransactionResponse), PeerNetworkError> {
+        let data_request = GossipDataRequest::Transaction(tx_id);
+        match self
+            .pull_data_and_update_the_score(peer, data_request, peer_list)
+            .await
+        {
+            Ok(response) => match response {
+                GossipResponse::Accepted(maybe_data) => match maybe_data {
+                    Some(data) => {
+                        let tx = Self::transaction(data)?;
+                        Ok((peer.0, tx))
+                    }
+                    None => Err(PeerNetworkError::FailedToRequestData(
+                        "Peer did not have the requested transaction".to_string(),
+                    )),
+                },
+                GossipResponse::Rejected(reason) => {
+                    warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
+                    match reason {
+                        RejectionReason::HandshakeRequired => {
+                            peer_list.initiate_handshake(peer.1.address.api, true)
+                        }
+                        RejectionReason::GossipDisabled => {
+                            peer_list.set_is_online(&peer.0, false);
+                        }
+                        RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                            warn!(
+                                "Peer {:?} rejected transaction request with {:?}",
+                                peer.0, reason
+                            );
+                        }
+                        _ => {}
+                    }
+                    Err(PeerNetworkError::FailedToRequestData(format!(
+                        "Peer {:?} rejected the transaction {:?} request: {:?}",
+                        peer.0, tx_id, reason
+                    )))
+                }
+            },
+            Err(err) => match err {
+                GossipError::PeerNetwork(e) => Err(e),
+                other => Err(PeerNetworkError::FailedToRequestData(other.to_string())),
+            },
+        }
+    }
+
     fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
             GossipData::Block(block) => Ok(block),
@@ -651,6 +718,17 @@ impl GossipClient {
             GossipData::ExecutionPayload(block) => Ok(block),
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected ExecutionPayload, got {:?}",
+                gossip_data.data_type_and_id()
+            ))),
+        }
+    }
+
+    fn transaction(gossip_data: GossipData) -> Result<IrysTransactionResponse, PeerNetworkError> {
+        match gossip_data {
+            GossipData::Transaction(tx) => Ok(IrysTransactionResponse::Storage(tx)),
+            GossipData::CommitmentTransaction(tx) => Ok(IrysTransactionResponse::Commitment(tx)),
+            _ => Err(PeerNetworkError::UnexpectedData(format!(
+                "Expected Transaction or CommitmentTransaction, got {:?}",
                 gossip_data.data_type_and_id()
             ))),
         }

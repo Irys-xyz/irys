@@ -22,7 +22,6 @@ use core::time::Duration;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
-use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
@@ -147,11 +146,10 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A>(
+    pub fn run<M, B>(
         mut self,
         mempool: M,
         block_discovery: B,
-        api_client: A,
         task_executor: &TaskExecutor,
         peer_list: PeerList,
         db: DatabaseProvider,
@@ -166,14 +164,15 @@ impl P2PService {
         block_tree: BlockTreeReadGuard,
         started_at: Instant,
     ) -> GossipResult<(
+        Server,
+        ServerHandle,
         ServiceHandleWithShutdownSignal,
         Arc<BlockPool<B, M>>,
-        Arc<GossipDataHandler<M, B, A>>,
+        Arc<GossipDataHandler<M, B>>,
     )>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
-        A: ApiClient,
     {
         debug!("Starting the gossip service");
 
@@ -195,7 +194,6 @@ impl P2PService {
         let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
             block_pool: Arc::clone(&arc_pool),
-            api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
             peer_list: peer_list.clone(),
@@ -233,12 +231,15 @@ impl P2PService {
             peer_list,
         );
 
-        let gossip_service_handle =
-            spawn_watcher_task(server, server_handle, broadcast_task_handle, task_executor);
-
         debug!("Started gossip service");
 
-        Ok((gossip_service_handle, arc_pool, gossip_data_handler))
+        Ok((
+            server,
+            server_handle,
+            broadcast_task_handle,
+            arc_pool,
+            gossip_data_handler,
+        ))
     }
 
     async fn broadcast_data(
@@ -355,7 +356,7 @@ fn spawn_broadcast_task(
     )
 }
 
-fn spawn_watcher_task(
+pub fn spawn_p2p_server(
     server: Server,
     server_handle: ServerHandle,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,
