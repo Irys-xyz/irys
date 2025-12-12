@@ -27,7 +27,10 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     config
         .consensus
         .get_mut()
-        .programmable_data
+        .hardforks
+        .sprite
+        .as_mut()
+        .expect("Sprite hardfork must be configured for testing")
         .max_pd_chunks_per_block = max_pd_chunks;
 
     // Create and fund a test account for PD transactions

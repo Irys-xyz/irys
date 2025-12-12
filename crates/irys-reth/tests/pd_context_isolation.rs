@@ -62,9 +62,10 @@ fn create_pd_transaction(access_list: AccessList) -> TxEnv {
 
 #[test]
 fn test_evm_instances_have_isolated_pd_contexts() {
-    // Create a single factory
+    // Create a single factory with test hardfork config (Sprite enabled from genesis)
     let mock_chunk_provider = Arc::new(MockChunkProvider::new());
-    let factory = IrysEvmFactory::new(mock_chunk_provider);
+    let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
+    let factory = IrysEvmFactory::new(mock_chunk_provider, hardfork_config);
 
     // Create two EVMs from the same factory
     let mut cfg_env = CfgEnv::default();

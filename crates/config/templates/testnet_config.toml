@@ -132,11 +132,6 @@ tx_anchor_expiry_depth = 20
 ingress_proof_anchor_expiry_depth = 200
 commitment_fee = 100
 
-[consensus.Custom.programmable_data]
-cost_per_mb = 0.01
-base_fee_floor = 0.01
-max_pd_chunks_per_block = 7500
-
 [consensus.Custom.difficulty_adjustment]
 block_time = 12
 difficulty_adjustment_interval = 100800000
@@ -166,8 +161,16 @@ price_adjustment_interval = 10
 number_of_ingress_proofs_total = 1
 number_of_ingress_proofs_from_assignees = 0
 
-# To enable the next hardfork at a specific block, uncomment:
+# To enable the next_name_tbd hardfork at a specific timestamp, uncomment:
 # [consensus.Custom.hardforks.next_name_tbd]
-# activation_block = 1000000
+# activation_timestamp = 1000000
 # number_of_ingress_proofs_total = 4
 # number_of_ingress_proofs_from_assignees = 2
+
+# Sprite hardfork enables Programmable Data (PD) features.
+# To enable, uncomment and set activation_timestamp:
+# [consensus.Custom.hardforks.sprite]
+# activation_timestamp = 1000000
+# cost_per_mb = 0.01
+# base_fee_floor = 0.01
+# max_pd_chunks_per_block = 7500

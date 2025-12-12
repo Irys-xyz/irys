@@ -1,5 +1,6 @@
 //! Configurable hardfork parameters.
 
+use crate::storage_pricing::{phantoms::Usd, Amount};
 use crate::UnixTimestamp;
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,10 @@ pub struct IrysHardforkConfig {
     /// NextNameTBD hardfork - None means disabled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_name_tbd: Option<NextNameTBD>,
+
+    /// Sprite hardfork - enables Programmable Data features. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sprite: Option<Sprite>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -31,8 +36,8 @@ pub struct FrontierParams {
 /// When this fork activates, the contained parameters take effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NextNameTBD {
-    /// Timestamp (seconds since epoch) at which this hardfork activates
-    pub activation_timestamp: u64,
+    /// Timestamp at which this hardfork activates
+    pub activation_timestamp: UnixTimestamp,
 
     /// Number of total ingress proofs required
     pub number_of_ingress_proofs_total: u64,
@@ -41,37 +46,104 @@ pub struct NextNameTBD {
     pub number_of_ingress_proofs_from_assignees: u64,
 }
 
+/// Sprite hardfork - enables Programmable Data (PD) features.
+///
+/// When this fork activates, PD transactions become valid and the PD precompile is enabled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sprite {
+    /// Timestamp at which this hardfork activates
+    pub activation_timestamp: UnixTimestamp,
+
+    /// Cost per 1MB of Programmable Data in USD.
+    /// Used as the initial/target base fee for PD pricing.
+    pub cost_per_mb: Amount<Usd>,
+
+    /// Floor for base fee - base fee cannot drop below this value.
+    /// Expressed as USD per MB.
+    pub base_fee_floor: Amount<Usd>,
+
+    /// Maximum number of PD chunks that can be included in a single block.
+    /// This limit prevents exceeding the network's chunk processing capacity per block.
+    pub max_pd_chunks_per_block: u64,
+}
+
 impl IrysHardforkConfig {
-    /// Check if the NextNameTBD hardfork is active at a given timestamp (in seconds).
+    /// Check if the NextNameTBD hardfork is active at a given timestamp.
     pub fn is_next_name_tbd_active(&self, timestamp: UnixTimestamp) -> bool {
         self.next_name_tbd
             .as_ref()
-            .is_some_and(|f| timestamp.as_secs() >= f.activation_timestamp)
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
     }
 
     /// Get the activation timestamp for NextNameTBD hardfork, if configured.
-    pub fn next_name_tbd_activation_timestamp(&self) -> Option<u64> {
+    pub fn next_name_tbd_activation_timestamp(&self) -> Option<UnixTimestamp> {
         self.next_name_tbd.as_ref().map(|f| f.activation_timestamp)
     }
 
-    /// Get the number of ingress proofs required at a specific timestamp (in seconds).
+    /// Get the number of ingress proofs required at a specific timestamp.
     pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
         if let Some(ref fork) = self.next_name_tbd {
-            if timestamp.as_secs() >= fork.activation_timestamp {
+            if timestamp >= fork.activation_timestamp {
                 return fork.number_of_ingress_proofs_total;
             }
         }
         self.frontier.number_of_ingress_proofs_total
     }
 
-    /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
+    /// Get the number of ingress proofs from assignees required at a specific timestamp.
     pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
         if let Some(ref fork) = self.next_name_tbd {
-            if timestamp.as_secs() >= fork.activation_timestamp {
+            if timestamp >= fork.activation_timestamp {
                 return fork.number_of_ingress_proofs_from_assignees;
             }
         }
         self.frontier.number_of_ingress_proofs_from_assignees
+    }
+
+    /// Check if the Sprite hardfork is active at a given timestamp.
+    pub fn is_sprite_active(&self, timestamp: UnixTimestamp) -> bool {
+        self.sprite
+            .as_ref()
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Get the activation timestamp for Sprite hardfork, if configured.
+    pub fn sprite_activation_timestamp(&self) -> Option<UnixTimestamp> {
+        self.sprite.as_ref().map(|f| f.activation_timestamp)
+    }
+
+    /// Get the max PD chunks per block at a specific timestamp.
+    /// Returns None if Sprite is not active.
+    pub fn max_pd_chunks_per_block_at(&self, timestamp: UnixTimestamp) -> Option<u64> {
+        self.sprite
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+            .map(|f| f.max_pd_chunks_per_block)
+    }
+
+    /// Get the PD cost per MB at a specific timestamp.
+    /// Returns None if Sprite is not active.
+    pub fn pd_cost_per_mb_at(&self, timestamp: UnixTimestamp) -> Option<Amount<Usd>> {
+        self.sprite
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+            .map(|f| f.cost_per_mb)
+    }
+
+    /// Get the PD base fee floor at a specific timestamp.
+    /// Returns None if Sprite is not active.
+    pub fn pd_base_fee_floor_at(&self, timestamp: UnixTimestamp) -> Option<Amount<Usd>> {
+        self.sprite
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+            .map(|f| f.base_fee_floor)
+    }
+
+    /// Get a reference to the Sprite config if active at the given timestamp.
+    pub fn sprite_at(&self, timestamp: UnixTimestamp) -> Option<&Sprite> {
+        self.sprite
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
     }
 }
 
@@ -87,6 +159,7 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 2,
             },
             next_name_tbd: None,
+            sprite: None,
         };
 
         assert_eq!(
@@ -113,10 +186,11 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 0,
             },
             next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: 1000,
+                activation_timestamp: UnixTimestamp::from_secs(1000),
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
+            sprite: None,
         };
 
         // Before activation timestamp
@@ -160,10 +234,11 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 0,
             },
             next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: 5000,
+                activation_timestamp: UnixTimestamp::from_secs(5000),
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
+            sprite: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -184,5 +259,61 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
+        assert!(config.sprite.is_none());
+    }
+
+    #[test]
+    fn test_sprite_activation() {
+        use crate::U256;
+
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 1,
+                number_of_ingress_proofs_from_assignees: 0,
+            },
+            next_name_tbd: None,
+            sprite: Some(Sprite {
+                activation_timestamp: UnixTimestamp::from_secs(2000),
+                cost_per_mb: Amount::new(U256::from(100_000)),
+                base_fee_floor: Amount::new(U256::from(10_000)),
+                max_pd_chunks_per_block: 7500,
+            }),
+        };
+
+        // Before activation
+        assert!(!config.is_sprite_active(UnixTimestamp::from_secs(1999)));
+        assert!(config
+            .max_pd_chunks_per_block_at(UnixTimestamp::from_secs(1999))
+            .is_none());
+        assert!(config
+            .pd_cost_per_mb_at(UnixTimestamp::from_secs(1999))
+            .is_none());
+        assert!(config
+            .pd_base_fee_floor_at(UnixTimestamp::from_secs(1999))
+            .is_none());
+        assert!(config.sprite_at(UnixTimestamp::from_secs(1999)).is_none());
+
+        // At activation
+        assert!(config.is_sprite_active(UnixTimestamp::from_secs(2000)));
+        assert_eq!(
+            config.max_pd_chunks_per_block_at(UnixTimestamp::from_secs(2000)),
+            Some(7500)
+        );
+        assert_eq!(
+            config.pd_cost_per_mb_at(UnixTimestamp::from_secs(2000)),
+            Some(Amount::new(U256::from(100_000)))
+        );
+        assert_eq!(
+            config.pd_base_fee_floor_at(UnixTimestamp::from_secs(2000)),
+            Some(Amount::new(U256::from(10_000)))
+        );
+        assert!(config.sprite_at(UnixTimestamp::from_secs(2000)).is_some());
+
+        // After activation
+        assert!(config.is_sprite_active(UnixTimestamp::from_secs(3000)));
+        assert_eq!(
+            config.max_pd_chunks_per_block_at(UnixTimestamp::from_secs(3000)),
+            Some(7500)
+        );
     }
 }

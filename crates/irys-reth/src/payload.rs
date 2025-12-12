@@ -31,6 +31,7 @@
 use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 use crate::IrysPayloadBuilderAttributes;
 use alloy_consensus::Transaction as _;
+use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -40,6 +41,7 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_payload_builder::EthBuiltPayload;
 use reth_payload_builder_primitives::PayloadBuilderError;
+use reth_payload_primitives::PayloadBuilderAttributes as _;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError,
@@ -72,6 +74,8 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     builder_config: EthereumBuilderConfig,
     /// Maximum number of PD chunks that can be included in a single block.
     max_pd_chunks_per_block: u64,
+    /// Hardfork configuration for determining Sprite activation.
+    hardforks: Arc<IrysHardforkConfig>,
 }
 
 /// Combined iterator that yields shadow transactions first, then pool transactions
@@ -79,6 +83,8 @@ pub struct CombinedTransactionIterator {
     shadow: ShadowTxQueue,
     pd_budget: PdChunkBudget,
     pool_iter: BestTransactionsIter,
+    /// Whether the Sprite hardfork is active (enables PD chunk budgeting)
+    is_sprite_active: bool,
 }
 
 struct ShadowTxQueue {
@@ -184,7 +190,16 @@ impl PdChunkBudget {
 }
 
 impl CombinedTransactionIterator {
-    fn pd_chunks_for_transaction(transaction: &ValidPoolTransaction<EthPooledTransaction>) -> u64 {
+    /// Count PD chunks for a transaction. Returns 0 if Sprite hardfork is not active.
+    fn pd_chunks_for_transaction(
+        &self,
+        transaction: &ValidPoolTransaction<EthPooledTransaction>,
+    ) -> u64 {
+        // Skip PD chunk counting if Sprite hardfork is not active
+        if !self.is_sprite_active {
+            return 0;
+        }
+
         match detect_and_decode_pd_header(transaction.transaction.input()) {
             Ok(Some(_)) => transaction
                 .transaction
@@ -200,11 +215,13 @@ impl CombinedTransactionIterator {
         shadow_txs: Vec<EthPooledTransaction>,
         pool_iter: BestTransactionsIter,
         max_pd_chunks_per_block: u64,
+        is_sprite_active: bool,
     ) -> Self {
         Self {
             shadow: ShadowTxQueue::from_shadow_transactions(timestamp, shadow_txs),
             pd_budget: PdChunkBudget::new(max_pd_chunks_per_block),
             pool_iter,
+            is_sprite_active,
         }
     }
 
@@ -213,10 +230,21 @@ impl CombinedTransactionIterator {
             return Some(tx);
         }
 
-        if let Some(tx) = self
-            .pd_budget
-            .pop_ready_deferred(Self::pd_chunks_for_transaction)
-        {
+        // Check deferred PD transactions - need to capture is_sprite_active for closure
+        let is_sprite_active = self.is_sprite_active;
+        if let Some(tx) = self.pd_budget.pop_ready_deferred(|tx| {
+            if !is_sprite_active {
+                return 0;
+            }
+            match detect_and_decode_pd_header(tx.transaction.input()) {
+                Ok(Some(_)) => tx
+                    .transaction
+                    .access_list()
+                    .map(sum_pd_chunks_in_access_list)
+                    .unwrap_or_default(),
+                _ => 0,
+            }
+        }) {
             return Some(tx);
         }
 
@@ -229,7 +257,7 @@ impl Iterator for CombinedTransactionIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(tx) = self.next_candidate() {
-            let chunks = Self::pd_chunks_for_transaction(tx.as_ref());
+            let chunks = self.pd_chunks_for_transaction(tx.as_ref());
             if chunks == 0 || self.pd_budget.try_consume(&tx, chunks) {
                 return Some(tx);
             }
@@ -268,12 +296,13 @@ impl BestTransactions for CombinedTransactionIterator {
 
 impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
     /// `IrysPayloadBuilder` constructor.
-    pub const fn new(
+    pub fn new(
         client: Client,
         pool: Pool,
         evm_config: EvmConfig,
         builder_config: EthereumBuilderConfig,
         max_pd_chunks_per_block: u64,
+        hardforks: Arc<IrysHardforkConfig>,
     ) -> Self {
         Self {
             client,
@@ -281,6 +310,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             evm_config,
             builder_config,
             max_pd_chunks_per_block,
+            hardforks,
         }
     }
 }
@@ -299,6 +329,7 @@ where
         &self,
         attributes: BestTransactionsAttributes,
         shadow_txs: Vec<EthPooledTransaction>,
+        is_sprite_active: bool,
     ) -> BestTransactionsIter {
         let timestamp = Instant::now();
 
@@ -311,6 +342,7 @@ where
             shadow_txs,
             pool_txs,
             self.max_pd_chunks_per_block,
+            is_sprite_active,
         ))
     }
 }
@@ -331,6 +363,11 @@ where
     ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
         // Extract shadow transactions from attributes
         let shadow_txs = args.config.attributes.shadow_txs.clone();
+
+        // Check if Sprite hardfork is active at this block's timestamp
+        let block_timestamp =
+            irys_types::UnixTimestamp::from_secs(args.config.attributes.timestamp());
+        let is_sprite_active = self.hardforks.is_sprite_active(block_timestamp);
 
         // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
         let BuildArguments {
@@ -358,7 +395,13 @@ where
             self.pool.clone(),
             self.builder_config.clone(),
             eth_args,
-            |attributes| self.best_transactions_with_attributes(attributes, shadow_txs.clone()),
+            |attributes| {
+                self.best_transactions_with_attributes(
+                    attributes,
+                    shadow_txs.clone(),
+                    is_sprite_active,
+                )
+            },
         )?;
         Ok(result)
     }
@@ -381,6 +424,10 @@ where
         // Extract shadow transactions from attributes
         let shadow_txs = config.attributes.shadow_txs.clone();
 
+        // Check if Sprite hardfork is active at this block's timestamp
+        let block_timestamp = irys_types::UnixTimestamp::from_secs(config.attributes.timestamp());
+        let is_sprite_active = self.hardforks.is_sprite_active(block_timestamp);
+
         // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
         let PayloadConfig {
             parent_header,
@@ -398,7 +445,13 @@ where
             self.pool.clone(),
             self.builder_config.clone(),
             args,
-            |attributes| self.best_transactions_with_attributes(attributes, shadow_txs.clone()),
+            |attributes| {
+                self.best_transactions_with_attributes(
+                    attributes,
+                    shadow_txs.clone(),
+                    is_sprite_active,
+                )
+            },
         )?
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
@@ -521,8 +574,9 @@ mod tests {
             make_valid(normal_tx, 13, timestamp),
         ]));
 
+        // is_sprite_active = true to enable PD chunk budgeting for this test
         let mut iterator =
-            CombinedTransactionIterator::new(timestamp, vec![shadow_tx], pool_iter, 7_500);
+            CombinedTransactionIterator::new(timestamp, vec![shadow_tx], pool_iter, 7_500, true);
 
         let collected: Vec<_> = (&mut iterator).take(3).collect();
 

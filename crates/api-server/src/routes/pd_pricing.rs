@@ -35,10 +35,32 @@ pub struct FeeHistoryQuery {
 /// - `blockCount` (required): Number of recent blocks to analyze (1 to block_tree_depth)
 ///
 /// Example: GET /v1/price/pd/fee-history?blockCount=20
+///
+/// Returns 503 Service Unavailable if the Sprite hardfork is not yet active.
 pub async fn get_fee_history(
     query: web::Query<FeeHistoryQuery>,
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
+    // Check if Sprite hardfork is active
+    let current_timestamp = irys_types::UnixTimestamp::now().map_err(|e| {
+        (
+            format!("Failed to get current time: {}", e),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    if !state
+        .config
+        .consensus
+        .hardforks
+        .is_sprite_active(current_timestamp)
+    {
+        return Err((
+            "PD pricing unavailable: Sprite hardfork not yet active",
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+            .into());
+    }
+
     let max_block_count = state.config.consensus.block_tree_depth;
 
     // Validate block_count

@@ -29,7 +29,10 @@ async fn heavy_test_block_with_incorrect_pd_base_fee_gets_rejected() -> eyre::Re
     genesis_config
         .consensus
         .get_mut()
-        .programmable_data
+        .hardforks
+        .sprite
+        .as_mut()
+        .expect("Sprite hardfork must be configured for testing")
         .base_fee_floor = genesis_base_fee_floor;
 
     // Create and fund a signer for transactions
@@ -60,7 +63,10 @@ async fn heavy_test_block_with_incorrect_pd_base_fee_gets_rejected() -> eyre::Re
             .cfg
             .consensus
             .get_mut()
-            .programmable_data
+            .hardforks
+            .sprite
+            .as_mut()
+            .expect("Sprite hardfork must be configured for testing")
             .base_fee_floor = peer_base_fee_floor;
 
         peer_node.start_with_name("peer").await

@@ -177,15 +177,19 @@ pub async fn run_node(
         .with_database(database.clone())
         .with_launch_context(task_executor.clone());
 
-    let max_pd_chunks_per_block = node_config
-        .consensus_config()
-        .programmable_data
-        .max_pd_chunks_per_block;
+    // Get max PD chunks per block from Sprite hardfork config (if configured)
+    let hardfork_config = &node_config.consensus_config().hardforks;
+    let max_pd_chunks_per_block = hardfork_config
+        .sprite
+        .as_ref()
+        .map(|s| s.max_pd_chunks_per_block)
+        .unwrap_or(0); // Default to 0 if Sprite not configured
 
     let handle = builder
         .node(IrysEthereumNode {
             max_pd_chunks_per_block,
             chunk_provider,
+            hardfork_config: std::sync::Arc::new(hardfork_config.clone()),
         })
         .launch_with_debug_capabilities()
         .into_future()
