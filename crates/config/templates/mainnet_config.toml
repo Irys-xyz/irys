@@ -77,24 +77,33 @@ gpu_packing_batch_size = 1024
 cache_clean_lag = 2
 max_cache_size_bytes = 10737418240 # 10 GB
 
+# comment this block out if you configure coingecko or coinmarketcap
 [[oracles]]
-type = "coingecko"
-api_key = "provide-coingecko-api-key"
-# Coin ids are listed at https://docs.coingecko.com/reference/coins-list
-# Or in this official spreadsheet https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
-coin_id = "irys"
-# Set to true when using a CoinGecko demo API key (see https://docs.coingecko.com/v3.0.1/reference/introduction)
-demo_api_key = true
-# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
-poll_interval_ms = 300000
+type = "mock"
+initial_price = 1.0
+incremental_change = 0.00000000000001
+smoothing_interval = 15
 
-[[oracles]]
-type = "coinmarketcap"
-api_key = "provide-coinmarketcap-api-key"
-# CoinMarketCap ids can be found via https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
-id = "38978"
-# Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
-poll_interval_ms = 300000
+# uncomment this block when api_key is set
+# [[oracles]]
+# type = "coingecko"
+# api_key = "provide-coingecko-api-key"
+# # Coin ids are listed at https://docs.coingecko.com/reference/coins-list
+# # Or in this official spreadsheet https://docs.google.com/spreadsheets/d/1wTTuxXt8n9q7C4NDXqQpI3wpKu1_5bGVmP9Xz0XGSyU/edit?gid=0#gid=0
+# coin_id = "irys"
+# # Set to true when using a CoinGecko demo API key (see https://docs.coingecko.com/v3.0.1/reference/introduction)
+# demo_api_key = true
+# # Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+# poll_interval_ms = 300000
+
+# uncomment this block when api_key is set
+# [[oracles]]
+# type = "coinmarketcap"
+# api_key = "provide-coinmarketcap-api-key"
+# # CoinMarketCap ids can be found via https://api.coinmarketcap.com/data-api/v3/map/all?listing_status=active
+# id = "38978"
+# # Free tier permits ~10k requests/month; 5 minutes (300000 ms) keeps within limits.
+# poll_interval_ms = 300000
 
 [mempool]
 max_pending_pledge_items = 100

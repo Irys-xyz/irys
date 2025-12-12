@@ -1,9 +1,7 @@
 services:
   test-irys-1:
-    build:
-      context: ../../..
-      dockerfile: docker/Dockerfile
-    image: irys-test:latest
+    image: ${IMAGE_NAME:-localhost/irys-test:latest}
+    pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
     networks:
@@ -20,10 +18,8 @@ services:
       - NET_ADMIN
 
   test-irys-2:
-    build:
-      context: ../../..
-      dockerfile: docker/Dockerfile
-    image: irys-test:latest
+    image: ${IMAGE_NAME:-localhost/irys-test:latest}
+    pull_policy: never
     container_name: test-irys-2
     restart: unless-stopped
     depends_on:
@@ -45,10 +41,8 @@ services:
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
 
   test-irys-3:
-    build:
-      context: ../../..
-      dockerfile: docker/Dockerfile
-    image: irys-test:latest
+    image: ${IMAGE_NAME:-localhost/irys-test:latest}
+    pull_policy: never
     container_name: test-irys-3
     restart: unless-stopped
     depends_on:
