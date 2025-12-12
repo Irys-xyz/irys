@@ -1,6 +1,7 @@
 //! Payload component configuration for the Ethereum node.
 //! Original impl: https://github.com/paradigmxyz/reth/blob/2b283ae83f6c68b4c851206f8cd01491f63bb608/crates/ethereum/node/src/payload.rs#L19
 
+use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_chainspec::{EthChainSpec as _, EthereumHardforks};
 use reth_ethereum_engine_primitives::EthBuiltPayload;
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
@@ -11,6 +12,7 @@ use reth_node_builder::{
     components::PayloadBuilderBuilder, BuilderContext, PayloadBuilderConfig as _, PayloadTypes,
 };
 use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
+use std::sync::Arc;
 
 use crate::{IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 
@@ -18,6 +20,7 @@ use crate::{IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 #[derive(Clone, Debug)]
 pub struct IrysPayloadBuilderBuilder {
     pub max_pd_chunks_per_block: u64,
+    pub hardforks: Arc<IrysHardforkConfig>,
 }
 
 impl<Types, Node, Pool, Evm> PayloadBuilderBuilder<Node, Pool, Evm> for IrysPayloadBuilderBuilder
@@ -53,6 +56,7 @@ where
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
             self.max_pd_chunks_per_block,
+            self.hardforks.clone(),
         ))
     }
 }
