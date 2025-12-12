@@ -412,6 +412,30 @@ impl PeerList {
             .cloned()
     }
 
+    pub fn peer_by_api_address(&self, address: SocketAddr) -> Option<PeerListItem> {
+        let binding = self.read();
+        let mining_address = binding
+            .api_addr_to_mining_addr_map
+            .get(&address)
+            .copied()?;
+        binding
+            .persistent_peers_cache
+            .get(&mining_address)
+            .or_else(|| binding.unstaked_peer_purgatory.peek(&mining_address))
+            .cloned()
+    }
+
+    pub fn get_trusted_peer_gossip_address(&self, api_address: SocketAddr) -> Option<SocketAddr> {
+        let binding = self.read();
+        binding
+            .config
+            .node_config
+            .trusted_peers
+            .iter()
+            .find(|p| p.api == api_address)
+            .map(|p| p.gossip)
+    }
+
     pub fn is_a_trusted_peer(&self, miner_address: IrysAddress, source_ip: IpAddr) -> bool {
         let binding = self.read();
 

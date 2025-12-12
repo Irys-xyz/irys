@@ -356,7 +356,7 @@ fn spawn_broadcast_task(
     )
 }
 
-pub fn spawn_p2p_server(
+pub fn spawn_p2p_server_watcher_task(
     server: Server,
     server_handle: ServerHandle,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,

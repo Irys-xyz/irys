@@ -292,6 +292,7 @@ impl GossipServiceTestFixture {
     pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
+        warn!("Random port for gossip: {}", gossip_port);
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = temp_dir.path().to_path_buf();
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
@@ -424,6 +425,7 @@ impl GossipServiceTestFixture {
             self.mining_address,
             self.gossip_receiver.take().expect("to take receiver"),
         );
+        info!("Starting gossip service on port {}", self.gossip_port);
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()
@@ -478,7 +480,7 @@ impl GossipServiceTestFixture {
                 )
                 .expect("failed to run the gossip service");
 
-        let service_handle = crate::spawn_p2p_server(
+        let service_handle = crate::spawn_p2p_server_watcher_task(
             server,
             server_handle,
             broadcast_task_handle,

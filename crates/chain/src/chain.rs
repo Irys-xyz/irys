@@ -1607,7 +1607,7 @@ impl IrysNode {
             http_listener,
         );
 
-        let p2p_service_handle = irys_p2p::spawn_p2p_server(
+        let p2p_service_handle = irys_p2p::spawn_p2p_server_watcher_task(
             gossip_server,
             gossip_server_handle,
             broadcast_task_handle,
