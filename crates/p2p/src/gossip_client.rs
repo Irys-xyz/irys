@@ -8,14 +8,16 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest, IrysAddress,
-    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
+    BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData, GossipDataRequest,
+    GossipRequest, IrysAddress, IrysBlockHeader, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkError, PeerResponse, VersionRequest, DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
 use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -108,6 +110,138 @@ impl GossipClient {
         res
     }
 
+    pub async fn get_info(
+        &self,
+        peer: SocketAddr,
+    ) -> Result<NodeInfo, GossipClientError> {
+        let url = format!("http://{}/gossip/info", peer);
+        let response = self
+            .internal_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        let response: GossipResponse<NodeInfo> = response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+        })?;
+
+        match response {
+            GossipResponse::Accepted(info) => Ok(info),
+            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                format!("Request rejected: {:?}", reason),
+            )),
+        }
+    }
+
+    pub async fn get_peer_list(
+        &self,
+        peer: SocketAddr,
+    ) -> Result<Vec<PeerAddress>, GossipClientError> {
+        let url = format!("http://{}/gossip/peer-list", peer);
+        let response = self
+            .internal_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        let response: GossipResponse<Vec<PeerAddress>> = response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+        })?;
+
+        match response {
+            GossipResponse::Accepted(peers) => Ok(peers),
+            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                format!("Request rejected: {:?}", reason),
+            )),
+        }
+    }
+
+    pub async fn post_version(
+        &self,
+        peer: SocketAddr,
+        version: VersionRequest,
+    ) -> Result<PeerResponse, GossipClientError> {
+        let url = format!("http://{}/gossip/version", peer);
+        let response = self
+            .internal_client()
+            .post(&url)
+            .json(&version)
+            .send()
+            .await
+            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        let response: GossipResponse<PeerResponse> = response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+        })?;
+
+        match response {
+            GossipResponse::Accepted(version_response) => Ok(version_response),
+            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                format!("Request rejected: {:?}", reason),
+            )),
+        }
+    }
+
+    pub async fn get_block_index(
+        &self,
+        peer: SocketAddr,
+        query: BlockIndexQuery,
+    ) -> Result<Vec<BlockIndexItem>, GossipClientError> {
+        let url = format!("http://{}/gossip/block-index", peer);
+        let response = self
+            .internal_client()
+            .get(&url)
+            .query(&query)
+            .send()
+            .await
+            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        let response: GossipResponse<Vec<BlockIndexItem>> = response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+        })?;
+
+        match response {
+            GossipResponse::Accepted(index) => Ok(index),
+            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                format!("Request rejected: {:?}", reason),
+            )),
+        }
+    }
+
     pub async fn check_health(
         &self,
         peer: PeerAddress,
@@ -141,6 +275,9 @@ impl GossipClient {
                     }
                     RejectionReason::GossipDisabled => {
                         return Ok(false);
+                    }
+                    RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                        warn!("Health check rejected with reason: {:?}", reason);
                     }
                     _ => {
                         warn!(
@@ -482,6 +619,9 @@ impl GossipClient {
                         RejectionReason::GossipDisabled => {
                             peer_list.set_is_online(&peer.0, false);
                         }
+                        RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                            warn!("Peer {:?} rejected block request with {:?}", peer.0, reason);
+                        }
                         _ => {}
                     }
                     Err(PeerNetworkError::FailedToRequestData(format!(
@@ -640,6 +780,14 @@ impl GossipClient {
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} unable to verify our origin",
                                         data_request, address
+                                    )),
+                                ));
+                            }
+                            RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Request {:?}: Peer {:?} rejected with {:?}",
+                                        data_request, address, reason
                                     )),
                                 ));
                             }
@@ -809,6 +957,15 @@ impl GossipClient {
                                         format!(
                                             "{}: Peer {:?} unable to verify our origin when updating the stake and pledge list",
                                             url, peer.0
+                                        ),
+                                    )));
+                            }
+                            RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                                last_error =
+                                    Some(GossipError::from(PeerNetworkError::FailedToRequestData(
+                                        format!(
+                                            "{}: Peer {:?} rejected with {:?}",
+                                            url, peer.0, reason
                                         ),
                                     )));
                             }

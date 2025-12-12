@@ -847,7 +847,7 @@ impl IrysNode {
                 loop {
                     interval.tick().await;
 
-                    let info = irys_api_server::routes::index::get_node_info(
+                    let info = irys_domain::get_node_info(
                         &block_index,
                         &block_tree,
                         &peer_list,
@@ -1365,6 +1365,9 @@ impl IrysNode {
             service_senders.clone(),
             chain_sync_tx.clone(),
             mempool_guard.clone(),
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            std::time::Instant::now(),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)

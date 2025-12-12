@@ -27,13 +27,7 @@ pub async fn block_index_route(
     let height = query.height;
 
     // Clone only the requested range while holding the read lock briefly
-    let requested_blocks: Vec<BlockIndexItem> = {
-        let block_index_read = state.block_index.read();
-        let total = block_index_read.items.len();
-        let start = height.min(total);
-        let end = start.saturating_add(limit).min(total);
-        block_index_read.items[start..end].to_vec()
-    };
+    let requested_blocks = state.block_index.read().get_range(height as u64, limit);
 
     Ok(Json(requested_blocks))
 }

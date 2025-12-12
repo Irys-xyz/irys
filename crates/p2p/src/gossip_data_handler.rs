@@ -14,10 +14,12 @@ use irys_actors::{
 use irys_api_client::ApiClient;
 use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
-use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
+use irys_domain::{
+    BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
+};
 use irys_types::IrysAddress;
 use irys_types::{
-    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    BlockHash, CommitmentTransaction, Config, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
     IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
@@ -26,6 +28,7 @@ use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, error, instrument, warn, Instrument as _, Span};
 
 pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
@@ -50,6 +53,10 @@ where
     pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,
     pub data_request_tracker: DataRequestTracker,
+    pub block_index: BlockIndexReadGuard,
+    pub block_tree: BlockTreeReadGuard,
+    pub config: Config,
+    pub started_at: Instant,
 }
 
 impl<M, B, A> Clone for GossipDataHandler<M, B, A>
@@ -70,6 +77,10 @@ where
             span: self.span.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
             data_request_tracker: DataRequestTracker::new(),
+            block_index: self.block_index.clone(),
+            block_tree: self.block_tree.clone(),
+            config: self.config.clone(),
+            started_at: self.started_at,
         }
     }
 }

@@ -25,11 +25,12 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
-use irys_domain::PeerList;
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::{Config, DatabaseProvider, GossipBroadcastMessage, IrysAddress, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
@@ -161,6 +162,9 @@ impl P2PService {
         service_senders: ServiceSenders,
         chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
         mempool_guard: MempoolReadGuard,
+        block_index: BlockIndexReadGuard,
+        block_tree: BlockTreeReadGuard,
+        started_at: Instant,
     ) -> GossipResult<(
         ServiceHandleWithShutdownSignal,
         Arc<BlockPool<B, M>>,
@@ -199,6 +203,10 @@ impl P2PService {
             span: Span::current(),
             execution_payload_cache: execution_payload_provider,
             data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+            block_index,
+            block_tree,
+            config: config.clone(),
+            started_at,
         });
         let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 

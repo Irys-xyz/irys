@@ -767,6 +767,14 @@ where
                                     )),
                                 ));
                             }
+                            RejectionReason::InvalidCredentials | RejectionReason::ProtocolMismatch => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} rejected data request {:?} with {:?}",
+                                        peer.0, data_request, reason
+                                    )),
+                                ));
+                            }
                         }
                     }
                     Err(err) => {
