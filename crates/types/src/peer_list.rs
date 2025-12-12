@@ -465,7 +465,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Block(block_hash),
+            data_request: GossipDataRequest::BlockHeader(block_hash),
             use_trusted_peers_only,
             response: sender,
             retries,

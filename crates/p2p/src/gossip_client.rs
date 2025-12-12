@@ -8,8 +8,9 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest, IrysAddress,
-    IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError, DATA_REQUEST_RETRIES,
+    BlockBody, BlockHash, GossipCacheKey, GossipData, GossipDataRequest, GossipRequest,
+    IrysAddress, IrysBlockHeader, PeerAddress, PeerListItem, PeerNetworkError,
+    DATA_REQUEST_RETRIES,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -186,7 +187,7 @@ impl GossipClient {
                 )
                 .await
             }
-            GossipData::Block(irys_block_header) => {
+            GossipData::BlockHeader(irys_block_header) => {
                 if irys_block_header.poa.chunk.is_none() {
                     error!(
                         target = "p2p::gossip_client::send_data",
@@ -197,6 +198,13 @@ impl GossipClient {
                 self.send_data_internal(
                     format!("http://{}/gossip/block", peer.address.gossip),
                     &irys_block_header,
+                )
+                .await
+            }
+            GossipData::BlockBody(block_body) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/block_body", peer.address.gossip),
+                    &block_body,
                 )
                 .await
             }
@@ -424,15 +432,37 @@ impl GossipClient {
         }
     }
 
-    pub async fn pull_block_from_network(
+    pub async fn pull_block_header_from_network(
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
-        let data_request = GossipDataRequest::Block(block_hash);
+        let data_request = GossipDataRequest::BlockHeader(block_hash);
         self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
             .await
+    }
+
+    pub async fn pull_block_body_from_network(
+        &self,
+        block_hash: BlockHash,
+        use_trusted_peers_only: bool,
+        peer_list: &PeerList,
+    ) -> Result<(IrysAddress, Arc<BlockBody>), PeerNetworkError> {
+        let data_request = GossipDataRequest::BlockBody(block_hash);
+        self.pull_data_from_network(
+            data_request,
+            use_trusted_peers_only,
+            peer_list,
+            |gossip_data| match gossip_data {
+                GossipData::BlockBody(body) => Ok(body),
+                _ => Err(PeerNetworkError::UnexpectedData(format!(
+                    "Expected BlockBody, got {:?}",
+                    gossip_data.data_type_and_id()
+                ))),
+            },
+        )
+        .await
     }
 
     pub async fn pull_payload_from_network(
@@ -458,7 +488,7 @@ impl GossipClient {
         peer: &(IrysAddress, PeerListItem),
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
-        let data_request = GossipDataRequest::Block(block_hash);
+        let data_request = GossipDataRequest::BlockHeader(block_hash);
         match self
             .pull_data_and_update_the_score(peer, data_request, peer_list)
             .await
@@ -499,7 +529,7 @@ impl GossipClient {
 
     fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
-            GossipData::Block(block) => Ok(block),
+            GossipData::BlockHeader(block) => Ok(block),
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected IrysBlockHeader, got {:?}",
                 gossip_data.data_type_and_id()

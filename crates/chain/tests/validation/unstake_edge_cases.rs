@@ -5,7 +5,6 @@ use crate::utils::{
 };
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
@@ -13,7 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
+use irys_types::{BlockTransactions, CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 use tracing::debug;

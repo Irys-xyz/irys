@@ -17,8 +17,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_api_client::ApiClient;
 use irys_domain::{PeerList, ScoreDecreaseReason};
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof,
-    IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    BlockBody, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
+    IngressProof, IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::{builder::Block as _, primitives::Block};
 use std::net::TcpListener;
@@ -133,7 +133,7 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_block(
+    async fn handle_block_header(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
         req: actix_web::HttpRequest,
@@ -157,9 +157,10 @@ where
             ));
         };
 
-        let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
-            Err(error_response) => return error_response,
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
+        {
+            return error_response;
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
@@ -179,7 +180,7 @@ where
                 let block_hash_string = gossip_request.data.block_hash;
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
+                    .handle_block_header(gossip_request, source_socket_addr)
                     .in_current_span()
                     .await
                 {
@@ -203,6 +204,72 @@ where
         debug!(
             "Node {:?}: Started handling block {} height {} and returned ok response to the peer",
             this_node_id, block_hash, block_height
+        );
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_block_body(
+        server: Data<Self>,
+        irys_block_header_json: web::Json<GossipRequest<BlockBody>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        // TODO: this implementation is incomplete!
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let block_hash = irys_block_header_json.0.data.block_hash;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring block header {:?}",
+                node_id, block_hash
+            );
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+        let gossip_request = irys_block_header_json.0;
+        let source_miner_address = gossip_request.miner_address;
+        let Some(source_socket_addr) = req.peer_addr() else {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            ));
+        };
+
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
+        {
+            return error_response;
+        };
+        server.peer_list.set_is_online(&source_miner_address, true);
+
+        let this_node_id = server.data_handler.gossip_client.mining_address;
+        let block_hash = gossip_request.data.block_hash;
+
+        let handler = server.data_handler.clone();
+
+        tokio::spawn(
+            async move {
+                if let Err(e) = handler
+                    .handle_block_body(gossip_request, source_socket_addr)
+                    .await
+                {
+                    Self::handle_invalid_data(&source_miner_address, &e, &server.peer_list);
+                    error!(
+                        "Node {:?}: Failed to process the block body {}: {:?}",
+                        this_node_id, block_hash, e
+                    );
+                } else {
+                    info!(
+                        "Node {:?}: Server handler handled block body {}",
+                        this_node_id, block_hash
+                    );
+                }
+            }
+            .in_current_span(),
+        );
+
+        debug!(
+            "Node {:?}: Started handling block body {} and returned ok response to the peer",
+            this_node_id, block_hash
         );
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
@@ -437,13 +504,14 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             let request_id = match &data_request.0.data {
-                GossipDataRequest::Block(hash) => format!("block {:?}", hash),
+                GossipDataRequest::BlockHeader(hash) => format!("block header {:?}", hash),
                 GossipDataRequest::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
                 }
                 GossipDataRequest::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
+                GossipDataRequest::BlockBody(hash) => format!("block body {:?}", hash),
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
@@ -540,7 +608,8 @@ where
                         .route("/transaction", web::post().to(Self::handle_transaction))
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
-                        .route("/block", web::post().to(Self::handle_block))
+                        .route("/block", web::post().to(Self::handle_block_header))
+                        .route("/block_body", web::post().to(Self::handle_block_body))
                         .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
                         .route(
                             "/execution_payload",

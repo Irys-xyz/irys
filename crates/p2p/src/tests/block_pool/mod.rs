@@ -8,7 +8,6 @@ use crate::tests::util::{
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_api_client::ApiClient;
@@ -17,7 +16,7 @@ use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
+    AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
     CommitmentTransaction, Config, DataTransactionHeader, DatabaseProvider, GossipData,
     GossipDataRequest, IrysAddress, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress,
     PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, VersionRequest, H256,
@@ -270,7 +269,7 @@ async fn should_process_block() {
     service
         .process_block::<ApiClientStub>(
             Arc::clone(&test_header),
-            BlockTransactions::default(),
+            Arc::new(BlockBody::default()),
             false,
         )
         .await
@@ -412,7 +411,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let pool_for_server = block_pool.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
         GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
-        GossipDataRequest::Block(block_hash) => {
+        GossipDataRequest::BlockHeader(block_hash) => {
             let block = block_for_server.clone();
             let block_for_response = block.clone();
             let pool = pool_for_server.clone();
@@ -421,15 +420,16 @@ async fn should_process_block_with_intermediate_block_in_api() {
                 debug!("Send block to block pool");
                 pool.process_block::<ApiClientStub>(
                     Arc::new(block.clone()),
-                    BlockTransactions::default(),
+                    Arc::new(BlockBody::default()),
                     false,
                 )
                 .await
                 .expect("to process block");
             });
-            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
+            GossipResponse::Accepted(Some(GossipData::BlockHeader(Arc::new(block_for_response))))
         }
         GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+        GossipDataRequest::BlockBody(_) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -440,7 +440,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     // Process block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block3), BlockTransactions::default(), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block3), Arc::new(BlockBody::default()), false)
         .await
         .expect("can't process block");
 
@@ -596,16 +596,17 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     let block_for_server_clone = block_for_server.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
         GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
-        GossipDataRequest::Block(block_hash) => {
+        GossipDataRequest::BlockHeader(block_hash) => {
             debug!("Received a request to pull the block: {:?}", block_hash);
             let block_for_server = block_for_server_clone
                 .read()
                 .unwrap()
                 .clone()
-                .map(|b| GossipData::Block(Arc::new(b)));
+                .map(|b| GossipData::BlockHeader(Arc::new(b)));
             GossipResponse::Accepted(block_for_server)
         }
         GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+        GossipDataRequest::BlockBody(_) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -618,7 +619,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     // Process block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block3), BlockTransactions::default(), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block3), Arc::new(BlockBody::default()), false)
         .await
         .expect("can't process block");
 
@@ -638,7 +639,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
     // Process block4 to trigger reprocessing of block2 and then block3
     block_pool
-        .process_block::<ApiClientStub>(Arc::clone(&block4), BlockTransactions::default(), false)
+        .process_block::<ApiClientStub>(Arc::clone(&block4), Arc::new(BlockBody::default()), false)
         .await
         .expect("can't process block");
 
@@ -733,7 +734,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     let res = block_pool
         .process_block::<ApiClientStub>(
             Arc::new(header_building_on_very_old_block.clone()),
-            BlockTransactions::default(),
+            Arc::new(BlockBody::default()),
             false,
         )
         .await;
@@ -894,7 +895,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                 let res = pool
                     .process_block::<ApiClientStub>(
                         Arc::new(block.clone()),
-                        BlockTransactions::default(),
+                        Arc::new(BlockBody::default()),
                         false,
                     )
                     .await;
@@ -921,7 +922,11 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool
-        .process_block::<ApiClientStub>(Arc::new(bogus_block), BlockTransactions::default(), false)
+        .process_block::<ApiClientStub>(
+            Arc::new(bogus_block),
+            Arc::new(BlockBody::default()),
+            false,
+        )
         .await;
 
     sync_service_handle.shutdown_signal.fire();
@@ -981,7 +986,7 @@ async fn should_not_fast_track_block_already_in_index() {
     let err = service
         .process_block::<ApiClientStub>(
             Arc::new(test_header.clone()),
-            BlockTransactions::default(),
+            Arc::new(BlockBody::default()),
             true,
         )
         .await
