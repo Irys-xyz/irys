@@ -56,7 +56,7 @@ where
             evm_config,
             EthereumBuilderConfig::new().with_gas_limit(gas_limit),
             self.max_pd_chunks_per_block,
-            self.hardforks.clone(),
+            self.hardforks,
         ))
     }
 }

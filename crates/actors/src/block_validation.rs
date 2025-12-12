@@ -1,5 +1,5 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
-use crate::pd_pricing::base_fee::compute_base_fee_per_chunk;
+use crate::pd_pricing::base_fee::compute_pd_base_fee_for_block;
 use crate::{
     block_discovery::BlockTransactions,
     block_producer::ledger_expiry,
@@ -1585,15 +1585,14 @@ async fn generate_expected_shadow_transactions(
         Vec::new()
     };
 
-    // Calculate PD base fee using parent EMA and current pricing EMA
-    let block_timestamp_for_hardfork = block.timestamp_secs();
-    let pd_base_fee_per_chunk = compute_base_fee_per_chunk(
+    // Calculate PD base fee for this block
+    let pd_base_fee_per_chunk = compute_pd_base_fee_for_block(
         config,
         parent_block,
         &parent_ema_snapshot,
         &current_ema_for_pricing.ema_for_public_pricing(),
         parent_evm_block,
-        block_timestamp_for_hardfork,
+        block.timestamp_secs(),
     )?;
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
@@ -1608,7 +1607,7 @@ async fn generate_expected_shadow_transactions(
         &publish_ledger_with_txs,
         initial_treasury_balance,
         pd_base_fee_per_chunk,
-        block_timestamp_for_hardfork,
+        block.timestamp_secs(),
         &expired_ledger_fees,
         &commitment_refund_events,
         &unstake_refund_events,

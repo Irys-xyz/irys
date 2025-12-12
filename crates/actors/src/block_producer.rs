@@ -539,12 +539,13 @@ pub trait BlockProdStrategy {
                 self.inner().config.consensus.ema.price_adjustment_interval,
             );
 
-        // Calculate PD base fee for the new block using both parent and current pricing EMA
-        let pd_base_fee = self.calculate_pd_base_fee_for_new_block(
+        // Calculate PD base fee for the new block
+        let pd_base_fee = base_fee::compute_pd_base_fee_for_block(
+            &self.inner().config,
             &prev_block_header,
-            &prev_evm_block,
             &prev_block_ema_snapshot,
             &current_ema_for_pricing,
+            &prev_evm_block,
             current_timestamp.to_secs(),
         )?;
 

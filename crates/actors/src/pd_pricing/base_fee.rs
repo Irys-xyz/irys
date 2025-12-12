@@ -12,6 +12,68 @@ use irys_types::{
 const MB_SIZE: u64 = 1024 * 1024;
 pub const PD_BASE_FEE_INDEX: usize = 1;
 
+/// Compute the PD base fee per chunk for a new block.
+///
+/// Handles all three cases:
+/// - Pre-Sprite: returns zero (no PD fees)
+/// - First Sprite block (parent is pre-Sprite): returns floor base fee
+/// - Normal Sprite block (parent is post-Sprite): computes from parent utilization
+pub fn compute_pd_base_fee_for_block(
+    config: &Config,
+    parent_block: &IrysBlockHeader,
+    parent_ema_snapshot: &EmaSnapshot,
+    current_ema_price: &irys_types::IrysTokenPrice,
+    parent_evm_block: &alloy_consensus::Block<
+        alloy_consensus::EthereumTxEnvelope<alloy_consensus::TxEip4844>,
+    >,
+    block_timestamp: UnixTimestamp,
+) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+    let Some(sprite) = config.consensus.hardforks.sprite_at(block_timestamp) else {
+        // Pre-Sprite: no PD fees
+        return Ok(Amount::new(U256::from(0)));
+    };
+
+    // Sprite is active - check if parent is pre-Sprite
+    let parent_is_pre_sprite = parent_block.timestamp_secs() < sprite.activation_timestamp;
+    if parent_is_pre_sprite {
+        // First Sprite block: parent doesn't have PdBaseFeeUpdate, use floor
+        return compute_floor_base_fee_per_chunk(sprite, current_ema_price, config.consensus.chunk_size);
+    }
+
+    // Normal case: compute from parent's utilization
+    compute_base_fee_per_chunk(
+        config,
+        parent_block,
+        parent_ema_snapshot,
+        current_ema_price,
+        parent_evm_block,
+        block_timestamp,
+    )
+}
+
+/// Compute the floor PD base fee per chunk.
+/// Used for the first block after Sprite activation when parent is pre-Sprite.
+fn compute_floor_base_fee_per_chunk(
+    sprite: &Sprite,
+    current_ema_price: &irys_types::IrysTokenPrice,
+    chunk_size: u64,
+) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
+    let floor_per_chunk_usd = Amount::new(mul_div(
+        sprite.base_fee_floor.amount,
+        U256::from(chunk_size),
+        U256::from(MB_SIZE),
+    )?);
+    convert_per_chunk_usd_to_irys(floor_per_chunk_usd, current_ema_price)
+}
+
+/// Compute the PD base fee per chunk for a new block based on parent block utilization.
+///
+/// # Preconditions (caller must ensure):
+/// - Sprite hardfork is active for `block_timestamp`
+/// - Parent block is post-Sprite (has `PdBaseFeeUpdate` transaction)
+///
+/// For the first block after Sprite activation (where parent is pre-Sprite),
+/// use `compute_floor_base_fee_per_chunk` instead.
 pub fn compute_base_fee_per_chunk(
     config: &Config,
     parent_block: &IrysBlockHeader,
@@ -22,13 +84,14 @@ pub fn compute_base_fee_per_chunk(
     >,
     block_timestamp: UnixTimestamp,
 ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
-    // Caller must ensure Sprite hardfork is active before calling this function
+    // Caller must ensure: Sprite active AND parent is post-Sprite
     let sprite = config
         .consensus
         .hardforks
         .sprite_at(block_timestamp)
         .expect("Sprite hardfork must be active - caller should check before calling");
 
+    // Extract from parent (which must be post-Sprite and have PdBaseFeeUpdate)
     let current_pd_base_fee_irys = extract_pd_base_fee_from_block(
         parent_block,
         parent_evm_block,
@@ -102,6 +165,11 @@ pub fn calculate_pd_base_fee_for_new_block(
 ///
 /// The PD base fee is stored in the PdBaseFeeUpdate transaction, which is always
 /// the 2nd transaction in a block (after BlockReward at position 0).
+///
+/// # Panics
+/// Callers must ensure this is only called for post-Sprite blocks that contain
+/// the PdBaseFeeUpdate transaction. Use `compute_base_fee_per_chunk` which handles
+/// pre-Sprite parent blocks correctly.
 pub fn extract_pd_base_fee_from_block(
     irys_block_header: &irys_types::IrysBlockHeader,
     evm_block: &reth_ethereum_primitives::Block,
@@ -111,7 +179,7 @@ pub fn extract_pd_base_fee_from_block(
     use eyre::{eyre, OptionExt as _};
     use irys_reth::shadow_tx::{detect_and_decode, TransactionPacket};
 
-    // Special case: Genesis block (height 0) or first Sprite block should use the minimum base fee
+    // Special case: Genesis block (height 0) should use the minimum base fee
     // The genesis block doesn't have the standard transaction structure
     if irys_block_header.height == 0 {
         // Convert the floor from per-MB to per-chunk

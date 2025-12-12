@@ -41,7 +41,7 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_payload_builder::EthBuiltPayload;
 use reth_payload_builder_primitives::PayloadBuilderError;
-use reth_payload_primitives::PayloadBuilderAttributes;
+use reth_payload_primitives::PayloadBuilderAttributes as _;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError,
@@ -425,8 +425,7 @@ where
         let shadow_txs = config.attributes.shadow_txs.clone();
 
         // Check if Sprite hardfork is active at this block's timestamp
-        let block_timestamp =
-            irys_types::UnixTimestamp::from_secs(config.attributes.timestamp());
+        let block_timestamp = irys_types::UnixTimestamp::from_secs(config.attributes.timestamp());
         let is_sprite_active = self.hardforks.is_sprite_active(block_timestamp);
 
         // Convert IrysPayloadBuilderAttributes to EthPayloadBuilderAttributes for the inner builder
