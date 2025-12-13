@@ -427,6 +427,10 @@ where
             .json(GossipResponse::Accepted(node_info))
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
     async fn handle_peer_list(server: Data<Self>) -> HttpResponse {
         let ips = server.peer_list.all_known_peers();
         HttpResponse::Ok()
@@ -434,6 +438,10 @@ where
             .json(GossipResponse::Accepted(ips))
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
     async fn handle_version(
         server: Data<Self>,
         req: actix_web::HttpRequest,
@@ -522,6 +530,10 @@ where
             .json(GossipResponse::Accepted(response))
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
     async fn handle_block_index(
         server: Data<Self>,
         query: web::Query<BlockIndexQuery>,
