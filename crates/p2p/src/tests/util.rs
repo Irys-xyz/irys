@@ -15,7 +15,8 @@ use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::mempool_service::{create_state, AtomicMempoolState, TxIngressError, TxReadError};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, ChunkIngressError, IngressProofError, MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    IngressProofError, MempoolFacade,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
@@ -120,18 +121,26 @@ impl MempoolFacade for MempoolStub {
         &self,
         chunk: UnpackedChunk,
     ) -> std::result::Result<(), ChunkIngressError> {
-        self.chunks
-            .write()
-            .expect("to unlock mempool chunks")
-            .push(chunk.clone());
+        let mut guard = self.chunks.write().expect("to unlock mempool chunks");
 
-        // Pretend that we've validated the chunk and we're ready to gossip it
-        let message_bus = self.internal_message_bus.clone();
-        tokio::runtime::Handle::current().spawn(async move {
-            message_bus
-                .send(GossipBroadcastMessage::from(chunk))
-                .expect("to send chunk");
-        });
+        if guard
+            .iter()
+            .any(|existing_chunk| existing_chunk.data_path == chunk.data_path)
+        {
+            return Err(ChunkIngressError::Advisory(
+                AdvisoryChunkIngressError::Other("Already exists".into()),
+            ));
+        } else {
+            guard.push(chunk.clone());
+
+            // Pretend that we've validated the chunk and we're ready to gossip it
+            let message_bus = self.internal_message_bus.clone();
+            tokio::runtime::Handle::current().spawn(async move {
+                message_bus
+                    .send(GossipBroadcastMessage::from(chunk))
+                    .expect("to send chunk");
+            });
+        }
 
         Ok(())
     }
