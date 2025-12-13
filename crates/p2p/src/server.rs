@@ -648,15 +648,6 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        if !server.data_handler.sync_state.is_gossip_reception_enabled()
-            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
-        {
-            let node_id = server.data_handler.gossip_client.mining_address;
-            warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
-            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::GossipDisabled,
-            ));
-        }
         if let Err(error_response) =
             Self::check_peer(&server.peer_list, &req, data_request.miner_address)
         {
