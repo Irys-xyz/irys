@@ -32,9 +32,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, instrument, warn, Instrument as _, Span};
 
-pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
-pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
-
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
 pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery>

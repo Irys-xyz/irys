@@ -16,9 +16,8 @@ use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
-    BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, Config, DatabaseProvider, GossipData,
-    GossipDataRequest, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, RethPeerInfo,
+    Config, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, NodeConfig, PeerAddress,
+    PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;

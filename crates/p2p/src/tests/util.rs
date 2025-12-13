@@ -8,7 +8,7 @@ use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use eyre::{eyre, Result};
+use eyre::Result;
 use futures::{future, FutureExt as _};
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockTransactions};
 use irys_actors::mempool_guard::MempoolReadGuard;
@@ -26,12 +26,11 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::IrysAddress;
 use irys_types::{
-    AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
-    IrysBlockHeader, IrysTransactionResponse, MempoolConfig, NodeConfig, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle,
-    TxChunkOffset, TxKnownStatus, UnpackedChunk, VersionRequest, H256,
+    Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, GossipData,
+    GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, MempoolConfig, NodeConfig,
+    NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
+    TokioServiceHandle, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};

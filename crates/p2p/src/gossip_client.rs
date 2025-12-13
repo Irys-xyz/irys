@@ -290,7 +290,7 @@ impl GossipClient {
                 warn!("Health check rejected with reason: {:?}", reason);
                 match reason {
                     RejectionReason::HandshakeRequired => {
-                        peer_list.initiate_handshake(peer.api, true);
+                        peer_list.initiate_handshake(peer.api, peer.gossip, true);
                     }
                     RejectionReason::GossipDisabled => {
                         return Ok(false);
@@ -648,9 +648,11 @@ impl GossipClient {
                 GossipResponse::Rejected(reason) => {
                     warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
                     match reason {
-                        RejectionReason::HandshakeRequired => {
-                            peer_list.initiate_handshake(peer.1.address.api, true)
-                        }
+                        RejectionReason::HandshakeRequired => peer_list.initiate_handshake(
+                            peer.1.address.api,
+                            peer.1.address.gossip,
+                            true,
+                        ),
                         RejectionReason::GossipDisabled => {
                             peer_list.set_is_online(&peer.0, false);
                         }
@@ -696,9 +698,11 @@ impl GossipClient {
                 GossipResponse::Rejected(reason) => {
                     warn!("Peer {:?} rejected the request: {:?}", peer.0, reason);
                     match reason {
-                        RejectionReason::HandshakeRequired => {
-                            peer_list.initiate_handshake(peer.1.address.api, true)
-                        }
+                        RejectionReason::HandshakeRequired => peer_list.initiate_handshake(
+                            peer.1.address.api,
+                            peer.1.address.gossip,
+                            true,
+                        ),
                         RejectionReason::GossipDisabled => {
                             peer_list.set_is_online(&peer.0, false);
                         }
@@ -839,7 +843,11 @@ impl GossipClient {
                         );
                         match reason {
                             RejectionReason::HandshakeRequired => {
-                                peer_list.initiate_handshake(peer.1.address.api, true);
+                                peer_list.initiate_handshake(
+                                    peer.1.address.api,
+                                    peer.1.address.gossip,
+                                    true,
+                                );
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} requires a handshake",
@@ -1028,7 +1036,11 @@ impl GossipClient {
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
                                         format!("{}: Peer {:?} requires a handshake", url, peer.0),
                                     )));
-                                peer_list.initiate_handshake(peer.1.address.api, true);
+                                peer_list.initiate_handshake(
+                                    peer.1.address.api,
+                                    peer.1.address.gossip,
+                                    true,
+                                );
                             }
                             RejectionReason::GossipDisabled => {
                                 last_error =

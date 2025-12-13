@@ -249,7 +249,7 @@ impl PeerNetworkService {
         let sender = self.inner.sender();
         let peer_list = self.inner.peer_list();
 
-        let trusted_peers = peer_list.trusted_peer_addresses();
+        let trusted_peers = peer_list.trusted_peer_api_to_gossip_addresses();
         Self::trusted_peers_handshake_task(sender.clone(), trusted_peers);
 
         let initial_peers: HashMap<IrysAddress, PeerListItem> = peer_list
@@ -475,43 +475,23 @@ impl PeerNetworkService {
                 .sign_p2p_handshake(&mut version_request)
                 .expect("Failed to sign version request");
 
-            let gossip_address =
-                if let Some(peer) = self.inner.peer_list().peer_by_api_address(api_address) {
-                    Some(peer.address.gossip)
-                } else {
-                    self.inner
-                        .peer_list()
-                        .get_trusted_peer_gossip_address(api_address)
-                };
+            let gossip_address = handshake.gossip_address;
 
-            let task = if let Some(gossip_address) = gossip_address {
-                Some(HandshakeTask {
-                    api_address,
-                    gossip_address,
-                    version_request,
-                    is_trusted_peer: self.inner.peer_list().is_trusted_peer(&api_address),
-                    peer_filter_mode: state.config.node_config.peer_filter_mode,
-                    peer_list: self.inner.peer_list(),
-                    gossip_client: state.gossip_client.clone(),
-                    sender: self.inner.sender(),
-                    semaphore: state.handshake_semaphore.clone(),
-                    peers_limit: state.peers_limit,
-                })
-            } else {
-                warn!(
-                    "Could not resolve gossip address for peer API address: {}",
-                    api_address
-                );
-                state.currently_running_announcements.remove(&api_address);
-                None
-            };
-
-            task
+            HandshakeTask {
+                api_address,
+                gossip_address,
+                version_request,
+                is_trusted_peer: self.inner.peer_list().is_trusted_peer(&api_address),
+                peer_filter_mode: state.config.node_config.peer_filter_mode,
+                peer_list: self.inner.peer_list(),
+                gossip_client: state.gossip_client.clone(),
+                sender: self.inner.sender(),
+                semaphore: state.handshake_semaphore.clone(),
+                peers_limit: state.peers_limit,
+            }
         };
 
-        if let Some(task) = task {
-            self.spawn_handshake_task(task);
-        }
+        self.spawn_handshake_task(task);
     }
 
     fn spawn_handshake_task(&self, task: HandshakeTask) {
@@ -600,6 +580,7 @@ impl PeerNetworkService {
                     &sender,
                     PeerNetworkServiceMessage::Handshake(HandshakeMessage {
                         api_address,
+                        gossip_address: msg.peer_gossip_address,
                         force: false,
                     }),
                 );
@@ -732,6 +713,7 @@ impl PeerNetworkService {
                                     &sender,
                                     PeerNetworkServiceMessage::Handshake(HandshakeMessage {
                                         api_address: peer.1.address.api,
+                                        gossip_address: peer.1.address.gossip,
                                         force: true,
                                     }),
                                 );
@@ -808,13 +790,14 @@ impl PeerNetworkService {
     }
     fn trusted_peers_handshake_task(
         sender: PeerNetworkSender,
-        trusted_peers_api_addresses: HashSet<SocketAddr>,
+        trusted_peers_api_to_gossip_addresses: HashMap<SocketAddr, SocketAddr>,
     ) {
-        for api_address in trusted_peers_api_addresses {
+        for (api_address, gossip_address) in trusted_peers_api_to_gossip_addresses {
             send_message_and_log_error(
                 &sender,
                 PeerNetworkServiceMessage::Handshake(HandshakeMessage {
                     api_address,
+                    gossip_address,
                     force: true,
                 }),
             );
@@ -896,6 +879,7 @@ impl PeerNetworkService {
                     &sender,
                     PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
                         peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
                         success: true,
                         retry: false,
                     }),
@@ -911,6 +895,7 @@ impl PeerNetworkService {
                     &sender,
                     PeerNetworkServiceMessage::AnnouncementFinished(AnnouncementFinishedMessage {
                         peer_api_address: api_address,
+                        peer_gossip_address: gossip_address,
                         success: false,
                         retry: true,
                     }),
@@ -942,6 +927,7 @@ impl PeerNetworkService {
                         &sender,
                         PeerNetworkServiceMessage::Handshake(HandshakeMessage {
                             api_address: peer.api,
+                            gossip_address: peer.gossip,
                             force: false,
                         }),
                     );
@@ -1016,20 +1002,13 @@ pub(crate) fn spawn_peer_network_service_with_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use eyre::eyre;
     use futures::FutureExt as _;
-    use irys_api_client::test_utils::CountingMockClient;
     use irys_database::{tables::PeerListItems, walk_all};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
-    use irys_types::{
-        AcceptedResponse, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-        CommitmentTransaction, Config, DataTransactionHeader, IrysAddress, IrysTransactionResponse,
-        NodeConfig, NodeInfo, PeerNetworkServiceMessage, RethPeerInfo, H256,
-    };
-    use std::collections::{HashMap, HashSet, VecDeque};
+    use irys_types::{Config, IrysAddress, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo};
+    use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr as _;
     use std::sync::Arc;
@@ -1072,29 +1051,18 @@ mod tests {
         config: Config,
         inner: Arc<PeerNetworkServiceInner>,
         service: PeerNetworkService,
-        reth_calls: Arc<AsyncMutex<Vec<RethPeerInfo>>>,
     }
 
     impl TestHarness {
         fn new(temp_dir: &std::path::Path, config: Config) -> Self {
             let db = open_db(temp_dir);
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
-            let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
-            let reth_sender = {
-                let reth_calls = reth_calls.clone();
-                Arc::new(move |info: RethPeerInfo| {
-                    let reth_calls = reth_calls.clone();
-                    async move {
-                        reth_calls.lock().await.push(info);
-                    }
-                    .boxed()
-                })
-            };
+            let reth_sender = { Arc::new(move |_info: RethPeerInfo| async move {}.boxed()) };
             let peer_list = PeerList::new(
                 &config,
                 &db,
                 sender.clone(),
-                tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
+                broadcast::channel::<PeerEvent>(100).0,
             )
             .expect("peer list");
             let inner = Arc::new(PeerNetworkServiceInner::new(
@@ -1110,7 +1078,6 @@ mod tests {
                 config,
                 inner,
                 service,
-                reth_calls,
             }
         }
 
@@ -1194,9 +1161,15 @@ mod tests {
     #[test]
     async fn test_initial_handshake_with_trusted_peers() {
         let (sender, mut receiver) = PeerNetworkSender::new_with_receiver();
-        let peers: HashSet<SocketAddr> = vec![
-            "127.0.0.1:25001".parse().unwrap(),
-            "127.0.0.1:25002".parse().unwrap(),
+        let peers: HashMap<SocketAddr, SocketAddr> = vec![
+            (
+                "127.0.0.1:25001".parse().unwrap(),
+                "127.0.0.1:25001".parse().unwrap(),
+            ),
+            (
+                "127.0.0.1:25002".parse().unwrap(),
+                "127.0.0.1:25002".parse().unwrap(),
+            ),
         ]
         .into_iter()
         .collect();
@@ -1263,6 +1236,7 @@ mod tests {
                 .service
                 .handle_announcement_finished(AnnouncementFinishedMessage {
                     peer_api_address: target,
+                    peer_gossip_address: target,
                     success: false,
                     retry: true,
                 })

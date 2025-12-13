@@ -1527,7 +1527,6 @@ mod tests {
         use super::*;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
@@ -1535,7 +1534,7 @@ mod tests {
             NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
-        use std::sync::{Arc, Mutex, RwLock};
+        use std::sync::{Arc, Mutex};
 
         #[tokio::test]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
