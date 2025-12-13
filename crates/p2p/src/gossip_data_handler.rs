@@ -8,41 +8,40 @@ use crate::{
 use core::net::SocketAddr;
 use futures::stream::{self, StreamExt as _};
 use irys_actors::{
-    block_discovery::{BlockDiscoveryFacade, BlockTransactions},
+    block_discovery::{
+        get_commitment_tx_in_parallel, get_data_tx_in_parallel, BlockDiscoveryFacade,
+        BlockTransactions,
+    },
     AdvisoryChunkIngressError, ChunkIngressError, CriticalChunkIngressError, MempoolFacade,
 };
-use irys_api_client::ApiClient;
 use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
-use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
+use irys_domain::{
+    BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
+};
 use irys_types::IrysAddress;
 use irys_types::{
-    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    BlockHash, CommitmentTransaction, Config, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader,
     IrysTransactionResponse, PeerListItem, UnpackedChunk, H256,
 };
-use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, error, instrument, warn, Instrument as _, Span};
-
-pub(crate) const MAX_PEERS_TO_SELECT_FROM: usize = 15;
-pub(crate) const MAX_TX_PEERS_TO_TRY: usize = 7;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient>
+pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
-    TApiClient: ApiClient,
 {
     pub mempool: TMempoolFacade,
     pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub(crate) cache: Arc<GossipCache>,
-    pub api_client: TApiClient,
     pub gossip_client: GossipClient,
     pub peer_list: PeerList,
     pub sync_state: ChainSyncState,
@@ -50,35 +49,40 @@ where
     pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,
     pub data_request_tracker: DataRequestTracker,
+    pub block_index: BlockIndexReadGuard,
+    pub block_tree: BlockTreeReadGuard,
+    pub config: Config,
+    pub started_at: Instant,
 }
 
-impl<M, B, A> Clone for GossipDataHandler<M, B, A>
+impl<M, B> Clone for GossipDataHandler<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     fn clone(&self) -> Self {
         Self {
             mempool: self.mempool.clone(),
             block_pool: self.block_pool.clone(),
             cache: Arc::clone(&self.cache),
-            api_client: self.api_client.clone(),
             gossip_client: self.gossip_client.clone(),
             peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
             span: self.span.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
             data_request_tracker: DataRequestTracker::new(),
+            block_index: self.block_index.clone(),
+            block_tree: self.block_tree.clone(),
+            config: self.config.clone(),
+            started_at: self.started_at,
         }
     }
 }
 
-impl<M, B, A> GossipDataHandler<M, B, A>
+impl<M, B> GossipDataHandler<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_chunk(
@@ -529,7 +533,7 @@ where
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
         self.block_pool
-            .process_block::<A>(
+            .process_block(
                 Arc::new(block_header),
                 block_transactions,
                 skip_block_validation,
@@ -723,6 +727,61 @@ where
                     None => Ok(false),
                 }
             }
+            GossipDataRequest::Transaction(tx_id) => {
+                debug!(
+                    "Node {}: Handling transaction request for tx {:?}",
+                    self.gossip_client.mining_address, tx_id
+                );
+
+                let vec = vec![tx_id];
+                let mempool_guard = &self.block_pool.mempool_guard;
+                let db = &self.block_pool.db;
+
+                // Try commitment txs first
+                if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        let data = Arc::new(GossipData::CommitmentTransaction(tx));
+                        if check_result.should_update_score() {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
+                        return Ok(true);
+                    }
+                };
+
+                // Try data txs
+                if let Ok(mut result) =
+                    get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        let data = Arc::new(GossipData::Transaction(tx));
+                        if check_result.should_update_score() {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
+                        return Ok(true);
+                    }
+                };
+
+                Ok(false)
+            }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
@@ -753,6 +812,28 @@ where
                     .await;
 
                 Ok(maybe_evm_block.map(GossipData::ExecutionPayload))
+            }
+            GossipDataRequest::Transaction(tx_id) => {
+                let vec = vec![tx_id];
+                let mempool_guard = &self.block_pool.mempool_guard;
+                let db = &self.block_pool.db;
+
+                if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        return Ok(Some(GossipData::CommitmentTransaction(tx)));
+                    }
+                };
+
+                if let Ok(mut result) =
+                    get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        return Ok(Some(GossipData::Transaction(tx)));
+                    }
+                };
+
+                Ok(None)
             }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
         }
@@ -1022,54 +1103,44 @@ where
 
                     // Try source peer first if provided
                     if let Some((source_api_address, source_miner_address)) = source_peer {
-                        match self
-                            .api_client
-                            .get_transaction(source_api_address, tx_id_to_fetch)
-                            .await
+                        if let Some(peer_item) =
+                            self.peer_list.peer_by_mining_address(&source_miner_address)
                         {
-                            Ok(resp) => {
-                                fetched = Some((resp, source_miner_address));
-                            }
-                            Err(e) => {
-                                warn!(
-                                    "Failed to fetch tx {} from source peer {}: {}",
-                                    tx_id_to_fetch, source_api_address, e
-                                );
-                                last_err = Some(e.to_string());
+                            match self
+                                .gossip_client
+                                .pull_transaction_from_peer(
+                                    tx_id_to_fetch,
+                                    &(source_miner_address, peer_item),
+                                    &self.peer_list,
+                                )
+                                .await
+                            {
+                                Ok((_, resp)) => {
+                                    fetched = Some((resp, source_miner_address));
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to fetch tx {} from source peer {}: {}",
+                                        tx_id_to_fetch, source_api_address, e
+                                    );
+                                    last_err = Some(e.to_string());
+                                }
                             }
                         }
                     }
 
                     // If source failed or not provided, try random peers from top active
                     if fetched.is_none() {
-                        let mut exclude = HashSet::new();
-                        if let Some((_, source_miner_address)) = source_peer {
-                            exclude.insert(source_miner_address);
-                        }
-                        let mut top_peers = self
-                            .peer_list
-                            .top_active_peers(Some(MAX_PEERS_TO_SELECT_FROM), Some(exclude));
-                        top_peers.shuffle(&mut rand::thread_rng());
-                        top_peers.truncate(MAX_TX_PEERS_TO_TRY);
-
-                        for (peer_addr, peer_item) in top_peers {
-                            match self
-                                .api_client
-                                .get_transaction(peer_item.address.api, tx_id_to_fetch)
-                                .await
-                            {
-                                Ok(resp) => {
-                                    fetched = Some((resp, peer_addr));
-                                    break;
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Failed to fetch tx {} from peer {}: {}",
-                                        tx_id_to_fetch, peer_item.address.api, e
-                                    );
-                                    last_err = Some(e.to_string());
-                                    continue;
-                                }
+                        match self
+                            .gossip_client
+                            .pull_transaction_from_network(tx_id_to_fetch, false, &self.peer_list)
+                            .await
+                        {
+                            Ok((addr, resp)) => {
+                                fetched = Some((resp, addr));
+                            }
+                            Err(e) => {
+                                last_err = Some(e.to_string());
                             }
                         }
                     }

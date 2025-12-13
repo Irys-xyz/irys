@@ -1,10 +1,9 @@
 use crate::block_pool::{BlockRemovalReason, FailureReason};
 use crate::gossip_data_handler::GossipDataHandler;
-use crate::{BlockPool, GossipError, GossipResult};
+use crate::{BlockPool, GossipClient, GossipError, GossipResult};
 use irys_actors::block_discovery::BlockDiscoveryFacade;
 use irys_actors::reth_service::RethServiceMessage;
 use irys_actors::MempoolFacade;
-use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
@@ -96,9 +95,8 @@ pub enum SyncChainServiceMessage {
 
 /// Inner service containing the sync logic
 #[derive(Debug, Clone)]
-pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> {
+pub struct ChainSyncServiceInner<B: BlockDiscoveryFacade, M: MempoolFacade> {
     sync_state: ChainSyncState,
-    api_client: A,
     peer_list: PeerList,
     config: Config,
     block_index: BlockIndexReadGuard,
@@ -108,7 +106,7 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
     ///  needs to fetch the tip of the block index from the network to figure out how
     ///  much behind the network we are, if at all.
     is_sync_task_spawned: Arc<AtomicBool>,
-    gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+    gossip_data_handler: Arc<GossipDataHandler<M, B>>,
     reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
     /// An atomic bool to enable or disable VDF mining when sync is in progress
     is_vdf_mining_enabled: Arc<AtomicBool>,
@@ -117,10 +115,10 @@ pub struct ChainSyncServiceInner<A: ApiClient, B: BlockDiscoveryFacade, M: Mempo
 
 /// Main sync service that runs in its own tokio task
 #[derive(Debug)]
-pub struct ChainSyncService<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> {
+pub struct ChainSyncService<B: BlockDiscoveryFacade, M: MempoolFacade> {
     shutdown: Shutdown,
     msg_rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
-    inner: ChainSyncServiceInner<T, B, M>,
+    inner: ChainSyncServiceInner<B, M>,
 }
 
 /// Facade for interacting with the sync service
@@ -149,46 +147,19 @@ impl SyncChainServiceFacade {
     }
 }
 
-impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<IrysApiClient, B, M> {
+impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
     pub fn new(
         sync_state: ChainSyncState,
-        peer_list: PeerList,
-        config: irys_types::Config,
-        block_index: BlockIndexReadGuard,
-        block_pool: Arc<BlockPool<B, M>>,
-        gossip_data_handler: Arc<GossipDataHandler<M, B, IrysApiClient>>,
-        reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
-        is_vdf_mining_enabled: Arc<AtomicBool>,
-    ) -> Self {
-        Self::new_with_client(
-            sync_state,
-            IrysApiClient::new(),
-            peer_list,
-            config,
-            block_index,
-            block_pool,
-            gossip_data_handler,
-            reth_service,
-            is_vdf_mining_enabled,
-        )
-    }
-}
-
-impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<A, B, M> {
-    pub fn new_with_client(
-        sync_state: ChainSyncState,
-        api_client: A,
         peer_list: PeerList,
         config: Config,
         block_index: BlockIndexReadGuard,
         block_pool: Arc<BlockPool<B, M>>,
-        gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+        gossip_data_handler: Arc<GossipDataHandler<M, B>>,
         reth_service: Option<mpsc::UnboundedSender<RethServiceMessage>>,
         is_vdf_mining_enabled: Arc<AtomicBool>,
     ) -> Self {
         Self {
             sync_state,
-            api_client,
             peer_list,
             config,
             block_index,
@@ -230,7 +201,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
         let config = self.config.clone();
         let peer_list = self.peer_list.clone();
         let sync_state = self.sync_state.clone();
-        let api_client = self.api_client.clone();
         let gossip_data_handler = self.gossip_data_handler.clone();
         let is_sync_task_spawned = self.is_sync_task_spawned.clone();
         let block_pool = self.block_pool.clone();
@@ -268,7 +238,6 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
 
                 let res = sync_chain(
                     sync_state.clone(),
-                    api_client,
                     &peer_list,
                     start_sync_from_height
                         .try_into()
@@ -339,7 +308,7 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
                         })?;
 
                     block_pool
-                        .process_block::<A>(header, block_transactions, is_fast_tracking)
+                        .process_block(header, block_transactions, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
@@ -453,10 +422,10 @@ impl<A: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceIn
     }
 }
 
-impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T, B, M> {
+impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn spawn_service(
-        inner: ChainSyncServiceInner<T, B, M>,
+        inner: ChainSyncServiceInner<B, M>,
         rx: mpsc::UnboundedReceiver<SyncChainServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
@@ -502,7 +471,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
             .sync
             .enable_periodic_sync_check;
 
-        let periodic_sync_check_interval = if is_periodic_check_enabled {
+        let periodic_sync_check_interval = if is_periodic_check_enabled && period_secs > 0 {
             Duration::from_secs(period_secs)
         } else {
             Duration::MAX
@@ -633,7 +602,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
                             Ok(block_transactions) => {
                                 if let Err(e) = inner
                                     .block_pool
-                                    .process_block::<T>(
+                                    .process_block(
                                         cached_block.header,
                                         block_transactions,
                                         cached_block.is_fast_tracking,
@@ -673,7 +642,7 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
         match is_local_index_is_behind_trusted_peers(
             &self.inner.config,
             &self.inner.peer_list,
-            &self.inner.api_client,
+            &self.inner.gossip_data_handler.gossip_client,
             &self.inner.block_index,
         )
         .await
@@ -696,14 +665,14 @@ impl<T: ApiClient, B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<T
 }
 
 #[instrument(skip_all, err)]
-async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
+async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     sync_state: ChainSyncState,
-    api_client: impl ApiClient,
     peer_list: &PeerList,
     mut start_sync_from_height: usize,
     config: &irys_types::Config,
-    gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+    gossip_data_handler: Arc<GossipDataHandler<M, B>>,
 ) -> ChainSyncResult<()> {
+    let gossip_client = &gossip_data_handler.gossip_client;
     let migration_depth = config.consensus.block_migration_depth as usize;
     let sync_mode = config.node_config.sync_mode;
     let block_batch_size = config.node_config.sync.block_batch_size;
@@ -783,7 +752,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
         if let Err(err) = check_and_update_full_validation_switch_height(
             config,
             peer_list,
-            &api_client,
+            gossip_client,
             &sync_state,
         )
         .await
@@ -798,7 +767,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
     let block_index = match get_block_index(
         peer_list,
-        &api_client,
+        gossip_client,
         // +1, because the index endpoint is inclusive, and we don't want to fetch the last block again
         sync_state.sync_target_height() + 1,
         block_batch_size,
@@ -873,7 +842,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
                             match get_block_index(
                                 peer_list,
-                                &api_client,
+                                gossip_client,
                                 retry_height,
                                 1, // Just get one block
                                 3, // 3 retries for the network call
@@ -967,7 +936,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
                 check_and_update_full_validation_switch_height(
                     config,
                     peer_list,
-                    &api_client,
+                    gossip_client,
                     &sync_state,
                 )
                 .await?;
@@ -975,7 +944,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 
             let additional_index = get_block_index(
                 peer_list,
-                &api_client,
+                gossip_client,
                 sync_target,
                 block_batch_size,
                 5,
@@ -991,7 +960,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
             if blocks_to_request == 0 {
                 let estimated_height = estimate_canonical_height(
                     peer_list,
-                    &api_client,
+                    gossip_client,
                     start_sync_from_height as u64,
                 )
                 .await;
@@ -1026,7 +995,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
     // This uses the same timeout logic as the retry path in the main sync loop.
     match pull_unique_highest_blocks(
         peer_list,
-        &api_client,
+        gossip_client,
         gossip_data_handler.clone(),
         is_trusted_mode,
         retry_block_request_timeout_secs,
@@ -1059,7 +1028,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
 /// peers are grouped together.
 async fn pull_highest_blocks(
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
+    gossip_client: &GossipClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
 ) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)>> {
@@ -1087,7 +1056,7 @@ async fn pull_highest_blocks(
         HashMap::new();
 
     for (miner_address, peer) in peers {
-        match api_client.node_info(peer.address.api).await {
+        match gossip_client.get_info(peer.address.gossip).await {
             Ok(info) => {
                 let hash = info.block_hash;
                 let height = info.height;
@@ -1103,14 +1072,14 @@ async fn pull_highest_blocks(
                     entry.1.push((miner_address, peer.clone()));
                 }
                 debug!(
-                    "Post-sync: Peer {:?} reported highest block hash {:?} (api: {})",
-                    miner_address, hash, peer.address.api
+                    "Post-sync: Peer {:?} reported highest block hash {:?} (gossip: {})",
+                    miner_address, hash, peer.address.gossip
                 );
             }
             Err(err) => {
                 warn!(
-                    "Post-sync: Failed to fetch node info from peer {:?} (api: {}): {}",
-                    miner_address, peer.address.api, err
+                    "Post-sync: Failed to fetch node info from peer {:?} (gossip: {}): {}",
+                    miner_address, peer.address.gossip, err
                 );
             }
         }
@@ -1121,16 +1090,16 @@ async fn pull_highest_blocks(
 
 /// Collects unique highest block hashes from peers and pulls each of them in parallel.
 /// Each pull uses the same timeout logic as used elsewhere in the sync task.
-async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A: ApiClient>(
+async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade>(
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
-    gossip_data_handler: Arc<GossipDataHandler<M, B, A>>,
+    gossip_client: &GossipClient,
+    gossip_data_handler: Arc<GossipDataHandler<M, B>>,
     use_trusted_peers_only: bool,
     retry_block_request_timeout_secs: u64,
 ) -> ChainSyncResult<()> {
     // Collect unique hashes with their reporting peers (trusted or top-N active peers)
     let peers_by_top_block_hash =
-        pull_highest_blocks(peer_list, api_client, use_trusted_peers_only, None).await?;
+        pull_highest_blocks(peer_list, gossip_client, use_trusted_peers_only, None).await?;
 
     if peers_by_top_block_hash.is_empty() {
         debug!("Post-sync: No unique highest blocks reported by peers");
@@ -1221,7 +1190,7 @@ async fn pull_unique_highest_blocks<B: BlockDiscoveryFacade, M: MempoolFacade, A
 async fn check_and_update_full_validation_switch_height(
     config: &Config,
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
+    gossip_client: &GossipClient,
     sync_state: &ChainSyncState,
 ) -> ChainSyncResult<()> {
     // We should enable full validation when the index nears the (tip - migration depth)
@@ -1247,12 +1216,12 @@ async fn check_and_update_full_validation_switch_height(
 
         for (_, peer) in trusted_peers.iter() {
             debug!("Sync task: Trusted peer: {:?}", peer);
-            let node_info = match api_client.node_info(peer.address.api).await {
+            let node_info = match gossip_client.get_info(peer.address.gossip).await {
                 Ok(info) => info,
                 Err(err) => {
                     warn!(
                             "Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer",
-                            peer.address.api, err
+                            peer.address.gossip, err
                         );
                     continue;
                 }
@@ -1300,7 +1269,7 @@ async fn check_and_update_full_validation_switch_height(
 ), err)]
 async fn get_block_index(
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
+    gossip_client: &GossipClient,
     start: usize,
     limit: usize,
     retries: usize,
@@ -1317,7 +1286,7 @@ async fn get_block_index(
     //  However, we should make a more sophisticated algorithm for a follow-up release.
     let peers = synced_peers_sorted_by_cumulative_diff(
         peer_list,
-        api_client,
+        gossip_client,
         fetch_from_trusted_peers_only,
     )
     .await?;
@@ -1335,16 +1304,16 @@ async fn get_block_index(
 
             for (mining_addr, peer) in &peers_to_fetch_index_from {
                 debug!(
-                    peer.address = ?peer.address.api,
+                    peer.address = ?peer.address.gossip,
                     index.start = start,
                     index.limit = limit,
                     "Fetching block index from peer {:?}",
                     mining_addr
                 );
 
-                match api_client
+                match gossip_client
                     .get_block_index(
-                        peer.address.api,
+                        peer.address.gossip,
                         BlockIndexQuery {
                             height: start,
                             limit,
@@ -1354,7 +1323,7 @@ async fn get_block_index(
                 {
                     Ok(index) => {
                         debug!(
-                            peer.address = ?peer.address.api,
+                            peer.address = ?peer.address.gossip,
                             index.start = start,
                             index.limit = limit,
                             "Fetched block index from peer {:?}: {:?}",
@@ -1364,7 +1333,7 @@ async fn get_block_index(
                     }
                     Err(error) => {
                         warn!(
-                            peer.address = ?peer.address.api,
+                            peer.address = ?peer.address.gossip,
                             index.start = start,
                             index.limit = limit,
                             "Failed to fetch a block index from peer {:?}: {:?}",
@@ -1385,7 +1354,7 @@ async fn get_block_index(
 async fn is_local_index_is_behind_trusted_peers(
     config: &Config,
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
+    gossip_client: &GossipClient,
     block_index: &BlockIndexReadGuard,
 ) -> ChainSyncResult<bool> {
     let migration_depth = u64::from(config.consensus.block_migration_depth);
@@ -1401,10 +1370,10 @@ async fn is_local_index_is_behind_trusted_peers(
 
     for (_, peer) in trusted_peers.iter() {
         debug!("Sync task: Trusted peer: {:?}", peer);
-        let node_info = match api_client.node_info(peer.address.api).await {
+        let node_info = match gossip_client.get_info(peer.address.gossip).await {
             Ok(info) => info,
             Err(err) => {
-                warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
+                warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.gossip, err);
                 continue;
             }
         };
@@ -1434,7 +1403,7 @@ async fn is_local_index_is_behind_trusted_peers(
 /// It returns the highest block index height reported by trusted peers.
 async fn estimate_canonical_height(
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
+    gossip_client: &GossipClient,
     mut highest_trusted_peer_height: u64,
 ) -> u64 {
     let mut highest_difficulty = U256::zero();
@@ -1447,42 +1416,14 @@ async fn estimate_canonical_height(
 
     let futures = trusted_peers.iter().map(|(_, peer)| {
         debug!("Sync task: Trusted peer: {:?}", peer);
-        let api_1 = api_client.clone();
-        let height = async move {
-            match api_1.node_info(peer.address.api).await {
-                Ok(info) => Some(info.block_index_height),
-                Err(err) => {
-                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
-                    None
-                }
-            }
-        };
-        let api_2 = api_client.clone();
-        let diff = async move {
-            match api_2.get_latest_block(peer.address.api, false).await {
-                Ok(block) => {
-                    match block {
-                        Some(block) => Some(block.irys.cumulative_diff),
-                        None => {
-                            warn!("Sync task: Trusted peer {} returned no latest block, trying another peer", peer.address.api);
-                            None
-                        }
-                    }
-                },
-                Err(err) => {
-                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.api, err);
-                    None
-                }
-            }
-        };
-
+        let gossip_client = gossip_client.clone();
         async move {
-            let (block_index_height, latest_cumulative_difficulty) = tokio::join!(
-                height, diff
-            );
-            match (block_index_height, latest_cumulative_difficulty) {
-                (Some(h), Some(d)) => Some((h, d)),
-                _ => None,
+            match gossip_client.get_info(peer.address.gossip).await {
+                Ok(info) => Some((info.block_index_height, info.cumulative_difficulty)),
+                Err(err) => {
+                    warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.gossip, err);
+                    None
+                }
             }
         }
     });
@@ -1506,7 +1447,7 @@ async fn estimate_canonical_height(
 
 async fn synced_peers_sorted_by_cumulative_diff(
     peer_list: &PeerList,
-    api_client: &impl ApiClient,
+    gossip_client: &GossipClient,
     trusted_peers_only: bool,
 ) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysAddress, PeerListItem)>>> {
     let peers = if trusted_peers_only {
@@ -1521,9 +1462,9 @@ async fn synced_peers_sorted_by_cumulative_diff(
     }
 
     let peers_and_diffs_futures = peers.into_iter().map(|(addr, peer)| {
-        let api_client = api_client.clone();
+        let gossip_client = gossip_client.clone();
         async move {
-            match api_client.node_info(peer.address.api).await {
+            match gossip_client.get_info(peer.address.gossip).await {
                 Ok(info) => {
                     if !info.is_syncing {
                         Ok((addr, peer, info.cumulative_difficulty))
@@ -1567,7 +1508,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
 mod tests {
     use super::*;
     use crate::peer_network_service::spawn_peer_network_service_with_client;
-    use crate::tests::util::{ApiClientStub, FakeGossipServer};
+    use crate::tests::util::FakeGossipServer;
     use futures::future::BoxFuture;
     use futures::{future, FutureExt as _};
     use irys_types::RethPeerInfo;
@@ -1586,7 +1527,6 @@ mod tests {
         use super::*;
         use crate::tests::util::data_handler_stub;
         use crate::types::GossipResponse;
-        use eyre::eyre;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::{
@@ -1594,7 +1534,7 @@ mod tests {
             NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
-        use std::sync::{Arc, Mutex, RwLock};
+        use std::sync::{Arc, Mutex};
 
         #[tokio::test]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
@@ -1631,8 +1571,35 @@ mod tests {
                         }
                     }
                     GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
+                    GossipDataRequest::Transaction(_) => GossipResponse::Accepted(None),
                 }
             });
+
+            let calls = Arc::new(Mutex::new(vec![]));
+            let block_index_requests = calls.clone();
+            fake_gossip_server.set_on_block_index_request(move |query| {
+                let mut calls_ref = calls.lock().unwrap();
+                let calls_len = calls_ref.len();
+                calls_ref.push(query);
+
+                // Simulate a process needing to make two calls
+                if calls_len == 0 {
+                    GossipResponse::Accepted(vec![BlockIndexItem {
+                        block_hash: BlockHash::repeat_byte(1),
+                        num_ledgers: 0,
+                        ledgers: vec![],
+                    }])
+                } else if calls_len == 1 {
+                    GossipResponse::Accepted(vec![BlockIndexItem {
+                        block_hash: BlockHash::repeat_byte(2),
+                        num_ledgers: 0,
+                        ledgers: vec![],
+                    }])
+                } else {
+                    GossipResponse::Accepted(vec![])
+                }
+            });
+
             let fake_gossip_address = fake_gossip_server.spawn();
             let fake_peer_address = PeerAddress {
                 gossip: fake_gossip_address,
@@ -1646,32 +1613,6 @@ mod tests {
             node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
 
-            let api_client_stub = ApiClientStub::new();
-            let calls = Arc::new(Mutex::new(vec![]));
-            let block_index_requests = calls.clone();
-            api_client_stub.set_block_index_handler(move |query| {
-                let mut calls_ref = calls.lock().unwrap();
-                let calls_len = calls_ref.len();
-                calls_ref.push(query);
-
-                // Simulate a process needing to make two calls
-                if calls_len == 0 {
-                    Ok(vec![BlockIndexItem {
-                        block_hash: BlockHash::repeat_byte(1),
-                        num_ledgers: 0,
-                        ledgers: vec![],
-                    }])
-                } else if calls_len == 1 {
-                    Ok(vec![BlockIndexItem {
-                        block_hash: BlockHash::repeat_byte(2),
-                        num_ledgers: 0,
-                        ledgers: vec![],
-                    }])
-                } else {
-                    Ok(vec![])
-                }
-            });
-
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
             let tokio_handle = tokio::runtime::Handle::current();
@@ -1680,7 +1621,6 @@ mod tests {
             let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
-                api_client_stub.clone(),
                 reth_peer_sender,
                 receiver,
                 sender,
@@ -1700,21 +1640,14 @@ mod tests {
                 true,
             );
 
-            let data_handler = data_handler_stub(
-                &config,
-                &peer_list_guard,
-                db.clone(),
-                api_client_stub.clone(),
-                sync_state.clone(),
-            )
-            .await;
+            let data_handler =
+                data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
             sync_chain(
                 sync_state.clone(),
-                api_client_stub.clone(),
                 &peer_list_guard,
                 10,
                 &config,
@@ -1778,17 +1711,6 @@ mod tests {
             node_config.genesis_peer_discovery_timeout_millis = 10;
             let config = Config::new(node_config);
 
-            let api_client_stub = ApiClientStub {
-                txs: Default::default(),
-                block_index_handler: Arc::new(RwLock::new(Box::new(
-                    move |_query: BlockIndexQuery| Err(eyre!("Simulating index request error")),
-                ))),
-                block_index_calls: Arc::new(Default::default()),
-                node_info_handler: Arc::new(RwLock::new(Box::new(|_| {
-                    Ok(irys_types::NodeInfo::default())
-                }))),
-            };
-
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let runtime_handle = tokio::runtime::Handle::current();
             let reth_peer_sender = noop_reth_peer_sender();
@@ -1796,7 +1718,6 @@ mod tests {
             let (_peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
-                api_client_stub.clone(),
                 reth_peer_sender,
                 receiver,
                 sender,
@@ -1822,21 +1743,13 @@ mod tests {
                 true,
             );
 
-            let data_handler = data_handler_stub(
-                &config,
-                &peer_list,
-                db,
-                api_client_stub.clone(),
-                sync_state.clone(),
-            )
-            .await;
+            let data_handler = data_handler_stub(&config, &peer_list, db, sync_state.clone()).await;
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
 
             sync_chain(
                 sync_state.clone(),
-                api_client_stub.clone(),
                 &peer_list,
                 start_from,
                 &config,
@@ -1855,7 +1768,7 @@ mod tests {
     mod post_sync_unique_highest_blocks {
         use super::*;
         use crate::tests::util::data_handler_stub;
-        use crate::tests::util::{ApiClientStub, FakeGossipServer};
+        use crate::tests::util::FakeGossipServer;
         use crate::types::GossipResponse;
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
@@ -1901,6 +1814,22 @@ mod tests {
                 _ => GossipResponse::Accepted(None),
             });
 
+            // Set info handler to return the same hash
+            server1.set_on_info_request(move || {
+                let info = NodeInfo {
+                    block_hash: temp_block_hash,
+                    ..NodeInfo::default()
+                };
+                GossipResponse::Accepted(info)
+            });
+            server2.set_on_info_request(move || {
+                let info = NodeInfo {
+                    block_hash: temp_block_hash,
+                    ..NodeInfo::default()
+                };
+                GossipResponse::Accepted(info)
+            });
+
             let addr1 = server1.spawn();
             let addr2 = server2.spawn();
 
@@ -1910,15 +1839,6 @@ mod tests {
             let config = Config::new(node_config);
 
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
-
-            let api_client_stub = ApiClientStub::new();
-            api_client_stub.set_node_info_handler(move |_api| {
-                let info = NodeInfo {
-                    block_hash: temp_block_hash,
-                    ..NodeInfo::default()
-                };
-                Ok(info)
-            });
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
@@ -1932,7 +1852,6 @@ mod tests {
             let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
-                api_client_stub.clone(),
                 reth_peer_sender,
                 receiver,
                 sender,
@@ -1971,20 +1890,14 @@ mod tests {
 
             // Build data handler
             let db = db.clone();
-            let data_handler = data_handler_stub(
-                &config,
-                &peer_list_guard,
-                db,
-                api_client_stub.clone(),
-                sync_state.clone(),
-            )
-            .await;
+            let data_handler =
+                data_handler_stub(&config, &peer_list_guard, db, sync_state.clone()).await;
 
             // Execute helper
-            pull_unique_highest_blocks::<_, _, _>(
+            pull_unique_highest_blocks::<_, _>(
                 &peer_list_guard,
-                &api_client_stub,
-                data_handler,
+                &data_handler.gossip_client,
+                data_handler.clone(),
                 false,
                 retry_timeout,
             )
@@ -2029,6 +1942,21 @@ mod tests {
                 _ => GossipResponse::Accepted(None),
             });
 
+            server1.set_on_info_request(move || {
+                let info = NodeInfo {
+                    block_hash: temp_block_hash,
+                    ..NodeInfo::default()
+                };
+                GossipResponse::Accepted(info)
+            });
+            server2.set_on_info_request(move || {
+                let info = NodeInfo {
+                    block_hash: temp_block_hash,
+                    ..NodeInfo::default()
+                };
+                GossipResponse::Accepted(info)
+            });
+
             let addr1: SocketAddr = server1.spawn();
             let addr2: SocketAddr = server2.spawn();
 
@@ -2036,15 +1964,6 @@ mod tests {
             node_config.sync_mode = SyncMode::Full;
             let config = Config::new(node_config);
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
-
-            let api_client_stub = ApiClientStub::new();
-            api_client_stub.set_node_info_handler(move |_api| {
-                let info = NodeInfo {
-                    block_hash: temp_block_hash,
-                    ..NodeInfo::default()
-                };
-                Ok(info)
-            });
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let temp_dir = setup_tracing_and_temp_dir(None, false);
@@ -2058,7 +1977,6 @@ mod tests {
             let (_peer_network_handle, peer_list_guard) = spawn_peer_network_service_with_client(
                 db.clone(),
                 &config,
-                api_client_stub.clone(),
                 reth_peer_sender,
                 receiver,
                 sender,
@@ -2094,19 +2012,13 @@ mod tests {
             peer_list_guard.add_or_update_peer(addr_b, peer2, true);
 
             let db = db.clone();
-            let data_handler = data_handler_stub(
-                &config,
-                &peer_list_guard,
-                db,
-                api_client_stub.clone(),
-                sync_state.clone(),
-            )
-            .await;
+            let data_handler =
+                data_handler_stub(&config, &peer_list_guard, db, sync_state.clone()).await;
 
-            pull_unique_highest_blocks::<_, _, _>(
+            pull_unique_highest_blocks::<_, _>(
                 &peer_list_guard,
-                &api_client_stub,
-                data_handler,
+                &data_handler.gossip_client,
+                data_handler.clone(),
                 false,
                 retry_timeout,
             )

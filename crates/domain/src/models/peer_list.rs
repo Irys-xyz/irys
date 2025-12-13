@@ -47,7 +47,7 @@ pub struct PeerListDataInner {
     /// These peers are kept in memory only until they reach the persistence threshold
     unstaked_peer_purgatory: LruCache<IrysAddress, PeerListItem>,
     known_peers_cache: HashSet<PeerAddress>,
-    trusted_peers_api_addresses: HashSet<SocketAddr>,
+    trusted_peers_api_to_gossip_addresses: HashMap<SocketAddr, SocketAddr>,
     /// Whitelist of allowed peer API addresses based on peer filter mode
     peer_whitelist: HashSet<SocketAddr>,
     peer_network_service_sender: PeerNetworkSender,
@@ -280,8 +280,8 @@ impl PeerList {
 
         peers.retain(|(_miner_address, peer)| {
             guard
-                .trusted_peers_api_addresses
-                .contains(&peer.address.api)
+                .trusted_peers_api_to_gossip_addresses
+                .contains_key(&peer.address.api)
         });
 
         peers.sort_by_key(|(_address, peer)| peer.reputation_score.get());
@@ -296,8 +296,8 @@ impl PeerList {
         trusted_peers
     }
 
-    pub fn trusted_peer_addresses(&self) -> HashSet<SocketAddr> {
-        self.read().trusted_peers_api_addresses.clone()
+    pub fn trusted_peer_api_to_gossip_addresses(&self) -> HashMap<SocketAddr, SocketAddr> {
+        self.read().trusted_peers_api_to_gossip_addresses.clone()
     }
 
     pub fn top_active_peers(
@@ -412,6 +412,27 @@ impl PeerList {
             .cloned()
     }
 
+    pub fn peer_by_api_address(&self, address: SocketAddr) -> Option<PeerListItem> {
+        let binding = self.read();
+        let mining_address = binding.api_addr_to_mining_addr_map.get(&address).copied()?;
+        binding
+            .persistent_peers_cache
+            .get(&mining_address)
+            .or_else(|| binding.unstaked_peer_purgatory.peek(&mining_address))
+            .cloned()
+    }
+
+    pub fn get_trusted_peer_gossip_address(&self, api_address: SocketAddr) -> Option<SocketAddr> {
+        let binding = self.read();
+        binding
+            .config
+            .node_config
+            .trusted_peers
+            .iter()
+            .find(|p| p.api == api_address)
+            .map(|p| p.gossip)
+    }
+
     pub fn is_a_trusted_peer(&self, miner_address: IrysAddress, source_ip: IpAddr) -> bool {
         let binding = self.read();
 
@@ -429,9 +450,9 @@ impl PeerList {
 
         let ip_matches_cached_ip = source_ip == peer_gossip_ip;
         let ip_is_in_a_trusted_list = binding
-            .trusted_peers_api_addresses
+            .trusted_peers_api_to_gossip_addresses
             .iter()
-            .any(|socket_addr| socket_addr.ip() == peer_api_ip);
+            .any(|(api, _gossip)| api.ip() == peer_api_ip);
 
         ip_matches_cached_ip && ip_is_in_a_trusted_list
     }
@@ -480,14 +501,21 @@ impl PeerList {
     /// Check if an API address is a trusted peer
     pub fn is_trusted_peer(&self, api_address: &SocketAddr) -> bool {
         let guard = self.read();
-        guard.trusted_peers_api_addresses.contains(api_address)
+        guard
+            .trusted_peers_api_to_gossip_addresses
+            .contains_key(api_address)
     }
 
     /// Initiate a handshake with a peer by its API address. If force is set to true, the networking
     /// service will attempt to handshake even if the previous handshake was successful.
-    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
+    pub fn initiate_handshake(
+        &self,
+        api_address: SocketAddr,
+        gossip_address: SocketAddr,
+        force: bool,
+    ) {
         let guard = self.read();
-        guard.initiate_handshake(api_address, force);
+        guard.initiate_handshake(api_address, gossip_address, force);
     }
 }
 
@@ -498,18 +526,21 @@ impl PeerListDataInner {
         config: &Config,
         peer_events: broadcast::Sender<PeerEvent>,
     ) -> Result<Self, PeerNetworkError> {
-        let trusted_peers_api_addresses: HashSet<SocketAddr> = config
+        let trusted_peers_api_to_gossip_addresses: HashMap<SocketAddr, SocketAddr> = config
             .node_config
             .trusted_peers
             .iter()
-            .map(|p| p.api)
+            .map(|p| (p.api, p.gossip))
             .collect();
 
         // Initialize whitelist based on peer filter mode
         let peer_api_ip_whitelist = match config.node_config.peer_filter_mode {
             PeerFilterMode::Unrestricted => HashSet::new(), // No restrictions
             PeerFilterMode::TrustedOnly | PeerFilterMode::TrustedAndHandshake => {
-                let mut ip_whitelist = trusted_peers_api_addresses.clone();
+                let mut ip_whitelist: HashSet<SocketAddr> = trusted_peers_api_to_gossip_addresses
+                    .keys()
+                    .copied()
+                    .collect();
                 ip_whitelist.extend(config.node_config.initial_whitelist.clone());
                 ip_whitelist
             }
@@ -524,7 +555,7 @@ impl PeerListDataInner {
                     .expect("Expected to be able to create an LRU cache"),
             ),
             known_peers_cache: HashSet::new(),
-            trusted_peers_api_addresses,
+            trusted_peers_api_to_gossip_addresses,
             peer_whitelist: peer_api_ip_whitelist,
             peer_network_service_sender: peer_network_sender,
             peer_events,
@@ -630,10 +661,15 @@ impl PeerListDataInner {
         }
     }
 
-    pub fn initiate_handshake(&self, api_address: SocketAddr, force: bool) {
-        if let Err(send_error) = self
-            .peer_network_service_sender
-            .initiate_handshake(api_address, force)
+    pub fn initiate_handshake(
+        &self,
+        api_address: SocketAddr,
+        gossip_address: SocketAddr,
+        force: bool,
+    ) {
+        if let Err(send_error) =
+            self.peer_network_service_sender
+                .initiate_handshake(api_address, gossip_address, force)
         {
             error!("Failed to send a force announce message: {:?}", send_error);
         }
@@ -1062,7 +1098,7 @@ mod tests {
             known_peers_cache: HashSet::new(),
             gossip_addr_to_mining_addr_map: HashMap::new(),
             api_addr_to_mining_addr_map: HashMap::new(),
-            trusted_peers_api_addresses: HashSet::new(),
+            trusted_peers_api_to_gossip_addresses: HashMap::new(),
             peer_whitelist: HashSet::new(),
             peer_network_service_sender: create_mock_sender(),
             peer_events,
@@ -1339,11 +1375,11 @@ mod tests {
         {
             let mut inner = peer_list.0.write().unwrap();
             inner
-                .trusted_peers_api_addresses
-                .insert(staked_peer.address.api);
+                .trusted_peers_api_to_gossip_addresses
+                .insert(staked_peer.address.api, staked_peer.address.gossip);
             inner
-                .trusted_peers_api_addresses
-                .insert(unstaked_peer.address.api);
+                .trusted_peers_api_to_gossip_addresses
+                .insert(unstaked_peer.address.api, unstaked_peer.address.gossip);
         }
         let trusted_peers = peer_list.all_trusted_peers();
         let trusted_contains_staked = trusted_peers.iter().any(|(addr, _)| addr == &staked_addr);
@@ -1359,13 +1395,13 @@ mod tests {
         );
 
         // Test 10: trusted_peer_addresses should return both staked and unstaked peer addresses
-        let trusted_addresses = peer_list.trusted_peer_addresses();
+        let trusted_addresses = peer_list.trusted_peer_api_to_gossip_addresses();
         assert!(
-            trusted_addresses.contains(&staked_peer.address.api),
+            trusted_addresses.contains_key(&staked_peer.address.api),
             "trusted_peer_addresses should contain staked peer API address"
         );
         assert!(
-            trusted_addresses.contains(&unstaked_peer.address.api),
+            trusted_addresses.contains_key(&unstaked_peer.address.api),
             "trusted_peer_addresses should contain unstaked peer API address"
         );
 

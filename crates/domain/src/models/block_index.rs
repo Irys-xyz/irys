@@ -75,6 +75,14 @@ impl BlockIndex {
         self.items.last()
     }
 
+    /// Retrieves a range of [`BlockIndexItem`]s from the block index
+    pub fn get_range(&self, start_height: u64, limit: usize) -> Vec<BlockIndexItem> {
+        let total = self.items.len();
+        let start = (start_height as usize).min(total);
+        let end = start.saturating_add(limit).min(total);
+        self.items[start..end].to_vec()
+    }
+
     /// Pushes a new [`BlockIndexItem`] onto the items array
     pub fn push_item(&mut self, block_index_item: &BlockIndexItem) -> eyre::Result<()> {
         let mut items_vec = self.items.to_vec();

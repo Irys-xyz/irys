@@ -27,7 +27,6 @@ use irys_actors::{
     validation_service::ValidationService,
     BlockValidationTracker, DataSyncService, MempoolServiceMessageWithSpan, StorageModuleService,
 };
-use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -847,7 +846,7 @@ impl IrysNode {
                 loop {
                     interval.tick().await;
 
-                    let info = irys_api_server::routes::index::get_node_info(
+                    let info = irys_domain::get_node_info(
                         &block_index,
                         &block_tree,
                         &peer_list,
@@ -1351,10 +1350,15 @@ impl IrysNode {
         // resolved once all actors are converted to tokio services, and BlockPool is moved into
         // domain
         let (chain_sync_tx, chain_sync_rx) = mpsc::unbounded_channel();
-        let (p2p_service_handle, block_pool, gossip_data_handler) = p2p_service.run(
+        let (
+            gossip_server,
+            gossip_server_handle,
+            broadcast_task_handle,
+            block_pool,
+            gossip_data_handler,
+        ) = p2p_service.run(
             mempool_facade,
             block_discovery_facade.clone(),
-            IrysApiClient::new(),
             task_exec,
             peer_list_guard.clone(),
             irys_db.clone(),
@@ -1365,6 +1369,9 @@ impl IrysNode {
             service_senders.clone(),
             chain_sync_tx.clone(),
             mempool_guard.clone(),
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            std::time::Instant::now(),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)
@@ -1598,6 +1605,13 @@ impl IrysNode {
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
             },
             http_listener,
+        );
+
+        let p2p_service_handle = irys_p2p::spawn_p2p_server_watcher_task(
+            gossip_server,
+            gossip_server_handle,
+            broadcast_task_handle,
+            task_exec,
         );
 
         // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
@@ -1902,7 +1916,7 @@ impl IrysNode {
         runtime_handle: tokio::runtime::Handle,
         block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
         gossip_data_handler: Arc<
-            GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl, IrysApiClient>,
+            GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl>,
         >,
         (tx, rx): (
             UnboundedSender<SyncChainServiceMessage>,

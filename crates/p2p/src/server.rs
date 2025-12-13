@@ -10,19 +10,23 @@ use crate::{
 };
 use actix_web::{
     dev::Server,
+    http::header::ContentType,
     web::{self, Data},
     App, HttpResponse, HttpServer,
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
-use irys_api_client::ApiClient;
-use irys_domain::{PeerList, ScoreDecreaseReason};
+use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof,
-    IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    parse_user_agent, AcceptedResponse, BlockIndexQuery, CommitmentTransaction,
+    DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof, IrysAddress,
+    IrysBlockHeader, PeerListItem, ProtocolVersion, UnpackedChunk, VersionRequest,
 };
+use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
-use std::net::TcpListener;
+use semver::Version;
+use std::net::{IpAddr, TcpListener};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn, Instrument as _};
 use tracing_actix_web::TracingLogger;
 
@@ -31,21 +35,19 @@ use tracing_actix_web::TracingLogger;
 const DEFAULT_DUPLICATE_REQUEST_MILLISECONDS: u128 = 10_000; // 10 seconds
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B, A>
+pub(crate) struct GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
-    data_handler: Arc<GossipDataHandler<M, B, A>>,
+    data_handler: Arc<GossipDataHandler<M, B>>,
     peer_list: PeerList,
 }
 
-impl<M, B, A> Clone for GossipServer<M, B, A>
+impl<M, B> Clone for GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     fn clone(&self) -> Self {
         Self {
@@ -55,14 +57,13 @@ where
     }
 }
 
-impl<M, B, A> GossipServer<M, B, A>
+impl<M, B> GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     pub(crate) const fn new(
-        gossip_server_data_handler: Arc<GossipDataHandler<M, B, A>>,
+        gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
     ) -> Self {
         Self {
@@ -401,6 +402,165 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(whitelist))
     }
 
+    async fn handle_info(server: Data<Self>) -> HttpResponse {
+        let block_index = &server.data_handler.block_index;
+        let block_tree = &server.data_handler.block_tree;
+        let peer_list = &server.peer_list;
+        let sync_state = &server.data_handler.sync_state;
+        let started_at = server.data_handler.started_at;
+        let mining_address = server.data_handler.gossip_client.mining_address;
+        let chain_id = server.data_handler.config.consensus.chain_id;
+
+        let node_info = get_node_info(
+            block_index,
+            block_tree,
+            peer_list,
+            sync_state,
+            started_at,
+            mining_address,
+            chain_id,
+        )
+        .await;
+
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(GossipResponse::Accepted(node_info))
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_peer_list(server: Data<Self>) -> HttpResponse {
+        let ips = server.peer_list.all_known_peers();
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(GossipResponse::Accepted(ips))
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_version(
+        server: Data<Self>,
+        req: actix_web::HttpRequest,
+        body: web::Json<VersionRequest>,
+    ) -> HttpResponse {
+        let connection_info = req.connection_info();
+        let Some(source_addr_str) = connection_info.peer_addr() else {
+            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+                RejectionReason::InvalidCredentials,
+            ));
+        };
+        let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
+            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+                RejectionReason::InvalidCredentials,
+            ));
+        };
+
+        let version_request = body.into_inner();
+
+        if source_addr != version_request.address.gossip.ip() {
+            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+                RejectionReason::InvalidCredentials,
+            ));
+        }
+
+        if version_request.protocol_version != ProtocolVersion::V1 {
+            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+                RejectionReason::ProtocolMismatch,
+            ));
+        }
+
+        if !version_request.verify_signature() {
+            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+                RejectionReason::InvalidCredentials,
+            ));
+        }
+
+        let mut peers = server.peer_list.all_known_peers();
+        peers.shuffle(&mut rand::thread_rng());
+        let cap = server
+            .data_handler
+            .config
+            .node_config
+            .p2p_handshake
+            .server_peer_list_cap;
+        if peers.len() > cap {
+            peers.truncate(cap);
+        }
+
+        let peer_address = version_request.address;
+        let mining_addr = version_request.mining_address;
+        let peer_list_entry = PeerListItem {
+            address: peer_address,
+            ..Default::default()
+        };
+
+        let is_staked = server
+            .data_handler
+            .block_tree
+            .read()
+            .canonical_epoch_snapshot()
+            .is_staked(mining_addr);
+        server
+            .peer_list
+            .add_or_update_peer(mining_addr, peer_list_entry, is_staked);
+
+        let node_name = version_request
+            .user_agent
+            .and_then(|ua| parse_user_agent(&ua))
+            .map(|(name, _, _, _)| name)
+            .unwrap_or_default();
+
+        let response = AcceptedResponse {
+            version: Version::new(1, 2, 0),
+            protocol_version: ProtocolVersion::V1,
+            peers,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            message: Some(format!("Welcome to the network {node_name}")),
+        };
+
+        HttpResponse::Ok()
+            .content_type(ContentType::json())
+            .json(GossipResponse::Accepted(response))
+    }
+
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_block_index(
+        server: Data<Self>,
+        query: web::Query<BlockIndexQuery>,
+    ) -> HttpResponse {
+        const MAX_BLOCK_INDEX_QUERY_LIMIT: usize = 1_000;
+        const DEFAULT_BLOCK_INDEX_QUERY_LIMIT: usize = 100;
+
+        let limit = if query.limit == 0 {
+            DEFAULT_BLOCK_INDEX_QUERY_LIMIT
+        } else {
+            query.limit
+        };
+        if limit > MAX_BLOCK_INDEX_QUERY_LIMIT {
+            return HttpResponse::Ok()
+                .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData));
+        }
+        let height = query.height;
+
+        let requested_blocks = server
+            .data_handler
+            .block_index
+            .read()
+            .get_range(height as u64, limit);
+
+        HttpResponse::Ok().json(GossipResponse::Accepted(requested_blocks))
+    }
+
     fn handle_invalid_data(
         peer_miner_address: &IrysAddress,
         error: &GossipError,
@@ -444,6 +604,7 @@ where
                 GossipDataRequest::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
+                GossipDataRequest::Transaction(hash) => format!("transaction {:?}", hash),
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
@@ -487,15 +648,6 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequest>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        if !server.data_handler.sync_state.is_gossip_reception_enabled()
-            || !server.data_handler.sync_state.is_gossip_broadcast_enabled()
-        {
-            let node_id = server.data_handler.gossip_client.mining_address;
-            warn!("Node {}: Gossip reception/broadcast is disabled", node_id,);
-            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::GossipDisabled,
-            ));
-        }
         if let Err(error_response) =
             Self::check_peer(&server.peer_list, &req, data_request.miner_address)
         {
@@ -552,7 +704,11 @@ where
                         .route(
                             "/stake_and_pledge_whitelist",
                             web::get().to(Self::handle_stake_and_pledge_whitelist),
-                        ),
+                        )
+                        .route("/info", web::get().to(Self::handle_info))
+                        .route("/peer-list", web::get().to(Self::handle_peer_list))
+                        .route("/version", web::post().to(Self::handle_version))
+                        .route("/block-index", web::get().to(Self::handle_block_index)),
                 )
         })
         .shutdown_timeout(5)
@@ -573,7 +729,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::util::{ApiClientStub, BlockDiscoveryStub, MempoolStub};
+    use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{Config, DatabaseProvider, NodeConfig, PeerNetworkSender, PeerScore};
@@ -603,7 +759,7 @@ mod tests {
         peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
 
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
-        GossipServer::<MempoolStub, BlockDiscoveryStub, ApiClientStub>::handle_invalid_data(
+        GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(
             &miner, &error, &peer_list,
         );
 
