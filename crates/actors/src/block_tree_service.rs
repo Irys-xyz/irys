@@ -368,15 +368,19 @@ impl BlockTreeServiceInner {
         // Ensure continuous height progression
         ensure!(
             block_index.latest_height() + 1 == first_block.height,
-            "Height gap detected: block index at height {}, trying to migrate height {}",
-            block_index.latest_height(),
-            first_block.height
+            "Height gap detected: block index at height {} ({}), trying to migrate height {} ({})",
+            &block_index.latest_height(),
+            &latest_indexed.block_hash,
+            &first_block.height,
+            &first_block.block_hash
         );
 
         // Ensure proper chain linkage
         ensure!(
             latest_indexed.block_hash == first_block.previous_block_hash,
-            "Chain break detected: migration block doesn't link to indexed chain"
+            "Chain break detected: migration block ({}) doesn't link to indexed chain ({})",
+            &latest_indexed.block_hash,
+            &first_block.previous_block_hash
         );
 
         Ok(())
