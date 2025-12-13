@@ -10,6 +10,7 @@ use crate::{
     validation_service::ValidationServiceMessage,
     StorageModuleServiceMessage,
 };
+use eyre::ensure;
 use eyre::OptionExt as _;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
@@ -347,6 +348,88 @@ impl BlockTreeServiceInner {
             .expect("mempool service has unexpectedly become unreachable");
     }
 
+    /// Ensures blocks can be migrated by verifying height continuity and chain linkage.
+    fn validate_migration_continuity(
+        &self,
+        migration_block: &Arc<IrysBlockHeader>,
+    ) -> eyre::Result<()> {
+        let blocks_to_migrate = self.get_blocks_to_migrate(migration_block)?;
+
+        // Nothing to validate if no blocks need migration
+        let Some(first_block) = blocks_to_migrate.first() else {
+            return Ok(());
+        };
+
+        let block_index = self.block_index_guard.read();
+        let latest_indexed = block_index
+            .get_latest_item()
+            .ok_or_eyre("Block index is empty")?;
+
+        // Ensure continuous height progression
+        ensure!(
+            block_index.latest_height() + 1 == first_block.height,
+            "Height gap detected: block index at height {} ({}), trying to migrate height {} ({})",
+            &block_index.latest_height(),
+            &latest_indexed.block_hash,
+            &first_block.height,
+            &first_block.block_hash
+        );
+
+        // Ensure proper chain linkage
+        ensure!(
+            latest_indexed.block_hash == first_block.previous_block_hash,
+            "Chain break detected: migration block ({}) doesn't link to indexed chain ({})",
+            &latest_indexed.block_hash,
+            &first_block.previous_block_hash
+        );
+
+        Ok(())
+    }
+
+    /// Collect blocks to migrate by walking backwards from the current migration block
+    /// to the head of the `block_index`
+    fn get_blocks_to_migrate(
+        &self,
+        migration_block: &Arc<IrysBlockHeader>,
+    ) -> eyre::Result<Vec<Arc<IrysBlockHeader>>> {
+        let mut blocks_to_migrate = vec![];
+
+        // Get the last migrated block hash
+        let bi = self.block_index_guard.read();
+        let last_migrated = bi
+            .get_latest_item()
+            .ok_or_eyre("must have at least a single item in block index")?;
+        let last_migrated_hash = last_migrated.block_hash;
+        drop(bi);
+
+        // Get the block tree
+        let block_tree = self.cache.read().expect("poisoned lock");
+
+        // Walk backwards from the given block to the last migrated block
+        let mut current_hash = migration_block.block_hash;
+
+        while current_hash != last_migrated_hash {
+            // Get the block
+            let current_block = block_tree.get_block(&current_hash).ok_or_else(|| {
+                eyre::eyre!(
+                    "block {} not found while collecting blocks for migration",
+                    current_hash
+                )
+            })?;
+
+            // Add to list
+            let arc_block = Arc::new(current_block.clone());
+            blocks_to_migrate.push(arc_block.clone());
+
+            // Move to previous block
+            current_hash = arc_block.previous_block_hash;
+        }
+
+        // Reverse to get oldest-first order
+        blocks_to_migrate.reverse();
+        Ok(blocks_to_migrate)
+    }
+
     /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
     /// should be migrated. If eligible, sends migration message unless block
     /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
@@ -354,48 +437,12 @@ impl BlockTreeServiceInner {
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
         // Check if the block is already in the block index
-        let binding = self.block_index_guard.clone();
+        // let binding = self.block_index_guard.clone();
 
         debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block");
 
         // Collect blocks to migrate by walking backwards from the current migration block
-        let blocks_to_migrate = {
-            let mut blocks_to_migrate = vec![];
-            let mut current = block.block_hash;
-
-            // Get the last migrated block hash from block_index to know when to stop
-            let last_migrated_hash = {
-                let bi = binding.read();
-                bi.get_latest_item()
-                    .ok_or_eyre("must have at laest a single item in block index")?
-                    .block_hash
-            };
-
-            // Walk backwards until we reach the last migrated block
-            let block_tree = self.cache.read().expect("poisoned lock");
-            loop {
-                // Stop if we've reached the last migrated block
-                if current == last_migrated_hash {
-                    break;
-                }
-
-                let to_migrate = block_tree
-                    .get_block(&current)
-                    .map(|block| Arc::new(block.clone()))
-                    .ok_or_else(|| {
-                        eyre::eyre!(
-                            "block {} not found while collecting blocks for migration",
-                            current,
-                        )
-                    })?;
-                blocks_to_migrate.push(to_migrate.clone());
-                current = to_migrate.previous_block_hash;
-            }
-
-            // Reverse to get oldest-first order
-            blocks_to_migrate.reverse();
-            blocks_to_migrate
-        };
+        let blocks_to_migrate = self.get_blocks_to_migrate(block)?;
 
         // Send all blocks in order (oldest to newest)
         for block_to_migrate in blocks_to_migrate {
@@ -546,6 +593,7 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
+        // Handle a failed validation first
         if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
                 block.hash = %block_hash,
@@ -590,6 +638,8 @@ impl BlockTreeServiceInner {
 
             return Ok(());
         }
+
+        // From here, we are processing a fully validated block
         let Some(height) = self
             .cache
             .read()
@@ -597,7 +647,7 @@ impl BlockTreeServiceInner {
             .get_block(&block_hash)
             .map(|block| block.height)
         else {
-            // most likely the block was stuck in the validation queue for a bit and it got migrated out from the tree
+            // most likely the block was stuck in the validation queue for a bit and it got pruned out of the block_tree
             tracing::warn!(
                 "block validation returned a result for a block that's no longer in block cache"
             );
@@ -614,7 +664,8 @@ impl BlockTreeServiceInner {
 
             // Get the current tip before any changes
             // Note: We can't rely on canonical chain here, because the canonical chain was already updated when this
-            //       block arrived and was added after pre-validation. The tip only moves after full validation.
+            //       block arrived and was added after pre-validation. While the canonical head advances immediately, the
+            //       `cache.tip` only moves after full validation.
             let old_tip = cache.tip;
             let old_tip_block = cache
                 .get_block(&old_tip)
@@ -668,7 +719,7 @@ impl BlockTreeServiceInner {
                     // this also means that the tip can point to a block in a chain that is not
                     // the canonical one (aka which the self.max_cumulative_difficulty is pointing at).
                     // That is valid because the blocks below self.max_cumulative_difficulty
-                    // could still be undregoing validation, which is not guaranteed to succeed
+                    // could still be undergoing validation, which is not guaranteed to succeed
                     false
                 } else {
                     cache.mark_tip(&block_hash)?
@@ -850,9 +901,16 @@ impl BlockTreeServiceInner {
         }
 
         if let Some(markers) = &new_canonical_markers {
+            // Validate migration will succeed BEFORE emitting any events
+            if tip_changed {
+                self.validate_migration_continuity(&markers.migration_block)?;
+            }
+
+            // Emit consensus events (only after we know migration will succeed)
             self.emit_fcu(markers).await?;
             self.emit_block_confirmed(markers);
-            // Handle block migration (move chunks to disk and add to block_index)
+
+            // Perform the actual migration
             if tip_changed {
                 self.migrate_block(&markers.migration_block).await?;
             }
