@@ -109,6 +109,27 @@ impl GossipClient {
         let res = self.send_data_internal(url, &requested_data).await;
         let response_time = start_time.elapsed();
         Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
+
+        if !matches!(&res, Ok(GossipResponse::Accepted(Some(_)))) {
+            if let GossipDataRequest::Transaction(tx_id) = requested_data {
+                debug!(
+                    "Gossip pull_data failed for transaction {}, falling back to API client",
+                    tx_id
+                );
+                let api_client = IrysApiClient::new();
+                if let Ok(tx_response) = api_client.get_transaction(peer.1.address.api, tx_id).await
+                {
+                    let gossip_data = match tx_response {
+                        IrysTransactionResponse::Storage(tx) => GossipData::Transaction(tx),
+                        IrysTransactionResponse::Commitment(tx) => {
+                            GossipData::CommitmentTransaction(tx)
+                        }
+                    };
+                    return Ok(GossipResponse::Accepted(Some(gossip_data)));
+                }
+            }
+        }
+
         res
     }
 
