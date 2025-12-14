@@ -6,7 +6,7 @@ use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
-use irys_api_client::{ApiClient, IrysApiClient};
+use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData,
