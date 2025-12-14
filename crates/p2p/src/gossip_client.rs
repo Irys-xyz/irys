@@ -6,6 +6,7 @@ use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
+use irys_api_client::{ApiClient, IrysApiClient};
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData,
@@ -113,31 +114,49 @@ impl GossipClient {
 
     pub async fn get_info(&self, peer: PeerAddress) -> Result<NodeInfo, GossipClientError> {
         let url = format!("http://{}/gossip/info", peer.gossip);
-        let response = self
-            .internal_client()
-            .get(&url)
-            .send()
-            .await
-            .map_err(|error| GossipClientError::GetRequest(peer.gossip.to_string(), error.to_string()))?;
+        let response = self.internal_client().get(&url).send().await;
 
-        if !response.status().is_success() {
-            return Err(GossipClientError::GetRequest(
+        let gossip_result = match response {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    Err(GossipClientError::GetRequest(
+                        peer.gossip.to_string(),
+                        resp.status().to_string(),
+                    ))
+                } else {
+                    match resp.json::<GossipResponse<NodeInfo>>().await {
+                        Ok(GossipResponse::Accepted(info)) => Ok(info),
+                        Ok(GossipResponse::Rejected(reason)) => Err(GossipClientError::GetRequest(
+                            peer.gossip.to_string(),
+                            format!("Request rejected: {:?}", reason),
+                        )),
+                        Err(e) => Err(GossipClientError::GetJsonResponsePayload(
+                            peer.gossip.to_string(),
+                            e.to_string(),
+                        )),
+                    }
+                }
+            }
+            Err(e) => Err(GossipClientError::GetRequest(
                 peer.gossip.to_string(),
-                response.status().to_string(),
-            ));
-        }
-
-        let response: GossipResponse<NodeInfo> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
-        })?;
-
-        match response {
-            GossipResponse::Accepted(info) => Ok(info),
-            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
-                peer.gossip.to_string(),
-                format!("Request rejected: {:?}", reason),
+                e.to_string(),
             )),
+        };
+
+        if let Ok(info) = gossip_result {
+            return Ok(info);
         }
+
+        debug!(
+            "Gossip get_info failed for peer {}, falling back to API client",
+            peer.gossip
+        );
+
+        let api_client = IrysApiClient::new();
+        api_client
+            .node_info(peer.api)
+            .await
+            .map_err(|e| GossipClientError::GetRequest(peer.api.to_string(), e.to_string()))
     }
 
     pub async fn get_peer_list(
@@ -232,33 +251,49 @@ impl GossipClient {
         query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, GossipClientError> {
         let url = format!("http://{}/gossip/block-index", peer.gossip);
-        let response = self
-            .internal_client()
-            .get(&url)
-            .query(&query)
-            .send()
-            .await
-            .map_err(|error| GossipClientError::GetRequest(peer.gossip.to_string(), error.to_string()))?;
+        let response = self.internal_client().get(&url).query(&query).send().await;
 
-        if !response.status().is_success() {
-            return Err(GossipClientError::GetRequest(
+        let gossip_result = match response {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    Err(GossipClientError::GetRequest(
+                        peer.gossip.to_string(),
+                        resp.status().to_string(),
+                    ))
+                } else {
+                    match resp.json::<GossipResponse<Vec<BlockIndexItem>>>().await {
+                        Ok(GossipResponse::Accepted(index)) => Ok(index),
+                        Ok(GossipResponse::Rejected(reason)) => Err(GossipClientError::GetRequest(
+                            peer.gossip.to_string(),
+                            format!("Request rejected: {:?}", reason),
+                        )),
+                        Err(e) => Err(GossipClientError::GetJsonResponsePayload(
+                            peer.gossip.to_string(),
+                            e.to_string(),
+                        )),
+                    }
+                }
+            }
+            Err(e) => Err(GossipClientError::GetRequest(
                 peer.gossip.to_string(),
-                response.status().to_string(),
-            ));
-        }
-
-        let response: GossipResponse<Vec<BlockIndexItem>> =
-            response.json().await.map_err(|error| {
-                GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
-            })?;
-
-        match response {
-            GossipResponse::Accepted(index) => Ok(index),
-            GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
-                peer.gossip.to_string(),
-                format!("Request rejected: {:?}", reason),
+                e.to_string(),
             )),
+        };
+
+        if let Ok(index) = gossip_result {
+            return Ok(index);
         }
+
+        debug!(
+            "Gossip get_block_index failed for peer {}, falling back to API client",
+            peer.gossip
+        );
+
+        let api_client = IrysApiClient::new();
+        api_client
+            .get_block_index(peer.api, query)
+            .await
+            .map_err(|e| GossipClientError::GetRequest(peer.api.to_string(), e.to_string()))
     }
 
     pub async fn check_health(
