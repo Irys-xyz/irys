@@ -111,30 +111,30 @@ impl GossipClient {
         res
     }
 
-    pub async fn get_info(&self, peer: SocketAddr) -> Result<NodeInfo, GossipClientError> {
-        let url = format!("http://{}/gossip/info", peer);
+    pub async fn get_info(&self, peer: PeerAddress) -> Result<NodeInfo, GossipClientError> {
+        let url = format!("http://{}/gossip/info", peer.gossip);
         let response = self
             .internal_client()
             .get(&url)
             .send()
             .await
-            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+            .map_err(|error| GossipClientError::GetRequest(peer.gossip.to_string(), error.to_string()))?;
 
         if !response.status().is_success() {
             return Err(GossipClientError::GetRequest(
-                peer.to_string(),
+                peer.gossip.to_string(),
                 response.status().to_string(),
             ));
         }
 
         let response: GossipResponse<NodeInfo> = response.json().await.map_err(|error| {
-            GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+            GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
         })?;
 
         match response {
             GossipResponse::Accepted(info) => Ok(info),
             GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
-                peer.to_string(),
+                peer.gossip.to_string(),
                 format!("Request rejected: {:?}", reason),
             )),
         }
@@ -228,34 +228,34 @@ impl GossipClient {
 
     pub async fn get_block_index(
         &self,
-        peer: SocketAddr,
+        peer: PeerAddress,
         query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, GossipClientError> {
-        let url = format!("http://{}/gossip/block-index", peer);
+        let url = format!("http://{}/gossip/block-index", peer.gossip);
         let response = self
             .internal_client()
             .get(&url)
             .query(&query)
             .send()
             .await
-            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+            .map_err(|error| GossipClientError::GetRequest(peer.gossip.to_string(), error.to_string()))?;
 
         if !response.status().is_success() {
             return Err(GossipClientError::GetRequest(
-                peer.to_string(),
+                peer.gossip.to_string(),
                 response.status().to_string(),
             ));
         }
 
         let response: GossipResponse<Vec<BlockIndexItem>> =
             response.json().await.map_err(|error| {
-                GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+                GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
             })?;
 
         match response {
             GossipResponse::Accepted(index) => Ok(index),
             GossipResponse::Rejected(reason) => Err(GossipClientError::GetRequest(
-                peer.to_string(),
+                peer.gossip.to_string(),
                 format!("Request rejected: {:?}", reason),
             )),
         }
