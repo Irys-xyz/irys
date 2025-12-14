@@ -561,6 +561,14 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(requested_blocks))
     }
 
+    #[expect(
+        clippy::unused_async,
+        reason = "Actix-web handler signature requires handlers to be async"
+    )]
+    async fn handle_protocol_version() -> HttpResponse {
+        HttpResponse::Ok().json(crate::gossip_client::GossipClient::CURRENT_PROTOCOL_VERSION)
+    }
+
     fn handle_invalid_data(
         peer_miner_address: &IrysAddress,
         error: &GossipError,
@@ -708,7 +716,11 @@ where
                         .route("/info", web::get().to(Self::handle_info))
                         .route("/peer-list", web::get().to(Self::handle_peer_list))
                         .route("/version", web::post().to(Self::handle_version))
-                        .route("/block-index", web::get().to(Self::handle_block_index)),
+                        .route("/block-index", web::get().to(Self::handle_block_index))
+                        .route(
+                            "/protocol_version",
+                            web::get().to(Self::handle_protocol_version),
+                        ),
                 )
         })
         .shutdown_timeout(5)

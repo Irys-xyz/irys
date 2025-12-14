@@ -1056,7 +1056,7 @@ async fn pull_highest_blocks(
         HashMap::new();
 
     for (miner_address, peer) in peers {
-        match gossip_client.get_info(peer.address.gossip).await {
+        match gossip_client.get_info(peer.address).await {
             Ok(info) => {
                 let hash = info.block_hash;
                 let height = info.height;
@@ -1216,7 +1216,7 @@ async fn check_and_update_full_validation_switch_height(
 
         for (_, peer) in trusted_peers.iter() {
             debug!("Sync task: Trusted peer: {:?}", peer);
-            let node_info = match gossip_client.get_info(peer.address.gossip).await {
+            let node_info = match gossip_client.get_info(peer.address).await {
                 Ok(info) => info,
                 Err(err) => {
                     warn!(
@@ -1313,7 +1313,7 @@ async fn get_block_index(
 
                 match gossip_client
                     .get_block_index(
-                        peer.address.gossip,
+                        peer.address,
                         BlockIndexQuery {
                             height: start,
                             limit,
@@ -1370,7 +1370,7 @@ async fn is_local_index_is_behind_trusted_peers(
 
     for (_, peer) in trusted_peers.iter() {
         debug!("Sync task: Trusted peer: {:?}", peer);
-        let node_info = match gossip_client.get_info(peer.address.gossip).await {
+        let node_info = match gossip_client.get_info(peer.address).await {
             Ok(info) => info,
             Err(err) => {
                 warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.gossip, err);
@@ -1418,7 +1418,7 @@ async fn estimate_canonical_height(
         debug!("Sync task: Trusted peer: {:?}", peer);
         let gossip_client = gossip_client.clone();
         async move {
-            match gossip_client.get_info(peer.address.gossip).await {
+            match gossip_client.get_info(peer.address).await {
                 Ok(info) => Some((info.block_index_height, info.cumulative_difficulty)),
                 Err(err) => {
                     warn!("Sync task: Failed to fetch node info from trusted peer {}: {}, trying another peer", peer.address.gossip, err);
@@ -1464,7 +1464,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
     let peers_and_diffs_futures = peers.into_iter().map(|(addr, peer)| {
         let gossip_client = gossip_client.clone();
         async move {
-            match gossip_client.get_info(peer.address.gossip).await {
+            match gossip_client.get_info(peer.address).await {
                 Ok(info) => {
                     if !info.is_syncing {
                         Ok((addr, peer, info.cumulative_difficulty))
