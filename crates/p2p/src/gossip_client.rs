@@ -46,6 +46,8 @@ pub struct GossipClient {
 }
 
 impl GossipClient {
+    pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+
     #[must_use]
     pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
         Self {
@@ -315,6 +317,29 @@ impl GossipClient {
             .get_block_index(peer.api, query)
             .await
             .map_err(|e| GossipClientError::GetRequest(peer.api.to_string(), e.to_string()))
+    }
+
+    pub async fn get_protocol_version(&self, peer: PeerAddress) -> Result<u32, GossipClientError> {
+        let url = format!("http://{}/gossip/protocol_version", peer.gossip);
+        let response = self
+            .internal_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| {
+                GossipClientError::GetRequest(peer.gossip.to_string(), error.to_string())
+            })?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.gossip.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        response.json().await.map_err(|error| {
+            GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
+        })
     }
 
     pub async fn check_health(
@@ -1700,6 +1725,24 @@ mod tests {
             let final_score = final_peer.unwrap().reputation_score.get();
             // Score should be within valid bounds
             assert!(final_score <= PeerScore::MAX);
+        }
+    }
+
+    mod protocol_version_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_get_protocol_version() {
+            let server = MockHttpServer::new_with_response(200, "1", "application/json");
+            let fixture = TestFixture::new();
+            let peer = create_peer_address("127.0.0.1", server.port());
+
+            let version = fixture
+                .client
+                .get_protocol_version(peer)
+                .await
+                .expect("to get version");
+            assert_eq!(version, 1);
         }
     }
 }
