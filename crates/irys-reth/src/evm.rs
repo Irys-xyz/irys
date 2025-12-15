@@ -60,6 +60,11 @@ mod constants {
 pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
     LazyLock::new(|| Address::from_word(keccak256("irys_pd_base_fee_account")));
 
+/// Account address used to store the IRYS/USD price in EVM state.
+/// The balance of this account represents the current IRYS token price in USD (1e18 scale).
+pub static IRYS_USD_PRICE_ACCOUNT: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_usd_price_account")));
+
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
@@ -398,6 +403,13 @@ impl EvmFactory for IrysEvmFactory {
         let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
         let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
 
+        // Get minimum PD transaction cost if Sprite is active
+        // Convert from irys_types::U256 to alloy_primitives::U256 via bytes
+        let min_pd_transaction_cost_usd = self
+            .hardfork_config
+            .min_pd_transaction_cost_at(block_timestamp)
+            .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
+
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
@@ -410,6 +422,7 @@ impl EvmFactory for IrysEvmFactory {
             false,
             self.context.clone_for_new_evm(),
             is_sprite_active,
+            min_pd_transaction_cost_usd,
         );
 
         // Register Irys custom precompiles only if Sprite hardfork is active.
@@ -432,6 +445,13 @@ impl EvmFactory for IrysEvmFactory {
         let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
         let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
 
+        // Get minimum PD transaction cost if Sprite is active
+        // Convert from irys_types::U256 to alloy_primitives::U256 via bytes
+        let min_pd_transaction_cost_usd = self
+            .hardfork_config
+            .min_pd_transaction_cost_at(block_timestamp)
+            .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
+
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
@@ -444,6 +464,7 @@ impl EvmFactory for IrysEvmFactory {
             true,
             self.context.clone_for_new_evm(),
             is_sprite_active,
+            min_pd_transaction_cost_usd,
         );
 
         // Register Irys custom precompiles only if Sprite hardfork is active.
@@ -503,6 +524,8 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     context: PdContext,
     // Whether the Sprite hardfork is active (enables PD features)
     is_sprite_active: bool,
+    // Minimum PD transaction cost in USD (1e18 scale), None if Sprite not active
+    min_pd_transaction_cost_usd: Option<U256>,
 }
 
 impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
@@ -521,6 +544,7 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
         inspect: bool,
         context: PdContext,
         is_sprite_active: bool,
+        min_pd_transaction_cost_usd: Option<U256>,
     ) -> Self {
         Self {
             inner: evm,
@@ -528,6 +552,7 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             state: Default::default(),
             context,
             is_sprite_active,
+            min_pd_transaction_cost_usd,
         }
     }
 
@@ -659,6 +684,36 @@ where
 
                 let base_total = chunks.saturating_mul(base_per_chunk);
                 let prio_total = chunks.saturating_mul(prio_per_chunk);
+
+                // Validate minimum PD transaction cost
+                if let Some(min_cost_usd) = self.min_pd_transaction_cost_usd {
+                    let irys_usd_price = self.read_irys_usd_price();
+                    if !irys_usd_price.is_zero() {
+                        // Calculate minimum cost in IRYS tokens:
+                        // min_cost_irys = (min_cost_usd * 1e18) / irys_usd_price
+                        // Both min_cost_usd and irys_usd_price are in 1e18 scale
+                        let scale = U256::from(10_u128.pow(18));
+                        let min_cost_irys = min_cost_usd.saturating_mul(scale) / irys_usd_price;
+
+                        // Calculate actual total fees
+                        let actual_total_fees = base_total.saturating_add(prio_total);
+
+                        if actual_total_fees < min_cost_irys {
+                            tracing::debug!(
+                                min_cost_usd = %min_cost_usd,
+                                irys_usd_price = %irys_usd_price,
+                                min_cost_irys = %min_cost_irys,
+                                actual_total_fees = %actual_total_fees,
+                                chunks = %chunks,
+                                "PD transaction rejected: fees below minimum cost"
+                            );
+                            return Err(EVMError::Custom(format!(
+                                "PD transaction fees ({}) below minimum cost ({} IRYS, {} USD at price {})",
+                                actual_total_fees, min_cost_irys, min_cost_usd, irys_usd_price
+                            )));
+                        }
+                    }
+                }
 
                 // Fee payer is the transaction caller; priority recipient is block beneficiary.
                 let fee_payer = tx.caller;
@@ -998,6 +1053,16 @@ where
     /// The fee is stored as the balance of the PD_BASE_FEE_ACCOUNT.
     pub fn read_pd_base_fee_per_chunk(&mut self) -> U256 {
         match self.load_account(*PD_BASE_FEE_ACCOUNT) {
+            Ok(Some(acc)) => acc.info.balance,
+            _ => U256::ZERO,
+        }
+    }
+
+    /// Reads the current IRYS/USD price from the EVM state.
+    /// The price is stored as the balance of the IRYS_USD_PRICE_ACCOUNT.
+    /// Returns the price in 1e18 scale (e.g., 1e18 = $1.00).
+    pub fn read_irys_usd_price(&mut self) -> U256 {
+        match self.load_account(*IRYS_USD_PRICE_ACCOUNT) {
             Ok(Some(acc)) => acc.info.balance,
             _ => U256::ZERO,
         }
@@ -1381,6 +1446,40 @@ where
                         target,
                         vec![topic],
                         vec![DynSolValue::Uint(update.per_chunk, 256)],
+                    );
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Ok((account, execution_result, existed)), target))
+                }
+                shadow_tx::TransactionPacket::IrysUsdPriceUpdate(update) => {
+                    // IrysUsdPriceUpdate is a PD feature - only allow when Sprite hardfork is active.
+                    // This provides defense-in-depth; the consensus layer already guards generation.
+                    if !self.is_sprite_active {
+                        tracing::warn!(
+                            "IrysUsdPriceUpdate shadow transaction received before Sprite hardfork is active"
+                        );
+                        return Err(Self::create_internal_error(
+                            "IrysUsdPriceUpdate not allowed before Sprite hardfork".to_string(),
+                        ));
+                    }
+
+                    // Write the IRYS/USD price into the price account balance.
+                    let target = *IRYS_USD_PRICE_ACCOUNT;
+
+                    // Load existing or create new account
+                    let existed;
+                    let mut account = if let Some(acc) = self.load_account(target)? {
+                        existed = true;
+                        acc
+                    } else {
+                        existed = false;
+                        Account::new_not_existing(0)
+                    };
+                    account.info.balance = update.price;
+
+                    let log = Self::create_shadow_log(
+                        target,
+                        vec![topic],
+                        vec![DynSolValue::Uint(update.price, 256)],
                     );
                     let execution_result = Self::create_success_result(log);
                     Ok((Ok((account, execution_result, existed)), target))

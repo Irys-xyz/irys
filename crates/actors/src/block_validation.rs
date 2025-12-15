@@ -1595,6 +1595,21 @@ async fn generate_expected_shadow_transactions(
         block.timestamp_secs(),
     )?;
 
+    // Compute IRYS/USD price for IrysUsdPriceUpdate shadow tx (only when Sprite active)
+    let is_sprite_active = config
+        .consensus
+        .hardforks
+        .is_sprite_active(block.timestamp_secs());
+    let irys_usd_price = if is_sprite_active {
+        // Convert irys_types::U256 to reth Uint<256, 4> via bytes
+        let ema_price = current_ema_for_pricing.ema_for_public_pricing();
+        Some(reth::revm::primitives::ruint::Uint::from_be_bytes(
+            ema_price.amount.to_be_bytes(),
+        ))
+    } else {
+        None
+    };
+
     let mut shadow_tx_generator = ShadowTxGenerator::new(
         &block.height,
         &block.reward_address,
@@ -1607,6 +1622,7 @@ async fn generate_expected_shadow_transactions(
         &publish_ledger_with_txs,
         initial_treasury_balance,
         pd_base_fee_per_chunk,
+        irys_usd_price,
         block.timestamp_secs(),
         &expired_ledger_fees,
         &commitment_refund_events,

@@ -65,6 +65,12 @@ pub struct Sprite {
     /// Maximum number of PD chunks that can be included in a single block.
     /// This limit prevents exceeding the network's chunk processing capacity per block.
     pub max_pd_chunks_per_block: u64,
+
+    /// Minimum cost for a PD transaction in USD.
+    /// Transactions with total PD cost (base_fee + priority_fee) × chunks below this
+    /// threshold will be rejected. This prevents spam and ensures economic viability.
+    /// Expressed in USD (1e18 scale).
+    pub min_pd_transaction_cost: Amount<Usd>,
 }
 
 impl IrysHardforkConfig {
@@ -144,6 +150,15 @@ impl IrysHardforkConfig {
         self.sprite
             .as_ref()
             .filter(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Get the minimum PD transaction cost in USD at a specific timestamp.
+    /// Returns None if Sprite is not active.
+    pub fn min_pd_transaction_cost_at(&self, timestamp: UnixTimestamp) -> Option<Amount<Usd>> {
+        self.sprite
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+            .map(|f| f.min_pd_transaction_cost)
     }
 }
 
@@ -277,6 +292,7 @@ mod tests {
                 cost_per_mb: Amount::new(U256::from(100_000)),
                 base_fee_floor: Amount::new(U256::from(10_000)),
                 max_pd_chunks_per_block: 7500,
+                min_pd_transaction_cost: Amount::new(U256::from(10_000_000_000_000_000_u64)), // 0.01 USD
             }),
         };
 
@@ -292,6 +308,9 @@ mod tests {
             .pd_base_fee_floor_at(UnixTimestamp::from_secs(1999))
             .is_none());
         assert!(config.sprite_at(UnixTimestamp::from_secs(1999)).is_none());
+        assert!(config
+            .min_pd_transaction_cost_at(UnixTimestamp::from_secs(1999))
+            .is_none());
 
         // At activation
         assert!(config.is_sprite_active(UnixTimestamp::from_secs(2000)));
@@ -308,6 +327,10 @@ mod tests {
             Some(Amount::new(U256::from(10_000)))
         );
         assert!(config.sprite_at(UnixTimestamp::from_secs(2000)).is_some());
+        assert_eq!(
+            config.min_pd_transaction_cost_at(UnixTimestamp::from_secs(2000)),
+            Some(Amount::new(U256::from(10_000_000_000_000_000_u64)))
+        );
 
         // After activation
         assert!(config.is_sprite_active(UnixTimestamp::from_secs(3000)));

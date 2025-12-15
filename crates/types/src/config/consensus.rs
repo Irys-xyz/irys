@@ -636,6 +636,7 @@ impl ConsensusConfig {
                     cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
                     base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
                     max_pd_chunks_per_block: 7_500,
+                    min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
                 }),
             },
             ..base
