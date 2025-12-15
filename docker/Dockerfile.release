@@ -1,0 +1,56 @@
+# Multi-stage Dockerfile that builds the irys binary inside the container
+
+# --- Builder stage: compile the Rust binary ---
+FROM rust:1.86-slim AS builder
+
+WORKDIR /workspace
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    clang \
+    cmake \
+    git \
+    ca-certificates \
+    libgmp-dev \
+    m4 \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the full workspace
+COPY . .
+
+# Build the release binary with portable CPU target
+ENV RUSTFLAGS="-C target-cpu=x86-64"
+RUN cargo build --release --bin irys -p irys-chain --locked
+
+# Compute binary MD5 hash
+RUN md5sum /workspace/target/release/irys | awk '{print $1}' > /workspace/binary_md5.txt
+
+# --- Runtime stage: minimal Debian runtime ---
+FROM debian:bookworm-slim
+
+ARG GIT_COMMIT=unknown
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libgmp10 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the compiled binary and MD5 from builder
+COPY --from=builder /workspace/target/release/irys /app/irys
+COPY --from=builder /workspace/binary_md5.txt /tmp/binary_md5.txt
+COPY docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/irys /app/entrypoint.sh
+
+# Write build info
+RUN echo "commit=${GIT_COMMIT}" > /app/build-info.txt && \
+    echo "binary_md5=$(cat /tmp/binary_md5.txt)" >> /app/build-info.txt && \
+    rm /tmp/binary_md5.txt
+
+ENTRYPOINT ["/app/entrypoint.sh"]

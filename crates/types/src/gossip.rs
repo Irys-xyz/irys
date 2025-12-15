@@ -167,6 +167,7 @@ pub enum GossipDataRequest {
     ExecutionPayload(B256),
     Block(BlockHash),
     Chunk(ChunkPathHash),
+    Transaction(H256),
 }
 
 impl Debug for GossipDataRequest {
@@ -178,6 +179,9 @@ impl Debug for GossipDataRequest {
             }
             Self::Chunk(chunk_path_hash) => {
                 write!(f, "chunk {chunk_path_hash:?}")
+            }
+            Self::Transaction(tx_id) => {
+                write!(f, "transaction {tx_id:?}")
             }
         }
     }

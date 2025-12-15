@@ -8,17 +8,16 @@ use actix_web::dev::Server;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use eyre::{eyre, Result};
+use eyre::Result;
 use futures::{future, FutureExt as _};
 use irys_actors::block_discovery::{BlockDiscoveryError, BlockTransactions};
 use irys_actors::mempool_guard::MempoolReadGuard;
+use irys_actors::mempool_service::{create_state, AtomicMempoolState, TxIngressError, TxReadError};
 use irys_actors::services::ServiceSenders;
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade,
-    mempool_service::{TxIngressError, TxReadError},
-    ChunkIngressError, IngressProofError, MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
+    IngressProofError, MempoolFacade,
 };
-use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::{ExecutionPayloadCache, RethBlockProvider};
 use irys_domain::{BlockIndex, BlockIndexReadGuard, BlockTree, BlockTreeReadGuard, PeerList};
@@ -28,12 +27,11 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::IrysAddress;
 use irys_types::{
-    AcceptedResponse, Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CombinedBlockHeader,
-    CommitmentTransaction, Config, DataTransaction, DataTransactionHeader, DatabaseProvider,
-    GossipBroadcastMessage, GossipData, GossipDataRequest, GossipRequest, IngressProof,
-    IrysBlockHeader, IrysTransactionResponse, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerResponse, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    TxKnownStatus, UnpackedChunk, VersionRequest, H256,
+    Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, GossipData,
+    GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, MempoolConfig, NodeConfig,
+    NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
+    TokioServiceHandle, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
@@ -123,18 +121,26 @@ impl MempoolFacade for MempoolStub {
         &self,
         chunk: UnpackedChunk,
     ) -> std::result::Result<(), ChunkIngressError> {
-        self.chunks
-            .write()
-            .expect("to unlock mempool chunks")
-            .push(chunk.clone());
+        let mut guard = self.chunks.write().expect("to unlock mempool chunks");
 
-        // Pretend that we've validated the chunk and we're ready to gossip it
-        let message_bus = self.internal_message_bus.clone();
-        tokio::runtime::Handle::current().spawn(async move {
-            message_bus
-                .send(GossipBroadcastMessage::from(chunk))
-                .expect("to send chunk");
-        });
+        if guard
+            .iter()
+            .any(|existing_chunk| existing_chunk.data_path == chunk.data_path)
+        {
+            return Err(ChunkIngressError::Advisory(
+                AdvisoryChunkIngressError::Other("Already exists".into()),
+            ));
+        } else {
+            guard.push(chunk.clone());
+
+            // Pretend that we've validated the chunk and we're ready to gossip it
+            let message_bus = self.internal_message_bus.clone();
+            tokio::runtime::Handle::current().spawn(async move {
+                message_bus
+                    .send(GossipBroadcastMessage::from(chunk))
+                    .expect("to send chunk");
+            });
+        }
 
         Ok(())
     }
@@ -258,156 +264,6 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct ApiClientStub {
-    pub txs: HashMap<H256, DataTransactionHeader>,
-    pub block_index_handler: Arc<
-        RwLock<Box<dyn Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static>>,
-    >,
-    pub block_index_calls: Arc<RwLock<Vec<BlockIndexQuery>>>,
-    pub node_info_handler:
-        Arc<RwLock<Box<dyn Fn(SocketAddr) -> Result<NodeInfo> + Send + Sync + 'static>>>,
-}
-
-impl ApiClientStub {
-    pub(crate) fn new() -> Self {
-        Self {
-            txs: HashMap::new(),
-            block_index_handler: Arc::new(RwLock::new(Box::new(|_| Ok(Vec::new())))),
-            block_index_calls: Arc::new(Default::default()),
-            node_info_handler: Arc::new(RwLock::new(Box::new(|_| Ok(NodeInfo::default())))),
-        }
-    }
-
-    pub(crate) fn set_block_index_handler(
-        &self,
-        handler: impl Fn(BlockIndexQuery) -> Result<Vec<BlockIndexItem>> + Send + Sync + 'static,
-    ) {
-        let mut guard = self.block_index_handler.write().expect("to unlock handler");
-        *guard = Box::new(handler);
-    }
-
-    pub(crate) fn set_node_info_handler(
-        &self,
-        handler: impl Fn(SocketAddr) -> Result<NodeInfo> + Send + Sync + 'static,
-    ) {
-        let mut guard = self
-            .node_info_handler
-            .write()
-            .expect("to unlock node_info handler");
-        *guard = Box::new(handler);
-    }
-}
-
-#[async_trait::async_trait]
-impl ApiClient for ApiClientStub {
-    async fn get_transaction(
-        &self,
-        _peer: SocketAddr,
-        tx_id: H256,
-    ) -> Result<IrysTransactionResponse> {
-        Ok(self
-            .txs
-            .get(&tx_id)
-            .ok_or(eyre!("Transaction {} not found in stub API client", tx_id))?
-            .clone()
-            .into())
-    }
-
-    async fn post_transaction(
-        &self,
-        _api_address: SocketAddr,
-        _transaction: DataTransactionHeader,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn post_commitment_transaction(
-        &self,
-        _peer: SocketAddr,
-        _transaction: CommitmentTransaction,
-    ) -> Result<()> {
-        Ok(())
-    }
-
-    async fn get_transactions(
-        &self,
-        peer: SocketAddr,
-        tx_ids: &[H256],
-    ) -> Result<Vec<IrysTransactionResponse>> {
-        debug!("Fetching {} transactions from peer {}", tx_ids.len(), peer);
-        let mut results = Vec::with_capacity(tx_ids.len());
-
-        for &tx_id in tx_ids {
-            let result = self.get_transaction(peer, tx_id).await?;
-            results.push(result);
-        }
-
-        Ok(results)
-    }
-
-    async fn post_version(
-        &self,
-        _api_address: SocketAddr,
-        _version: VersionRequest,
-    ) -> Result<PeerResponse> {
-        Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
-    }
-
-    async fn get_block_by_hash(
-        &self,
-        _peer: SocketAddr,
-        _block_hash: H256,
-        _with_poa: bool,
-    ) -> Result<Option<CombinedBlockHeader>> {
-        Ok(None)
-    }
-
-    async fn get_latest_block(
-        &self,
-        _peer: SocketAddr,
-        _with_poa: bool,
-    ) -> Result<Option<CombinedBlockHeader>> {
-        Ok(None)
-    }
-
-    async fn get_block_by_height(
-        &self,
-        _peer: SocketAddr,
-        _block_height: u64,
-        _with_poa: bool,
-    ) -> Result<Option<CombinedBlockHeader>> {
-        Ok(None)
-    }
-
-    async fn get_block_index(
-        &self,
-        _peer: SocketAddr,
-        block_index_query: BlockIndexQuery,
-    ) -> Result<Vec<BlockIndexItem>> {
-        self.block_index_calls
-            .write()
-            .expect("To unlock calls")
-            .push(block_index_query.clone());
-        let handler = self.block_index_handler.read().expect("to unlock response");
-        handler(block_index_query)
-    }
-
-    async fn node_info(&self, _peer: SocketAddr) -> Result<NodeInfo> {
-        let handler = self
-            .node_info_handler
-            .read()
-            .expect("to unlock node_info handler");
-        handler(_peer)
-    }
-}
-
-impl Default for ApiClientStub {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 pub(crate) struct GossipServiceTestFixture {
     pub gossip_port: u16,
     pub api_port: u16,
@@ -421,7 +277,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub mempool_txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub mempool_chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub discovery_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
-    pub api_client_stub: ApiClientStub,
+    pub mempool_state: AtomicMempoolState,
     // Tets need the task manager to be stored somewhere
     #[expect(dead_code)]
     pub task_manager: TaskManager,
@@ -444,13 +300,19 @@ impl GossipServiceTestFixture {
     pub(crate) async fn new() -> Self {
         let temp_dir = setup_tracing_and_temp_dir(Some("gossip_test_fixture"), false);
         let gossip_port = random_free_port();
+        let api_port = random_free_port();
+
+        warn!("Random port for gossip: {}", gossip_port);
         let mut node_config = NodeConfig::testing();
         node_config.base_directory = temp_dir.path().to_path_buf();
+        node_config.gossip.public_port = gossip_port;
+        node_config.gossip.bind_port = gossip_port;
+        node_config.http.public_port = gossip_port;
+        node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
         node_config.mining_key = random_signer.signer;
         let config = Config::new(node_config);
 
-        let api_port = random_free_port();
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
         let db = DatabaseProvider(Arc::new(db_env));
@@ -472,7 +334,6 @@ impl GossipServiceTestFixture {
         let (peer_network_handle, peer_list) = spawn_peer_network_service_with_client(
             db.clone(),
             &config,
-            ApiClientStub::new(),
             reth_peer_sender,
             receiver,
             sender,
@@ -535,6 +396,10 @@ impl GossipServiceTestFixture {
 
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
 
+        let mempool_config = MempoolConfig::testing();
+        let state = create_state(&mempool_config, &[]);
+        let mempool_state = AtomicMempoolState::new(state);
+
         Self {
             _temp_dir: temp_dir,
             gossip_port,
@@ -548,7 +413,7 @@ impl GossipServiceTestFixture {
             mempool_txs,
             mempool_chunks,
             discovery_blocks,
-            api_client_stub: ApiClientStub::new(),
+            mempool_state,
             task_manager,
             task_executor,
             block_status_provider: block_status_provider_mock,
@@ -573,6 +438,7 @@ impl GossipServiceTestFixture {
             self.mining_address,
             self.gossip_receiver.take().expect("to take receiver"),
         );
+        info!("Starting gossip service on port {}", self.gossip_port);
         let gossip_listener = TcpListener::bind(
             format!("127.0.0.1:{}", self.gossip_port)
                 .parse::<SocketAddr>()
@@ -599,23 +465,40 @@ impl GossipServiceTestFixture {
         let gossip_broadcast = self.service_senders.gossip_broadcast.clone();
 
         gossip_service.sync_state.finish_sync();
-        let (service_handle, _block_pool, _data_handler) = gossip_service
-            .run(
-                mempool_stub,
-                block_discovery_stub,
-                self.api_client_stub.clone(),
-                &self.task_executor,
-                peer_list,
-                self.db.clone(),
-                gossip_listener,
-                self.block_status_provider.clone(),
-                execution_payload_provider,
-                self.config.clone(),
-                self.service_senders.clone(),
-                self.sync_tx.clone(),
-                MempoolReadGuard::stub(),
-            )
-            .expect("failed to run the gossip service");
+        let (server, server_handle, broadcast_task_handle, _block_pool, _data_handler) =
+            gossip_service
+                .run(
+                    mempool_stub,
+                    block_discovery_stub,
+                    &self.task_executor,
+                    peer_list,
+                    self.db.clone(),
+                    gossip_listener,
+                    self.block_status_provider.clone(),
+                    execution_payload_provider,
+                    self.config.clone(),
+                    self.service_senders.clone(),
+                    self.sync_tx.clone(),
+                    MempoolReadGuard::new(self.mempool_state.clone()),
+                    BlockIndexReadGuard::new(Arc::new(RwLock::new(
+                        BlockIndex::new(&self.config.node_config)
+                            .await
+                            .expect("block index"),
+                    ))),
+                    BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
+                        &IrysBlockHeader::new_mock_header(),
+                        self.config.consensus.clone(),
+                    )))),
+                    std::time::Instant::now(),
+                )
+                .expect("failed to run the gossip service");
+
+        let service_handle = crate::spawn_p2p_server_watcher_task(
+            server,
+            server_handle,
+            broadcast_task_handle,
+            &self.task_executor,
+        );
 
         (service_handle, gossip_broadcast)
     }
@@ -639,7 +522,6 @@ impl GossipServiceTestFixture {
     /// Can panic
     pub(crate) fn add_peer(&self, other: &Self) {
         let peer = other.create_default_peer_entry();
-
         debug!(
             "Adding peer {:?}: {:?} to gossip service {:?}",
             other.mining_address, peer, self.gossip_port
@@ -647,6 +529,13 @@ impl GossipServiceTestFixture {
 
         self.peer_list
             .add_or_update_peer(other.mining_address, peer, true);
+    }
+
+    pub(crate) async fn add_tx_to_mempool(&self, tx: DataTransactionHeader) {
+        self.mempool_state
+            .insert_tx_and_mark_valid(&tx)
+            .await
+            .expect("to insert tx");
     }
 }
 
@@ -700,6 +589,9 @@ struct FakeGossipDataHandler {
     on_block_data_request: Box<dyn Fn(BlockHash) -> GossipResponse<bool> + Send + Sync>,
     on_pull_data_request:
         Box<dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync>,
+    on_info_request: Box<dyn Fn() -> GossipResponse<NodeInfo> + Send + Sync>,
+    on_block_index_request:
+        Box<dyn Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>> + Send + Sync>,
 }
 
 impl FakeGossipDataHandler {
@@ -707,6 +599,8 @@ impl FakeGossipDataHandler {
         Self {
             on_block_data_request: Box::new(|_| GossipResponse::Accepted(false)),
             on_pull_data_request: Box::new(|_| GossipResponse::Accepted(None)),
+            on_info_request: Box::new(|| GossipResponse::Accepted(NodeInfo::default())),
+            on_block_index_request: Box::new(|_| GossipResponse::Accepted(Vec::new())),
         }
     }
 
@@ -719,6 +613,17 @@ impl FakeGossipDataHandler {
         data_request: GossipDataRequest,
     ) -> GossipResponse<Option<GossipData>> {
         (self.on_pull_data_request)(data_request)
+    }
+
+    fn call_on_info_request(&self) -> GossipResponse<NodeInfo> {
+        (self.on_info_request)()
+    }
+
+    fn call_on_block_index_request(
+        &self,
+        query: BlockIndexQuery,
+    ) -> GossipResponse<Vec<BlockIndexItem>> {
+        (self.on_block_index_request)(query)
     }
 
     fn set_on_block_data_request(
@@ -735,6 +640,22 @@ impl FakeGossipDataHandler {
         >,
     ) {
         self.on_pull_data_request = on_pull_data_request;
+    }
+
+    fn set_on_info_request(
+        &mut self,
+        on_info_request: Box<dyn Fn() -> GossipResponse<NodeInfo> + Send + Sync>,
+    ) {
+        self.on_info_request = on_info_request;
+    }
+
+    fn set_on_block_index_request(
+        &mut self,
+        on_block_index_request: Box<
+            dyn Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>> + Send + Sync,
+        >,
+    ) {
+        self.on_block_index_request = on_block_index_request;
     }
 }
 
@@ -785,6 +706,29 @@ impl FakeGossipServer {
             .set_on_pull_data_request(Box::new(on_pull_data_request));
     }
 
+    pub(crate) fn set_on_info_request(
+        &self,
+        on_info_request: impl Fn() -> GossipResponse<NodeInfo> + Send + Sync + 'static,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .set_on_info_request(Box::new(on_info_request));
+    }
+
+    pub(crate) fn set_on_block_index_request(
+        &self,
+        on_block_index_request: impl Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        self.handler
+            .write()
+            .expect("to unlock handler")
+            .set_on_block_index_request(Box::new(on_block_index_request));
+    }
+
     /// Runs the fake server, returns the address on which the server has started, as well
     /// as the server handle
     pub(crate) fn run(&self, address: SocketAddr) -> (Server, SocketAddr) {
@@ -796,6 +740,10 @@ impl FakeGossipServer {
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
                 .service(web::resource("/gossip/pull_data").route(web::post().to(handle_pull_data)))
+                .service(web::resource("/gossip/info").route(web::get().to(handle_info)))
+                .service(
+                    web::resource("/gossip/block-index").route(web::get().to(handle_block_index)),
+                )
                 .default_service(web::to(|| async {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
@@ -846,6 +794,12 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(false)
             }
+            GossipDataRequest::Transaction(hash) => {
+                warn!("Transaction request for hash {:?}", hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(false)
+            }
         },
         Err(e) => {
             warn!("Failed to acquire read lock on handler: {}", e);
@@ -880,13 +834,57 @@ async fn handle_pull_data(
     }
 }
 
-pub(crate) async fn data_handler_stub<T: ApiClient>(
+async fn handle_info(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    warn!("Fake server got info request");
+
+    match handler.read() {
+        Ok(handler) => {
+            let response = handler.call_on_info_request();
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .json(response)
+        }
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process a request")
+        }
+    }
+}
+
+async fn handle_block_index(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    query: web::Query<BlockIndexQuery>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    warn!("Fake server got block index request: {:?}", query);
+
+    match handler.read() {
+        Ok(handler) => {
+            let response = handler.call_on_block_index_request(query.into_inner());
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .json(response)
+        }
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process a request")
+        }
+    }
+}
+
+pub(crate) async fn data_handler_stub(
     config: &Config,
     peer_list_guard: &PeerList,
     db: DatabaseProvider,
-    api_client_stub: T,
     sync_state: ChainSyncState,
-) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
+) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
     let genesis_block = IrysBlockHeader::new_mock_header();
     let block_index = BlockIndex::new(&config.node_config)
         .await
@@ -916,7 +914,10 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         sync_tx,
         sync_state.clone(),
         // Index guard, tree guard
-        BlockStatusProvider::new(block_index_read_guard_stub, block_tree_read_guard_stub),
+        BlockStatusProvider::new(
+            block_index_read_guard_stub.clone(),
+            block_tree_read_guard_stub.clone(),
+        ),
         // Reth service as a second argument
         execution_payload_cache.clone(),
         config.clone(),
@@ -929,7 +930,6 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         mempool: mempool_stub,
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
-        api_client: api_client_stub.clone(),
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
@@ -939,15 +939,19 @@ pub(crate) async fn data_handler_stub<T: ApiClient>(
         span: Span::current(),
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+        block_index: block_index_read_guard_stub,
+        block_tree: block_tree_read_guard_stub,
+        config: config.clone(),
+        started_at: std::time::Instant::now(),
     })
 }
 
-pub(crate) async fn data_handler_with_stubbed_pool<T: ApiClient>(
+pub(crate) async fn data_handler_with_stubbed_pool(
     peer_list_guard: &PeerList,
-    api_client_stub: T,
     sync_state: ChainSyncState,
     block_pool: Arc<BlockPool<BlockDiscoveryStub, MempoolStub>>,
-) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub, T>> {
+    config: &Config,
+) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
     let (service_senders, _service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
@@ -956,12 +960,19 @@ pub(crate) async fn data_handler_with_stubbed_pool<T: ApiClient>(
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
 
+    let genesis_block = IrysBlockHeader::new_mock_header();
+    let block_index = BlockIndex::new(&config.node_config)
+        .await
+        .expect("expected to create a block index");
+    let block_index_read_guard_stub = BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+    let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
+    let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
+
     info!("Created GossipDataHandler stub");
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         block_pool,
         cache: Arc::new(GossipCache::new()),
-        api_client: api_client_stub,
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
@@ -971,6 +982,10 @@ pub(crate) async fn data_handler_with_stubbed_pool<T: ApiClient>(
         span: Span::current(),
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+        block_index: block_index_read_guard_stub,
+        block_tree: block_tree_read_guard_stub,
+        config: config.clone(),
+        started_at: std::time::Instant::now(),
     })
 }
 

@@ -22,14 +22,14 @@ use core::time::Duration;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::services::ServiceSenders;
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
-use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
-use irys_domain::PeerList;
+use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::{Config, DatabaseProvider, GossipBroadcastMessage, IrysAddress, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
@@ -146,11 +146,10 @@ impl P2PService {
     ///
     /// If the service fails to start, an error is returned. This can happen if the server fails to
     /// bind to the address or if any of the tasks fails to spawn.
-    pub fn run<M, B, A>(
+    pub fn run<M, B>(
         mut self,
         mempool: M,
         block_discovery: B,
-        api_client: A,
         task_executor: &TaskExecutor,
         peer_list: PeerList,
         db: DatabaseProvider,
@@ -161,15 +160,19 @@ impl P2PService {
         service_senders: ServiceSenders,
         chain_sync_tx: UnboundedSender<SyncChainServiceMessage>,
         mempool_guard: MempoolReadGuard,
+        block_index: BlockIndexReadGuard,
+        block_tree: BlockTreeReadGuard,
+        started_at: Instant,
     ) -> GossipResult<(
+        Server,
+        ServerHandle,
         ServiceHandleWithShutdownSignal,
         Arc<BlockPool<B, M>>,
-        Arc<GossipDataHandler<M, B, A>>,
+        Arc<GossipDataHandler<M, B>>,
     )>
     where
         M: MempoolFacade,
         B: BlockDiscoveryFacade,
-        A: ApiClient,
     {
         debug!("Starting the gossip service");
 
@@ -191,7 +194,6 @@ impl P2PService {
         let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
             block_pool: Arc::clone(&arc_pool),
-            api_client,
             cache: Arc::clone(&self.cache),
             gossip_client: self.client.clone(),
             peer_list: peer_list.clone(),
@@ -199,6 +201,10 @@ impl P2PService {
             span: Span::current(),
             execution_payload_cache: execution_payload_provider,
             data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
+            block_index,
+            block_tree,
+            config: config.clone(),
+            started_at,
         });
         let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 
@@ -225,12 +231,15 @@ impl P2PService {
             peer_list,
         );
 
-        let gossip_service_handle =
-            spawn_watcher_task(server, server_handle, broadcast_task_handle, task_executor);
-
         debug!("Started gossip service");
 
-        Ok((gossip_service_handle, arc_pool, gossip_data_handler))
+        Ok((
+            server,
+            server_handle,
+            broadcast_task_handle,
+            arc_pool,
+            gossip_data_handler,
+        ))
     }
 
     async fn broadcast_data(
@@ -347,7 +356,7 @@ fn spawn_broadcast_task(
     )
 }
 
-fn spawn_watcher_task(
+pub fn spawn_p2p_server_watcher_task(
     server: Server,
     server_handle: ServerHandle,
     mut broadcast_task_handle: ServiceHandleWithShutdownSignal,

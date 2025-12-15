@@ -230,4 +230,6 @@ pub enum RejectionReason {
     InvalidData,
     RateLimited,
     UnableToVerifyOrigin,
+    InvalidCredentials,
+    ProtocolMismatch,
 }

@@ -1,0 +1,88 @@
+name: Docker Release
+
+on:
+  push:
+    tags:
+      - mainnet-*
+      - testnet-*
+      - nightly-*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (e.g., mainnet-0.1.0, testnet-0.2.0, nightly-20250611)'
+        required: true
+        type: string
+      tag_latest:
+        description: 'Also tag as latest'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-and-push:
+    name: build and push docker image
+    runs-on: [self-hosted, misc-runner]
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set lowercase image name
+        id: image
+        run: |
+          OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "name=ghcr.io/${OWNER_LOWER}/irys" >> $GITHUB_OUTPUT
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "VERSION=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Start rootless Docker
+        run: |
+          dockerd-rootless.sh &
+          timeout 30 sh -c 'until docker info 2>/dev/null; do sleep 1; done'
+
+      - name: Log in to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Build and push Docker image
+        run: |
+          docker build \
+            --file ./docker/Dockerfile.release \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} \
+            .
+
+          docker push ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }}
+
+      - name: Tag as latest
+        if: ${{ inputs.tag_latest || (startsWith(github.ref_name, 'mainnet-') && !contains(github.ref_name, '-rc') && github.event_name == 'push') }}
+        run: |
+          docker tag ${{ steps.image.outputs.name }}:${{ steps.version.outputs.VERSION }} ${{ steps.image.outputs.name }}:latest
+          docker push ${{ steps.image.outputs.name }}:latest
+
+      - name: Cleanup Docker
+        if: always()
+        run: |
+          # stop all containers
+          docker stop $(docker ps -aq) 2>/dev/null || true
+          docker system prune -a -f --volumes
+
+          # kill daemon
+          pkill -f dockerd-rootless.sh || true
+
+          # Wait a moment for cleanup
+          sleep 2
+
+          # remove runtime data (ignoring errors)
+          rm -rf ${XDG_RUNTIME_DIR}/* || true
+          rm -rf ~/.local/share/docker/* || true

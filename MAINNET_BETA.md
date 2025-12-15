@@ -21,7 +21,7 @@ The minimum amount of storage a miner can provide to the protocol is a full 22TB
 
 We recommend formatting your drives with XFS - it has demonstrated the best characteristics (fast I/O, low space overhead) out of the suitable mainline file systems.
 # Building from source
-First download the source for the latest tagged release at https://github.com/Irys-xyz/irys/releases
+First download the source for the latest tagged release at https://github.com/Irys-xyz/irys/releases (tagged mainnet-\*, DO NOT use the testnet-\* tagged releases!)
 ## Dependencies
 * clang & a C/C++ build toolchain (some of the packing routines are written in C/C++)
 * gmp
@@ -149,7 +149,8 @@ parallel_verification_thread_limit = 4
 ```toml
 [[oracles]]
 ```
-The `[[oracles]]` sections can be left unchanged until the $IRYS token is listed on coingecko and coinmarket cap.
+<!-- TODO: update below & config template once mainnet is updated with https://github.com/Irys-xyz/irys/pull/1046 -->
+The `[[oracles]]` sections control the $IRYS price oracles your node will consult when producing a block. By default, the `mock` oracle is specified, but we support both Coingecko and Coinmarketcap as price sources - simply fill out the api_key and other configuration parameters and then uncomment the block to activate the oracle. Multiple oracles are supported, and the node will use the most recent price info out of all of them.
 
 ## Storage Configuration
 To participate in mining on Irys you must provide drives for your assigned partitions to be stored on. Once provided and pledged the protocol will assign a partition hash which your node will use to pack your partition. Once packed the Irys node software will begin to mine the storage and you will be able to earn block rewards for any blocks you produce.

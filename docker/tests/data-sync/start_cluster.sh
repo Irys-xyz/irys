@@ -2,24 +2,13 @@
 set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$SCRIPT_DIR/../../.."
 cd "$SCRIPT_DIR"
 
 IMAGE_NAME="${IMAGE_NAME:-localhost/irys-test:latest}"
 export IMAGE_NAME
 
-# Function to cleanup on exit
-cleanup() {
-    echo ""
-    echo "Shutting down containers..."
-    docker compose down -v 2>/dev/null || true
-}
-
-# Set up trap to cleanup on exit
-trap cleanup EXIT
-
 echo "========================================"
-echo "Irys Remote Partition Sync Test"
+echo "Irys Test Cluster"
 echo "========================================"
 echo "Using image: $IMAGE_NAME"
 echo ""
@@ -42,7 +31,7 @@ for container in test-irys-1 test-irys-2 test-irys-3; do
 done
 
 if [ "$containers_running" = false ]; then
-    echo "Containers not running. Starting..."
+    echo "Starting containers..."
     docker compose up -d
 
     # Wait for nodes to be ready
@@ -70,22 +59,14 @@ else
     echo "Containers already running."
 fi
 
-# Run the sync_partition_data_remote_test
-echo ""
-echo "Running sync_partition_data_remote_test..."
-echo "========================================"
-
-NODE_URLS="http://localhost:19080,http://localhost:19081,http://localhost:19082" \
-cargo test --package irys-chain --test mod sync_partition_data_remote_test -- --nocapture --ignored
-
-test_result=$?
-
 echo ""
 echo "========================================"
-if [ $test_result -eq 0 ]; then
-    echo "✓ Test passed"
-else
-    echo "✗ Test failed"
-fi
-
-exit $test_result
+echo "✓ Cluster is running"
+echo ""
+echo "Nodes:"
+echo "  - http://localhost:19080"
+echo "  - http://localhost:19081"
+echo "  - http://localhost:19082"
+echo ""
+echo "To stop: docker compose down -v"
+echo "========================================"
