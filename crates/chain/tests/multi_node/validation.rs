@@ -47,6 +47,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
             >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             let invalid_reward_amount = Amount::new(reward_amount.amount.pow(2_u64.into()));
@@ -60,6 +61,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
                     pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -211,6 +213,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
             >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             let mut tampered_mempool = mempool.clone();
@@ -224,6 +227,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
                     pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -309,6 +313,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
             >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             // NOTE: We reverse the order of txs, this means
@@ -326,6 +331,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
                     pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }

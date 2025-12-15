@@ -1985,6 +1985,76 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok(tx_hash)
     }
 
+    /// Create and inject a PD transaction with fully customizable fees.
+    ///
+    /// This is similar to `create_and_inject_pd_transaction_with_priority_fee` but allows
+    /// setting both priority_fee and base_fee per chunk. Used for testing fee validation
+    /// scenarios like min_pd_transaction_cost enforcement.
+    ///
+    /// # Arguments
+    /// * `signer` - The IrysSigner to sign the transaction
+    /// * `chunks_per_tx` - Number of chunks for the PD transaction
+    /// * `priority_fee_per_chunk` - Priority fee per chunk in wei
+    /// * `base_fee_per_chunk` - Max base fee per chunk in wei
+    /// * `nonce` - Transaction nonce
+    /// * `offset_base` - Base offset for chunk range specifiers
+    pub async fn create_and_inject_pd_transaction_with_custom_fees(
+        &self,
+        signer: &irys_types::irys::IrysSigner,
+        chunks_per_tx: u16,
+        priority_fee_per_chunk: u64,
+        base_fee_per_chunk: u64,
+        nonce: u64,
+        offset_base: u32,
+    ) -> eyre::Result<FixedBytes<32>> {
+        let local_signer = LocalSigner::from(signer.signer.clone());
+        let chain_id = self.node_ctx.config.consensus.chain_id;
+
+        // Build storage keys for the specified number of chunks
+        let storage_keys = (0..chunks_per_tx).map(|i| ChunkRangeSpecifier {
+            partition_index: alloy_primitives::aliases::U200::from_le_bytes([0xff; 25]),
+            offset: offset_base + i as u32,
+            chunk_count: 1,
+        });
+        let access_list = build_pd_access_list(storage_keys);
+
+        // Build PD header with custom fees
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: alloy_primitives::U256::from(priority_fee_per_chunk),
+            max_base_fee_per_chunk: alloy_primitives::U256::from(base_fee_per_chunk),
+        };
+        let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
+
+        // Create and sign EIP-1559 transaction
+        let mut tx = TxEip1559 {
+            access_list,
+            chain_id,
+            gas_limit: 1_000_000,
+            input: calldata,
+            max_fee_per_gas: 20_000_000_000,
+            max_priority_fee_per_gas: 1_000_000_000,
+            nonce,
+            to: alloy_primitives::TxKind::Call(Address::random()),
+            value: alloy_primitives::U256::ZERO,
+        };
+        let signature = local_signer
+            .sign_transaction_sync(&mut tx)
+            .expect("PD tx must be signable");
+
+        // Inject transaction into mempool
+        let tx_envelope = EthereumTxEnvelope::Eip1559(tx.into_signed(signature))
+            .encoded_2718()
+            .into();
+        let tx_hash = self
+            .node_ctx
+            .reth_node_adapter
+            .rpc
+            .inject_tx(tx_envelope)
+            .await?;
+
+        Ok(tx_hash)
+    }
+
     /// Get current and predicted PD base fee per chunk in Irys tokens.
     ///
     /// Returns (current_block_fee, predicted_next_block_fee).

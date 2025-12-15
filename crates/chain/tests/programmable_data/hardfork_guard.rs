@@ -42,7 +42,9 @@ async fn heavy_pd_transactions_rejected_before_sprite_hardfork() -> eyre::Result
             cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"),
             base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"),
             max_pd_chunks_per_block: 7_500,
-            min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"),
+            // Set min_pd_transaction_cost low enough that the test's PD tx will pass.
+            // The test uses ~1e11 wei per chunk, so at $1/IRYS we need min < 1e11 wei.
+            min_pd_transaction_cost: Amount::token(dec!(0.0)).expect("valid token amount"),
         }),
     };
 

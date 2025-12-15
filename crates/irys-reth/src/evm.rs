@@ -707,10 +707,14 @@ where
                                 chunks = %chunks,
                                 "PD transaction rejected: fees below minimum cost"
                             );
-                            return Err(EVMError::Custom(format!(
-                                "PD transaction fees ({}) below minimum cost ({} IRYS, {} USD at price {})",
-                                actual_total_fees, min_cost_irys, min_cost_usd, irys_usd_price
-                            )));
+                            // Use InvalidTransaction::GasPriceLessThanBasefee to signal that the
+                            // transaction should be skipped during block building (not a fatal error).
+                            // This causes the payload builder to skip this tx and continue.
+                            // Note: We're repurposing this error type since there's no specific
+                            // "PD fee too low" variant in revm.
+                            return Err(EVMError::Transaction(
+                                InvalidTransaction::GasPriceLessThanBasefee,
+                            ));
                         }
                     }
                 }

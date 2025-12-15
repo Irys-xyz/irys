@@ -1139,6 +1139,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
             >,
             timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<
             (EthBuiltPayload, irys_types::U256),
             irys_actors::block_producer::BlockProductionError,
@@ -1158,6 +1159,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
                     pd_base_fee,
                     timestamp_ms,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
@@ -1562,6 +1564,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
             >,
             timestamp_ms: UnixTimestampMs,
             _solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<
             (EthBuiltPayload, irys_types::U256),
             irys_actors::block_producer::BlockProductionError,
@@ -1578,6 +1581,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
                     pd_base_fee,
                     timestamp_ms,
                     invalid_solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }

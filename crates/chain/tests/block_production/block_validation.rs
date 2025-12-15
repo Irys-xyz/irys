@@ -153,6 +153,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             >,
             _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
+            current_ema_for_pricing: &irys_types::IrysTokenPrice,
         ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             self.prod
@@ -164,6 +165,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
                     pd_base_fee,
                     self.invalid_timestamp,
                     solution_hash,
+                    current_ema_for_pricing,
                 )
                 .await
         }
