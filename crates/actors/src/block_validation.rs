@@ -1,5 +1,5 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
-use crate::pd_pricing::base_fee::compute_base_fee_per_chunk;
+use crate::pd_pricing::base_fee::compute_pd_base_fee_for_block;
 use crate::{
     block_discovery::BlockTransactions,
     block_producer::ledger_expiry,
@@ -1315,35 +1315,41 @@ pub async fn shadow_transactions_are_valid(
         }
     }
 
-    // 2.5. Validate PD chunk budget
-    let max_pd_chunks = config.consensus.programmable_data.max_pd_chunks_per_block;
-    let mut total_pd_chunks: u64 = 0;
+    // 2.5. Validate PD chunk budget (only if Sprite hardfork is active)
+    let block_timestamp = irys_types::UnixTimestamp::from_secs(block_timestamp_sec as u64);
+    if let Some(max_pd_chunks) = config
+        .consensus
+        .hardforks
+        .max_pd_chunks_per_block_at(block_timestamp)
+    {
+        let mut total_pd_chunks: u64 = 0;
 
-    for tx in evm_block.body.transactions.iter() {
-        // Try to detect PD header in transaction input
-        let input = tx.input();
-        if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
-            // This is a PD transaction, sum chunks from access list if present
-            if let Some(access_list) = tx.access_list() {
-                let chunks = sum_pd_chunks_in_access_list(access_list);
-                total_pd_chunks = total_pd_chunks.saturating_add(chunks);
+        for tx in evm_block.body.transactions.iter() {
+            // Try to detect PD header in transaction input
+            let input = tx.input();
+            if let Ok(Some(_header)) = detect_and_decode_pd_header(input) {
+                // This is a PD transaction, sum chunks from access list if present
+                if let Some(access_list) = tx.access_list() {
+                    let chunks = sum_pd_chunks_in_access_list(access_list);
+                    total_pd_chunks = total_pd_chunks.saturating_add(chunks);
+                }
             }
         }
-    }
 
-    if total_pd_chunks > max_pd_chunks {
-        tracing::debug!(
-            block_hash = %block.block_hash,
-            evm_block_hash = %block.evm_block_hash,
-            total_pd_chunks,
-            max_pd_chunks,
-            "Rejecting block: exceeds maximum PD chunks per block",
-        );
-        eyre::bail!(
-            "Block exceeds maximum PD chunks per block: {} > {}",
-            total_pd_chunks,
-            max_pd_chunks
-        );
+        if total_pd_chunks > max_pd_chunks {
+            tracing::debug!(
+                block_hash = %block.block_hash,
+                evm_block_hash = %block.evm_block_hash,
+                total_pd_chunks,
+                max_pd_chunks,
+                "Rejecting block: exceeds maximum PD chunks per block",
+            );
+            eyre::bail!(
+                "Block exceeds maximum PD chunks per block: {} > {}",
+                total_pd_chunks,
+                max_pd_chunks
+            );
+        }
     }
 
     // 3. Extract shadow transactions from the beginning of the block lazily
@@ -1579,13 +1585,14 @@ async fn generate_expected_shadow_transactions(
         Vec::new()
     };
 
-    // Calculate PD base fee using parent EMA and current pricing EMA
-    let pd_base_fee_per_chunk = compute_base_fee_per_chunk(
+    // Calculate PD base fee for this block
+    let pd_base_fee_per_chunk = compute_pd_base_fee_for_block(
         config,
         parent_block,
         &parent_ema_snapshot,
         &current_ema_for_pricing.ema_for_public_pricing(),
         parent_evm_block,
+        block.timestamp_secs(),
     )?;
 
     let mut shadow_tx_generator = ShadowTxGenerator::new(
@@ -1600,6 +1607,7 @@ async fn generate_expected_shadow_transactions(
         &publish_ledger_with_txs,
         initial_treasury_balance,
         pd_base_fee_per_chunk,
+        block.timestamp_secs(),
         &expired_ledger_fees,
         &commitment_refund_events,
         &unstake_refund_events,

@@ -346,18 +346,39 @@ impl ConfigureEvm for IrysEvmConfig {
 #[non_exhaustive]
 pub struct IrysEvmFactory {
     context: PdContext,
+    hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
 }
 
 impl IrysEvmFactory {
-    pub fn new(chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>) -> Self {
+    pub fn new(
+        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+        hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    ) -> Self {
         let context = PdContext::new(chunk_provider);
-        Self { context }
+        Self {
+            context,
+            hardfork_config,
+        }
     }
 
     /// Provides access to the PdContext for test setup.
     #[cfg(test)]
     pub fn context(&self) -> &PdContext {
         &self.context
+    }
+
+    /// Provides access to the hardfork config.
+    pub fn hardfork_config(&self) -> &irys_types::hardfork_config::IrysHardforkConfig {
+        &self.hardfork_config
+    }
+
+    /// Creates a new factory for testing with Sprite hardfork enabled from genesis.
+    #[cfg(test)]
+    pub fn new_for_testing(
+        chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    ) -> Self {
+        let hardfork_config = Arc::new(irys_types::config::ConsensusConfig::testing().hardforks);
+        Self::new(chunk_provider, hardfork_config)
     }
 }
 
@@ -373,6 +394,10 @@ impl EvmFactory for IrysEvmFactory {
 
     fn create_evm<DB: Database>(&self, db: DB, input: EvmEnv) -> Self::Evm<DB, NoOpInspector> {
         let spec_id = input.cfg_env.spec;
+        // Check if Sprite hardfork is active based on block timestamp
+        let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
+        let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
+
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
@@ -384,11 +409,14 @@ impl EvmFactory for IrysEvmFactory {
                 ))),
             false,
             self.context.clone_for_new_evm(),
+            is_sprite_active,
         );
 
-        // Register Irys custom precompiles depending on active hardfork (Frontier+).
-        let pd_context = evm.pd_context().clone();
-        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+        // Register Irys custom precompiles only if Sprite hardfork is active.
+        if is_sprite_active {
+            let pd_context = evm.pd_context().clone();
+            register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+        }
 
         evm
     }
@@ -400,6 +428,10 @@ impl EvmFactory for IrysEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let spec_id = input.cfg_env.spec;
+        // Check if Sprite hardfork is active based on block timestamp
+        let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
+        let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
+
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
@@ -411,11 +443,14 @@ impl EvmFactory for IrysEvmFactory {
                 ))),
             true,
             self.context.clone_for_new_evm(),
+            is_sprite_active,
         );
 
-        // Register Irys custom precompiles depending on active hardfork (Frontier+).
-        let pd_context = evm.pd_context().clone();
-        register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+        // Register Irys custom precompiles only if Sprite hardfork is active.
+        if is_sprite_active {
+            let pd_context = evm.pd_context().clone();
+            register_irys_precompiles_if_active(evm.precompiles_mut(), spec_id, pd_context);
+        }
 
         evm
     }
@@ -466,6 +501,8 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     state: revm_primitives::map::foldhash::HashMap<Address, Account>,
     // Shared context for accessing Irys data
     context: PdContext,
+    // Whether the Sprite hardfork is active (enables PD features)
+    is_sprite_active: bool,
 }
 
 impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
@@ -483,13 +520,20 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
         >,
         inspect: bool,
         context: PdContext,
+        is_sprite_active: bool,
     ) -> Self {
         Self {
             inner: evm,
             inspect,
             state: Default::default(),
             context,
+            is_sprite_active,
         }
+    }
+
+    /// Returns whether the Sprite hardfork is active for this EVM instance.
+    pub const fn is_sprite_active(&self) -> bool {
+        self.is_sprite_active
     }
 
     /// Consumes self and return the inner EVM instance.
@@ -584,82 +628,85 @@ where
             Either::Right(tx) => tx,
         };
 
-        // Update EVM's PdContext with transaction access_list for PD precompile
-        // Each EVM has its own PdContext (via clone), so this is thread-safe
-        let access_list = tx.access_list.to_vec();
-        self.context.update_access_list(access_list);
-        tracing::debug!(
-            access_list_items = tx.access_list.len(),
-            "Updated PdContext with transaction access_list for this EVM instance"
-        );
+        // PD (Programmable Data) features are only available when Sprite hardfork is active
+        if self.is_sprite_active {
+            // Update EVM's PdContext with transaction access_list for PD precompile
+            // Each EVM has its own PdContext (via clone), so this is thread-safe
+            let access_list = tx.access_list.to_vec();
+            self.context.update_access_list(access_list);
+            tracing::debug!(
+                access_list_items = tx.access_list.len(),
+                "Updated PdContext with transaction access_list for this EVM instance"
+            );
 
-        // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
-        // Layout: [magic][version:u16][borsh header][rest]
-        if let Some((pd_header, consumed)) =
-            crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
-        {
-            // Compute PD fees based on header values. Always derive PD chunk count from access list.
-            let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
-            let chunks = U256::from(chunks_u64);
-            // Read the actual PD base fee from EVM state and cap by user's max.
-            let actual_per_chunk = self.read_pd_base_fee_per_chunk();
-            let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
-                // TODO: reject the tx!!!
-                pd_header.max_base_fee_per_chunk
-            } else {
-                actual_per_chunk
-            };
-            let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
-
-            let base_total = chunks.saturating_mul(base_per_chunk);
-            let prio_total = chunks.saturating_mul(prio_per_chunk);
-
-            // Fee payer is the transaction caller; priority recipient is block beneficiary.
-            let fee_payer = tx.caller;
-            let beneficiary = self.block().beneficiary;
-            // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
-            // that will also make accounting easier on irys side
-            let treasury = Address::ZERO;
-
-            // Strip the PD header from calldata before executing the tx logic.
-            let stripped: Bytes = tx.data.slice(consumed..);
-            let mut tx = tx;
-            tx.data = stripped;
-
-            let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
+            // Detect PD metadata header in calldata and handle it specially (strip + charge fees).
+            // Layout: [magic][version:u16][borsh header][rest]
+            if let Some((pd_header, consumed)) =
+                crate::pd_tx::detect_and_decode_pd_header(&tx.data).expect("pd header parse error")
             {
-                // deduct fees from payer
-                // TODO: if user does not have enough fees then we extract all the funds we can from him
-                if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
-                    &mut self.inner.ctx.journaled_state.database,
-                    fee_payer,
-                    treasury,
-                    base_total,
-                )? {
-                    return Err(EVMError::Custom(
-                        "insufficient balance for PD base fees".to_string(),
-                    ));
+                // Compute PD fees based on header values. Always derive PD chunk count from access list.
+                let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
+                let chunks = U256::from(chunks_u64);
+                // Read the actual PD base fee from EVM state and cap by user's max.
+                let actual_per_chunk = self.read_pd_base_fee_per_chunk();
+                let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
+                    // TODO: reject the tx!!!
+                    pd_header.max_base_fee_per_chunk
+                } else {
+                    actual_per_chunk
+                };
+                let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
+
+                let base_total = chunks.saturating_mul(base_per_chunk);
+                let prio_total = chunks.saturating_mul(prio_per_chunk);
+
+                // Fee payer is the transaction caller; priority recipient is block beneficiary.
+                let fee_payer = tx.caller;
+                let beneficiary = self.block().beneficiary;
+                // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
+                // that will also make accounting easier on irys side
+                let treasury = Address::ZERO;
+
+                // Strip the PD header from calldata before executing the tx logic.
+                let stripped: Bytes = tx.data.slice(consumed..);
+                let mut tx = tx;
+                tx.data = stripped;
+
+                let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
+                {
+                    // deduct fees from payer
+                    // TODO: if user does not have enough fees then we extract all the funds we can from him
+                    if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                        &mut self.inner.ctx.journaled_state.database,
+                        fee_payer,
+                        treasury,
+                        base_total,
+                    )? {
+                        return Err(EVMError::Custom(
+                            "insufficient balance for PD base fees".to_string(),
+                        ));
+                    }
+                    if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                        &mut self.inner.ctx.journaled_state.database,
+                        fee_payer,
+                        beneficiary,
+                        prio_total,
+                    )? {
+                        return Err(EVMError::Custom(
+                            "insufficient balance for PD priority fees".to_string(),
+                        ));
+                    }
                 }
-                if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
-                    &mut self.inner.ctx.journaled_state.database,
-                    fee_payer,
-                    beneficiary,
-                    prio_total,
-                )? {
-                    return Err(EVMError::Custom(
-                        "insufficient balance for PD priority fees".to_string(),
-                    ));
-                }
+                self.inner.ctx.journaled_state.checkpoint_commit();
+
+                let res = if self.inspect {
+                    self.inner.inspect_tx(tx)
+                } else {
+                    self.inner.transact(tx)
+                }?;
+
+                return Ok(res);
             }
-            self.inner.ctx.journaled_state.checkpoint_commit();
-
-            let res = if self.inspect {
-                self.inner.inspect_tx(tx)
-            } else {
-                self.inner.transact(tx)
-            }?;
-
-            return Ok(res);
         }
 
         if self.inspect {
@@ -1305,6 +1352,17 @@ where
                     ))
                 }
                 shadow_tx::TransactionPacket::PdBaseFeeUpdate(update) => {
+                    // PdBaseFeeUpdate is a PD feature - only allow when Sprite hardfork is active.
+                    // This provides defense-in-depth; the consensus layer already guards generation.
+                    if !self.is_sprite_active {
+                        tracing::warn!(
+                            "PdBaseFeeUpdate shadow transaction received before Sprite hardfork is active"
+                        );
+                        return Err(Self::create_internal_error(
+                            "PdBaseFeeUpdate not allowed before Sprite hardfork".to_string(),
+                        ));
+                    }
+
                     // Write the per-chunk base fee into the PD base fee account balance.
                     let target = *PD_BASE_FEE_ACCOUNT;
 
@@ -1523,7 +1581,7 @@ mod tests {
     fn evm_rejects_eip4844_blob_fields_in_transact_raw() {
         // Build minimal EVM env with Cancun spec enabled
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         cfg_env.chain_id = 1;
@@ -1561,7 +1619,7 @@ mod tests {
     #[test]
     fn evm_processes_normal_tx_success() {
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
 
         // Cancun spec, chain id 1, zero basefee and ample gas limit
         let mut cfg_env = CfgEnv::default();

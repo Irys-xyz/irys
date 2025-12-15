@@ -170,7 +170,7 @@ mod tests {
         access_list: AccessList,
     ) -> revm::context::result::ResultAndState {
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
 
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
@@ -247,7 +247,7 @@ mod tests {
         use alloy_evm::{Evm as _, EvmFactory as _};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -273,7 +273,7 @@ mod tests {
         };
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -327,7 +327,7 @@ mod tests {
         use alloy_evm::{Evm as _, EvmFactory as _};
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -353,7 +353,7 @@ mod tests {
         };
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -399,7 +399,7 @@ mod tests {
         };
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -455,7 +455,7 @@ mod tests {
         };
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();
@@ -510,7 +510,7 @@ mod tests {
         };
 
         let mock_chunk_provider = Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
-        let factory = IrysEvmFactory::new(mock_chunk_provider);
+        let factory = IrysEvmFactory::new_for_testing(mock_chunk_provider);
         let mut cfg_env = CfgEnv::default();
         cfg_env.spec = SpecId::CANCUN;
         let block_env = BlockEnv::default();

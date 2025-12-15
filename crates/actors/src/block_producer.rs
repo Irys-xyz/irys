@@ -539,12 +539,14 @@ pub trait BlockProdStrategy {
                 self.inner().config.consensus.ema.price_adjustment_interval,
             );
 
-        // Calculate PD base fee for the new block using both parent and current pricing EMA
-        let pd_base_fee = self.calculate_pd_base_fee_for_new_block(
+        // Calculate PD base fee for the new block
+        let pd_base_fee = base_fee::compute_pd_base_fee_for_block(
+            &self.inner().config,
             &prev_block_header,
-            &prev_evm_block,
             &prev_block_ema_snapshot,
             &current_ema_for_pricing,
+            &prev_evm_block,
+            current_timestamp.to_secs(),
         )?;
 
         let (eth_built_payload, final_treasury) = self
@@ -825,7 +827,7 @@ pub trait BlockProdStrategy {
         perv_evm_block: &reth_ethereum_primitives::Block,
         mempool: &MempoolTxsBundle,
         reward_amount: Amount<irys_types::storage_pricing::phantoms::Irys>,
-        pd_base_fee: Amount<(CostPerChunk, Irys)>,
+        pd_base_fee: Option<Amount<(CostPerChunk, Irys)>>,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
@@ -848,6 +850,7 @@ pub trait BlockProdStrategy {
             &mempool.publish_txs,
             initial_treasury_balance,
             pd_base_fee,
+            timestamp_ms.to_secs(),
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
@@ -1340,6 +1343,7 @@ pub trait BlockProdStrategy {
         prev_evm_block: &reth_ethereum_primitives::Block,
         prev_block_ema_snapshot: &EmaSnapshot,
         current_ema_price: &irys_types::IrysTokenPrice,
+        block_timestamp: irys_types::UnixTimestamp,
     ) -> eyre::Result<Amount<(CostPerChunk, Irys)>> {
         base_fee::compute_base_fee_per_chunk(
             &self.inner().config,
@@ -1347,6 +1351,7 @@ pub trait BlockProdStrategy {
             prev_block_ema_snapshot,
             current_ema_price,
             prev_evm_block,
+            block_timestamp,
         )
     }
 
