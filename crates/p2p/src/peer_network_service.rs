@@ -862,7 +862,7 @@ impl PeerNetworkService {
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
-        let mut peer_response_result = gossip_client
+        let peer_response_result = gossip_client
             .post_version(gossip_address, version_request.clone())
             .await
             .map_err(|e| {
