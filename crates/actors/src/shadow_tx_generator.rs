@@ -10,7 +10,7 @@ use irys_types::{
     },
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysAddress, IrysBlockHeader, UnixTimestamp, H256, U256,
+    IrysAddress, IrysBlockHeader, IrysTokenPrice, UnixTimestamp, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -46,8 +46,11 @@ pub struct ShadowTxGenerator<'a> {
     // PD base fee per chunk (None for pre-Sprite blocks, Some for Sprite blocks)
     pd_base_fee_per_chunk: Option<Amount<(CostPerChunk, Irys)>>,
 
-    // IRYS/USD price for IrysUsdPriceUpdate (None for pre-Sprite blocks)
-    irys_usd_price: Option<Uint<256, 4>>,
+    // IRYS/USD price for IrysUsdPriceUpdate shadow tx
+    irys_usd_price: IrysTokenPrice,
+
+    // Block timestamp for hardfork checks
+    block_timestamp: UnixTimestamp,
 
     // Iterator state
     treasury_balance: U256,
@@ -104,18 +107,22 @@ impl Iterator for ShadowTxGenerator<'_> {
                 Phase::IrysUsdPrice => {
                     self.phase = Phase::Commitments;
                     self.index = 0;
-                    // Only emit IrysUsdPriceUpdate if we have a price (Sprite active)
-                    if let Some(price) = self.irys_usd_price {
-                        // IRYS/USD price update has no treasury impact
+                    // Only emit IrysUsdPriceUpdate if Sprite hardfork is active
+                    if self.config.hardforks.is_sprite_active(self.block_timestamp) {
+                        // Convert IrysTokenPrice to reth Uint<256, 4> at emission time
+                        let reth_price =
+                            Uint::from_be_bytes(self.irys_usd_price.amount.to_be_bytes());
                         return Some(Ok(ShadowMetadata {
                             shadow_tx: ShadowTransaction::new_v1(
-                                TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate { price }),
+                                TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                                    price: reth_price,
+                                }),
                                 (*self.solution_hash).into(),
                             ),
                             transaction_fee: 0,
                         }));
                     }
-                    // None: skip IrysUsdPriceUpdate and continue to next phase
+                    // Pre-Sprite: skip IrysUsdPriceUpdate and continue to next phase
                 }
 
                 Phase::Commitments => {
@@ -189,7 +196,7 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         pd_base_fee_per_chunk: Option<Amount<(CostPerChunk, Irys)>>,
-        irys_usd_price: Option<Uint<256, 4>>,
+        irys_usd_price: IrysTokenPrice,
         block_timestamp: UnixTimestamp,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
@@ -200,12 +207,6 @@ impl<'a> ShadowTxGenerator<'a> {
         if is_sprite_active && pd_base_fee_per_chunk.is_none() {
             return Err(eyre!(
                 "pd_base_fee_per_chunk must be provided when Sprite hardfork is active"
-            ));
-        }
-        // Validate irys_usd_price: if Sprite is active, it must be provided
-        if is_sprite_active && irys_usd_price.is_none() {
-            return Err(eyre!(
-                "irys_usd_price must be provided when Sprite hardfork is active"
             ));
         }
 
@@ -241,6 +242,7 @@ impl<'a> ShadowTxGenerator<'a> {
             submit_txs,
             pd_base_fee_per_chunk,
             irys_usd_price,
+            block_timestamp,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -304,6 +306,7 @@ impl<'a> ShadowTxGenerator<'a> {
             submit_txs,
             pd_base_fee_per_chunk,
             irys_usd_price,
+            block_timestamp,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -964,7 +967,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1118,7 +1121,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1223,7 +1226,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1457,7 +1460,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1575,7 +1578,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
@@ -1699,7 +1702,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
@@ -1785,7 +1788,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
-            Some(Uint::from(1000000000000000000_u128)), // IRYS/USD price (1e18)
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
@@ -1837,8 +1840,8 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            None,                        // This should cause an error
-            None, // irys_usd_price also None (but pd_base_fee check happens first)
+            None, // This should cause an error
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1850,54 +1853,6 @@ mod tests {
         assert!(
             err_msg
                 .contains("pd_base_fee_per_chunk must be provided when Sprite hardfork is active"),
-            "Unexpected error message: {}",
-            err_msg
-        );
-    }
-
-    #[test]
-    fn test_error_when_sprite_active_but_irys_usd_price_none() {
-        let config = ConsensusConfig::testing(); // Sprite active from genesis
-        let parent_block = IrysBlockHeader::new_mock_header();
-        let block_height = 1;
-        let reward_address = IrysAddress::from([1_u8; 20]);
-        let reward_amount = U256::from(1000);
-        let initial_treasury = U256::from(1000000);
-
-        let publish_ledger = PublishLedgerWithTxs {
-            txs: vec![],
-            proofs: None,
-        };
-        let empty_fees = LedgerExpiryBalanceDelta {
-            miner_balance_increment: BTreeMap::new(),
-            user_perm_fee_refunds: Vec::new(),
-        };
-        let solution_hash = H256::zero();
-
-        // Sprite is active (timestamp 0 with testing config), pd_base_fee is Some, but irys_usd_price is None
-        let result = ShadowTxGenerator::new(
-            &block_height,
-            &reward_address,
-            &reward_amount,
-            &parent_block,
-            &solution_hash,
-            &config,
-            &[],
-            &[],
-            &publish_ledger,
-            initial_treasury,
-            Some(Amount::new(U256::from(1000000_u64))), // pd_base_fee is provided
-            None,                                       // This should cause an error
-            UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
-            &empty_fees,
-            &[],
-            &[],
-        );
-
-        assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
-        assert!(
-            err_msg.contains("irys_usd_price must be provided when Sprite hardfork is active"),
             "Unexpected error message: {}",
             err_msg
         );

@@ -839,22 +839,6 @@ pub trait BlockProdStrategy {
         // Get treasury balance from previous block
         let initial_treasury_balance = prev_block_header.treasury;
 
-        // Compute IRYS/USD price for IrysUsdPriceUpdate shadow tx (only when Sprite active)
-        let is_sprite_active = self
-            .inner()
-            .config
-            .consensus
-            .hardforks
-            .is_sprite_active(timestamp_ms.to_secs());
-        let irys_usd_price = if is_sprite_active {
-            // Convert irys_types::U256 to reth Uint<256, 4> via bytes
-            Some(reth::revm::primitives::ruint::Uint::from_be_bytes(
-                current_ema_for_pricing.amount.to_be_bytes(),
-            ))
-        } else {
-            None
-        };
-
         // Generate expected shadow transactions using shared logic
         let mut shadow_tx_generator = ShadowTxGenerator::new(
             &block_height,
@@ -868,7 +852,7 @@ pub trait BlockProdStrategy {
             &mempool.publish_txs,
             initial_treasury_balance,
             pd_base_fee,
-            irys_usd_price,
+            *current_ema_for_pricing,
             timestamp_ms.to_secs(),
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
