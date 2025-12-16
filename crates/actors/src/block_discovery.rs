@@ -345,9 +345,11 @@ impl BlockDiscoveryServiceInner {
         let previous_block_header = {
             let (tx_prev, rx_prev) = oneshot::channel();
             mempool_sender
-                .send(
-                    MempoolServiceMessage::GetBlockHeader(parent_block_hash, false, tx_prev).into(),
-                )
+                .send(MempoolServiceMessage::GetBlockHeader(
+                    parent_block_hash,
+                    false,
+                    tx_prev,
+                ))
                 .map_err(|channel_error| {
                     BlockDiscoveryInternalError::MempoolRequestFailed(channel_error.to_string())
                 })?;

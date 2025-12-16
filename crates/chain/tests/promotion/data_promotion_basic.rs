@@ -338,7 +338,10 @@ async fn heavy_promotion_validates_submit_inclusion_test() -> eyre::Result<()> {
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(data_tx.header.clone(), tx).into())
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+            data_tx.header.clone(),
+            tx,
+        ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
     let _ = rx.await?;

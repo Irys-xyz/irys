@@ -30,7 +30,7 @@ use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, instrument, warn, Instrument as _, Span};
+use tracing::{debug, error, instrument, warn, Instrument as _};
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
@@ -45,8 +45,6 @@ where
     pub gossip_client: GossipClient,
     pub peer_list: PeerList,
     pub sync_state: ChainSyncState,
-    /// Tracing span
-    pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,
     pub data_request_tracker: DataRequestTracker,
     pub block_index: BlockIndexReadGuard,
@@ -68,7 +66,6 @@ where
             gossip_client: self.gossip_client.clone(),
             peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
-            span: self.span.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
             data_request_tracker: DataRequestTracker::new(),
             block_index: self.block_index.clone(),
@@ -420,7 +417,7 @@ where
         .await
     }
 
-    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), parent = &self.span)]
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,

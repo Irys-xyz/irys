@@ -3,7 +3,7 @@ use crate::mempool_service::{
     ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
 use crate::services::ServiceSenders;
-use crate::{CriticalChunkIngressError, MempoolServiceMessageWithSpan};
+use crate::CriticalChunkIngressError;
 use eyre::eyre;
 use irys_types::{
     chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
@@ -64,13 +64,13 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
 
 #[derive(Clone, Debug)]
 pub struct MempoolServiceFacadeImpl {
-    service: UnboundedSender<MempoolServiceMessageWithSpan>,
+    service: UnboundedSender<MempoolServiceMessage>,
     migration_sender: broadcast::Sender<BlockMigratedEvent>,
 }
 
 impl MempoolServiceFacadeImpl {
     pub fn new(
-        service: UnboundedSender<MempoolServiceMessageWithSpan>,
+        service: UnboundedSender<MempoolServiceMessage>,
         migration_sender: broadcast::Sender<BlockMigratedEvent>,
     ) -> Self {
         Self {
@@ -98,7 +98,9 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_id = tx_header.id;
         self.service
-            .send(MempoolServiceMessage::IngestDataTxFromApi(tx_header, oneshot_tx).into())
+            .send(MempoolServiceMessage::IngestDataTxFromApi(
+                tx_header, oneshot_tx,
+            ))
             .map_err(|_| {
                 TxIngressError::Other(format!("Error sending TxIngressMessage for tx {}", tx_id))
             })?;
@@ -113,7 +115,9 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_id = tx_header.id;
         self.service
-            .send(MempoolServiceMessage::IngestDataTxFromGossip(tx_header, oneshot_tx).into())
+            .send(MempoolServiceMessage::IngestDataTxFromGossip(
+                tx_header, oneshot_tx,
+            ))
             .map_err(|_| {
                 TxIngressError::Other(format!("Error sending TxIngressMessage for tx {}", tx_id))
             })?;
@@ -128,9 +132,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_id = commitment_tx.id;
         self.service
-            .send(
-                MempoolServiceMessage::IngestCommitmentTxFromApi(commitment_tx, oneshot_tx).into(),
-            )
+            .send(MempoolServiceMessage::IngestCommitmentTxFromApi(
+                commitment_tx,
+                oneshot_tx,
+            ))
             .map_err(|_| {
                 TxIngressError::Other(format!(
                     "Error sending CommitmentTxIngressMessage for tx {}",
@@ -150,10 +155,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let tx_id = commitment_tx.id;
         self.service
-            .send(
-                MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx, oneshot_tx)
-                    .into(),
-            )
+            .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+                commitment_tx,
+                oneshot_tx,
+            ))
             .map_err(|_| {
                 TxIngressError::Other(format!(
                     "Error sending CommitmentTxIngressMessage for tx {}",
@@ -173,7 +178,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let data_root = ingress_proof.data_root;
         self.service
-            .send(MempoolServiceMessage::IngestIngressProof(ingress_proof, oneshot_tx).into())
+            .send(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))
             .map_err(|_| {
                 IngressProofError::Other(format!(
                     "Error sending IngestIngressProof message for data_root {:?}",
@@ -191,7 +199,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
         self.service
-            .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx).into())
+            .send(MempoolServiceMessage::IngestChunk(chunk, oneshot_tx))
             .map_err(|_| {
                 CriticalChunkIngressError::Other(format!(
                     "Error sending ChunkIngressMessage for chunk data_root {:?} tx_offset {}",
@@ -205,7 +213,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn is_known_data_transaction(&self, tx_id: H256) -> Result<TxKnownStatus, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx).into())
+            .send(MempoolServiceMessage::DataTxExists(tx_id, oneshot_tx))
             .map_err(|_| {
                 TxReadError::Other(format!("Error sending TxExistenceQuery for tx {}", tx_id))
             })?;
@@ -219,7 +227,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     ) -> Result<TxKnownStatus, TxReadError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::CommitmentTxExists(tx_id, oneshot_tx).into())
+            .send(MempoolServiceMessage::CommitmentTxExists(tx_id, oneshot_tx))
             .map_err(|_| {
                 TxReadError::Other(format!("Error sending TxExistenceQuery for tx {}", tx_id))
             })?;
@@ -234,7 +242,11 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     ) -> Result<Option<IrysBlockHeader>, TxReadError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, include_chunk, tx).into())
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block_hash,
+                include_chunk,
+                tx,
+            ))
             .map_err(|_| {
                 TxReadError::Other(format!(
                     "Error sending GetBlockHeader message for block {}",
@@ -264,7 +276,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::RemoveFromBlacklist(tx_ids, tx).into())
+            .send(MempoolServiceMessage::RemoveFromBlacklist(tx_ids, tx))
             .map_err(|send_error| eyre!("{send_error:?}"))?;
 
         rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
@@ -273,7 +285,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn get_stake_and_pledge_whitelist(&self) -> HashSet<IrysAddress> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx).into())
+            .send(MempoolServiceMessage::CloneStakeAndPledgeWhitelist(tx))
             .expect("to send GetStakeAndPledgeWhitelist message");
 
         rx.await
@@ -286,7 +298,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     ) -> eyre::Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(new_whitelist, tx).into())
+            .send(MempoolServiceMessage::UpdateStakeAndPledgeWhitelist(
+                new_whitelist,
+                tx,
+            ))
             .map_err(|send_error| eyre!("{send_error:?}"))?;
 
         rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))

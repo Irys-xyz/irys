@@ -15,6 +15,7 @@ use irys_actors::{
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_guard::MempoolReadGuard,
+    mempool_service::MempoolServiceMessage,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
@@ -25,7 +26,7 @@ use irys_actors::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
-    BlockValidationTracker, DataSyncService, MempoolServiceMessageWithSpan, StorageModuleService,
+    BlockValidationTracker, DataSyncService, StorageModuleService,
 };
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
@@ -836,7 +837,7 @@ impl IrysNode {
             let (tx, rx) = oneshot::channel();
             ctx.service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetState(tx).into())?;
+                .send(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
             // use executor so we get automatic termination when the node starts to shut down
@@ -1265,7 +1266,7 @@ impl IrysNode {
         let (tx, rx) = oneshot::channel();
         service_senders
             .mempool
-            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx).into())
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
             .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
 
         let mempool_state = rx
@@ -2023,7 +2024,7 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool_sender: UnboundedSender<MempoolServiceMessage>,
     reth_rx: UnboundedReceiver<RethServiceMessage>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {
