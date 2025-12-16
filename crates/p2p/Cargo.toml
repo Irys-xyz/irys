@@ -8,7 +8,6 @@ edition = "2021"
 irys-actors.workspace = true
 irys-domain = { workspace = true, features = ["test-utils"] }
 irys-types.workspace = true
-irys-api-client.workspace = true
 irys-database.workspace = true
 irys-vdf.workspace = true
 irys-reth-node-bridge.workspace = true

@@ -2,7 +2,6 @@ use crate::types::{GossipResponse, RejectionReason};
 use crate::{gossip_client::GossipClientError, GossipClient, GossipError};
 use eyre::{Report, Result as EyreResult};
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
-use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
@@ -873,24 +872,6 @@ impl PeerNetworkService {
                 );
                 PeerListServiceError::PostVersionError(e.to_string())
             });
-
-        if peer_response_result.is_err() {
-            debug!(
-                "Falling back to API client for announcement to {}",
-                api_address
-            );
-            let api_client = IrysApiClient::new();
-            peer_response_result = api_client
-                .post_version(api_address, version_request)
-                .await
-                .map_err(|e| {
-                    warn!(
-                        "Failed to announce yourself to api address {}: {}",
-                        api_address, e
-                    );
-                    PeerListServiceError::PostVersionError(e.to_string())
-                });
-        }
 
         let peer_response = match peer_response_result {
             Ok(peer_response) => {
