@@ -5,7 +5,6 @@ use irys_types::{
     storage_pricing::{Amount, PRECISION_SCALE},
     NodeConfig, U256,
 };
-use rust_decimal_macros::dec;
 
 /// Block specification for test chain setup
 struct BlockSpec {
@@ -53,7 +52,7 @@ async fn setup_pd_fee_history_test_chain(
         .expect("Sprite hardfork must be configured for testing");
     sprite.max_pd_chunks_per_block = 100; // 100 chunks for easy percentage calculations
                                           // Set min_pd_transaction_cost to 0 to avoid rejections in this test
-    sprite.min_pd_transaction_cost = Amount::token(dec!(0.0)).expect("valid token amount");
+    sprite.min_pd_transaction_cost = Amount::new(U256::from(0));
 
     // Create and fund a test account for PD transactions
     let pd_signer = config.new_random_signer();
@@ -376,15 +375,14 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
         .as_mut()
         .expect("Sprite hardfork must be configured for testing");
 
-    // Set minimum to $0.000000001 USD (1e-9 USD = 1e9 wei at $1/IRYS)
-    // This creates a threshold of ~1 gwei that low fees (200 wei) won't meet,
-    // but high fees (>1e9 wei) will meet. Keeps values within u64 range.
-    sprite.min_pd_transaction_cost = Amount::token(dec!(0.000000001)).expect("valid amount");
-    sprite.base_fee_floor = Amount::token(dec!(0.0000000001)).expect("valid amount");
+    // Set minimum to 1 gwei (1e9 wei). At $1/IRYS, low fees (200 wei) won't meet this.
+    let min_cost = Amount::new(U256::from(10_u64.pow(9)));
+    sprite.min_pd_transaction_cost = min_cost;
+    sprite.base_fee_floor = Amount::new(U256::from(10_u64.pow(8)));
     sprite.max_pd_chunks_per_block = 100;
 
-    // Extract min_cost_usd before we borrow config for node creation
-    let min_cost_usd = sprite.min_pd_transaction_cost.amount;
+    // Store min_cost before we borrow config for node creation
+    let min_cost_usd = min_cost.amount;
 
     // Start node and mine initial block to establish pricing
     let node = IrysNodeTest::new_genesis(config).start().await;
@@ -446,19 +444,30 @@ async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()>
     );
 
     // 3. Submit ADEQUATE-FEE transaction (at or above minimum)
-    // The EVM uses the on-chain IRYS/USD price for min cost calculation.
-    // At $0.000000001 USD min cost and $1/IRYS price: min_cost_irys = 1e9 wei
-    // Use fees that exceed this threshold to ensure acceptance.
-    let adequate_fee = 2_000_000_000_u64; // 2e9 wei - double the threshold
+    // Use the base fee from the API response (predicted next block fee at index [1])
+    // Only adjust priority fee to meet the minimum threshold
+    let base_fee_from_api: u64 = fee_history.base_fee_per_chunk_irys[1]
+        .amount
+        .try_into()
+        .expect("base_fee should fit in u64");
+
+    // The EVM calculates min_cost_irys using on-chain price which may differ from API's EMA.
+    // At $1/IRYS price: min_cost_irys = min_cost.amount (they're equal in internal representation)
+    // For 1 chunk: total_fee = base_fee + priority_fee >= min_cost_irys
+    // So: priority_fee >= min_cost_irys - base_fee
+    let evm_min_cost_irys: u64 = min_cost_usd.try_into().expect("min_cost fits in u64");
+    let required_priority_fee = evm_min_cost_irys.saturating_sub(base_fee_from_api);
+    // Add buffer to ensure we exceed the threshold (same magnitude as min_cost)
+    let priority_fee = required_priority_fee.saturating_add(evm_min_cost_irys);
 
     let adequate_tx_hash = node
         .create_and_inject_pd_transaction_with_custom_fees(
             &adequate_fee_signer,
-            1,            // 1 chunk
-            adequate_fee, // priority fee per chunk
-            adequate_fee, // base fee per chunk
-            0,            // nonce (fresh signer, starts at 0)
-            100,          // offset_base (different from first tx)
+            1,                 // 1 chunk
+            priority_fee,      // priority fee per chunk (adjusted to meet minimum)
+            base_fee_from_api, // base fee from API
+            0,                 // nonce (fresh signer, starts at 0)
+            100,               // offset_base (different from first tx)
         )
         .await?;
 

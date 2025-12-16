@@ -40,6 +40,7 @@ use revm::{MainBuilder as _, MainContext as _};
 use tracing::trace;
 
 // External crate imports - Other
+use irys_types::storage_pricing::TOKEN_SCALE;
 
 use super::*;
 use crate::precompiles::pd::context::PdContext;
@@ -687,35 +688,34 @@ where
 
                 // Validate minimum PD transaction cost
                 if let Some(min_cost_usd) = self.min_pd_transaction_cost_usd {
-                    let irys_usd_price = self.read_irys_usd_price();
-                    if !irys_usd_price.is_zero() {
-                        // Calculate minimum cost in IRYS tokens:
-                        // min_cost_irys = (min_cost_usd * 1e18) / irys_usd_price
-                        // Both min_cost_usd and irys_usd_price are in 1e18 scale
-                        let scale = U256::from(10_u128.pow(18));
-                        let min_cost_irys = min_cost_usd.saturating_mul(scale) / irys_usd_price;
+                    let irys_usd_price = self.read_irys_usd_price()?;
 
-                        // Calculate actual total fees
-                        let actual_total_fees = base_total.saturating_add(prio_total);
+                    // Calculate minimum cost in IRYS tokens:
+                    // min_cost_irys = (min_cost_usd * TOKEN_SCALE) / irys_usd_price
+                    // Both min_cost_usd and irys_usd_price are in TOKEN_SCALE (1e18) scale
+                    let scale = U256::from_be_bytes(TOKEN_SCALE.to_be_bytes());
+                    let min_cost_irys = min_cost_usd.saturating_mul(scale) / irys_usd_price;
 
-                        if actual_total_fees < min_cost_irys {
-                            tracing::debug!(
-                                min_cost_usd = %min_cost_usd,
-                                irys_usd_price = %irys_usd_price,
-                                min_cost_irys = %min_cost_irys,
-                                actual_total_fees = %actual_total_fees,
-                                chunks = %chunks,
-                                "PD transaction rejected: fees below minimum cost"
-                            );
-                            // Use InvalidTransaction::GasPriceLessThanBasefee to signal that the
-                            // transaction should be skipped during block building (not a fatal error).
-                            // This causes the payload builder to skip this tx and continue.
-                            // Note: We're repurposing this error type since there's no specific
-                            // "PD fee too low" variant in revm.
-                            return Err(EVMError::Transaction(
-                                InvalidTransaction::GasPriceLessThanBasefee,
-                            ));
-                        }
+                    // Calculate actual total fees
+                    let actual_total_fees = base_total.saturating_add(prio_total);
+
+                    if actual_total_fees < min_cost_irys {
+                        tracing::debug!(
+                            min_cost_usd = %min_cost_usd,
+                            irys_usd_price = %irys_usd_price,
+                            min_cost_irys = %min_cost_irys,
+                            actual_total_fees = %actual_total_fees,
+                            chunks = %chunks,
+                            "PD transaction rejected: fees below minimum cost"
+                        );
+                        // Use InvalidTransaction::GasPriceLessThanBasefee to signal that the
+                        // transaction should be skipped during block building (not a fatal error).
+                        // This causes the payload builder to skip this tx and continue.
+                        // Note: We're repurposing this error type since there's no specific
+                        // "PD fee too low" variant in revm.
+                        return Err(EVMError::Transaction(
+                            InvalidTransaction::GasPriceLessThanBasefee,
+                        ));
                     }
                 }
 
@@ -1065,11 +1065,22 @@ where
     /// Reads the current IRYS/USD price from the EVM state.
     /// The price is stored as the balance of the IRYS_USD_PRICE_ACCOUNT.
     /// Returns the price in 1e18 scale (e.g., 1e18 = $1.00).
-    pub fn read_irys_usd_price(&mut self) -> U256 {
-        match self.load_account(*IRYS_USD_PRICE_ACCOUNT) {
-            Ok(Some(acc)) => acc.info.balance,
-            _ => U256::ZERO,
+    ///
+    /// # Errors
+    /// Returns an error if the price account doesn't exist or has zero balance.
+    pub fn read_irys_usd_price(&mut self) -> Result<U256, <Self as Evm>::Error> {
+        let price = match self.load_account(*IRYS_USD_PRICE_ACCOUNT)? {
+            Some(acc) => acc.info.balance,
+            None => U256::ZERO,
+        };
+
+        if price.is_zero() {
+            return Err(Self::create_internal_error(
+                "IRYS/USD price not set in EVM state".to_string(),
+            ));
         }
+
+        Ok(price)
     }
 
     /// Loads an account from the underlying state, or the database if there are no preexisting changes.

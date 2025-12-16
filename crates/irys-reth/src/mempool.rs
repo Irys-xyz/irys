@@ -240,33 +240,30 @@ where
                     .map(sum_pd_chunks_in_access_list)
                     .unwrap_or(0);
 
-                if chunks > 0 {
-                    // Calculate total fees in IRYS tokens:
-                    // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
-                    let total_per_chunk = pd_header
-                        .max_base_fee_per_chunk
-                        .saturating_add(pd_header.max_priority_fee_per_chunk);
-                    let total_fees =
-                        total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
+                // Calculate total fees in IRYS tokens:
+                // (max_base_fee_per_chunk + max_priority_fee_per_chunk) × chunks
+                let total_per_chunk = pd_header
+                    .max_base_fee_per_chunk
+                    .saturating_add(pd_header.max_priority_fee_per_chunk);
+                let total_fees =
+                    total_per_chunk.saturating_mul(alloy_primitives::U256::from(chunks));
 
-                    // Get minimum cost from hardfork config (in USD)
-                    // Note: Full price conversion happens at EVM level. Here we do a basic
-                    // sanity check - if total fees are zero, the tx is clearly underpriced.
-                    if total_fees.is_zero() {
-                        tracing::trace!(
-                            sender = ?tx.sender(),
-                            tx_hash = ?tx.hash(),
-                            chunks = chunks,
-                            "PD transaction rejected: zero fees for {} chunks",
-                            chunks
-                        );
-                        return Err(TransactionValidationOutcome::Invalid(
-                            tx,
-                            reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
-                                InvalidTransactionError::FeeCapTooLow,
-                            ),
-                        ));
-                    }
+                // Basic sanity check: PD transactions must have non-zero fees.
+                // The full min_pd_transaction_cost validation (USD→IRYS conversion)
+                // happens at EVM execution time.
+                if total_fees.is_zero() {
+                    tracing::trace!(
+                        sender = ?tx.sender(),
+                        tx_hash = ?tx.hash(),
+                        chunks = chunks,
+                        "PD transaction rejected: zero total fees"
+                    );
+                    return Err(TransactionValidationOutcome::Invalid(
+                        tx,
+                        reth_transaction_pool::error::InvalidPoolTransactionError::Consensus(
+                            InvalidTransactionError::FeeCapTooLow,
+                        ),
+                    ));
                 }
             }
         }
