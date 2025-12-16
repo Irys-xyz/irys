@@ -2,8 +2,9 @@ use crate::utils::IrysNodeTest;
 use alloy_consensus::Transaction as _;
 use irys_actors::{pd_pricing::base_fee::PD_BASE_FEE_INDEX, reth_ethereum_primitives};
 use irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
-use irys_types::{NodeConfig, U256};
+use irys_types::{storage_pricing::Amount, NodeConfig, U256};
 use reth::primitives::SealedBlock;
+use rust_decimal_macros::dec;
 
 /// Test that PD base fee increases when block utilization exceeds the 50% target.
 ///
@@ -24,14 +25,16 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
 
     // Set max PD chunks to 100 for easy percentage calculations
     let max_pd_chunks = 100_u64;
-    config
+    let sprite = config
         .consensus
         .get_mut()
         .hardforks
         .sprite
         .as_mut()
-        .expect("Sprite hardfork must be configured for testing")
-        .max_pd_chunks_per_block = max_pd_chunks;
+        .expect("Sprite hardfork must be configured for testing");
+    sprite.max_pd_chunks_per_block = max_pd_chunks;
+    // Set min_pd_transaction_cost to 0 to avoid rejections in this test
+    sprite.min_pd_transaction_cost = Amount::token(dec!(0.0)).expect("valid token amount");
 
     // Create and fund a test account for PD transactions
     let pd_tx_signer = config.new_random_signer();
@@ -64,7 +67,8 @@ async fn test_pd_base_fee_increases_with_high_utilization() -> eyre::Result<()> 
     let (_block2, eth_payload2, _) = node.mine_block_without_gossip().await?;
 
     // Verify all PD transactions were included
-    verify_pd_transactions_included(eth_payload2.block(), &tx_hashes, 2)?;
+    // 3 shadow txs: BlockReward, PdBaseFeeUpdate, IrysUsdPriceUpdate
+    verify_pd_transactions_included(eth_payload2.block(), &tx_hashes, 3)?;
 
     // Extract PD base fee from block 2
     let block2_pd_base_fee: U256 = extract_pd_base_fee_from_block(eth_payload2.block())?.into();
