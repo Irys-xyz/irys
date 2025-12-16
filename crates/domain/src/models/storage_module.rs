@@ -1248,7 +1248,7 @@ impl StorageModule {
             self.query_submodule_db_by_offset(partition_offset, |tx| {
                 let tx_path = match get_tx_path_by_offset(tx, partition_offset) {
                     Ok(Some(tx_path)) => tx_path,
-                    Ok(None) => return Ok(None), 
+                    Ok(None) => return Ok(None),
                     Err(err) => return Err(eyre::eyre!("Database read should succeed: {:?}", err)),
                 };
 
