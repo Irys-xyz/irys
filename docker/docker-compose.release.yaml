@@ -1,0 +1,64 @@
+# Production cluster using distroless release image
+#
+# Usage:
+#   docker compose -f docker/docker-compose.release.yaml up -d
+#
+# Prerequisites:
+#   docker build -f docker/Dockerfile.release -t irys:release .
+#
+# Note: This uses distroless images (no shell). For debugging, use docker-compose.linux.yaml
+
+services:
+  irys-1:
+    image: ${IMAGE_NAME:-irys:release}
+    pull_policy: never
+    container_name: irys-1
+    restart: unless-stopped
+    working_dir: /app
+    networks:
+      app_network:
+        ipv4_address: 172.20.0.2
+    ports:
+      - "19080:8080"
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      - ./configs/irys-1.toml:/app/config.toml:ro
+      - irys-1-data:/app/data
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/irys", "--config", "/app/config.toml"]
+
+  irys-2:
+    image: ${IMAGE_NAME:-irys:release}
+    pull_policy: never
+    container_name: irys-2
+    restart: unless-stopped
+    working_dir: /app
+    depends_on:
+      - irys-1
+    networks:
+      app_network:
+        ipv4_address: 172.20.0.3
+    ports:
+      - "19081:8080"
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      - ./configs/irys-2.toml:/app/config.toml:ro
+      - irys-2-data:/app/data
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ["/irys", "--config", "/app/config.toml"]
+
+volumes:
+  irys-1-data:
+  irys-2-data:
+
+networks:
+  app_network:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
