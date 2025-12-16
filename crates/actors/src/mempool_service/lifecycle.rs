@@ -207,7 +207,7 @@ impl Inner {
             return Ok(());
         }
 
-        tracing::debug!(tx.id = %txid, "Tx not in mempool; leaving unchanged");
+        tracing::debug!(tx.id = %txid, "Tx {txid} not in mempool; leaving unchanged");
         Ok(())
     }
 

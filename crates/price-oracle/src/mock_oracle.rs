@@ -68,7 +68,7 @@ impl MockOracle {
         {
             guard.going_up = !guard.going_up;
             guard.calls = 0;
-            tracing::debug!(new_direction_is_up =? guard.going_up, "inverting the delta direction");
+            tracing::debug!(new_direction_is_up =? guard.going_up, "inverting the delta direction, now going_up={}", guard.going_up);
         }
 
         // Update the price in the current direction

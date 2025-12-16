@@ -340,7 +340,7 @@ impl EpochSnapshot {
                 return Err(EpochSnapshotError::UnstakeSignerNotStaked { signer });
             }
 
-            debug!(tx.signer = %signer, "unstake_applied");
+            debug!(tx.signer = %signer, "unstake_applied for signer {signer}");
         }
         Ok(())
     }
@@ -861,7 +861,7 @@ impl EpochSnapshot {
                     data_partition.miner_address
                 }
                 (Some(_), Some(_)) => {
-                    warn!(tx.partition_hash = %ph, "unpledge_target_in_both_maps");
+                    warn!(tx.partition_hash = %ph, "unpledge_target_in_both_maps for partition {ph}");
                     return Err(EpochSnapshotError::UnpledgeTargetInBothMaps {
                         partition_hash: ph,
                     });

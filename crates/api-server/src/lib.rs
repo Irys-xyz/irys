@@ -171,7 +171,7 @@ pub fn routes() -> impl HttpServiceFactory {
 
 pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
-    info!(custom.port = ?port, "Starting API server");
+    info!(custom.port = ?port, "Starting API server on port {port}");
     let state = web::Data::new(app_state);
     HttpServer::new(move || {
         let span = tracing::info_span!(target: "irys-api-http", "api_server");

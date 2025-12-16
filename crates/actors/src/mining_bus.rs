@@ -109,7 +109,7 @@ impl MiningBus {
     /// Send partition expiration notice to all subscribers.
     #[tracing::instrument(level = "trace", skip_all, fields(partition.expired_count = msg.0.len()))]
     pub fn send_partitions_expiration(&self, msg: BroadcastPartitionsExpiration) -> usize {
-        debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes");
+        debug!(custom.msg = ?msg.0, "Broadcasting expiration, expired partition hashes: {:?}", msg.0);
         self.send_event(Arc::new(MiningBroadcastEvent::PartitionsExpiration(msg)))
     }
 }

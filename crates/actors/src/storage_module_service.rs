@@ -728,7 +728,7 @@ impl StorageModuleService {
             }
         }
 
-        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last {} in-bound messages before shutdown", self.msg_rx.len());
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?
         }

@@ -24,7 +24,7 @@ pub fn routes() -> impl HttpServiceFactory {
 
 pub fn run_server(state: PackingWorkerState, listener: TcpListener) -> Server {
     let port = listener.local_addr().expect("listener to work").port();
-    info!(custom.port = ?port, "Starting API server");
+    info!(custom.port = ?port, "Starting API server on port {port}");
 
     HttpServer::new(move || {
         App::new()

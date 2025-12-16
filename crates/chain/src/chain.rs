@@ -1029,7 +1029,7 @@ impl IrysNode {
                             _ = &mut service_set => {
                             },
                             res = &mut task_manager_pinned => {
-                                tracing::warn!(custom.res = ?res)
+                                tracing::warn!(custom.res = ?res, "Task manager completed with result: {res:?}")
                             }
                             _ = reth_node => {}
                         }

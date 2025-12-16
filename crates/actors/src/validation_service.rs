@@ -435,7 +435,7 @@ fn handle_broadcast_recv<T>(
             eyre::bail!("broadcast channel closed")
         }
         Err(broadcast::error::RecvError::Lagged(n)) => {
-            warn!(custom.skipped_messages = ?n, "reorg lagged");
+            warn!(custom.skipped_messages = ?n, "reorg lagged by {n} messages");
             if n > 5 {
                 error!("reorg channel significantly lagged");
             }
