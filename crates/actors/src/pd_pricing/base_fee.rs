@@ -359,6 +359,7 @@ mod tests {
             cost_per_mb: Amount::token(dec!(0.001))?,
             base_fee_floor: Amount::token(dec!(0.001))?,
             max_pd_chunks_per_block: max_chunks,
+            min_pd_transaction_cost: Amount::token(dec!(0.0))?,
         };
 
         let result = calculate_pd_base_fee_for_new_block(
@@ -486,6 +487,7 @@ pub(crate) mod pd_fee_adjustments {
                 cost_per_mb: Amount::token(dec!(0.01))?,
                 base_fee_floor: Amount::token(dec!(0.01))?,
                 max_pd_chunks_per_block: max_chunks_per_block,
+                min_pd_transaction_cost: Amount::token(dec!(0.0))?,
             };
 
             // Action

@@ -40,6 +40,7 @@ use revm::{MainBuilder as _, MainContext as _};
 use tracing::trace;
 
 // External crate imports - Other
+use irys_types::storage_pricing::TOKEN_SCALE;
 
 use super::*;
 use crate::precompiles::pd::context::PdContext;
@@ -59,6 +60,11 @@ mod constants {
 /// The balance of this account represents the current PD base fee.
 pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
     LazyLock::new(|| Address::from_word(keccak256("irys_pd_base_fee_account")));
+
+/// Account address used to store the IRYS/USD price in EVM state.
+/// The balance of this account represents the current IRYS token price in USD (1e18 scale).
+pub static IRYS_USD_PRICE_ACCOUNT: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_usd_price_account")));
 
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
@@ -398,6 +404,13 @@ impl EvmFactory for IrysEvmFactory {
         let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
         let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
 
+        // Get minimum PD transaction cost if Sprite is active
+        // Convert from irys_types::U256 to alloy_primitives::U256 via bytes
+        let min_pd_transaction_cost_usd = self
+            .hardfork_config
+            .min_pd_transaction_cost_at(block_timestamp)
+            .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
+
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
@@ -410,6 +423,7 @@ impl EvmFactory for IrysEvmFactory {
             false,
             self.context.clone_for_new_evm(),
             is_sprite_active,
+            min_pd_transaction_cost_usd,
         );
 
         // Register Irys custom precompiles only if Sprite hardfork is active.
@@ -432,6 +446,13 @@ impl EvmFactory for IrysEvmFactory {
         let block_timestamp = irys_types::UnixTimestamp::from_secs(input.block_env.timestamp.to());
         let is_sprite_active = self.hardfork_config.is_sprite_active(block_timestamp);
 
+        // Get minimum PD transaction cost if Sprite is active
+        // Convert from irys_types::U256 to alloy_primitives::U256 via bytes
+        let min_pd_transaction_cost_usd = self
+            .hardfork_config
+            .min_pd_transaction_cost_at(block_timestamp)
+            .map(|amount| U256::from_be_bytes(amount.amount.to_be_bytes()));
+
         let mut evm = IrysEvm::new(
             revm::Context::mainnet()
                 .with_block(input.block_env)
@@ -444,6 +465,7 @@ impl EvmFactory for IrysEvmFactory {
             true,
             self.context.clone_for_new_evm(),
             is_sprite_active,
+            min_pd_transaction_cost_usd,
         );
 
         // Register Irys custom precompiles only if Sprite hardfork is active.
@@ -503,6 +525,8 @@ pub struct IrysEvm<DB: Database, I, PRECOMPILE = EthPrecompiles> {
     context: PdContext,
     // Whether the Sprite hardfork is active (enables PD features)
     is_sprite_active: bool,
+    // Minimum PD transaction cost in USD (1e18 scale), None if Sprite not active
+    min_pd_transaction_cost_usd: Option<U256>,
 }
 
 impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
@@ -521,6 +545,7 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
         inspect: bool,
         context: PdContext,
         is_sprite_active: bool,
+        min_pd_transaction_cost_usd: Option<U256>,
     ) -> Self {
         Self {
             inner: evm,
@@ -528,6 +553,7 @@ impl<DB: Database, I, PRECOMPILE> IrysEvm<DB, I, PRECOMPILE> {
             state: Default::default(),
             context,
             is_sprite_active,
+            min_pd_transaction_cost_usd,
         }
     }
 
@@ -659,6 +685,39 @@ where
 
                 let base_total = chunks.saturating_mul(base_per_chunk);
                 let prio_total = chunks.saturating_mul(prio_per_chunk);
+
+                // Validate minimum PD transaction cost
+                if let Some(min_cost_usd) = self.min_pd_transaction_cost_usd {
+                    let irys_usd_price = self.read_irys_usd_price()?;
+
+                    // Calculate minimum cost in IRYS tokens:
+                    // min_cost_irys = (min_cost_usd * TOKEN_SCALE) / irys_usd_price
+                    // Both min_cost_usd and irys_usd_price are in TOKEN_SCALE (1e18) scale
+                    let scale = U256::from_be_bytes(TOKEN_SCALE.to_be_bytes());
+                    let min_cost_irys = min_cost_usd.saturating_mul(scale) / irys_usd_price;
+
+                    // Calculate actual total fees
+                    let actual_total_fees = base_total.saturating_add(prio_total);
+
+                    if actual_total_fees < min_cost_irys {
+                        tracing::debug!(
+                            min_cost_usd = %min_cost_usd,
+                            irys_usd_price = %irys_usd_price,
+                            min_cost_irys = %min_cost_irys,
+                            actual_total_fees = %actual_total_fees,
+                            chunks = %chunks,
+                            "PD transaction rejected: fees below minimum cost"
+                        );
+                        // Use InvalidTransaction::GasPriceLessThanBasefee to signal that the
+                        // transaction should be skipped during block building (not a fatal error).
+                        // This causes the payload builder to skip this tx and continue.
+                        // Note: We're repurposing this error type since there's no specific
+                        // "PD fee too low" variant in revm.
+                        return Err(EVMError::Transaction(
+                            InvalidTransaction::GasPriceLessThanBasefee,
+                        ));
+                    }
+                }
 
                 // Fee payer is the transaction caller; priority recipient is block beneficiary.
                 let fee_payer = tx.caller;
@@ -1001,6 +1060,27 @@ where
             Ok(Some(acc)) => acc.info.balance,
             _ => U256::ZERO,
         }
+    }
+
+    /// Reads the current IRYS/USD price from the EVM state.
+    /// The price is stored as the balance of the IRYS_USD_PRICE_ACCOUNT.
+    /// Returns the price in 1e18 scale (e.g., 1e18 = $1.00).
+    ///
+    /// # Errors
+    /// Returns an error if the price account doesn't exist or has zero balance.
+    pub fn read_irys_usd_price(&mut self) -> Result<U256, <Self as Evm>::Error> {
+        let price = match self.load_account(*IRYS_USD_PRICE_ACCOUNT)? {
+            Some(acc) => acc.info.balance,
+            None => U256::ZERO,
+        };
+
+        if price.is_zero() {
+            return Err(Self::create_internal_error(
+                "IRYS/USD price not set in EVM state".to_string(),
+            ));
+        }
+
+        Ok(price)
     }
 
     /// Loads an account from the underlying state, or the database if there are no preexisting changes.
@@ -1385,6 +1465,40 @@ where
                     let execution_result = Self::create_success_result(log);
                     Ok((Ok((account, execution_result, existed)), target))
                 }
+                shadow_tx::TransactionPacket::IrysUsdPriceUpdate(update) => {
+                    // IrysUsdPriceUpdate is a PD feature - only allow when Sprite hardfork is active.
+                    // This provides defense-in-depth; the consensus layer already guards generation.
+                    if !self.is_sprite_active {
+                        tracing::warn!(
+                            "IrysUsdPriceUpdate shadow transaction received before Sprite hardfork is active"
+                        );
+                        return Err(Self::create_internal_error(
+                            "IrysUsdPriceUpdate not allowed before Sprite hardfork".to_string(),
+                        ));
+                    }
+
+                    // Write the IRYS/USD price into the price account balance.
+                    let target = *IRYS_USD_PRICE_ACCOUNT;
+
+                    // Load existing or create new account
+                    let existed;
+                    let mut account = if let Some(acc) = self.load_account(target)? {
+                        existed = true;
+                        acc
+                    } else {
+                        existed = false;
+                        Account::new_not_existing(0)
+                    };
+                    account.info.balance = update.price;
+
+                    let log = Self::create_shadow_log(
+                        target,
+                        vec![topic],
+                        vec![DynSolValue::Uint(update.price, 256)],
+                    );
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Ok((account, execution_result, existed)), target))
+                }
             },
         }
     }
@@ -1514,7 +1628,9 @@ where
 mod tests {
     use super::*;
     use crate::pd_tx::{prepend_pd_header_v1_to_calldata, PdHeaderV1};
-    use crate::shadow_tx::{PdBaseFeeUpdate, ShadowTransaction, TransactionPacket};
+    use crate::shadow_tx::{
+        IrysUsdPriceUpdate, PdBaseFeeUpdate, ShadowTransaction, TransactionPacket,
+    };
     use crate::test_utils::{
         advance_block, get_balance, get_nonce, sign_shadow_tx, sign_tx, TestContext,
         DEFAULT_PRIORITY_FEE,
@@ -1674,7 +1790,9 @@ mod tests {
         let beneficiary = ctx.block_producer_a.address();
         let treasury = Address::ZERO;
 
-        let pd_base_fee = U256::from(7_u64);
+        // Fee values must exceed min_pd_transaction_cost ($0.01 USD at $1/IRYS = 0.01 tokens = 10^16 wei)
+        // With 3 chunks: total fees = 3 * (base + prio) >= 10^16, so per chunk >= 3.33e15
+        let pd_base_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens per chunk
         let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
         let pd_fee_update = ShadowTransaction::new_v1(
             TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
@@ -1685,7 +1803,23 @@ mod tests {
         // Priority fee ignored for PdBaseFeeUpdate (no payer address)
         let pd_fee_update_signed =
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
+
+        // Set IRYS/USD price (required for PD fee validation)
+        let irys_usd_price = U256::from(1_000_000_000_000_000_000_u128); // $1.00 in 1e18 scale
+        let irys_price_update = ShadowTransaction::new_v1(
+            TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                price: irys_usd_price,
+            }),
+            solution_hash,
+        );
+        let irys_price_signed = sign_shadow_tx(
+            irys_price_update,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        advance_block(&mut node, vec![pd_fee_update_signed, irys_price_signed]).await?;
 
         // Capture initial balances and nonce
         let payer_initial = get_balance(&node.inner, payer);
@@ -1693,10 +1827,11 @@ mod tests {
         let sink_initial = get_balance(&node.inner, treasury);
         let payer_initial_nonce = get_nonce(&node.inner, payer);
 
-        // Build and submit a PD-header transaction: 3 chunks, prio=10, base<=7
+        // Build and submit a PD-header transaction: 3 chunks
+        let pd_priority_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens per chunk
         let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: U256::from(10_u64),
-            max_base_fee_per_chunk: U256::from(7_u64),
+            max_priority_fee_per_chunk: pd_priority_fee,
+            max_base_fee_per_chunk: pd_base_fee,
         };
         let user_calldata = Bytes::from(vec![0xAA, 0xBB]);
         let input = prepend_pd_header_v1_to_calldata(&header, &user_calldata);
@@ -1749,8 +1884,8 @@ mod tests {
         let block_basefee = block.header().base_fee_per_gas.unwrap_or(0);
 
         // Calculate PD fees
-        let pd_base_total = U256::from(3_u64) * pd_base_fee; // 3 chunks * 7 = 21
-        let pd_prio_total = U256::from(3_u64) * U256::from(10_u64); // 3 chunks * 10 = 30
+        let pd_base_total = U256::from(3_u64) * pd_base_fee;
+        let pd_prio_total = U256::from(3_u64) * pd_priority_fee;
 
         // Calculate EVM gas costs
         // Note: max_priority_fee_per_gas = 0 in this test, so only base fee matters
@@ -1830,8 +1965,10 @@ mod tests {
 
         let payer = ctx.normal_signer.address();
 
-        // Set PD base fee to a known value
-        let pd_base_fee = U256::from(100_u64);
+        // Set PD base fee - must exceed min_pd_transaction_cost ($0.01 at $1/IRYS)
+        // With 2 chunks: total >= 10^16, so per chunk needs ~5e15
+        let pd_base_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens
+        let pd_priority_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens
         let solution_hash = FixedBytes::<32>::from_slice(&[0x44; 32]);
         let pd_fee_update = ShadowTransaction::new_v1(
             TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
@@ -1841,7 +1978,23 @@ mod tests {
         );
         let pd_fee_update_signed =
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
+
+        // Set IRYS/USD price (required for PD fee validation)
+        let irys_usd_price = U256::from(1_000_000_000_000_000_000_u128); // $1.00 in 1e18 scale
+        let irys_price_update = ShadowTransaction::new_v1(
+            TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                price: irys_usd_price,
+            }),
+            solution_hash,
+        );
+        let irys_price_signed = sign_shadow_tx(
+            irys_price_update,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        advance_block(&mut node, vec![pd_fee_update_signed, irys_price_signed]).await?;
 
         // Capture pre-simulation state
         let balance_before = get_balance(&node.inner, payer);
@@ -1853,8 +2006,8 @@ mod tests {
 
         // Build single PD transaction with 2 chunks
         let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: U256::from(50_u64),
-            max_base_fee_per_chunk: U256::from(100_u64),
+            max_priority_fee_per_chunk: pd_priority_fee,
+            max_base_fee_per_chunk: pd_base_fee,
         };
         let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xAA]));
 
@@ -1934,8 +2087,10 @@ mod tests {
         let beneficiary = ctx.block_producer_a.address();
         let treasury = Address::ZERO;
 
-        // Set PD base fee to a known value
-        let pd_base_fee = U256::from(100_u64);
+        // Set PD base fee - must exceed min_pd_transaction_cost ($0.01 at $1/IRYS)
+        // With 3 chunks: total >= 10^16, so per chunk needs ~3.33e15
+        let pd_base_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens
+        let pd_priority_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens
         let solution_hash = FixedBytes::<32>::from_slice(&[0x44; 32]);
         let pd_fee_update = ShadowTransaction::new_v1(
             TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
@@ -1945,7 +2100,23 @@ mod tests {
         );
         let pd_fee_update_signed =
             sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
-        advance_block(&mut node, vec![pd_fee_update_signed]).await?;
+
+        // Set IRYS/USD price (required for PD fee validation)
+        let irys_usd_price = U256::from(1_000_000_000_000_000_000_u128); // $1.00 in 1e18 scale
+        let irys_price_update = ShadowTransaction::new_v1(
+            TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                price: irys_usd_price,
+            }),
+            solution_hash,
+        );
+        let irys_price_signed = sign_shadow_tx(
+            irys_price_update,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        advance_block(&mut node, vec![pd_fee_update_signed, irys_price_signed]).await?;
 
         // Capture initial state
         let payer_initial_balance = get_balance(&node.inner, payer);
@@ -1963,8 +2134,8 @@ mod tests {
 
         // Build PD transaction header (3 chunks with fees)
         let header = PdHeaderV1 {
-            max_priority_fee_per_chunk: U256::from(50_u64),
-            max_base_fee_per_chunk: U256::from(100_u64),
+            max_priority_fee_per_chunk: pd_priority_fee,
+            max_base_fee_per_chunk: pd_base_fee,
         };
 
         // Reverting initcode: PUSH1 0 PUSH1 0 REVERT (0x60006000fd)
@@ -2022,8 +2193,8 @@ mod tests {
 
         // Calculate expected PD fees
         let num_chunks = 3_u64;
-        let pd_base_total = U256::from(num_chunks) * pd_base_fee; // 3 * 100 = 300
-        let pd_prio_total = U256::from(num_chunks) * U256::from(50_u64); // 3 * 50 = 150
+        let pd_base_total = U256::from(num_chunks) * pd_base_fee;
+        let pd_prio_total = U256::from(num_chunks) * pd_priority_fee;
 
         // Calculate EVM gas costs
         let evm_base_cost = U256::from(gas_used) * U256::from(block_basefee);

@@ -75,9 +75,13 @@ async fn heavy_test_reth_block_with_pd_too_large_gets_rejected() -> eyre::Result
     );
 
     // Build transaction calldata with PD header
+    // Note: Fees must be high enough to meet min_pd_transaction_cost ($0.01 USD).
+    // At $1/IRYS price, min_cost_irys = $0.01 * 1e18 = 1e16 wei.
+    // With 80 chunks, we need: total_fees >= 1e16, so per-chunk >= 1e16/80 = 1.25e14 wei.
+    // Using higher values for safety margin.
     let header = PdHeaderV1 {
-        max_priority_fee_per_chunk: U256::from(1_000_000_000_u64),
-        max_base_fee_per_chunk: U256::from(10_000_000_000_u64),
+        max_priority_fee_per_chunk: U256::from(1_000_000_000_000_000_u64), // 1e15 wei = 0.001 IRYS
+        max_base_fee_per_chunk: U256::from(1_000_000_000_000_000_u64),     // 1e15 wei = 0.001 IRYS
     };
     let calldata = prepend_pd_header_v1_to_calldata(&header, &[]);
 

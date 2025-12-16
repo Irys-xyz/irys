@@ -1,7 +1,7 @@
 use eyre::{eyre, Result};
 use irys_reth::shadow_tx::{
-    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, PdBaseFeeUpdate, ShadowTransaction,
-    TransactionPacket, UnstakeDebit,
+    BalanceDecrement, BalanceIncrement, BlockRewardIncrement, IrysUsdPriceUpdate, PdBaseFeeUpdate,
+    ShadowTransaction, TransactionPacket, UnstakeDebit,
 };
 use irys_types::{
     storage_pricing::{
@@ -10,7 +10,7 @@ use irys_types::{
     },
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     BoundedFee, CommitmentTransaction, ConsensusConfig, DataTransactionHeader, IngressProofsList,
-    IrysAddress, IrysBlockHeader, UnixTimestamp, H256, U256,
+    IrysAddress, IrysBlockHeader, IrysTokenPrice, UnixTimestamp, H256, U256,
 };
 use reth::revm::primitives::ruint::Uint;
 use std::collections::BTreeMap;
@@ -46,6 +46,12 @@ pub struct ShadowTxGenerator<'a> {
     // PD base fee per chunk (None for pre-Sprite blocks, Some for Sprite blocks)
     pd_base_fee_per_chunk: Option<Amount<(CostPerChunk, Irys)>>,
 
+    // IRYS/USD price for IrysUsdPriceUpdate shadow tx
+    irys_usd_price: IrysTokenPrice,
+
+    // Block timestamp for hardfork checks
+    block_timestamp: UnixTimestamp,
+
     // Iterator state
     treasury_balance: U256,
     phase: Phase,
@@ -80,7 +86,7 @@ impl Iterator for ShadowTxGenerator<'_> {
                 }
 
                 Phase::PdBaseFee => {
-                    self.phase = Phase::Commitments;
+                    self.phase = Phase::IrysUsdPrice;
                     self.index = 0;
                     // Only emit PdBaseFeeUpdate if we have a base fee (Sprite active)
                     if let Some(base_fee) = &self.pd_base_fee_per_chunk {
@@ -96,6 +102,27 @@ impl Iterator for ShadowTxGenerator<'_> {
                         }));
                     }
                     // None: skip PdBaseFeeUpdate and continue to next phase
+                }
+
+                Phase::IrysUsdPrice => {
+                    self.phase = Phase::Commitments;
+                    self.index = 0;
+                    // Only emit IrysUsdPriceUpdate if Sprite hardfork is active
+                    if self.config.hardforks.is_sprite_active(self.block_timestamp) {
+                        // Convert IrysTokenPrice to reth Uint<256, 4> at emission time
+                        let reth_price =
+                            Uint::from_be_bytes(self.irys_usd_price.amount.to_be_bytes());
+                        return Some(Ok(ShadowMetadata {
+                            shadow_tx: ShadowTransaction::new_v1(
+                                TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                                    price: reth_price,
+                                }),
+                                (*self.solution_hash).into(),
+                            ),
+                            transaction_fee: 0,
+                        }));
+                    }
+                    // Pre-Sprite: skip IrysUsdPriceUpdate and continue to next phase
                 }
 
                 Phase::Commitments => {
@@ -169,6 +196,7 @@ impl<'a> ShadowTxGenerator<'a> {
         publish_ledger: &'a PublishLedgerWithTxs,
         initial_treasury_balance: U256,
         pd_base_fee_per_chunk: Option<Amount<(CostPerChunk, Irys)>>,
+        irys_usd_price: IrysTokenPrice,
         block_timestamp: UnixTimestamp,
         ledger_expiry_balance_delta: &'a LedgerExpiryBalanceDelta,
         refund_events: &[UnpledgeRefundEvent],
@@ -213,6 +241,8 @@ impl<'a> ShadowTxGenerator<'a> {
             commitment_txs,
             submit_txs,
             pd_base_fee_per_chunk,
+            irys_usd_price,
+            block_timestamp,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -275,6 +305,8 @@ impl<'a> ShadowTxGenerator<'a> {
             commitment_txs,
             submit_txs,
             pd_base_fee_per_chunk,
+            irys_usd_price,
+            block_timestamp,
             treasury_balance: initial_treasury_balance,
             phase: Phase::Header,
             index: 0,
@@ -744,6 +776,7 @@ impl<'a> ShadowTxGenerator<'a> {
 enum Phase {
     Header,
     PdBaseFee,
+    IrysUsdPrice,
     Commitments,
     SubmitLedger,
     ExpiredLedgerFees,
@@ -906,6 +939,15 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
+                    }),
+                    solution_hash.into(),
+                ),
+                transaction_fee: 0,
+            },
         ];
 
         let empty_fees = LedgerExpiryBalanceDelta {
@@ -925,6 +967,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1003,6 +1046,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // IRYS/USD Price Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
             // Stake
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -1068,6 +1121,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1128,6 +1182,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // IRYS/USD Price Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
             // Storage fee for the submit transaction (treasury amount only)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -1162,6 +1226,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1317,6 +1382,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // IRYS/USD Price Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
             // Storage fee for the publish transaction (treasury amount + perm_fee)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -1385,6 +1460,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],
@@ -1462,6 +1538,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // IRYS/USD Price Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
         ];
 
         // Add miner rewards in sorted order (BTreeMap guarantees this)
@@ -1492,6 +1578,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
@@ -1575,6 +1662,16 @@ mod tests {
                 ),
                 transaction_fee: 0,
             },
+            // IRYS/USD Price Update
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
         ];
 
         // Add user refunds in sorted order (already sorted by tx_id)
@@ -1605,6 +1702,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
@@ -1646,7 +1744,7 @@ mod tests {
             proofs: None,
         };
 
-        // Only expect block reward and PD base fee update
+        // Only expect block reward, PD base fee update, and IRYS/USD price update
         let expected_shadow_txs = vec![
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
@@ -1661,6 +1759,15 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
                         per_chunk: U256::from(1000000_u64).into(),
+                    }),
+                    H256::zero().into(),
+                ),
+                transaction_fee: 0,
+            },
+            ShadowMetadata {
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                        price: Uint::from(1000000000000000000_u128),
                     }),
                     H256::zero().into(),
                 ),
@@ -1681,6 +1788,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))),
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &expired_fees,
             &[],
@@ -1732,7 +1840,8 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            None,                        // This should cause an error
+            None, // This should cause an error
+            IrysTokenPrice::new(U256::from(1000000000000000000_u128)),
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],

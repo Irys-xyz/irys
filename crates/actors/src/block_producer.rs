@@ -558,6 +558,7 @@ pub trait BlockProdStrategy {
                 pd_base_fee,
                 current_timestamp,
                 solution.solution_hash,
+                &current_ema_for_pricing,
             )
             .await?;
         let evm_block = eth_built_payload.block();
@@ -830,6 +831,7 @@ pub trait BlockProdStrategy {
         pd_base_fee: Option<Amount<(CostPerChunk, Irys)>>,
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
+        current_ema_for_pricing: &IrysTokenPrice,
     ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
@@ -850,6 +852,7 @@ pub trait BlockProdStrategy {
             &mempool.publish_txs,
             initial_treasury_balance,
             pd_base_fee,
+            *current_ema_for_pricing,
             timestamp_ms.to_secs(),
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,

@@ -1,7 +1,10 @@
 use crate::{api::pd_fee_history_request, utils::IrysNodeTest};
 use irys_api_server::routes::pd_pricing::PdFeeHistoryResponse;
 use irys_chain::IrysNodeCtx;
-use irys_types::{storage_pricing::PRECISION_SCALE, NodeConfig, U256};
+use irys_types::{
+    storage_pricing::{Amount, PRECISION_SCALE},
+    NodeConfig, U256,
+};
 
 /// Block specification for test chain setup
 struct BlockSpec {
@@ -40,14 +43,16 @@ async fn setup_pd_fee_history_test_chain(
     // Configure node with predictable PD parameters
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
-    config
+    let sprite = config
         .consensus
         .get_mut()
         .hardforks
         .sprite
         .as_mut()
-        .expect("Sprite hardfork must be configured for testing")
-        .max_pd_chunks_per_block = 100; // 100 chunks for easy percentage calculations
+        .expect("Sprite hardfork must be configured for testing");
+    sprite.max_pd_chunks_per_block = 100; // 100 chunks for easy percentage calculations
+                                          // Set min_pd_transaction_cost to 0 to avoid rejections in this test
+    sprite.min_pd_transaction_cost = Amount::new(U256::from(0));
 
     // Create and fund a test account for PD transactions
     let pd_signer = config.new_random_signer();
@@ -339,6 +344,146 @@ async fn heavy_pd_fee_history_priority_fee_percentiles() -> eyre::Result<()> {
             }
         }
     }
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Test that the fee history API returns min_pd_transaction_cost and that
+/// transactions must respect this minimum to be included in blocks.
+///
+/// Verifies the full flow:
+/// 1. API returns min_pd_transaction_cost in response
+/// 2. PD transaction with fees < min is rejected (not included in block)
+/// 3. PD transaction with fees >= min is accepted (included in block)
+#[test_log::test(tokio::test)]
+async fn heavy_pd_fee_history_returns_min_transaction_cost() -> eyre::Result<()> {
+    // Configure node with high min_pd_transaction_cost
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = 32;
+
+    // Create and fund two signers for PD transactions (separate to avoid nonce conflicts)
+    let low_fee_signer = config.new_random_signer();
+    let adequate_fee_signer = config.new_random_signer();
+    config.fund_genesis_accounts(vec![&low_fee_signer, &adequate_fee_signer]);
+
+    let sprite = config
+        .consensus
+        .get_mut()
+        .hardforks
+        .sprite
+        .as_mut()
+        .expect("Sprite hardfork must be configured for testing");
+
+    // Set minimum to 1 gwei (1e9 wei). At $1/IRYS, low fees (200 wei) won't meet this.
+    let min_cost = Amount::new(U256::from(10_u64.pow(9)));
+    sprite.min_pd_transaction_cost = min_cost;
+    sprite.base_fee_floor = Amount::new(U256::from(10_u64.pow(8)));
+    sprite.max_pd_chunks_per_block = 100;
+
+    // Store min_cost before we borrow config for node creation
+    let min_cost_usd = min_cost.amount;
+
+    // Start node and mine initial block to establish pricing
+    let node = IrysNodeTest::new_genesis(config).start().await;
+    let address = format!(
+        "http://127.0.0.1:{}",
+        node.node_ctx.config.node_config.http.bind_port
+    );
+    node.mine_block().await?;
+
+    // 1. Query API and verify min_pd_transaction_cost is returned
+    let response = pd_fee_history_request(&address, 1).await;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "Fee history request should succeed"
+    );
+
+    let fee_history: PdFeeHistoryResponse = response.json().await?;
+
+    assert_eq!(
+        fee_history.min_pd_transaction_cost_usd.amount, min_cost_usd,
+        "API should return configured min_pd_transaction_cost_usd"
+    );
+    let min_cost_irys = fee_history.min_pd_transaction_cost_irys.amount;
+    assert!(
+        min_cost_irys > U256::from(0),
+        "min_pd_transaction_cost_irys should be non-zero"
+    );
+
+    // 2. Submit LOW-FEE transaction (below minimum)
+    // Use fees well below min_cost_irys
+    let low_priority_fee = 100_u64; // 100 wei per chunk
+    let low_base_fee = 100_u64; // 100 wei per chunk
+                                // Total for 1 chunk = 200 wei, far below min_cost_irys
+
+    let low_fee_tx_hash = node
+        .create_and_inject_pd_transaction_with_custom_fees(
+            &low_fee_signer,
+            1,                // 1 chunk
+            low_priority_fee, // priority fee per chunk
+            low_base_fee,     // base fee per chunk
+            0,                // nonce
+            0,                // offset_base
+        )
+        .await?;
+
+    // Mine block - low-fee tx should NOT be included
+    let (_, eth_payload, _) = node.mine_block_without_gossip().await?;
+    let low_fee_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| *tx.tx_hash() == low_fee_tx_hash);
+
+    assert!(
+        !low_fee_included,
+        "Low-fee PD tx (fees below min_pd_transaction_cost) should be REJECTED"
+    );
+
+    // 3. Submit ADEQUATE-FEE transaction (at or above minimum)
+    // Use the base fee from the API response (predicted next block fee at index [1])
+    // Only adjust priority fee to meet the minimum threshold
+    let base_fee_from_api: u64 = fee_history.base_fee_per_chunk_irys[1]
+        .amount
+        .try_into()
+        .expect("base_fee should fit in u64");
+
+    // The EVM calculates min_cost_irys using on-chain price which may differ from API's EMA.
+    // At $1/IRYS price: min_cost_irys = min_cost.amount (they're equal in internal representation)
+    // For 1 chunk: total_fee = base_fee + priority_fee >= min_cost_irys
+    // So: priority_fee >= min_cost_irys - base_fee
+    let evm_min_cost_irys: u64 = min_cost_usd.try_into().expect("min_cost fits in u64");
+    let required_priority_fee = evm_min_cost_irys.saturating_sub(base_fee_from_api);
+    // Add buffer to ensure we exceed the threshold (same magnitude as min_cost)
+    let priority_fee = required_priority_fee.saturating_add(evm_min_cost_irys);
+
+    let adequate_tx_hash = node
+        .create_and_inject_pd_transaction_with_custom_fees(
+            &adequate_fee_signer,
+            1,                 // 1 chunk
+            priority_fee,      // priority fee per chunk (adjusted to meet minimum)
+            base_fee_from_api, // base fee from API
+            0,                 // nonce (fresh signer, starts at 0)
+            100,               // offset_base (different from first tx)
+        )
+        .await?;
+
+    // Mine block - adequate-fee tx should be included
+    let (_, eth_payload, _) = node.mine_block_without_gossip().await?;
+    let adequate_included = eth_payload
+        .block()
+        .body()
+        .transactions
+        .iter()
+        .any(|tx| *tx.tx_hash() == adequate_tx_hash);
+
+    assert!(
+        adequate_included,
+        "Adequate-fee PD tx (fees >= min_pd_transaction_cost) should be ACCEPTED"
+    );
 
     node.stop().await;
     Ok(())

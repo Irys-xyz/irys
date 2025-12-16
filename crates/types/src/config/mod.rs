@@ -570,6 +570,9 @@ mod tests {
 
         [hardforks.sprite.base_fee_floor]
         amount = "10000000000000000"
+
+        [hardforks.sprite.min_pd_transaction_cost]
+        amount = "10000000000000000"
         "#;
 
         // Create the expected config

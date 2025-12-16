@@ -151,6 +151,18 @@ impl PdPricing {
         base_fee_irys_vec.push(next_base_fee_irys);
         base_fee_usd_vec.push(next_base_fee_usd);
 
+        // Get min_pd_transaction_cost from the current (newest) block's sprite config
+        let current_timestamp = current_irys_block.timestamp_secs();
+        let current_sprite = self
+            .config
+            .consensus
+            .hardforks
+            .sprite_at(current_timestamp)
+            .expect("pre-Sprite blocks filtered");
+        let min_cost_usd = current_sprite.min_pd_transaction_cost;
+        let current_ema_price = current_ema.ema_for_public_pricing();
+        let min_cost_irys = convert_usd_to_irys_total(min_cost_usd, &current_ema_price)?;
+
         // oldest_block is first in array after oldest-first ordering
         let oldest_block = blocks_with_ema.first().ok_or_eyre("No oldest block")?;
 
@@ -160,6 +172,8 @@ impl PdPricing {
             base_fee_per_chunk_usd: base_fee_usd_vec,
             gas_used_ratio: gas_used_ratio_vec,
             reward: reward_vec,
+            min_pd_transaction_cost_irys: min_cost_irys,
+            min_pd_transaction_cost_usd: min_cost_usd,
         })
     }
 
@@ -296,6 +310,14 @@ pub struct PdFeeHistoryResponse {
 
     /// Priority fees per block with percentiles (length = N, historical blocks only)
     pub reward: Vec<BlockPriorityFees>,
+
+    /// Minimum total transaction cost in IRYS (at current EMA price).
+    /// Transaction composers should ensure: `total_fee >= max(min_pd_transaction_cost, computed_cost)`
+    pub min_pd_transaction_cost_irys: Amount<Irys>,
+
+    /// Minimum total transaction cost in USD (from hardfork config).
+    /// Transaction composers should ensure: `total_fee >= max(min_pd_transaction_cost, computed_cost)`
+    pub min_pd_transaction_cost_usd: Amount<Usd>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -326,6 +348,15 @@ fn convert_irys_to_usd(
 ) -> eyre::Result<Amount<(CostPerChunk, Usd)>> {
     let usd_amount = mul_div(irys_fee.amount, ema_price.amount, PRECISION_SCALE)?;
     Ok(Amount::<(CostPerChunk, Usd)>::new(usd_amount))
+}
+
+/// Convert USD amount to Irys amount using EMA price (for total transaction cost)
+fn convert_usd_to_irys_total(
+    usd_fee: Amount<Usd>,
+    ema_price: &IrysTokenPrice,
+) -> eyre::Result<Amount<Irys>> {
+    let irys_amount = mul_div(usd_fee.amount, PRECISION_SCALE, ema_price.amount)?;
+    Ok(Amount::<Irys>::new(irys_amount))
 }
 
 /// Validate percentiles array for fee history queries

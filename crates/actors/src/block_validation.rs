@@ -1607,6 +1607,7 @@ async fn generate_expected_shadow_transactions(
         &publish_ledger_with_txs,
         initial_treasury_balance,
         pd_base_fee_per_chunk,
+        current_ema_for_pricing.ema_for_public_pricing(),
         block.timestamp_secs(),
         &expired_ledger_fees,
         &commitment_refund_events,
