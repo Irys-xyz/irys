@@ -81,9 +81,7 @@ async fn heavy_pd_transaction_rejected_below_min_cost() -> eyre::Result<()> {
         "Low-fee PD transaction should NOT be included in block (rejected by EVM min cost check)"
     );
 
-    tracing::info!(
-        "Low-fee PD tx correctly rejected by EVM - not included in block"
-    );
+    tracing::info!("Low-fee PD tx correctly rejected by EVM - not included in block");
 
     // The test has verified:
     // 1. The low-fee tx was not included (min cost validation worked)

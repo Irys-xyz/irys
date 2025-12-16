@@ -109,9 +109,7 @@ impl Iterator for ShadowTxGenerator<'_> {
                         // IRYS/USD price update has no treasury impact
                         return Some(Ok(ShadowMetadata {
                             shadow_tx: ShadowTransaction::new_v1(
-                                TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
-                                    price,
-                                }),
+                                TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate { price }),
                                 (*self.solution_hash).into(),
                             ),
                             transaction_fee: 0,
@@ -1839,7 +1837,7 @@ mod tests {
             &[],
             &publish_ledger,
             initial_treasury,
-            None, // This should cause an error
+            None,                        // This should cause an error
             None, // irys_usd_price also None (but pd_base_fee check happens first)
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
@@ -1889,7 +1887,7 @@ mod tests {
             &publish_ledger,
             initial_treasury,
             Some(Amount::new(U256::from(1000000_u64))), // pd_base_fee is provided
-            None, // This should cause an error
+            None,                                       // This should cause an error
             UnixTimestamp::from_secs(0), // Sprite active from genesis in testing config
             &empty_fees,
             &[],

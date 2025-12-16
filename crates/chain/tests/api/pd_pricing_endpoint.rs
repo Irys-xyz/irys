@@ -1,7 +1,10 @@
 use crate::{api::pd_fee_history_request, utils::IrysNodeTest};
 use irys_api_server::routes::pd_pricing::PdFeeHistoryResponse;
 use irys_chain::IrysNodeCtx;
-use irys_types::{storage_pricing::{Amount, PRECISION_SCALE}, NodeConfig, U256};
+use irys_types::{
+    storage_pricing::{Amount, PRECISION_SCALE},
+    NodeConfig, U256,
+};
 use rust_decimal_macros::dec;
 
 /// Block specification for test chain setup
@@ -49,7 +52,7 @@ async fn setup_pd_fee_history_test_chain(
         .as_mut()
         .expect("Sprite hardfork must be configured for testing");
     sprite.max_pd_chunks_per_block = 100; // 100 chunks for easy percentage calculations
-    // Set min_pd_transaction_cost to 0 to avoid rejections in this test
+                                          // Set min_pd_transaction_cost to 0 to avoid rejections in this test
     sprite.min_pd_transaction_cost = Amount::token(dec!(0.0)).expect("valid token amount");
 
     // Create and fund a test account for PD transactions
