@@ -2262,4 +2262,136 @@ mod tests {
 
         Ok(())
     }
+
+    /// Test that PD transactions are correctly rejected when actual base fee exceeds
+    /// user's max, and automatically included when base fee is lowered.
+    ///
+    /// This verifies EIP-1559-style mempool retry semantics for PD transactions:
+    /// 1. TX rejected when actual_per_chunk > max_base_fee_per_chunk (stays in mempool)
+    /// 2. SAME TX automatically included when base fee drops below user's max
+    #[test_log::test(tokio::test)]
+    async fn test_pd_tx_rejected_then_accepted_on_fee_decrease() -> eyre::Result<()> {
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x11; 32]);
+
+        // Set VERY HIGH IRYS/USD price to make min_pd_transaction_cost negligible
+        // min_cost = $0.01 / $1,000,000 = 0.00000001 tokens (effectively zero)
+        let irys_usd_price = U256::from(1_000_000_000_000_000_000_000_000_u128); // $1,000,000
+        let irys_price_update = ShadowTransaction::new_v1(
+            TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                price: irys_usd_price,
+            }),
+            solution_hash,
+        );
+        let irys_price_signed = sign_shadow_tx(
+            irys_price_update,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        // Set HIGH base fee that exceeds user's max
+        let high_base_fee = U256::from(10_000_000_000_000_000_u64); // 0.01 tokens per chunk
+        let pd_fee_update_high = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: high_base_fee,
+            }),
+            solution_hash,
+        );
+        let pd_fee_high_signed = sign_shadow_tx(
+            pd_fee_update_high,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        // User sets max_base_fee BELOW the actual fee
+        let user_max_base_fee = U256::from(5_000_000_000_000_000_u64); // 0.005 tokens (< 0.01)
+        let pd_priority_fee = U256::from(5_000_000_000_000_000_u64);
+
+        // Build PD transaction header
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: pd_priority_fee,
+            max_base_fee_per_chunk: user_max_base_fee, // TOO LOW!
+        };
+
+        // Create and submit PD transaction (1 chunk)
+        use crate::test_utils::chunk_spec_with_params;
+
+        let payer = ctx.normal_signer.address();
+        let payer_nonce = get_nonce(&node.inner, payer);
+        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xAA]));
+        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
+        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![key1],
+        }]);
+        let tx_raw = TxEip1559 {
+            access_list,
+            input,
+            max_priority_fee_per_gas: 0,
+            nonce: payer_nonce,
+            ..tx_eip1559_base()
+        };
+        let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
+        let tx_hash = *pooled.hash();
+        node.inner
+            .pool
+            .add_transaction(TransactionOrigin::Local, pooled)
+            .await?;
+
+        // Mine block - TX should be REJECTED (not included, stays in mempool)
+        let payload1 = advance_block(&mut node, vec![pd_fee_high_signed, irys_price_signed.clone()]).await?;
+        let block1 = payload1.block();
+        let tx_in_block1 = block1
+            .body()
+            .transactions
+            .iter()
+            .any(|tx| *tx.hash() == tx_hash);
+        assert!(
+            !tx_in_block1,
+            "TX should NOT be included when max_base_fee ({}) < actual_base_fee ({})",
+            user_max_base_fee, high_base_fee
+        );
+
+        // Lower the base fee below user's max
+        let low_base_fee = U256::from(3_000_000_000_000_000_u64); // 0.003 tokens (< 0.005)
+        let pd_fee_update_low = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: low_base_fee,
+            }),
+            solution_hash,
+        );
+        let pd_fee_low_signed = sign_shadow_tx(
+            pd_fee_update_low,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        // Mine block with lowered fee - SAME TX should now be picked up from mempool
+        let payload2 = advance_block(&mut node, vec![pd_fee_low_signed]).await?;
+        let block2 = payload2.block();
+        let tx_in_block2 = block2
+            .body()
+            .transactions
+            .iter()
+            .any(|tx| *tx.hash() == tx_hash);
+        assert!(
+            tx_in_block2,
+            "TX should be automatically included from mempool when max_base_fee ({}) >= actual_base_fee ({})",
+            user_max_base_fee, low_base_fee
+        );
+
+        // Verify nonce was consumed (tx was executed)
+        let payer_final_nonce = get_nonce(&node.inner, payer);
+        assert_eq!(
+            payer_final_nonce,
+            payer_nonce + 1,
+            "Nonce should increment after transaction execution"
+        );
+
+        Ok(())
+    }
 }
