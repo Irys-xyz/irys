@@ -1,13 +1,12 @@
-//! Tests that PD transactions below min_pd_transaction_cost are rejected.
+//! Tests for PD transaction minimum cost validation.
 //!
-//! The min_pd_transaction_cost is a Sprite hardfork parameter that sets the minimum
-//! total cost (in USD) for a PD transaction. Transactions with fees below this
-//! threshold are rejected at EVM execution time during block production.
+//! The `min_pd_transaction_cost` Sprite hardfork parameter sets the minimum total cost
+//! (in USD) for a PD transaction. Transactions with fees below this threshold are rejected.
 //!
-//! NOTE: The mempool prefilter only performs a basic sanity check (rejecting zero fees).
-//! The full USD price conversion and min cost validation happens during EVM execution.
-//! This means low-fee transactions can enter the mempool but will be rejected when
-//! the block builder attempts to execute them.
+//! NOTE: The mempool prefilter only performs basic sanity checks. Full validation
+//! (USD price conversion, min cost) happens during EVM execution. This means invalid
+//! transactions can enter the mempool but will be rejected when the block builder
+//! attempts to execute them.
 
 use crate::utils::IrysNodeTest;
 use irys_types::storage_pricing::Amount;
