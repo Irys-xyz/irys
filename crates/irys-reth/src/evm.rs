@@ -2342,7 +2342,11 @@ mod tests {
             .await?;
 
         // Mine block - TX should be REJECTED (not included, stays in mempool)
-        let payload1 = advance_block(&mut node, vec![pd_fee_high_signed, irys_price_signed.clone()]).await?;
+        let payload1 = advance_block(
+            &mut node,
+            vec![pd_fee_high_signed, irys_price_signed.clone()],
+        )
+        .await?;
         let block1 = payload1.block();
         let tx_in_block1 = block1
             .body()
