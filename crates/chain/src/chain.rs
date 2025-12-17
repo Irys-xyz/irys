@@ -15,6 +15,7 @@ use irys_actors::{
     chunk_fetcher::{ChunkFetcherFactory, HttpChunkFetcher},
     chunk_migration_service::ChunkMigrationService,
     mempool_guard::MempoolReadGuard,
+    mempool_service::MempoolServiceMessage,
     mempool_service::{MempoolService, MempoolServiceFacadeImpl},
     mining_bus::{MiningBus, MiningBusBroadcaster},
     packing_service::PackingRequest,
@@ -25,9 +26,8 @@ use irys_actors::{
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
-    BlockValidationTracker, DataSyncService, MempoolServiceMessageWithSpan, StorageModuleService,
+    BlockValidationTracker, DataSyncService, StorageModuleService,
 };
-use irys_api_client::IrysApiClient;
 use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -837,7 +837,7 @@ impl IrysNode {
             let (tx, rx) = oneshot::channel();
             ctx.service_senders
                 .mempool
-                .send(MempoolServiceMessage::GetState(tx).into())?;
+                .send(MempoolServiceMessage::GetState(tx))?;
             let mempool = rx.await?;
             let config = ctx.config.clone();
             // use executor so we get automatic termination when the node starts to shut down
@@ -847,7 +847,7 @@ impl IrysNode {
                 loop {
                     interval.tick().await;
 
-                    let info = irys_api_server::routes::index::get_node_info(
+                    let info = irys_domain::get_node_info(
                         &block_index,
                         &block_tree,
                         &peer_list,
@@ -1266,7 +1266,7 @@ impl IrysNode {
         let (tx, rx) = oneshot::channel();
         service_senders
             .mempool
-            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx).into())
+            .send(irys_actors::mempool_service::MempoolServiceMessage::GetState(tx))
             .map_err(|_| eyre::eyre!("Failed to send GetState message to mempool service"))?;
 
         let mempool_state = rx
@@ -1351,10 +1351,15 @@ impl IrysNode {
         // resolved once all actors are converted to tokio services, and BlockPool is moved into
         // domain
         let (chain_sync_tx, chain_sync_rx) = mpsc::unbounded_channel();
-        let (p2p_service_handle, block_pool, gossip_data_handler) = p2p_service.run(
+        let (
+            gossip_server,
+            gossip_server_handle,
+            broadcast_task_handle,
+            block_pool,
+            gossip_data_handler,
+        ) = p2p_service.run(
             mempool_facade,
             block_discovery_facade.clone(),
-            IrysApiClient::new(),
             task_exec,
             peer_list_guard.clone(),
             irys_db.clone(),
@@ -1365,6 +1370,9 @@ impl IrysNode {
             service_senders.clone(),
             chain_sync_tx.clone(),
             mempool_guard.clone(),
+            block_index_guard.clone(),
+            block_tree_guard.clone(),
+            std::time::Instant::now(),
         )?;
 
         // set up the price oracles (initial price(s) fetched during construction)
@@ -1600,6 +1608,13 @@ impl IrysNode {
             http_listener,
         );
 
+        let p2p_service_handle = irys_p2p::spawn_p2p_server_watcher_task(
+            gossip_server,
+            gossip_server_handle,
+            broadcast_task_handle,
+            task_exec,
+        );
+
         // this OnceLock is due to the cyclic chain between Reth & the Irys node, where the IrysRethProvider requires both
         // this is "safe", as the OnceLock is always set before this start function returns
         let mut w = irys_provider
@@ -1726,32 +1741,34 @@ impl IrysNode {
             .filter(|sm| sm.partition_assignment().is_some())
         {
             let uninitialized = sm.get_intervals(ChunkType::Uninitialized);
-            for interval in uninitialized {
-                let sender = service_senders.packing_sender();
-                if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval)) {
-                    match sender.try_send(req) {
-                        Ok(()) => {}
-                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                            tracing::event!(
-                                target: "irys::packing",
-                                tracing::Level::WARN,
-                                storage_module.id = %sm.id,
-                                packing.interval = ?interval,
-                                "Dropping packing request due to a saturated channel"
-                            );
-                        }
-                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_req)) => {
+            let sender = service_senders.packing_sender();
+            let sm = sm.clone();
+
+            debug!(
+                "SM {} has {} Uninitialized intervals",
+                &sm.id,
+                &uninitialized.len()
+            );
+            // spawn a thread per SM (as packing queues are per-partition)
+            // this is to prevent packing requests getting dropped
+            // note: once we support submodules, this will probably need to change
+            runtime_handle.spawn(async move {
+                for interval in uninitialized {
+                    if let Ok(req) = PackingRequest::new(sm.clone(), PartitionChunkRange(interval))
+                    {
+                        if let Err(e) = sender.send(req).await {
                             tracing::event!(
                                 target: "irys::packing",
                                 tracing::Level::ERROR,
                                 storage_module.id = %sm.id,
                                 packing.interval = ?interval,
-                                "Packing channel closed; failed to enqueue repacking request"
+                                "Packing channel closed - {e}; failed to enqueue repacking request"
                             );
+                            return; // assume this is unrecoverable
                         }
                     }
                 }
-            }
+            });
         }
         (controllers, handles)
     }
@@ -1900,7 +1917,7 @@ impl IrysNode {
         runtime_handle: tokio::runtime::Handle,
         block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
         gossip_data_handler: Arc<
-            GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl, IrysApiClient>,
+            GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl>,
         >,
         (tx, rx): (
             UnboundedSender<SyncChainServiceMessage>,
@@ -2007,7 +2024,7 @@ fn init_peer_list_service(
 fn init_reth_service(
     irys_db: &DatabaseProvider,
     reth_node_adapter: IrysRethNodeAdapter,
-    mempool_sender: UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool_sender: UnboundedSender<MempoolServiceMessage>,
     reth_rx: UnboundedReceiver<RethServiceMessage>,
     runtime_handle: tokio::runtime::Handle,
 ) -> TokioServiceHandle {

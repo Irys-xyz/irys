@@ -261,8 +261,8 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
         .expect("to sign block header");
 
     // Set up the mock API client to return the transactions
-    fixture2.api_client_stub.txs.insert(tx1.id, tx1);
-    fixture2.api_client_stub.txs.insert(tx2.id, tx2);
+    fixture1.add_tx_to_mempool(tx1.clone()).await;
+    fixture1.add_tx_to_mempool(tx2.clone()).await;
 
     let (service1_handle, gossip_service1_message_bus) = fixture1.run_service().await;
     let (service2_handle, _gossip_service2_message_bus) = fixture2.run_service().await;
@@ -321,7 +321,7 @@ async fn heavy_should_reject_block_with_missing_transactions() -> eyre::Result<(
         .expect("to sign block header");
 
     // Set up the mock API client to return only one transaction
-    fixture2.api_client_stub.txs.insert(tx1.id, tx1);
+    fixture1.add_tx_to_mempool(tx1.clone()).await;
     // Don't add tx2 to expected transactions, so it will be missing
 
     // Send block from service 1 to service 2

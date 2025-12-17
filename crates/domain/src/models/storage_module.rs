@@ -1225,17 +1225,7 @@ impl StorageModule {
         let range = self.get_storage_module_ledger_offsets()?;
         let partition_offset = PartitionChunkOffset::from(*(ledger_offset - range.start()));
 
-        match self.generate_full_chunk(partition_offset) {
-            Ok(some_full_chunk) => Ok(some_full_chunk),
-            // Convert errors to Ok(None) to prevent node panics and HTTP 500 errors.
-            // Missing chunks are expected during normal operation (e.g., pruned data,
-            // gaps in storage) and should be handled gracefully by returning None
-            // rather than propagating errors up to the API layer.
-            Err(err) => {
-                debug!("Unable to find chunk at ledger offset: {err:?}");
-                Ok(None)
-            }
-        }
+        self.generate_full_chunk(partition_offset)
     }
 
     /// Constructs a Chunk struct for the given ledger offset
@@ -1254,10 +1244,13 @@ impl StorageModule {
         partition_offset: PartitionChunkOffset,
     ) -> Result<Option<PackedChunk>> {
         // Get paths and process them
-        let (data_root, data_size, data_path, chunk_offset) =
+        let Some((data_root, data_size, data_path, chunk_offset)) =
             self.query_submodule_db_by_offset(partition_offset, |tx| {
-                let tx_path = get_tx_path_by_offset(tx, partition_offset)?
-                    .ok_or(eyre::eyre!("Unable to find a chunk with that tx_path"))?;
+                let tx_path = match get_tx_path_by_offset(tx, partition_offset) {
+                    Ok(Some(tx_path)) => tx_path,
+                    Ok(None) => return Ok(None),
+                    Err(err) => return Err(eyre::eyre!("Database read should succeed: {:?}", err)),
+                };
 
                 // Extract the data_root form the tx_path leaf node
                 let path_buff = Base64::from(tx_path);
@@ -1303,13 +1296,16 @@ impl StorageModule {
                 let chunk_offset =
                     (proof.offset() as u64).div_ceil(self.config.consensus.chunk_size) - 1;
 
-                Ok((
+                Ok(Some((
                     data_root,
                     data_size,
                     path_buff,
                     TxChunkOffset(chunk_offset.try_into().expect("Value exceeds u32::MAX")),
-                ))
-            })?;
+                )))
+            })?
+            else {
+                return Ok(None);
+            };
 
         let mut chunks = self.read_chunks(partition_chunk_offset_ii!(
             partition_offset,

@@ -356,7 +356,9 @@ impl Compact for PeerListItem {
 
 #[derive(Copy, Clone, Debug)]
 pub struct HandshakeMessage {
-    /// API address of the peer to handshake with
+    /// Gossip address of the peer to handshake with
+    pub gossip_address: SocketAddr,
+    /// Fallback for older versions - API address of the peer to handshake with
     pub api_address: SocketAddr,
     /// If true, tries to handshake even if the peer is already known and the last handshake
     /// was successful
@@ -365,6 +367,8 @@ pub struct HandshakeMessage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnnouncementFinishedMessage {
+    pub peer_gossip_address: SocketAddr,
+    /// Fallback for older versions - API address of the peer
     pub peer_api_address: SocketAddr,
     pub success: bool,
     pub retry: bool,
@@ -451,9 +455,14 @@ impl PeerNetworkSender {
     pub fn initiate_handshake(
         &self,
         api_address: SocketAddr,
+        gossip_address: SocketAddr,
         force: bool,
     ) -> Result<(), SendError<PeerNetworkServiceMessage>> {
-        let message = PeerNetworkServiceMessage::Handshake(HandshakeMessage { api_address, force });
+        let message = PeerNetworkServiceMessage::Handshake(HandshakeMessage {
+            api_address,
+            gossip_address,
+            force,
+        });
         self.send(message)
     }
 

@@ -20,6 +20,7 @@ use irys_types::{
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem,
     UnpackedChunk,
 };
+use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
@@ -30,52 +31,52 @@ const HEADER_AND_BODY_RETRIES: usize = 3;
 
 /// Handles data received by the `GossipServer`
 #[derive(Debug)]
-pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery, TApiClient>
+pub struct GossipDataHandler<TMempoolFacade, TBlockDiscovery>
 where
     TMempoolFacade: MempoolFacade,
     TBlockDiscovery: BlockDiscoveryFacade,
-    TApiClient: ApiClient,
 {
     pub mempool: TMempoolFacade,
     pub block_pool: Arc<BlockPool<TBlockDiscovery, TMempoolFacade>>,
     pub(crate) cache: Arc<GossipCache>,
-    pub api_client: TApiClient,
     pub gossip_client: GossipClient,
     pub peer_list: PeerList,
     pub sync_state: ChainSyncState,
-    /// Tracing span
-    pub span: Span,
     pub execution_payload_cache: ExecutionPayloadCache,
     pub data_request_tracker: DataRequestTracker,
+    pub block_index: BlockIndexReadGuard,
+    pub block_tree: BlockTreeReadGuard,
+    pub config: Config,
+    pub started_at: Instant,
 }
 
-impl<M, B, A> Clone for GossipDataHandler<M, B, A>
+impl<M, B> Clone for GossipDataHandler<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     fn clone(&self) -> Self {
         Self {
             mempool: self.mempool.clone(),
             block_pool: self.block_pool.clone(),
             cache: Arc::clone(&self.cache),
-            api_client: self.api_client.clone(),
             gossip_client: self.gossip_client.clone(),
             peer_list: self.peer_list.clone(),
             sync_state: self.sync_state.clone(),
-            span: self.span.clone(),
             execution_payload_cache: self.execution_payload_cache.clone(),
             data_request_tracker: DataRequestTracker::new(),
+            block_index: self.block_index.clone(),
+            block_tree: self.block_tree.clone(),
+            config: self.config.clone(),
+            started_at: self.started_at,
         }
     }
 }
 
-impl<M, B, A> GossipDataHandler<M, B, A>
+impl<M, B> GossipDataHandler<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
-    A: ApiClient,
 {
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_chunk(
@@ -411,7 +412,7 @@ where
         .await
     }
 
-    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash), parent = &self.span)]
+    #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
         block_header_request: GossipRequest<IrysBlockHeader>,
@@ -729,7 +730,7 @@ where
             .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
 
         self.block_pool
-            .process_block::<A>(block_header, Arc::new(block_body), skip_block_validation)
+            .process_block(block_header, Arc::new(block_body), skip_block_validation)
             .await?;
         Ok(())
     }
@@ -999,6 +1000,61 @@ where
                     None => Ok(false),
                 }
             }
+            GossipDataRequest::Transaction(tx_id) => {
+                debug!(
+                    "Node {}: Handling transaction request for tx {:?}",
+                    self.gossip_client.mining_address, tx_id
+                );
+
+                let vec = vec![tx_id];
+                let mempool_guard = &self.block_pool.mempool_guard;
+                let db = &self.block_pool.db;
+
+                // Try commitment txs first
+                if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        let data = Arc::new(GossipData::CommitmentTransaction(tx));
+                        if check_result.should_update_score() {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
+                        return Ok(true);
+                    }
+                };
+
+                // Try data txs
+                if let Ok(mut result) =
+                    get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        let data = Arc::new(GossipData::Transaction(tx));
+                        if check_result.should_update_score() {
+                            self.gossip_client.send_data_and_update_score_for_request(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &self.peer_list,
+                            );
+                        } else {
+                            self.gossip_client.send_data_without_score_update(
+                                (&request.miner_address, peer_info),
+                                data,
+                            );
+                        }
+                        return Ok(true);
+                    }
+                };
+
+                Ok(false)
+            }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
@@ -1056,6 +1112,28 @@ where
                     .await;
 
                 Ok(maybe_evm_block.map(GossipData::ExecutionPayload))
+            }
+            GossipDataRequest::Transaction(tx_id) => {
+                let vec = vec![tx_id];
+                let mempool_guard = &self.block_pool.mempool_guard;
+                let db = &self.block_pool.db;
+
+                if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        return Ok(Some(GossipData::CommitmentTransaction(tx)));
+                    }
+                };
+
+                if let Ok(mut result) =
+                    get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
+                {
+                    if let Some(tx) = result.pop() {
+                        return Ok(Some(GossipData::Transaction(tx)));
+                    }
+                };
+
+                Ok(None)
             }
             GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
         }

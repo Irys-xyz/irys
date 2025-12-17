@@ -1,5 +1,4 @@
 use crate::mempool_service::MempoolServiceMessage;
-use crate::MempoolServiceMessageWithSpan;
 use eyre::eyre;
 use irys_database::{database, db::IrysDatabaseExt as _};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
@@ -22,7 +21,7 @@ pub struct RethService {
     cmd_rx: UnboundedReceiver<RethServiceMessage>,
     handle: IrysRethNodeAdapter,
     db: DatabaseProvider,
-    mempool: UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool: UnboundedSender<MempoolServiceMessage>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -60,7 +59,7 @@ pub struct ForkChoiceUpdate {
 
 #[tracing::instrument(level = "trace", skip_all, err)]
 async fn evm_block_hash_from_block_hash(
-    mempool_service: &UnboundedSender<MempoolServiceMessageWithSpan>,
+    mempool_service: &UnboundedSender<MempoolServiceMessage>,
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
@@ -69,7 +68,7 @@ async fn evm_block_hash_from_block_hash(
     let irys_header = {
         let (tx, rx) = oneshot::channel();
         mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx).into())
+            .send(MempoolServiceMessage::GetBlockHeader(irys_hash, true, tx))
             .expect("expected send to mempool to succeed");
         let mempool_response = rx.await?;
         match mempool_response {
@@ -101,7 +100,7 @@ impl RethService {
     pub fn spawn_service(
         handle: IrysRethNodeAdapter,
         database_provider: DatabaseProvider,
-        mempool: UnboundedSender<MempoolServiceMessageWithSpan>,
+        mempool: UnboundedSender<MempoolServiceMessage>,
         cmd_rx: UnboundedReceiver<RethServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {

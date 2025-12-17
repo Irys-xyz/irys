@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use irys_types::{block_production::Seed, H256List, IrysBlockHeader};
 use irys_vdf::MiningBroadcaster;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use tracing::{debug, info, Span};
+use tracing::{debug, info};
 
 /// Tokio-native broadcast envelope for mining events.
 #[derive(Debug, Clone)]
@@ -30,7 +30,6 @@ pub enum MiningBroadcastEvent {
 #[derive(Debug)]
 struct MiningBusInner {
     subscribers: Mutex<Vec<UnboundedSender<Arc<MiningBroadcastEvent>>>>,
-    span: Option<Span>,
 }
 
 /// Tokio-native mining bus that supports fan-out to multiple subscribers.
@@ -46,23 +45,18 @@ struct MiningBusInner {
 #[derive(Debug, Clone)]
 pub struct MiningBus(Arc<MiningBusInner>);
 
+impl Default for MiningBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MiningBus {
-    /// Create a new mining bus with an optional tracing Span applied to send operations.
-    pub fn new(span: Option<Span>) -> Self {
+    /// Create a new mining bus.
+    pub fn new() -> Self {
         Self(Arc::new(MiningBusInner {
             subscribers: Mutex::new(Vec::new()),
-            span,
         }))
-    }
-
-    fn with_span<F: FnOnce()>(span: &Option<Span>, f: F) {
-        if let Some(span) = span {
-            let span = span.clone();
-            let _entered = span.enter();
-            f();
-        } else {
-            f();
-        }
     }
 
     /// Subscribe to mining events. Returns a new UnboundedReceiver.
@@ -88,10 +82,8 @@ impl MiningBus {
     /// Send a seed/checkpoints/global step update to all subscribers.
     #[tracing::instrument(level = "trace", skip_all, fields(vdf.seed = ?seed, vdf.global_step = %global_step, vdf.subscriber_count))]
     pub fn send_seed(&self, seed: Seed, checkpoints: H256List, global_step: u64) -> usize {
-        Self::with_span(&self.0.span, || {
-            let total = self.0.subscribers.lock().map(|s| s.len()).unwrap_or(0);
-            info!("Broadcast Mining: seed {:?}, subs: {}", seed, total);
-        });
+        let total = self.0.subscribers.lock().map(|s| s.len()).unwrap_or(0);
+        info!("Broadcast Mining: seed {:?}, subs: {}", seed, total);
 
         let msg = BroadcastMiningSeed {
             seed,
