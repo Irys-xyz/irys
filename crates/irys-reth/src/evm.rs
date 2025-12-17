@@ -673,14 +673,20 @@ where
                 // Compute PD fees based on header values. Always derive PD chunk count from access list.
                 let chunks_u64 = crate::pd_tx::sum_pd_chunks_in_access_list(&tx.access_list);
                 let chunks = U256::from(chunks_u64);
-                // Read the actual PD base fee from EVM state and cap by user's max.
+                // Read the actual PD base fee from EVM state.
                 let actual_per_chunk = self.read_pd_base_fee_per_chunk();
-                let base_per_chunk = if actual_per_chunk > pd_header.max_base_fee_per_chunk {
-                    // TODO: reject the tx!!!
-                    pd_header.max_base_fee_per_chunk
-                } else {
-                    actual_per_chunk
-                };
+                // Reject if actual base fee exceeds user's max (EIP-1559 semantics).
+                if actual_per_chunk > pd_header.max_base_fee_per_chunk {
+                    tracing::debug!(
+                        actual_per_chunk = %actual_per_chunk,
+                        max_base_fee_per_chunk = %pd_header.max_base_fee_per_chunk,
+                        "PD transaction rejected: actual base fee exceeds user's max"
+                    );
+                    return Err(EVMError::Transaction(
+                        InvalidTransaction::GasPriceLessThanBasefee,
+                    ));
+                }
+                let base_per_chunk = actual_per_chunk;
                 let prio_per_chunk = pd_header.max_priority_fee_per_chunk;
 
                 let base_total = chunks.saturating_mul(base_per_chunk);
