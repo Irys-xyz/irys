@@ -2370,10 +2370,7 @@ pub async fn data_txs_are_valid(
                             let (ing_tx, ing_rx) = tokio::sync::oneshot::channel();
                             if service_senders
                                 .mempool
-                                .send(
-                                    crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx)
-                                        .into(),
-                                )
+                                .send(crate::MempoolServiceMessage::IngestChunk(unpacked, ing_tx))
                                 .is_err()
                             {
                                 return Err(PreValidationError::ValidationServiceUnreachable);
@@ -2731,7 +2728,7 @@ async fn mempool_block_retriever(
     let (tx, rx) = tokio::sync::oneshot::channel();
     service_senders
         .mempool
-        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx).into())
+        .send(MempoolServiceMessage::GetBlockHeader(hash, false, tx))
         .expect("MempoolServiceMessage should be delivered");
     rx.await.expect("mempool service message should succeed")
 }

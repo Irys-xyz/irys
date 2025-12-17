@@ -81,7 +81,11 @@ pub async fn get_balance(
                 let (tx, rx) = oneshot::channel();
                 state
                     .mempool_service
-                    .send(MempoolServiceMessage::GetBlockHeader(irys_block_hash, false, tx).into())
+                    .send(MempoolServiceMessage::GetBlockHeader(
+                        irys_block_hash,
+                        false,
+                        tx,
+                    ))
                     .expect("expected send to mempool to succeed");
                 let mempool_response = rx.await.map_err(|e| {
                     error!("Mempool response error: {}", e);

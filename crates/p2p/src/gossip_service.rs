@@ -33,7 +33,7 @@ use std::time::Instant;
 use tokio::sync::mpsc::{
     channel, error::SendError, Receiver, Sender, UnboundedReceiver, UnboundedSender,
 };
-use tracing::{debug, info, warn, Span};
+use tracing::{debug, info, warn};
 
 type TaskExecutionResult = Result<(), tokio::task::JoinError>;
 
@@ -198,7 +198,6 @@ impl P2PService {
             gossip_client: self.client.clone(),
             peer_list: peer_list.clone(),
             sync_state: self.sync_state.clone(),
-            span: Span::current(),
             execution_payload_cache: execution_payload_provider,
             data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
             block_index,

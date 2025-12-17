@@ -32,7 +32,7 @@ pub async fn post_chunk(
     let tx_ingress_msg = MempoolServiceMessage::IngestChunk(chunk, oneshot_tx);
 
     // Handle failure to deliver the message (e.g., channel closed)
-    if let Err(err) = state.mempool_service.send(tx_ingress_msg.into()) {
+    if let Err(err) = state.mempool_service.send(tx_ingress_msg) {
         tracing::error!("Failed to send to mempool channel: {:?}", err);
         return Err((
             format!("Failed to send to mempool channel: {err:?}"),

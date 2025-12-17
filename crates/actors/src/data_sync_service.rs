@@ -263,7 +263,9 @@ impl DataSyncServiceInner {
             // ..then, send the unpacked chunk to the mempool and let the it do it's thing.
             self.service_senders
                 .mempool
-                .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(unpacked_chunk).into())
+                .send(crate::MempoolServiceMessage::IngestChunkFireAndForget(
+                    unpacked_chunk,
+                ))
                 .expect("to send MempoolServiceMessage");
         }
 

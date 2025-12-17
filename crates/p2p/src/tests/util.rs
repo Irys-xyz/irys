@@ -42,7 +42,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tracing::{debug, info, warn, Span};
+use tracing::{debug, info, warn};
 
 #[derive(Clone, Debug)]
 pub(crate) struct MempoolStub {
@@ -936,7 +936,6 @@ pub(crate) async fn data_handler_stub(
         ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
-        span: Span::current(),
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
         block_index: block_index_read_guard_stub,
@@ -979,7 +978,6 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,
-        span: Span::current(),
         execution_payload_cache,
         data_request_tracker: crate::rate_limiting::DataRequestTracker::new(),
         block_index: block_index_read_guard_stub,
