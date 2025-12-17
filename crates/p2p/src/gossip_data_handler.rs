@@ -14,7 +14,6 @@ use irys_actors::{
     block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
     CriticalChunkIngressError, MempoolFacade,
 };
-use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
@@ -25,13 +24,12 @@ use irys_types::{
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem,
     UnpackedChunk,
 };
-use rand::prelude::SliceRandom as _;
 use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, error, instrument, warn, Instrument as _, Span};
+use tracing::{debug, error, instrument, warn, Instrument as _};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
 

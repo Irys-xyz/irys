@@ -221,7 +221,10 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let data_root = ingress_proof.data_root;
         self.service
-            .send(MempoolServiceMessage::IngestIngressProof(ingress_proof, oneshot_tx).into())
+            .send(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))
             .map_err(|_| {
                 IngressProofError::Other(format!(
                     "Error sending IngestIngressProof message for data_root {:?}",
@@ -309,7 +312,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn get_internal_read_guard(&self) -> MempoolReadGuard {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.service
-            .send(MempoolServiceMessage::GetReadGuard(tx).into())
+            .send(MempoolServiceMessage::GetReadGuard(tx))
             .expect("to send GetInternalReadGuard message");
 
         rx.await.expect("to process GetInternalReadGuard message")
