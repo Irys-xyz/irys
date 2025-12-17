@@ -294,6 +294,9 @@ impl ValidationService {
                     let vdf_pending = coordinator.vdf_scheduler.pending.len();
                     let concurrent_active = coordinator.concurrent_tasks.len();
 
+                    // TODO: this notify_one() is a quick and dirty fix for an issue this system has with it's usage of notify that we haven't been able to figure out (it causes stalls in the VDF validation)
+                    self.vdf_notify.notify_one();
+
                     // Extract VDF task details if running
                     let (vdf_running, vdf_block_hash, vdf_block_height) =
                         if let Some(current_vdf) = &coordinator.vdf_scheduler.current {
