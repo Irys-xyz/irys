@@ -749,10 +749,12 @@ where
                         available = %fee_payer_balance,
                         "PD transaction rejected: insufficient balance for PD fees"
                     );
-                    return Err(EVMError::Transaction(InvalidTransaction::LackOfFundForMaxFee {
-                        fee: Box::new(total_pd_fees),
-                        balance: Box::new(fee_payer_balance),
-                    }));
+                    return Err(EVMError::Transaction(
+                        InvalidTransaction::LackOfFundForMaxFee {
+                            fee: Box::new(total_pd_fees),
+                            balance: Box::new(fee_payer_balance),
+                        },
+                    ));
                 }
 
                 // Strip the PD header from calldata before executing the tx logic.
