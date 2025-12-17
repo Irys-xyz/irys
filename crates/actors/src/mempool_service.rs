@@ -196,20 +196,6 @@ pub struct Inner {
     message_handler_semaphore: Arc<Semaphore>,
 }
 
-pub struct MempoolServiceMessageWithSpan {
-    pub message: MempoolServiceMessage,
-    pub span: Span,
-}
-
-impl From<MempoolServiceMessage> for MempoolServiceMessageWithSpan {
-    fn from(value: MempoolServiceMessage) -> Self {
-        Self {
-            message: value,
-            span: Span::current(),
-        }
-    }
-}
-
 /// Messages that the Mempool Service handler supports
 #[derive(Debug)]
 pub enum MempoolServiceMessage {
@@ -277,6 +263,33 @@ pub enum MempoolServiceMessage {
     CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<IrysAddress>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
+}
+
+impl MempoolServiceMessage {
+    /// Returns the variant name as a static string for tracing/logging purposes
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            Self::BlockConfirmed(_) => "BlockConfirmed",
+            Self::IngestChunk(_, _) => "IngestChunk",
+            Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
+            Self::IngestIngressProof(_, _) => "IngestIngressProof",
+            Self::CommitmentTxExists(_, _) => "CommitmentTxExists",
+            Self::IngestCommitmentTxFromApi(_, _) => "IngestCommitmentTxFromApi",
+            Self::IngestCommitmentTxFromGossip(_, _) => "IngestCommitmentTxFromGossip",
+            Self::DataTxExists(_, _) => "DataTxExists",
+            Self::IngestDataTxFromApi(_, _) => "IngestDataTxFromApi",
+            Self::IngestDataTxFromGossip(_, _) => "IngestDataTxFromGossip",
+            Self::GetBestMempoolTxs(_, _) => "GetBestMempoolTxs",
+            Self::GetCommitmentTxs { .. } => "GetCommitmentTxs",
+            Self::GetDataTxs(_, _) => "GetDataTxs",
+            Self::GetBlockHeader(_, _, _) => "GetBlockHeader",
+            Self::GetState(_) => "GetState",
+            Self::RemoveFromBlacklist(_, _) => "RemoveFromBlacklist",
+            Self::UpdateStakeAndPledgeWhitelist(_, _) => "UpdateStakeAndPledgeWhitelist",
+            Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
+            Self::GetMempoolStatus(_) => "GetMempoolStatus",
+        }
+    }
 }
 
 impl Inner {
@@ -2661,8 +2674,8 @@ pub enum IngressProofError {
 #[derive(Debug)]
 pub struct MempoolService {
     shutdown: Shutdown,
-    msg_rx: UnboundedReceiver<MempoolServiceMessageWithSpan>, // mempool message receiver
-    reorg_rx: broadcast::Receiver<ReorgEvent>,                // reorg broadcast receiver
+    msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
+    reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
     block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
     inner: Arc<Inner>,
 }
@@ -2680,7 +2693,7 @@ impl MempoolService {
         reth_node_adapter: IrysRethNodeAdapter,
         storage_modules_guard: StorageModulesReadGuard,
         block_tree_read_guard: &BlockTreeReadGuard,
-        rx: UnboundedReceiver<MempoolServiceMessageWithSpan>,
+        rx: UnboundedReceiver<MempoolServiceMessage>,
         config: &Config,
         service_senders: &ServiceSenders,
         runtime_handle: tokio::runtime::Handle,
@@ -2762,15 +2775,15 @@ impl MempoolService {
                 msg = self.msg_rx.recv() => {
                     match msg {
                         Some(msg) => {
-                            let MempoolServiceMessageWithSpan { message: msg, span } = msg;
-                            let _enter = span.enter();
+                            // Create a new span for each message at process time (not send time)
+                            let msg_type = msg.variant_name();
+                            let span = tracing::info_span!("mempool_handle_message", msg_type = %msg_type);
 
                             // Acquiring a permit from the semaphore has to be called on the Arc<Semaphore> specifically
                             let semaphore = self.inner.message_handler_semaphore.clone();
                             match semaphore.try_acquire_owned() {
                                 Ok(permit) => {
                                     let inner = Arc::clone(&self.inner);
-                                    let msg_type = format!("{:?}", msg);
                                     // Permit acquired immediately
                                     runtime_handle.spawn(async move {
                                         let _permit = permit; // Hold until task completes
@@ -2779,10 +2792,10 @@ impl MempoolService {
                                             inner.handle_message(msg),
                                             20,
                                             &task_info,
-                                        ).in_current_span().await {
+                                        ).await {
                                             error!("Error handling mempool message {}: {:?}", msg_type, err);
                                         }
-                                    }.in_current_span());
+                                    }.instrument(span));
                                 }
                                 Err(e) => {
                                     match e {
@@ -2797,7 +2810,6 @@ impl MempoolService {
                                     // No permits available, will wait
                                     let inner = Arc::clone(&self.inner);
                                     let semaphore = inner.message_handler_semaphore.clone();
-                                    let msg_type = format!("{:?}", msg);
                                     // Wait a minute before crashing out
                                     match tokio::time::timeout(Duration::from_secs(60), semaphore.acquire_owned()).await {
                                         Ok(permit_result) => {
@@ -2810,10 +2822,10 @@ impl MempoolService {
                                                             inner.handle_message(msg),
                                                             20,
                                                             &task_info,
-                                                        ).in_current_span().await {
+                                                        ).await {
                                                             error!("Error handling mempool message {}: {:?}", msg_type, err);
                                                         }
-                                                    }.in_current_span());
+                                                    }.instrument(span));
                                                 }
                                                 Err(err) => {
                                                     error!("Failed to acquire mempool message handler permit: {:?}", err);
@@ -2862,7 +2874,8 @@ impl MempoolService {
         // Process remaining messages with timeout
         let process_remaining = async {
             while let Ok(msg) = self.msg_rx.try_recv() {
-                let MempoolServiceMessageWithSpan { message: msg, span } = msg;
+                let span =
+                    tracing::info_span!("mempool_handle_message", msg_type = %msg.variant_name());
                 self.inner.handle_message(msg).instrument(span).await?;
             }
             Ok::<(), eyre::Error>(())

@@ -87,7 +87,9 @@ async fn get_block_by_hash(
         let (tx, rx) = oneshot::channel();
         state
             .mempool_service
-            .send(MempoolServiceMessage::GetBlockHeader(block_hash, with_poa, tx).into())
+            .send(MempoolServiceMessage::GetBlockHeader(
+                block_hash, with_poa, tx,
+            ))
             .expect("expected send to mempool to succeed");
         let mempool_response = rx.await.map_err(|e| {
             tracing::error!("Mempool response error: {}", e);

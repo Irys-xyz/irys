@@ -474,7 +474,10 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .node_ctx
         .service_senders
         .mempool
-        .send(MempoolServiceMessage::IngestDataTxFromGossip(old_data_tx.header.clone(), tx).into())
+        .send(MempoolServiceMessage::IngestDataTxFromGossip(
+            old_data_tx.header.clone(),
+            tx,
+        ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
     rx.await??;
@@ -485,10 +488,10 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .node_ctx
         .service_senders
         .mempool
-        .send(
-            MempoolServiceMessage::IngestCommitmentTxFromGossip(commitment_tx_old.clone(), tx)
-                .into(),
-        )
+        .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
+            commitment_tx_old.clone(),
+            tx,
+        ))
         .map_err(|_| eyre::eyre!("failed to send mempool message"))?;
     // Ignore possible ingestion errors in tests
     rx.await??;
