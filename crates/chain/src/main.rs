@@ -1,7 +1,8 @@
 use irys_chain::{utils::load_config, IrysNode};
 use irys_testing_utils::setup_panic_hook;
+use irys_types::ShutdownReason;
 use irys_utils::shutdown::spawn_shutdown_watchdog;
-use tracing::{info, level_filters::LevelFilter};
+use tracing::{error, info, level_filters::LevelFilter};
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
     layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
@@ -52,8 +53,22 @@ async fn main() -> eyre::Result<()> {
     handle.start_mining()?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
-    let shutdown_reason =
-        tokio::task::spawn_blocking(|| reth_thread_handle.unwrap().join().unwrap()).await?;
+    let shutdown_reason = tokio::task::spawn_blocking(move || {
+        match reth_thread_handle {
+            Some(handle) => match handle.join() {
+                Ok(reason) => reason,
+                Err(e) => {
+                    error!("Reth thread panicked: {:?}", e);
+                    ShutdownReason::FatalError("Reth thread panicked".to_string())
+                }
+            },
+            None => {
+                error!("Reth thread handle was None");
+                ShutdownReason::FatalError("Reth thread handle was None".to_string())
+            }
+        }
+    })
+    .await?;
 
     // Spawn watchdog thread to force exit if graceful shutdown hangs
     spawn_shutdown_watchdog(shutdown_reason.clone());

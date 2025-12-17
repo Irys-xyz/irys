@@ -191,41 +191,39 @@ pub fn init_telemetry() -> Result<()> {
     Ok(())
 }
 
-/// Flush pending telemetry before process termination (e.g., panic hooks)
+/// Shutdown and flush all pending telemetry before process termination.
+///
+/// This properly drains all pending log/trace batches and waits for HTTP exports
+/// to complete. After calling this, no further telemetry will be processed.
+///
+/// # Important
+///
+/// This is a blocking call. When using tokio, call from `spawn_blocking`
+///
+/// Should be called once at application exit.
 #[cfg(feature = "telemetry")]
 pub fn flush_telemetry() -> Result<bool> {
-    use opentelemetry_sdk::logs::SdkLoggerProvider;
-    let logger_flush_res = LOGGER_PROVIDER.get().map(SdkLoggerProvider::force_flush);
+    let mut flushed = false;
 
-    let tracer_flush_res = TRACER_PROVIDER.get().map(SdkTracerProvider::force_flush);
-
-    let (flushed, res) = match (logger_flush_res, tracer_flush_res) {
-        (Some(Ok(_)), Some(Ok(_))) => (true, Ok(true)),
-        (None, Some(Ok(_))) => (true, Ok(true)),
-        (Some(Ok(_)), None) => (true, Ok(true)),
-
-        (None | Some(Ok(_)), Some(Err(te))) => {
-            (true, Err(eyre::eyre!("Failed to flush tracer: {:?}", &te)))
+    // Shutdown logger provider
+    if let Some(logger) = LOGGER_PROVIDER.get() {
+        if let Err(e) = logger.shutdown() {
+            eprintln!("Logger provider shutdown error: {:?}", e);
+        } else {
+            flushed = true;
         }
-        (Some(Err(le)), None | Some(Ok(_))) => {
-            (true, Err(eyre::eyre!("Failed to flush logger: {:?}", &le)))
-        }
-        (Some(Err(le)), Some(Err(te))) => (
-            false,
-            Err(eyre::eyre!(
-                "Failed to flush Logger & tracer - logger: {:?}\n tracer: {:?}",
-                &le,
-                te
-            )),
-        ),
-        (None, None) => (false, Ok(false)),
-    };
-
-    if flushed {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
 
-    res
+    // Shutdown tracer provider - drains pending spans
+    if let Some(tracer) = TRACER_PROVIDER.get() {
+        if let Err(e) = tracer.shutdown() {
+            eprintln!("Tracer provider shutdown error: {:?}", e);
+        } else {
+            flushed = true;
+        }
+    }
+
+    Ok(flushed)
 }
 
 // No-op implementations when the telemetry feature is disabled
