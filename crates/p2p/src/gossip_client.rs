@@ -6,7 +6,6 @@ use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
-use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData,
@@ -112,26 +111,6 @@ impl GossipClient {
         let response_time = start_time.elapsed();
         Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
 
-        if !matches!(&res, Ok(GossipResponse::Accepted(Some(_)))) {
-            if let GossipDataRequest::Transaction(tx_id) = requested_data {
-                debug!(
-                    "Gossip pull_data failed for transaction {}, falling back to API client",
-                    tx_id
-                );
-                let api_client = IrysApiClient::new();
-                if let Ok(tx_response) = api_client.get_transaction(peer.1.address.api, tx_id).await
-                {
-                    let gossip_data = match tx_response {
-                        IrysTransactionResponse::Storage(tx) => GossipData::Transaction(tx),
-                        IrysTransactionResponse::Commitment(tx) => {
-                            GossipData::CommitmentTransaction(tx)
-                        }
-                    };
-                    return Ok(GossipResponse::Accepted(Some(gossip_data)));
-                }
-            }
-        }
-
         res
     }
 
@@ -166,20 +145,7 @@ impl GossipClient {
             )),
         };
 
-        if let Ok(info) = gossip_result {
-            return Ok(info);
-        }
-
-        debug!(
-            "Gossip get_info failed for peer {}, falling back to API client",
-            peer.gossip
-        );
-
-        let api_client = IrysApiClient::new();
-        api_client
-            .node_info(peer.api)
-            .await
-            .map_err(|e| GossipClientError::GetRequest(peer.api.to_string(), e.to_string()))
+        gossip_result
     }
 
     pub async fn get_peer_list(
@@ -303,20 +269,7 @@ impl GossipClient {
             )),
         };
 
-        if let Ok(index) = gossip_result {
-            return Ok(index);
-        }
-
-        debug!(
-            "Gossip get_block_index failed for peer {}, falling back to API client",
-            peer.gossip
-        );
-
-        let api_client = IrysApiClient::new();
-        api_client
-            .get_block_index(peer.api, query)
-            .await
-            .map_err(|e| GossipClientError::GetRequest(peer.api.to_string(), e.to_string()))
+        gossip_result
     }
 
     pub async fn get_protocol_version(&self, peer: PeerAddress) -> Result<u32, GossipClientError> {
