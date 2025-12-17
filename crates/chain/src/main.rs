@@ -53,19 +53,17 @@ async fn main() -> eyre::Result<()> {
     handle.start_mining()?;
     let reth_thread_handle = handle.reth_thread_handle.clone();
     // wait for the node to be shut down
-    let shutdown_reason = tokio::task::spawn_blocking(move || {
-        match reth_thread_handle {
-            Some(handle) => match handle.join() {
-                Ok(reason) => reason,
-                Err(e) => {
-                    error!("Reth thread panicked: {:?}", e);
-                    ShutdownReason::FatalError("Reth thread panicked".to_string())
-                }
-            },
-            None => {
-                error!("Reth thread handle was None");
-                ShutdownReason::FatalError("Reth thread handle was None".to_string())
+    let shutdown_reason = tokio::task::spawn_blocking(move || match reth_thread_handle {
+        Some(handle) => match handle.join() {
+            Ok(reason) => reason,
+            Err(e) => {
+                error!("Reth thread panicked: {:?}", e);
+                ShutdownReason::FatalError("Reth thread panicked".to_string())
             }
+        },
+        None => {
+            error!("Reth thread handle was None");
+            ShutdownReason::FatalError("Reth thread handle was None".to_string())
         }
     })
     .await?;
