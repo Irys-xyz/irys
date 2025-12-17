@@ -28,7 +28,7 @@ use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tracing::{debug, error, info, warn, Instrument as _};
+use tracing::{debug, error, info, trace, warn, Instrument as _};
 
 pub const REGENERATE_PROOFS: bool = true;
 
@@ -315,7 +315,7 @@ impl InnerCacheTask {
             if pending_roots.len() >= 256 {
                 let write_tx = self.db.tx_mut()?;
                 for root in pending_roots.drain(..) {
-                    debug!(
+                    trace!(
                         chunk.data_root = ?root,
                         "Pruning chunks for data root without active proofs"
                     );
@@ -397,7 +397,7 @@ impl InnerCacheTask {
             let max_height: u64 = match horizon {
                 Some(h) => h,
                 None => {
-                    debug!(
+                    trace!(
                         data_root.data_root = ?data_root,
                         "Skipping prune for data root without inclusion or expiry"
                     );
@@ -405,9 +405,11 @@ impl InnerCacheTask {
                 }
             };
 
-            debug!(
+            trace!(
                 "Processing data root {} max height: {}, prune height: {}",
-                &data_root, &max_height, &prune_height
+                &data_root,
+                &max_height,
+                &prune_height
             );
 
             if max_height < prune_height {
@@ -426,7 +428,7 @@ impl InnerCacheTask {
                 }
 
                 if has_local_proof {
-                    debug!(
+                    trace!(
                         data_root.data_root = ?data_root,
                         "Skipping prune for data root with locally generated ingress proof"
                     );
