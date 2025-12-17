@@ -732,6 +732,29 @@ where
                 // that will also make accounting easier on irys side
                 let treasury = Address::ZERO;
 
+                // Pre-validate fee_payer has sufficient balance for total PD fees
+                let total_pd_fees = base_total.saturating_add(prio_total);
+                let fee_payer_account = self
+                    .inner
+                    .ctx
+                    .journaled_state
+                    .inner
+                    .load_account(&mut self.inner.ctx.journaled_state.database, fee_payer)?;
+                let fee_payer_balance = fee_payer_account.data.info.balance;
+
+                if fee_payer_balance < total_pd_fees {
+                    tracing::debug!(
+                        fee_payer = %fee_payer,
+                        required = %total_pd_fees,
+                        available = %fee_payer_balance,
+                        "PD transaction rejected: insufficient balance for PD fees"
+                    );
+                    return Err(EVMError::Transaction(InvalidTransaction::LackOfFundForMaxFee {
+                        fee: Box::new(total_pd_fees),
+                        balance: Box::new(fee_payer_balance),
+                    }));
+                }
+
                 // Strip the PD header from calldata before executing the tx logic.
                 let stripped: Bytes = tx.data.slice(consumed..);
                 let mut tx = tx;
@@ -739,27 +762,28 @@ where
 
                 let _checkpoint = self.inner.ctx.journaled_state.checkpoint();
                 {
-                    // deduct fees from payer
-                    // TODO: if user does not have enough fees then we extract all the funds we can from him
-                    if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                    // Deduct fees from payer. Balance was pre-validated above, so OutOfFunds
+                    // should not occur. OverflowPayment is theoretically possible but extremely
+                    // unlikely (would require recipient balance near U256::MAX).
+                    if let Some(err) = self.inner.ctx.journaled_state.inner.transfer(
                         &mut self.inner.ctx.journaled_state.database,
                         fee_payer,
                         treasury,
                         base_total,
                     )? {
-                        return Err(EVMError::Custom(
-                            "insufficient balance for PD base fees".to_string(),
-                        ));
+                        return Err(EVMError::Custom(format!(
+                            "PD base fee transfer failed unexpectedly: {err:?}"
+                        )));
                     }
-                    if let Some(_err) = self.inner.ctx.journaled_state.inner.transfer(
+                    if let Some(err) = self.inner.ctx.journaled_state.inner.transfer(
                         &mut self.inner.ctx.journaled_state.database,
                         fee_payer,
                         beneficiary,
                         prio_total,
                     )? {
-                        return Err(EVMError::Custom(
-                            "insufficient balance for PD priority fees".to_string(),
-                        ));
+                        return Err(EVMError::Custom(format!(
+                            "PD priority fee transfer failed unexpectedly: {err:?}"
+                        )));
                     }
                 }
                 self.inner.ctx.journaled_state.checkpoint_commit();
@@ -2394,6 +2418,170 @@ mod tests {
             payer_final_nonce,
             payer_nonce + 1,
             "Nonce should increment after transaction execution"
+        );
+
+        Ok(())
+    }
+
+    /// Test that PD transactions are correctly rejected when user has insufficient balance
+    /// for PD fees, and automatically included when the account is funded via shadow transaction.
+    ///
+    /// This verifies EIP-1559-style mempool retry semantics for PD fee balance validation:
+    /// 1. TX rejected when balance < total PD fees (stays in mempool)
+    /// 2. Account funded via UnstakeRefund shadow transaction
+    /// 3. SAME TX automatically included from mempool after funding
+    #[test_log::test(tokio::test)]
+    async fn test_pd_tx_rejected_then_accepted_after_funding() -> eyre::Result<()> {
+        use crate::shadow_tx::BalanceIncrement;
+
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+        let solution_hash = FixedBytes::<32>::from_slice(&[0x22; 32]);
+
+        // Use target_account which may have zero or low initial balance
+        // We'll set PD fees high enough to exceed any reasonable balance
+        let payer = ctx.normal_signer.address();
+        let payer_initial_balance = get_balance(&node.inner, payer);
+        let payer_nonce = get_nonce(&node.inner, payer);
+
+        // Set IRYS/USD price (required for PD fee validation)
+        // Use high price to make min_pd_transaction_cost negligible
+        let irys_usd_price = U256::from(1_000_000_000_000_000_000_000_000_u128); // $1,000,000
+        let irys_price_update = ShadowTransaction::new_v1(
+            TransactionPacket::IrysUsdPriceUpdate(IrysUsdPriceUpdate {
+                price: irys_usd_price,
+            }),
+            solution_hash,
+        );
+        let irys_price_signed = sign_shadow_tx(
+            irys_price_update,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        // Set a HIGH actual PD base fee that exceeds the payer's balance when multiplied by chunks
+        // payer_initial_balance is ~1M tokens, so set per-chunk fee to 0.6M tokens
+        // With 2 chunks: 2 * 0.6M = 1.2M > 1M balance
+        let excessive_base_fee_per_chunk = payer_initial_balance
+            .saturating_mul(U256::from(6_u64))
+            .checked_div(U256::from(10_u64))
+            .unwrap(); // 60% of balance per chunk
+
+        let pd_fee_update = ShadowTransaction::new_v1(
+            TransactionPacket::PdBaseFeeUpdate(PdBaseFeeUpdate {
+                per_chunk: excessive_base_fee_per_chunk,
+            }),
+            solution_hash,
+        );
+        let pd_fee_update_signed =
+            sign_shadow_tx(pd_fee_update, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+
+        // Priority fee per chunk (small relative to base fee)
+        let pd_priority_fee = U256::from(1_000_000_000_000_000_u64); // 0.001 tokens per chunk
+
+        // Build PD transaction header - user is willing to pay the high fees
+        let header = PdHeaderV1 {
+            max_priority_fee_per_chunk: pd_priority_fee,
+            max_base_fee_per_chunk: excessive_base_fee_per_chunk, // User accepts the high fee
+        };
+
+        // Create PD transaction with 2 chunks (total cost = 2 * excessive_fee + 2 * prio)
+        use crate::test_utils::chunk_spec_with_params;
+
+        let input = prepend_pd_header_v1_to_calldata(&header, &Bytes::from(vec![0xBB]));
+        let key1 = B256::from(chunk_spec_with_params([0; 25], 0, 1).encode());
+        let key2 = B256::from(chunk_spec_with_params([0; 25], 1, 1).encode());
+        let access_list = alloy_eips::eip2930::AccessList(vec![AlItem {
+            address: irys_types::precompile::PD_PRECOMPILE_ADDRESS,
+            storage_keys: vec![key1, key2],
+        }]);
+        let tx_raw = TxEip1559 {
+            access_list,
+            input,
+            max_priority_fee_per_gas: 0,
+            nonce: payer_nonce,
+            ..tx_eip1559_base()
+        };
+        let pooled = sign_tx(tx_raw, &ctx.normal_signer).await;
+        let tx_hash = *pooled.hash();
+
+        // Submit to mempool - should be accepted (mempool doesn't check PD fee balance)
+        node.inner
+            .pool
+            .add_transaction(TransactionOrigin::Local, pooled)
+            .await?;
+
+        // Mine block 1 - TX should be REJECTED due to insufficient balance for PD fees
+        let payload1 = advance_block(
+            &mut node,
+            vec![pd_fee_update_signed, irys_price_signed.clone()],
+        )
+        .await?;
+        let block1 = payload1.block();
+        let tx_in_block1 = block1
+            .body()
+            .transactions
+            .iter()
+            .any(|tx| *tx.hash() == tx_hash);
+        assert!(
+            !tx_in_block1,
+            "TX should NOT be included when balance ({}) < total PD fees (2 * {})",
+            payer_initial_balance, excessive_base_fee_per_chunk
+        );
+
+        // Verify payer nonce unchanged (tx not executed)
+        let payer_nonce_after_block1 = get_nonce(&node.inner, payer);
+        assert_eq!(
+            payer_nonce_after_block1, payer_nonce,
+            "Nonce should NOT change when TX is rejected"
+        );
+
+        // Fund the payer account via UnstakeRefund shadow transaction
+        // Need to add enough to cover: 2 chunks * (base_fee + prio_fee) + gas
+        // Total PD fees = 2 * excessive_base_fee_per_chunk + 2 * pd_priority_fee
+        // Add some extra for safety
+        let funding_amount = excessive_base_fee_per_chunk
+            .saturating_mul(U256::from(3_u64))
+            .saturating_add(pd_priority_fee.saturating_mul(U256::from(2_u64)));
+
+        let funding_tx = ShadowTransaction::new_v1(
+            TransactionPacket::UnstakeRefund(BalanceIncrement {
+                amount: funding_amount,
+                target: payer,
+                irys_ref: FixedBytes::ZERO,
+            }),
+            solution_hash,
+        );
+        let funding_tx_signed =
+            sign_shadow_tx(funding_tx, &ctx.block_producer_a, DEFAULT_PRIORITY_FEE).await?;
+
+        // Mine block 2 with funding - SAME TX should now be picked up from mempool
+        let payload2 = advance_block(&mut node, vec![funding_tx_signed]).await?;
+        let block2 = payload2.block();
+        let tx_in_block2 = block2
+            .body()
+            .transactions
+            .iter()
+            .any(|tx| *tx.hash() == tx_hash);
+        assert!(
+            tx_in_block2,
+            "TX should be automatically included from mempool after account is funded"
+        );
+
+        // Verify nonce was consumed (tx was executed)
+        let payer_final_nonce = get_nonce(&node.inner, payer);
+        assert_eq!(
+            payer_final_nonce,
+            payer_nonce + 1,
+            "Nonce should increment after transaction execution"
+        );
+
+        // Verify balance was affected (PD fees deducted)
+        let payer_final_balance = get_balance(&node.inner, payer);
+        assert!(
+            payer_final_balance < payer_initial_balance + funding_amount,
+            "Balance should be reduced by PD fees after execution"
         );
 
         Ok(())
