@@ -3,7 +3,7 @@ use crate::mempool_service::{
     ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
 use crate::services::ServiceSenders;
-use crate::{CriticalChunkIngressError, MempoolReadGuard, MempoolServiceMessageWithSpan};
+use crate::{CriticalChunkIngressError, MempoolReadGuard};
 use eyre::eyre;
 use irys_types::{
     chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,

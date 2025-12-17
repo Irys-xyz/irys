@@ -290,6 +290,7 @@ impl MempoolServiceMessage {
             Self::UpdateStakeAndPledgeWhitelist(_, _) => "UpdateStakeAndPledgeWhitelist",
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
             Self::GetMempoolStatus(_) => "GetMempoolStatus",
+            Self::GetReadGuard(_) => "GetReadGuard",
         }
     }
 }

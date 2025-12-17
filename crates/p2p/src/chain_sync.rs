@@ -595,7 +595,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     {
                         if let Err(e) = inner
                             .block_pool
-                            .process_block::<T>(
+                            .process_block(
                                 cached_block.header,
                                 cached_block.block_body,
                                 cached_block.is_fast_tracking,

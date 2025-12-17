@@ -799,11 +799,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool
-        .process_block(
-            Arc::new(bogus_block),
-            Arc::new(BlockBody::default()),
-            false,
-        )
+        .process_block(Arc::new(bogus_block), Arc::new(BlockBody::default()), false)
         .await;
 
     sync_service_handle.shutdown_signal.fire();

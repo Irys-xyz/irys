@@ -8,10 +8,10 @@ use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    AcceptedResponse, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipData,
-    GossipDataRequest, GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
-    NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, VersionRequest,
-    DATA_REQUEST_RETRIES, H256,
+    AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey,
+    GossipData, GossipDataRequest, GossipRequest, IrysAddress, IrysBlockHeader,
+    IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
+    VersionRequest, DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};

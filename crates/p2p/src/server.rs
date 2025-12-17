@@ -17,11 +17,9 @@ use actix_web::{
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::{
-    parse_user_agent, AcceptedResponse, BlockIndexQuery, CommitmentTransaction,
+    parse_user_agent, AcceptedResponse, BlockBody, BlockIndexQuery, CommitmentTransaction,
     DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof, IrysAddress,
     IrysBlockHeader, PeerListItem, ProtocolVersion, UnpackedChunk, VersionRequest,
-    BlockBody, CommitmentTransaction, DataTransactionHeader, GossipDataRequest, GossipRequest,
-    IngressProof, IrysAddress, IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};

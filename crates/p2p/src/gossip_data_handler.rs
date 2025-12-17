@@ -6,15 +6,20 @@ use crate::{
     GossipClient, GossipError, GossipResult,
 };
 use core::net::SocketAddr;
-use irys_actors::block_discovery::build_block_body_for_processed_block_header;
+use irys_actors::block_discovery::{
+    build_block_body_for_processed_block_header, get_commitment_tx_in_parallel,
+    get_data_tx_in_parallel,
+};
 use irys_actors::{
     block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
     CriticalChunkIngressError, MempoolFacade,
 };
 use irys_api_client::ApiClient;
 use irys_domain::chain_sync_state::ChainSyncState;
-use irys_domain::{ExecutionPayloadCache, PeerList, ScoreDecreaseReason};
-use irys_types::{BlockBody, IrysAddress};
+use irys_domain::{
+    BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
+};
+use irys_types::{BlockBody, Config, IrysAddress};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem,
@@ -25,6 +30,7 @@ use reth::builder::Block as _;
 use reth::primitives::Block;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 use tracing::{debug, error, instrument, warn, Instrument as _, Span};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
@@ -582,7 +588,7 @@ where
         };
 
         self.block_pool
-            .process_block::<A>(Arc::new(block_header), block_body, skip_block_validation)
+            .process_block(Arc::new(block_header), block_body, skip_block_validation)
             .await?;
         Ok(())
     }
