@@ -19,7 +19,7 @@ use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash,
-    GossipBroadcastMessage, IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
+    GossipBroadcastMessageV2, IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -1037,7 +1037,7 @@ where
                     let gossip_payload = execution_payload_provider
                         .get_sealed_block_from_cache(&evm_block_hash)
                         .await
-                        .map(GossipBroadcastMessage::from);
+                        .map(GossipBroadcastMessageV2::from);
 
                     if let Some(payload) = gossip_payload {
                         if let Err(err) = gossip_broadcast_sender.send(payload) {

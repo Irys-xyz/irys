@@ -46,7 +46,7 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
-    GossipBroadcastMessage, H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256,
+    GossipBroadcastMessageV2, H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256,
     U256,
 };
 use irys_types::{
@@ -1865,7 +1865,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from(Arc::clone(block_header)))?;
+            .send(GossipBroadcastMessageV2::from(Arc::clone(block_header)))?;
 
         Ok(())
     }
@@ -1877,7 +1877,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from((block).clone()))?;
+            .send(GossipBroadcastMessageV2::from((block).clone()))?;
 
         Ok(())
     }

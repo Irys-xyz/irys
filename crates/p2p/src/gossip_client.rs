@@ -9,7 +9,7 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
     AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey,
-    GossipData, GossipDataRequest, GossipRequest, IrysAddress, IrysBlockHeader,
+    GossipDataV2, GossipDataRequestV2, GossipRequest, IrysAddress, IrysBlockHeader,
     IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
     VersionRequest, DATA_REQUEST_RETRIES, H256,
 };
@@ -70,7 +70,7 @@ impl GossipClient {
     async fn send_data_and_update_score_internal(
         &self,
         peer: (&IrysAddress, &PeerListItem),
-        data: &GossipData,
+        data: &GossipDataV2,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
         let peer_miner_address = peer.0;
@@ -86,7 +86,7 @@ impl GossipClient {
     pub async fn make_get_data_request_and_update_the_score(
         &self,
         peer: &(IrysAddress, PeerListItem),
-        requested_data: GossipDataRequest,
+        requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
@@ -102,9 +102,9 @@ impl GossipClient {
     async fn pull_data_and_update_the_score(
         &self,
         peer: &(IrysAddress, PeerListItem),
-        requested_data: GossipDataRequest,
+        requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
-    ) -> GossipResult<GossipResponse<Option<GossipData>>> {
+    ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
         let res = self.send_data_internal(url, &requested_data).await;
@@ -352,31 +352,31 @@ impl GossipClient {
     async fn send_data(
         &self,
         peer: &PeerListItem,
-        data: &GossipData,
+        data: &GossipDataV2,
     ) -> GossipResult<GossipResponse<()>> {
         match data {
-            GossipData::Chunk(unpacked_chunk) => {
+            GossipDataV2::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/chunk", peer.address.gossip),
                     unpacked_chunk,
                 )
                 .await
             }
-            GossipData::Transaction(irys_transaction_header) => {
+            GossipDataV2::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/transaction", peer.address.gossip),
                     irys_transaction_header,
                 )
                 .await
             }
-            GossipData::CommitmentTransaction(commitment_tx) => {
+            GossipDataV2::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/commitment_tx", peer.address.gossip),
                     commitment_tx,
                 )
                 .await
             }
-            GossipData::BlockHeader(irys_block_header) => {
+            GossipDataV2::BlockHeader(irys_block_header) => {
                 if irys_block_header.poa.chunk.is_none() {
                     error!(
                         target = "p2p::gossip_client::send_data",
@@ -390,21 +390,21 @@ impl GossipClient {
                 )
                 .await
             }
-            GossipData::BlockBody(block_body) => {
+            GossipDataV2::BlockBody(block_body) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/block_body", peer.address.gossip),
                     &block_body,
                 )
                 .await
             }
-            GossipData::ExecutionPayload(execution_payload) => {
+            GossipDataV2::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/execution_payload", peer.address.gossip),
                     &execution_payload,
                 )
                 .await
             }
-            GossipData::IngressProof(ingress_proof) => {
+            GossipDataV2::IngressProof(ingress_proof) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/ingress_proof", peer.address.gossip),
                     &ingress_proof,
@@ -539,7 +539,7 @@ impl GossipClient {
     pub fn send_data_and_update_the_score_detached(
         &self,
         peer: (&IrysAddress, &PeerListItem),
-        data: Arc<GossipData>,
+        data: Arc<GossipDataV2>,
         peer_list: &PeerList,
         cache: Arc<GossipCache>,
         gossip_cache_key: GossipCacheKey,
@@ -569,7 +569,7 @@ impl GossipClient {
     pub fn send_data_without_score_update(
         &self,
         peer: (&IrysAddress, &PeerListItem),
-        data: Arc<GossipData>,
+        data: Arc<GossipDataV2>,
     ) {
         let client = self.clone();
         let peer = peer.1.clone();
@@ -585,7 +585,7 @@ impl GossipClient {
     pub fn send_data_and_update_score_for_request(
         &self,
         peer: (&IrysAddress, &PeerListItem),
-        data: Arc<GossipData>,
+        data: Arc<GossipDataV2>,
         peer_list: &PeerList,
     ) {
         let client = self.clone();
@@ -627,7 +627,7 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
-        let data_request = GossipDataRequest::BlockHeader(block_hash);
+        let data_request = GossipDataRequestV2::BlockHeader(block_hash);
         self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
             .await
     }
@@ -638,13 +638,13 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<BlockBody>), PeerNetworkError> {
-        let data_request = GossipDataRequest::BlockBody(block_hash);
+        let data_request = GossipDataRequestV2::BlockBody(block_hash);
         self.pull_data_from_network(
             data_request,
             use_trusted_peers_only,
             peer_list,
             |gossip_data| match gossip_data {
-                GossipData::BlockBody(body) => Ok(body),
+                GossipDataV2::BlockBody(body) => Ok(body),
                 _ => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()
@@ -660,7 +660,7 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Block), PeerNetworkError> {
-        let data_request = GossipDataRequest::ExecutionPayload(evm_payload_hash);
+        let data_request = GossipDataRequestV2::ExecutionPayload(evm_payload_hash);
         self.pull_data_from_network(
             data_request,
             use_trusted_peers_only,
@@ -676,7 +676,7 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, IrysTransactionResponse), PeerNetworkError> {
-        let data_request = GossipDataRequest::Transaction(tx_id);
+        let data_request = GossipDataRequestV2::Transaction(tx_id);
         self.pull_data_from_network(
             data_request,
             use_trusted_peers_only,
@@ -693,7 +693,7 @@ impl GossipClient {
         peer: &(IrysAddress, PeerListItem),
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
-        let data_request = GossipDataRequest::BlockHeader(block_hash);
+        let data_request = GossipDataRequestV2::BlockHeader(block_hash);
         match self
             .pull_data_and_update_the_score(peer, data_request, peer_list)
             .await
@@ -743,7 +743,7 @@ impl GossipClient {
         peer: &(IrysAddress, PeerListItem),
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, IrysTransactionResponse), PeerNetworkError> {
-        let data_request = GossipDataRequest::Transaction(tx_id);
+        let data_request = GossipDataRequestV2::Transaction(tx_id);
         match self
             .pull_data_and_update_the_score(peer, data_request, peer_list)
             .await
@@ -790,9 +790,9 @@ impl GossipClient {
         }
     }
 
-    fn block(gossip_data: GossipData) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
+    fn block(gossip_data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
-            GossipData::BlockHeader(block) => Ok(block),
+            GossipDataV2::BlockHeader(block) => Ok(block),
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected IrysBlockHeader, got {:?}",
                 gossip_data.data_type_and_id()
@@ -800,9 +800,9 @@ impl GossipClient {
         }
     }
 
-    fn execution_payload(gossip_data: GossipData) -> Result<Block, PeerNetworkError> {
+    fn execution_payload(gossip_data: GossipDataV2) -> Result<Block, PeerNetworkError> {
         match gossip_data {
-            GossipData::ExecutionPayload(block) => Ok(block),
+            GossipDataV2::ExecutionPayload(block) => Ok(block),
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected ExecutionPayload, got {:?}",
                 gossip_data.data_type_and_id()
@@ -810,10 +810,10 @@ impl GossipClient {
         }
     }
 
-    fn transaction(gossip_data: GossipData) -> Result<IrysTransactionResponse, PeerNetworkError> {
+    fn transaction(gossip_data: GossipDataV2) -> Result<IrysTransactionResponse, PeerNetworkError> {
         match gossip_data {
-            GossipData::Transaction(tx) => Ok(IrysTransactionResponse::Storage(tx)),
-            GossipData::CommitmentTransaction(tx) => Ok(IrysTransactionResponse::Commitment(tx)),
+            GossipDataV2::Transaction(tx) => Ok(IrysTransactionResponse::Storage(tx)),
+            GossipDataV2::CommitmentTransaction(tx) => Ok(IrysTransactionResponse::Commitment(tx)),
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected Transaction or CommitmentTransaction, got {:?}",
                 gossip_data.data_type_and_id()
@@ -823,10 +823,10 @@ impl GossipClient {
 
     pub async fn pull_data_from_network<T>(
         &self,
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-        map_data: fn(GossipData) -> Result<T, PeerNetworkError>,
+        map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
     ) -> Result<(IrysAddress, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
             peer_list.online_trusted_peers()

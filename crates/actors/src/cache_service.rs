@@ -13,7 +13,7 @@ use irys_database::{
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessageV2, IngressProof,
     LedgerChunkOffset, TokioServiceHandle, UnixTimestamp, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
@@ -112,7 +112,7 @@ pub struct InnerCacheTask {
     pub block_tree_guard: BlockTreeReadGuard,
     pub block_index_guard: BlockIndexReadGuard,
     pub config: Config,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
     pub ingress_proof_generation_state: IngressProofGenerationState,
     pub cache_sender: CacheServiceSender,
 }
@@ -716,7 +716,7 @@ impl ChunkCacheService {
         db: DatabaseProvider,
         rx: UnboundedReceiver<CacheServiceAction>,
         config: Config,
-        gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+        gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
         cache_sender: CacheServiceSender,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {

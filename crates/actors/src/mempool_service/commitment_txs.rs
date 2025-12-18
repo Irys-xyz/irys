@@ -2,7 +2,7 @@ use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressEr
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_types::{
-    CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage, IrysAddress,
+    CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessageV2, IrysAddress,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
@@ -288,7 +288,7 @@ impl Inner {
     fn broadcast_commitment_gossip(&self, tx: &CommitmentTransaction) {
         self.service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from(tx.clone()))
+            .send(GossipBroadcastMessageV2::from(tx.clone()))
             .expect("Failed to send gossip data");
     }
 

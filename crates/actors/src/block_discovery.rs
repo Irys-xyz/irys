@@ -18,7 +18,7 @@ use irys_domain::{
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     get_ingress_proofs, BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config,
-    DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
+    DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessageV2, IrysBlockHeader,
     IrysTransactionId, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
@@ -767,7 +767,7 @@ impl BlockDiscoveryServiceInner {
                 let block_hash_for_log = new_block_header.block_hash;
                 let block_height_for_log = new_block_header.height;
                 if let Err(error) =
-                    gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
+                    gossip_sender.send(GossipBroadcastMessageV2::from(new_block_header))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",

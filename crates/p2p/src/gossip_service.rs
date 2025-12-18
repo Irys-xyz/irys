@@ -25,7 +25,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
-use irys_types::{Config, DatabaseProvider, GossipBroadcastMessage, IrysAddress, P2PGossipConfig};
+use irys_types::{Config, DatabaseProvider, GossipBroadcastMessageV2, IrysAddress, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -101,7 +101,7 @@ impl ServiceHandleWithShutdownSignal {
 #[derive(Debug)]
 pub struct P2PService {
     cache: Arc<GossipCache>,
-    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessage>>,
+    broadcast_data_receiver: Option<UnboundedReceiver<GossipBroadcastMessageV2>>,
     client: GossipClient,
     pub sync_state: ChainSyncState,
     gossip_cfg: P2PGossipConfig,
@@ -123,7 +123,7 @@ impl P2PService {
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
         mining_address: IrysAddress,
-        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
+        broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
@@ -243,7 +243,7 @@ impl P2PService {
 
     async fn broadcast_data(
         &self,
-        broadcast_message: GossipBroadcastMessage,
+        broadcast_message: GossipBroadcastMessageV2,
         peer_list: &PeerList,
     ) -> GossipResult<()> {
         // Check if gossip broadcast is enabled
@@ -253,7 +253,7 @@ impl P2PService {
         }
 
         let message_type_and_id = broadcast_message.data_type_and_id();
-        let GossipBroadcastMessage { key, data } = broadcast_message;
+        let GossipBroadcastMessageV2 { key, data } = broadcast_message;
         let broadcast_data = Arc::new(data);
 
         debug!("Broadcasting data to peers: {}", message_type_and_id);
@@ -317,7 +317,7 @@ impl P2PService {
 }
 
 fn spawn_broadcast_task(
-    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessage>,
+    mut mempool_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
     service: std::sync::Arc<P2PService>,
     task_executor: &TaskExecutor,
     peer_list: PeerList,

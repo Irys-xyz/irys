@@ -6,7 +6,7 @@ use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::{
-    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, GossipDataRequest,
+    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, GossipDataRequestV2,
     HandshakeMessage, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
     PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
     RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
@@ -589,7 +589,7 @@ impl PeerNetworkService {
     }
     async fn handle_request_data_from_network(
         &self,
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
         retries: u8,
@@ -638,7 +638,7 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         peer_list: PeerList,
         sender: PeerNetworkSender,
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         retries: u8,
         top_active_window: usize,

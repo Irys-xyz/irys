@@ -27,8 +27,8 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, GossipData,
-    GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, MempoolConfig, NodeConfig,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessageV2, GossipDataV2,
+    GossipDataRequestV2, GossipRequest, IngressProof, IrysBlockHeader, MempoolConfig, NodeConfig,
     NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
     TokioServiceHandle, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
@@ -48,13 +48,13 @@ use tracing::{debug, info, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
 }
 
 impl MempoolStub {
     #[must_use]
-    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>) -> Self {
+    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
@@ -89,7 +89,7 @@ impl MempoolFacade for MempoolStub {
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipBroadcastMessage::from(tx_header))
+                .send(GossipBroadcastMessageV2::from(tx_header))
                 .expect("to send transaction");
         });
 
@@ -137,7 +137,7 @@ impl MempoolFacade for MempoolStub {
             let message_bus = self.internal_message_bus.clone();
             tokio::runtime::Handle::current().spawn(async move {
                 message_bus
-                    .send(GossipBroadcastMessage::from(chunk))
+                    .send(GossipBroadcastMessageV2::from(chunk))
                     .expect("to send chunk");
             });
         }
@@ -230,7 +230,7 @@ impl MempoolFacade for MempoolStub {
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
-    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessage>>,
+    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessageV2>>,
     pub block_status_provider: BlockStatusProvider,
 }
 
@@ -261,7 +261,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessage::from(block))
+                    .send(GossipBroadcastMessageV2::from(block))
                     .expect("to send block");
             });
         }
@@ -292,7 +292,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
     pub service_senders: ServiceSenders,
-    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
+    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessageV2>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
     // needs to be held so the directory is removed correctly
@@ -438,7 +438,7 @@ impl GossipServiceTestFixture {
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
-        mpsc::UnboundedSender<GossipBroadcastMessage>,
+        mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
@@ -594,7 +594,7 @@ pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
 struct FakeGossipDataHandler {
     on_block_data_request: Box<dyn Fn(BlockHash) -> GossipResponse<bool> + Send + Sync>,
     on_pull_data_request:
-        Box<dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync>,
+        Box<dyn Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>> + Send + Sync>,
     on_info_request: Box<dyn Fn() -> GossipResponse<NodeInfo> + Send + Sync>,
     on_block_index_request:
         Box<dyn Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>> + Send + Sync>,
@@ -616,8 +616,8 @@ impl FakeGossipDataHandler {
 
     fn call_on_pull_data_request(
         &self,
-        data_request: GossipDataRequest,
-    ) -> GossipResponse<Option<GossipData>> {
+        data_request: GossipDataRequestV2,
+    ) -> GossipResponse<Option<GossipDataV2>> {
         (self.on_pull_data_request)(data_request)
     }
 
@@ -642,7 +642,7 @@ impl FakeGossipDataHandler {
     fn set_on_pull_data_request(
         &mut self,
         on_pull_data_request: Box<
-            dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync,
+            dyn Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>> + Send + Sync,
         >,
     ) {
         self.on_pull_data_request = on_pull_data_request;
@@ -701,7 +701,7 @@ impl FakeGossipServer {
 
     pub(crate) fn set_on_pull_data_request(
         &self,
-        on_pull_data_request: impl Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>>
+        on_pull_data_request: impl Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>>
             + Send
             + Sync
             + 'static,
@@ -771,14 +771,14 @@ impl FakeGossipServer {
 
 async fn handle_get_data(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
     warn!("Fake server got request: {:?}", data_request.data);
 
     match handler.read() {
         Ok(handler) => match data_request.data {
-            GossipDataRequest::BlockHeader(block_hash) => {
+            GossipDataRequestV2::BlockHeader(block_hash) => {
                 let res = handler.call_on_block_data_request(block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {:?}",
@@ -788,25 +788,25 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            GossipDataRequest::BlockBody(block_hash) => {
+            GossipDataRequestV2::BlockBody(block_hash) => {
                 warn!("Block body request for hash {:?}", block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
             }
-            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+            GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(true)
             }
-            GossipDataRequest::Chunk(chunk_hash) => {
+            GossipDataRequestV2::Chunk(chunk_hash) => {
                 warn!("Chunk request for hash {:?}", chunk_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
             }
-            GossipDataRequest::Transaction(hash) => {
+            GossipDataRequestV2::Transaction(hash) => {
                 warn!("Transaction request for hash {:?}", hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
@@ -824,7 +824,7 @@ async fn handle_get_data(
 
 async fn handle_pull_data(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
     warn!("Fake server got pull data request: {:?}", data_request.data);

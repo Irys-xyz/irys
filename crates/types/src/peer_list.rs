@@ -1,4 +1,4 @@
-use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress};
 
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
@@ -380,7 +380,7 @@ pub enum PeerNetworkServiceMessage {
     AnnounceYourselfToPeer(PeerListItem),
     AnnouncementFinished(AnnouncementFinishedMessage),
     RequestDataFromNetwork {
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
         retries: u8,
@@ -474,7 +474,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::BlockHeader(block_hash),
+            data_request: GossipDataRequestV2::BlockHeader(block_hash),
             use_trusted_peers_only,
             response: sender,
             retries,
@@ -495,7 +495,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
+            data_request: GossipDataRequestV2::ExecutionPayload(evm_payload_hash),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,
@@ -516,7 +516,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Chunk(chunk_path_hash),
+            data_request: GossipDataRequestV2::Chunk(chunk_path_hash),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,

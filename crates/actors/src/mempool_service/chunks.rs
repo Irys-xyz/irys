@@ -11,7 +11,7 @@ use irys_types::{
     chunk::{max_chunk_offset, UnpackedChunk},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessageV2, IngressProof,
     H256,
 };
 use rayon::prelude::*;
@@ -429,7 +429,7 @@ impl Inner {
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
+        let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk);
 
         if let Err(error) = self
             .service_senders

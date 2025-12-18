@@ -21,7 +21,7 @@ use irys_domain::{
 use irys_types::{BlockBody, Config, IrysAddress};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipData, GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem,
+    GossipDataV2, GossipDataRequestV2, GossipRequest, IngressProof, IrysBlockHeader, PeerListItem,
     UnpackedChunk,
 };
 use reth::builder::Block as _;
@@ -877,7 +877,7 @@ where
     pub(crate) async fn handle_get_data(
         &self,
         peer_info: &PeerListItem,
-        request: GossipRequest<GossipDataRequest>,
+        request: GossipRequest<GossipDataRequestV2>,
         duplicate_request_milliseconds: u128,
     ) -> GossipResult<bool> {
         // Check rate limiting and score cap
@@ -895,7 +895,7 @@ where
         }
 
         match request.data {
-            GossipDataRequest::BlockHeader(block_hash) => {
+            GossipDataRequestV2::BlockHeader(block_hash) => {
                 let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
 
                 match maybe_block {
@@ -907,7 +907,7 @@ where
                                 "Block pool returned a block without a POA chunk"
                             );
                         }
-                        let data = Arc::new(GossipData::BlockHeader(block));
+                        let data = Arc::new(GossipDataV2::BlockHeader(block));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
@@ -925,7 +925,7 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequest::BlockBody(block_hash) => {
+            GossipDataRequestV2::BlockBody(block_hash) => {
                 debug!(
                     "Node {}: handling block body request for block {:?}",
                     self.gossip_client.mining_address, block_hash
@@ -956,7 +956,7 @@ where
                 };
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipData::BlockBody(block_body));
+                    let data = Arc::new(GossipDataV2::BlockBody(block_body));
                     if check_result.should_update_score() {
                         self.gossip_client.send_data_and_update_score_for_request(
                             (&request.miner_address, peer_info),
@@ -974,7 +974,7 @@ where
                     Ok(false)
                 }
             }
-            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+            GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 debug!(
                     "Node {}: Handling execution payload request for block {:?}",
                     self.gossip_client.mining_address, evm_block_hash
@@ -986,7 +986,7 @@ where
 
                 match maybe_evm_block {
                     Some(evm_block) => {
-                        let data = Arc::new(GossipData::ExecutionPayload(evm_block));
+                        let data = Arc::new(GossipDataV2::ExecutionPayload(evm_block));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
@@ -1004,7 +1004,7 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequest::Transaction(tx_id) => {
+            GossipDataRequestV2::Transaction(tx_id) => {
                 debug!(
                     "Node {}: Handling transaction request for tx {:?}",
                     self.gossip_client.mining_address, tx_id
@@ -1018,7 +1018,7 @@ where
                 if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
                 {
                     if let Some(tx) = result.pop() {
-                        let data = Arc::new(GossipData::CommitmentTransaction(tx));
+                        let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
@@ -1040,7 +1040,7 @@ where
                     get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
                 {
                     if let Some(tx) = result.pop() {
-                        let data = Arc::new(GossipData::Transaction(tx));
+                        let data = Arc::new(GossipDataV2::Transaction(tx));
                         if check_result.should_update_score() {
                             self.gossip_client.send_data_and_update_score_for_request(
                                 (&request.miner_address, peer_info),
@@ -1059,17 +1059,17 @@ where
 
                 Ok(false)
             }
-            GossipDataRequest::Chunk(_chunk_path_hash) => Ok(false),
+            GossipDataRequestV2::Chunk(_chunk_path_hash) => Ok(false),
         }
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data_sync(
         &self,
-        request: GossipRequest<GossipDataRequest>,
-    ) -> GossipResult<Option<GossipData>> {
+        request: GossipRequest<GossipDataRequestV2>,
+    ) -> GossipResult<Option<GossipDataV2>> {
         match request.data {
-            GossipDataRequest::BlockHeader(block_hash) => {
+            GossipDataRequestV2::BlockHeader(block_hash) => {
                 let maybe_block = self.block_pool.get_block_header(&block_hash).await?;
                 if let Some(block) = &maybe_block {
                     if block.poa.chunk.is_none() {
@@ -1080,9 +1080,9 @@ where
                         );
                     }
                 }
-                Ok(maybe_block.map(GossipData::BlockHeader))
+                Ok(maybe_block.map(GossipDataV2::BlockHeader))
             }
-            GossipDataRequest::BlockBody(block_hash) => {
+            GossipDataRequestV2::BlockBody(block_hash) => {
                 let maybe_block_body = if let Some(block_body) =
                     self.block_pool.get_cached_block_body(&block_hash).await
                 {
@@ -1107,17 +1107,17 @@ where
                         None
                     }
                 };
-                Ok(maybe_block_body.map(GossipData::BlockBody))
+                Ok(maybe_block_body.map(GossipDataV2::BlockBody))
             }
-            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+            GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
                     .execution_payload_cache
                     .get_locally_stored_evm_block(&evm_block_hash)
                     .await;
 
-                Ok(maybe_evm_block.map(GossipData::ExecutionPayload))
+                Ok(maybe_evm_block.map(GossipDataV2::ExecutionPayload))
             }
-            GossipDataRequest::Transaction(tx_id) => {
+            GossipDataRequestV2::Transaction(tx_id) => {
                 let vec = vec![tx_id];
                 let mempool_guard = &self.block_pool.mempool_guard;
                 let db = &self.block_pool.db;
@@ -1125,7 +1125,7 @@ where
                 if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
                 {
                     if let Some(tx) = result.pop() {
-                        return Ok(Some(GossipData::CommitmentTransaction(tx)));
+                        return Ok(Some(GossipDataV2::CommitmentTransaction(tx)));
                     }
                 };
 
@@ -1133,13 +1133,13 @@ where
                     get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
                 {
                     if let Some(tx) = result.pop() {
-                        return Ok(Some(GossipData::Transaction(tx)));
+                        return Ok(Some(GossipDataV2::Transaction(tx)));
                     }
                 };
 
                 Ok(None)
             }
-            GossipDataRequest::Chunk(_chunk_path_hash) => Ok(None),
+            GossipDataRequestV2::Chunk(_chunk_path_hash) => Ok(None),
         }
     }
 

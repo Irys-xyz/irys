@@ -10,7 +10,7 @@ use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term
 use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessage, IrysTransactionCommon as _,
+    DataLedger, DataTransactionHeader, GossipBroadcastMessageV2, IrysTransactionCommon as _,
     IrysTransactionId, H256, U256,
 };
 use reth_db::transaction::DbTxMut as _;
@@ -462,7 +462,7 @@ impl Inner {
 
     /// Broadcasts the transaction over gossip, with error logging.
     fn broadcast_tx_gossip(&self, tx: &DataTransactionHeader) {
-        let gossip_broadcast_message = GossipBroadcastMessage::from(tx.clone());
+        let gossip_broadcast_message = GossipBroadcastMessageV2::from(tx.clone());
         if let Err(error) = self
             .service_senders
             .gossip_broadcast

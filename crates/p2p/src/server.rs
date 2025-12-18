@@ -18,7 +18,7 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::{
     parse_user_agent, AcceptedResponse, BlockBody, BlockIndexQuery, CommitmentTransaction,
-    DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof, IrysAddress,
+    DataTransactionHeader, GossipDataRequestV2, GossipRequest, IngressProof, IrysAddress,
     IrysBlockHeader, PeerListItem, ProtocolVersion, UnpackedChunk, VersionRequest,
 };
 use rand::prelude::SliceRandom as _;
@@ -664,7 +664,7 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequest>>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled()
@@ -672,15 +672,15 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             let request_id = match &data_request.0.data {
-                GossipDataRequest::BlockHeader(hash) => format!("block header {:?}", hash),
-                GossipDataRequest::ExecutionPayload(hash) => {
+                GossipDataRequestV2::BlockHeader(hash) => format!("block header {:?}", hash),
+                GossipDataRequestV2::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
                 }
-                GossipDataRequest::Chunk(chunk_path_hash) => {
+                GossipDataRequestV2::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
-                GossipDataRequest::BlockBody(hash) => format!("block body {:?}", hash),
-                GossipDataRequest::Transaction(hash) => format!("transaction {:?}", hash),
+                GossipDataRequestV2::BlockBody(hash) => format!("block body {:?}", hash),
+                GossipDataRequestV2::Transaction(hash) => format!("transaction {:?}", hash),
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
@@ -721,7 +721,7 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_pull_data(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequest>>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if let Err(error_response) =

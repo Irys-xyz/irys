@@ -32,7 +32,7 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockTransactions,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessage, H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
+    GossipBroadcastMessageV2, H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
     Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs,
     VDFLimiterInfo, H256, U256,
 };
@@ -1246,7 +1246,7 @@ pub trait BlockProdStrategy {
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =
-            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+            GossipBroadcastMessageV2::from(eth_built_payload.block().clone());
         if let Err(payload_broadcast_error) = self
             .inner()
             .service_senders
