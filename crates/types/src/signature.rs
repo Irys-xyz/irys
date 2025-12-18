@@ -274,9 +274,9 @@ mod tests {
     fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
         // spellchecker:off
         // from the JS Client - `txSigningParity`
-        const SIG_HEX: &str = "0xbd608ebb350409c185816ce00338c8095dc1fae22261e819f6eb9f3a247fdf1c04d3807154be2932709176faf27623eaec485ab188dfe70edf99338c0fce38311c";
+        const SIG_HEX: &str = "0x559103e7798f0523cf37487224ddd6c2189276be86ec85d3b2ae7468b097f616173ba6d3056266f80dbeab90d793e6734dba1d92e81427e716bcd8853cca25fe1b";
         // Base58 encoding of the signature (for version=1 signing preimage)
-        const SIG_BS58: &str = "HiHLPhitbugcBNoJ7kFicwxJe7w2vEk37HZhHsaB1V9tsgd3cPrPEdMtWqss8QRwHwhQvvPA1GJsRDhGoXGEU519V";
+        const SIG_BS58: &str = "8YxBZcsHQXARCXnhcd5svVYWCYEBZWcWf8pE5TPai39ogdT3WXfWyd6VZ73duogV1t81pwTU1gdKj9nJQ9DiJAL2W";
         // spellchecker:on
         let testing_config = ConsensusConfig::testing();
         let irys_signer = IrysSigner {
@@ -291,13 +291,13 @@ mod tests {
             anchor: H256::from([1_u8; 32]),
             signer: IrysAddress::ZERO,
             commitment_type: CommitmentType::Unpledge {
-                pledge_count_before_executing: 0,
+                pledge_count_before_executing: 12,
                 partition_hash: [2_u8; 32].into(),
             },
             chain_id: testing_config.chain_id,
             signature: Default::default(),
             fee: 1234,
-            value: 0.into(),
+            value: 222.into(),
         });
 
         irys_signer.sign_commitment(&mut transaction)?;
