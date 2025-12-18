@@ -279,12 +279,17 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     tokio::time::sleep(Duration::from_millis(3000)).await;
 
     {
-        // Check that service 2 received and processed the transactions
-        let service2_mempool_txs = fixture2.mempool_txs.read().expect("to read transactions");
+        // Check that service 2 received the block (with transactions) for validation.
+        // Note: Transactions are now ingested into mempool AFTER validation succeeds
+        // via BlockTransactionsValidated, not during block_pool processing.
+        let service2_discovery_blocks = fixture2
+            .discovery_blocks
+            .read()
+            .expect("to read discovery blocks");
         eyre::ensure!(
-            service2_mempool_txs.len() == 2,
-            "Expected 2 transactions in service 2 mempool after block processing, but found {}",
-            service2_mempool_txs.len()
+            service2_discovery_blocks.len() == 1,
+            "Expected 1 block in service 2 discovery after block processing, but found {}",
+            service2_discovery_blocks.len()
         );
     };
 

@@ -125,6 +125,89 @@ impl Inner {
         Ok(())
     }
 
+    /// Ingests validated block transactions into mempool, bypassing gossip-path balance checks.
+    #[instrument(skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
+    pub async fn handle_block_transactions_validated(
+        &self,
+        block: Arc<IrysBlockHeader>,
+        transactions: Arc<crate::block_discovery::BlockTransactions>,
+    ) -> Result<(), crate::mempool_service::TxIngressError> {
+        debug!(
+            "Ingesting {} commitment txs, {} data txs from validated block {}",
+            transactions.commitment_txs.len(),
+            transactions.all_data_txs().count(),
+            block.block_hash
+        );
+
+        for commitment_tx in &transactions.commitment_txs {
+            if let Err(e) = self
+                .ingest_validated_commitment_tx(commitment_tx.clone())
+                .await
+            {
+                if !matches!(e, crate::mempool_service::TxIngressError::Skipped) {
+                    warn!(
+                        "Failed to ingest validated commitment tx {}: {:?}",
+                        commitment_tx.id(),
+                        e
+                    );
+                }
+            }
+        }
+
+        for data_tx in transactions.all_data_txs() {
+            if let Err(e) = self.ingest_validated_data_tx(data_tx.clone()).await {
+                if !matches!(e, crate::mempool_service::TxIngressError::Skipped) {
+                    warn!("Failed to ingest validated data tx {}: {:?}", data_tx.id, e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ingest a block-validated commitment tx, bypassing balance checks.
+    #[instrument(skip_all, fields(tx.id = %tx.id()))]
+    async fn ingest_validated_commitment_tx(
+        &self,
+        tx: CommitmentTransaction,
+    ) -> Result<(), crate::mempool_service::TxIngressError> {
+        if self
+            .mempool_state
+            .is_known_commitment_in_mempool(&tx.id(), tx.signer())
+            .await
+        {
+            return Err(crate::mempool_service::TxIngressError::Skipped);
+        }
+
+        self.mempool_state
+            .insert_commitment_and_mark_valid(&tx)
+            .await?;
+
+        debug!("Ingested validated commitment tx {}", tx.id());
+        Ok(())
+    }
+
+    /// Ingest a block-validated data tx, bypassing balance/EMA checks.
+    #[instrument(skip_all, fields(tx.id = %tx.id))]
+    async fn ingest_validated_data_tx(
+        &self,
+        tx: irys_types::DataTransactionHeader,
+    ) -> Result<(), crate::mempool_service::TxIngressError> {
+        if self
+            .mempool_state
+            .valid_submit_ledger_tx_cloned(&tx.id)
+            .await
+            .is_some()
+        {
+            return Err(crate::mempool_service::TxIngressError::Skipped);
+        }
+
+        self.mempool_state.bounded_insert_data_tx(tx.clone()).await;
+
+        debug!("Ingested validated data tx {}", tx.id);
+        Ok(())
+    }
+
     #[tracing::instrument(level = "trace", skip_all, fields(fork_parent.height = event.fork_parent.height))]
     pub async fn handle_reorg(&self, event: ReorgEvent) -> eyre::Result<()> {
         tracing::debug!(
