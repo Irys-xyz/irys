@@ -492,10 +492,17 @@ mod tests {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
+        // Seed the treasury with enough funds for refunds (1 wei per tx * 5 txs)
+        let tx_count = 5;
+        let treasury_deposit_amount = U256::from(tx_count);
+        let treasury_deposit_tx = treasury_deposit(treasury_deposit_amount);
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit_tx, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
+
         let initial_balance = get_balance(&node.inner, target_signer.address());
         let initial_producer_balance = get_balance(&node.inner, ctx.block_producer_a.address());
 
-        let tx_count = 5;
         let shadow_tx = shadow_tx(target_signer.address());
         let shadow_tx_topic = shadow_tx.topic().into();
         let shadow_tx =
@@ -504,7 +511,8 @@ mod tests {
 
         let _block_payload = mine_block_and_validate(&mut node, shadow_txs, &[]).await?;
 
-        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+        // Block 1 is used for treasury seeding, main transactions go to block 2
+        let block_execution = node.inner.provider.get_state(0..=2).unwrap().unwrap();
         assert_topic_present_in_logs(block_execution, shadow_tx_topic, tx_count as u64);
 
         // Target should gain from unstake but pay priority fees
@@ -616,6 +624,12 @@ mod tests {
     async fn test_shadow_tx_ordering() -> eyre::Result<()> {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
+
+        // Seed treasury for the unstake refund (2 wei for 2 unstake txs)
+        let treasury_deposit_tx = treasury_deposit(U256::from(2));
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit_tx, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
 
         // Create normal transactions with high gas price
         let normal_tx_hashes = create_and_submit_multiple_normal_txs(
@@ -1463,6 +1477,12 @@ mod tests {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
+        // Seed treasury for the unstake refund (1 wei)
+        let treasury_deposit_tx = treasury_deposit(U256::ONE);
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit_tx, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
+
         // Create different addresses for different transaction types
         let address_a = ctx.block_producer_a.address();
         let address_b = ctx.target_account.address();
@@ -1520,19 +1540,20 @@ mod tests {
         let block_payload = mine_block(&mut node, shadow_txs).await?;
 
         // Get execution results to verify receipt ordering
-        let block_execution = node.inner.provider.get_state(0..=1).unwrap().unwrap();
+        // Block 1 is used for treasury seeding, main transactions go to block 2
+        let block_execution = node.inner.provider.get_state(0..=2).unwrap().unwrap();
         let receipts = &block_execution.receipts;
 
-        // Verify we have receipts for block 1
+        // Verify we have receipts for block 2
         assert!(
-            receipts.len() > 1,
-            "Should have receipts for at least block 1"
+            receipts.len() > 2,
+            "Should have receipts for at least block 2"
         );
-        let block_1_receipts = &receipts[1];
+        let block_2_receipts = &receipts[2];
 
-        tracing::info!("Block 1 has {} receipts", block_1_receipts.len());
+        tracing::info!("Block 2 has {} receipts", block_2_receipts.len());
         assert_eq!(
-            block_1_receipts.len(),
+            block_2_receipts.len(),
             expected_tx_hashes.len(),
             "Should have exactly {} receipts for the {} shadow transactions",
             expected_tx_hashes.len(),
@@ -1560,7 +1581,7 @@ mod tests {
         }
 
         // Verify all receipts are successful (shadow transactions should succeed)
-        for (i, receipt) in block_1_receipts.iter().enumerate() {
+        for (i, receipt) in block_2_receipts.iter().enumerate() {
             assert!(
                 receipt.success,
                 "Receipt at position {} should be successful for shadow transaction {:?}",
@@ -1989,6 +2010,12 @@ mod tests {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
+        // Seed treasury for the unstake refund (1 wei)
+        let treasury_deposit_tx = treasury_deposit(U256::ONE);
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit_tx, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
+
         // Get initial balances
         let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
         let target_address = ctx.target_account.address();
@@ -2053,6 +2080,12 @@ mod tests {
 
         let beneficiary = ctx.block_producer_a.address(); // Producer A is the beneficiary for node 0
         let target_address = ctx.target_account.address();
+
+        // Seed treasury for the unstake refund (1 wei)
+        let treasury_deposit_tx = treasury_deposit(U256::ONE);
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit_tx, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
 
         // Fund the target account first to ensure it can pay priority fees
         let funding_amount = U256::from(100_000_000_000_u128); // 100 Gwei
@@ -2188,6 +2221,12 @@ mod tests {
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
 
+        // Seed treasury for the unstake refund (1 wei)
+        let treasury_deposit_tx = treasury_deposit(U256::ONE);
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit_tx, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
+
         // Create a block reward transaction with a non-zero priority fee
         let invalid_shadow_tx = block_reward();
         let priority_fee_per_gas = 1_000_000_000_u128; // 1 Gwei (should be rejected)
@@ -2197,7 +2236,7 @@ mod tests {
         let invalid_shadow_tx_pooled = sign_tx(invalid_shadow_tx_raw, &ctx.block_producer_a).await;
 
         // Also create a valid transaction so the block can be produced
-        // Using unstake which increments balance (so we don't need to fund the account first)
+        // Using unstake which increments balance (treasury was seeded above)
         let valid_tx = unstake(ctx.target_account.address());
         let valid_tx_raw = compose_shadow_tx(1, &valid_tx, 0); // 0 priority fee
         let valid_tx_pooled = sign_tx(valid_tx_raw, &ctx.block_producer_a).await;
@@ -2933,6 +2972,15 @@ pub mod test_utils {
                 target: address,
                 irys_ref: alloy_primitives::FixedBytes::ZERO,
             }),
+            alloy_primitives::FixedBytes::ZERO,
+        )
+    }
+
+    /// Compose a shadow tx for treasury deposit.
+    /// This seeds the treasury with funds that can be used for refunds/rewards.
+    pub fn treasury_deposit(amount: U256) -> ShadowTransaction {
+        ShadowTransaction::new_v1(
+            TransactionPacket::TreasuryDeposit(shadow_tx::TreasuryDeposit { amount }),
             alloy_primitives::FixedBytes::ZERO,
         )
     }
