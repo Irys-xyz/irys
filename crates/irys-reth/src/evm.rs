@@ -733,7 +733,12 @@ where
                 // Fee payer is the transaction caller; priority recipient is block beneficiary.
                 let fee_payer = tx.caller;
                 let beneficiary = self.block().beneficiary;
-                let treasury = *TREASURY_ACCOUNT;
+                // Pre-Sprite: burn to Address::ZERO, Post-Sprite: send to treasury
+                let treasury = if self.is_sprite_active {
+                    *TREASURY_ACCOUNT
+                } else {
+                    Address::ZERO
+                };
 
                 // Pre-validate fee_payer has sufficient balance for total PD fees
                 let total_pd_fees = base_total.saturating_add(prio_total);
@@ -1582,6 +1587,17 @@ where
                     Ok((Ok((account, execution_result, existed)), target))
                 }
                 shadow_tx::TransactionPacket::TreasuryDeposit(deposit) => {
+                    // TreasuryDeposit is only allowed when Sprite hardfork is active.
+                    // This provides defense-in-depth; the consensus layer already guards generation.
+                    if !self.is_sprite_active {
+                        tracing::warn!(
+                            "TreasuryDeposit shadow transaction received before Sprite hardfork is active"
+                        );
+                        return Err(Self::create_internal_error(
+                            "TreasuryDeposit not allowed before Sprite hardfork".to_string(),
+                        ));
+                    }
+
                     // TreasuryDeposit is a protocol-level operation to add funds to treasury
                     let target = *TREASURY_ACCOUNT;
 
@@ -1636,8 +1652,9 @@ where
         deduct_from_treasury: bool,
     ) -> Result<(Account, ExecutionResult<<Self as Evm>::HaltReason>, bool), <Self as Evm>::Error>
     {
-        // If deducting from treasury, validate and deduct first
-        if deduct_from_treasury {
+        // If deducting from treasury and Sprite is active, validate and deduct first.
+        // Pre-Sprite: funds are effectively minted from nowhere (old behavior).
+        if deduct_from_treasury && self.is_sprite_active {
             self.decrement_treasury_balance(balance_increment.amount)?;
         }
 
@@ -1726,8 +1743,10 @@ where
             .balance
             .saturating_sub(balance_decrement.amount);
 
-        // Transfer decremented funds to treasury
-        self.increment_treasury_balance(balance_decrement.amount)?;
+        // Transfer decremented funds to treasury (only post-Sprite)
+        if self.is_sprite_active {
+            self.increment_treasury_balance(balance_decrement.amount)?;
+        }
 
         let execution_result = Self::create_success_result(log);
 
