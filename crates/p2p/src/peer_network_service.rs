@@ -703,7 +703,11 @@ impl PeerNetworkService {
                             address, data_request, reason
                         );
                         match reason {
-                            RejectionReason::HandshakeRequired => {
+                            RejectionReason::HandshakeRequired(reason) => {
+                                warn!(
+                                    "Peer {} requires a handshake before requesting data: {:?}",
+                                    address, reason
+                                );
                                 last_error = Some(GossipError::PeerNetwork(
                                     PeerNetworkError::FailedToRequestData(
                                         "Peer requires a handshake".to_string(),
