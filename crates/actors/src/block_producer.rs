@@ -26,8 +26,8 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysEthereumNode, IrysPayloadAttributes,
-    IrysPayloadBuilderAttributes, IrysPayloadTypes,
+    compose_shadow_tx, evm::TREASURY_ACCOUNT, reth_node_ethereum::EthEngineTypes,
+    IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
@@ -877,9 +877,7 @@ pub trait BlockProdStrategy {
             shadow_txs.push(EthPooledTransaction::new(tx, 300));
         }
 
-        // Get the final treasury balance after all transactions
-        let final_treasury_balance = shadow_tx_generator.treasury_balance();
-
+        // Build and submit the EVM payload first
         let payload = self
             .build_and_submit_reth_payload(
                 prev_block_header,
@@ -889,7 +887,59 @@ pub trait BlockProdStrategy {
             )
             .await?;
 
+        // Post-Sprite: read final treasury from EVM state (authoritative source)
+        // Pre-Sprite: use shadow_tx_generator's tracked balance
+        let is_sprite_active = self
+            .inner()
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(timestamp_ms.to_secs());
+        let final_treasury_balance = if is_sprite_active {
+            self.read_treasury_from_evm_state(&payload)?
+        } else {
+            shadow_tx_generator.treasury_balance()
+        };
+
         Ok((payload, final_treasury_balance))
+    }
+
+    /// Read the treasury balance from the EVM state after block execution.
+    /// This is used post-Sprite when the EVM's TREASURY_ACCOUNT is the authoritative source.
+    fn read_treasury_from_evm_state(
+        &self,
+        payload: &EthBuiltPayload,
+    ) -> Result<U256, BlockProductionError> {
+        use reth::providers::{StateProvider, StateProviderFactory};
+
+        // Get state at the newly built block
+        let block_number = payload.block().number;
+        let state_provider = self
+            .inner()
+            .reth_provider
+            .history_by_block_number(block_number)
+            .map_err(|e| {
+                BlockProductionError::Irrecoverable {
+                    source: eyre!(
+                        "Failed to get state provider for block {}: {}",
+                        block_number,
+                        e
+                    ),
+                }
+            })?;
+
+        // Query TREASURY_ACCOUNT balance
+        let treasury_balance = state_provider
+            .account_balance(&(*TREASURY_ACCOUNT).into())
+            .map_err(|e| {
+                BlockProductionError::Irrecoverable {
+                    source: eyre!("Failed to query treasury balance: {}", e),
+                }
+            })?
+            .map(|b| U256::from_le_bytes(b.to_le_bytes()))
+            .unwrap_or(U256::zero());
+
+        Ok(treasury_balance)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(
