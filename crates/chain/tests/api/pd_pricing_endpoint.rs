@@ -149,27 +149,65 @@ async fn setup_pd_fee_history_test_chain(
         node.wait_until_height(irys_block.height, 10).await?;
 
         // Extract the PD base fee from the block
+        // On the first Sprite block, TreasuryDeposit is at index 1 and PdBaseFeeUpdate is at index 2.
+        // For subsequent blocks, PdBaseFeeUpdate is at index 1.
         let sealed_block = eth_payload.block();
-        let second_tx = sealed_block
+        let tx_at_index_1 = sealed_block
             .body()
             .transactions
             .get(PD_BASE_FEE_INDEX)
-            .ok_or_else(|| eyre::eyre!("Block {} missing PdBaseFeeUpdate tx", block_idx))?;
+            .ok_or_else(|| eyre::eyre!("Block {} missing tx at index 1", block_idx))?;
 
-        let shadow_tx = ShadowTransaction::decode(&mut second_tx.input().as_ref())
+        let shadow_tx_1 = ShadowTransaction::decode(&mut tx_at_index_1.input().as_ref())
             .map_err(|e| eyre::eyre!("Failed to decode shadow tx in block {}: {}", block_idx, e))?;
 
-        let base_fee = match shadow_tx
+        let base_fee = match shadow_tx_1
             .as_v1()
             .ok_or_else(|| eyre::eyre!("Expected V1 shadow tx"))?
         {
             TransactionPacket::PdBaseFeeUpdate(update) => {
-                // Convert alloy U256 to irys U256 using the same method as pd_pricing module
+                // Normal case: PdBaseFeeUpdate is at index 1
                 U256::from(update.per_chunk)
+            }
+            TransactionPacket::TreasuryDeposit(_) => {
+                // First Sprite block: TreasuryDeposit at index 1, check index 2 for PdBaseFeeUpdate
+                let tx_at_index_2 = sealed_block
+                    .body()
+                    .transactions
+                    .get(PD_BASE_FEE_INDEX + 1)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Block {} missing tx at index 2 (first Sprite block)",
+                            block_idx
+                        )
+                    })?;
+
+                let shadow_tx_2 = ShadowTransaction::decode(&mut tx_at_index_2.input().as_ref())
+                    .map_err(|e| {
+                        eyre::eyre!(
+                            "Failed to decode shadow tx at index 2 in block {}: {}",
+                            block_idx,
+                            e
+                        )
+                    })?;
+
+                match shadow_tx_2
+                    .as_v1()
+                    .ok_or_else(|| eyre::eyre!("Expected V1 shadow tx at index 2"))?
+                {
+                    TransactionPacket::PdBaseFeeUpdate(update) => U256::from(update.per_chunk),
+                    other => {
+                        return Err(eyre::eyre!(
+                            "Block {} 3rd tx is not PdBaseFeeUpdate: {:?}",
+                            block_idx,
+                            other
+                        ))
+                    }
+                }
             }
             other => {
                 return Err(eyre::eyre!(
-                    "Block {} 2nd tx is not PdBaseFeeUpdate: {:?}",
+                    "Block {} 2nd tx is not PdBaseFeeUpdate or TreasuryDeposit: {:?}",
                     block_idx,
                     other
                 ))

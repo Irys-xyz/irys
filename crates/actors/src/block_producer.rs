@@ -26,8 +26,8 @@ use irys_domain::{
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
-    compose_shadow_tx, evm::TREASURY_ACCOUNT, reth_node_ethereum::EthEngineTypes,
-    IrysEthereumNode, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
+    compose_shadow_tx, reth_node_ethereum::EthEngineTypes, IrysBuiltPayload, IrysEthereumNode,
+    IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
 };
 use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
@@ -51,7 +51,7 @@ use openssl::sha;
 use reth::{
     api::{ConsensusEngineHandle, NodeTypes, PayloadKind},
     core::primitives::SealedBlock,
-    payload::{EthBuiltPayload, PayloadBuilderHandle},
+    payload::PayloadBuilderHandle,
     revm::primitives::B256,
     tasks::shutdown::Shutdown,
 };
@@ -136,7 +136,7 @@ pub enum BlockProducerCommand {
             eyre::Result<
                 Option<(
                     Arc<irys_types::IrysBlockHeader>,
-                    EthBuiltPayload,
+                    IrysBuiltPayload,
                     BlockTransactions,
                 )>,
             >,
@@ -505,7 +505,7 @@ pub trait BlockProdStrategy {
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             BlockTransactions,
-            EthBuiltPayload,
+            IrysBuiltPayload,
         )>,
         BlockProductionError,
     > {
@@ -620,7 +620,7 @@ pub trait BlockProdStrategy {
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             BlockTransactions,
-            EthBuiltPayload,
+            IrysBuiltPayload,
         )>,
         BlockProductionError,
     > {
@@ -709,7 +709,7 @@ pub trait BlockProdStrategy {
             Arc<IrysBlockHeader>,
             Option<AdjustmentStats>,
             BlockTransactions,
-            EthBuiltPayload,
+            IrysBuiltPayload,
         )>,
         BlockProductionError,
     > {
@@ -806,7 +806,7 @@ pub trait BlockProdStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)>> {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)>> {
         let Some((block, stats, transactions, eth_built_payload)) =
             self.fully_produce_new_block_candidate(solution).await?
         else {
@@ -821,7 +821,7 @@ pub trait BlockProdStrategy {
     }
 
     /// Extracts and collects all transactions that should be included in a block
-    /// Returns the EthBuiltPayload and the final treasury balance
+    /// Returns the IrysBuiltPayload and the final treasury balance
     async fn create_evm_block(
         &self,
         prev_block_header: &IrysBlockHeader,
@@ -832,7 +832,7 @@ pub trait BlockProdStrategy {
         timestamp_ms: UnixTimestampMs,
         solution_hash: H256,
         current_ema_for_pricing: &IrysTokenPrice,
-    ) -> Result<(EthBuiltPayload, U256), BlockProductionError> {
+    ) -> Result<(IrysBuiltPayload, U256), BlockProductionError> {
         let block_height = prev_block_header.height + 1;
         let local_signer = LocalSigner::from(self.inner().config.irys_signer().signer);
 
@@ -887,7 +887,7 @@ pub trait BlockProdStrategy {
             )
             .await?;
 
-        // Post-Sprite: read final treasury from EVM state (authoritative source)
+        // Post-Sprite: get treasury from IrysBuiltPayload (extracted during payload building)
         // Pre-Sprite: use shadow_tx_generator's tracked balance
         let is_sprite_active = self
             .inner()
@@ -895,51 +895,29 @@ pub trait BlockProdStrategy {
             .consensus
             .hardforks
             .is_sprite_active(timestamp_ms.to_secs());
+
+        error!(
+            target: "treasury_debug",
+            payload_treasury = %payload.treasury_balance(),
+            shadow_gen_treasury = %shadow_tx_generator.treasury_balance(),
+            is_sprite_active = %is_sprite_active,
+            "TREASURY_DEBUG: Treasury balances from payload and shadow_tx_generator"
+        );
+
         let final_treasury_balance = if is_sprite_active {
-            self.read_treasury_from_evm_state(&payload)?
+            U256::from_le_bytes(payload.treasury_balance().to_le_bytes())
         } else {
             shadow_tx_generator.treasury_balance()
         };
 
+        error!(
+            target: "treasury_debug",
+            final_treasury = %final_treasury_balance,
+            source = if is_sprite_active { "payload" } else { "shadow_tx_generator" },
+            "TREASURY_DEBUG: Final treasury balance selected for block"
+        );
+
         Ok((payload, final_treasury_balance))
-    }
-
-    /// Read the treasury balance from the EVM state after block execution.
-    /// This is used post-Sprite when the EVM's TREASURY_ACCOUNT is the authoritative source.
-    fn read_treasury_from_evm_state(
-        &self,
-        payload: &EthBuiltPayload,
-    ) -> Result<U256, BlockProductionError> {
-        use reth::providers::{StateProvider, StateProviderFactory};
-
-        // Get state at the newly built block
-        let block_number = payload.block().number;
-        let state_provider = self
-            .inner()
-            .reth_provider
-            .history_by_block_number(block_number)
-            .map_err(|e| {
-                BlockProductionError::Irrecoverable {
-                    source: eyre!(
-                        "Failed to get state provider for block {}: {}",
-                        block_number,
-                        e
-                    ),
-                }
-            })?;
-
-        // Query TREASURY_ACCOUNT balance
-        let treasury_balance = state_provider
-            .account_balance(&(*TREASURY_ACCOUNT).into())
-            .map_err(|e| {
-                BlockProductionError::Irrecoverable {
-                    source: eyre!("Failed to query treasury balance: {}", e),
-                }
-            })?
-            .map(|b| U256::from_le_bytes(b.to_le_bytes()))
-            .unwrap_or(U256::zero());
-
-        Ok(treasury_balance)
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(
@@ -953,7 +931,7 @@ pub trait BlockProdStrategy {
         timestamp_ms: UnixTimestampMs,
         shadow_txs: Vec<EthPooledTransaction>,
         parent_mix_hash: B256,
-    ) -> Result<EthBuiltPayload, BlockProductionError> {
+    ) -> Result<IrysBuiltPayload, BlockProductionError> {
         debug!("Building Reth payload attributes");
 
         // generate payload attributes with shadow transactions
@@ -1018,12 +996,16 @@ pub trait BlockProdStrategy {
         let evm_block_hash = built_payload.block().hash();
         tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
-        let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
-            panic!(
-                "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
-                evm_block_hash, e
-            )
-        });
+        let payload = built_payload
+            .inner()
+            .clone()
+            .try_into_v5()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "failed to convert built payload to v5 for evm block hash {:?}: {:?}",
+                    evm_block_hash, e
+                )
+            });
         let new_payload_result = consensus_engine_handle
             .new_payload(ExecutionData {
                 payload: ExecutionPayload::V3(payload.execution_payload),
@@ -1241,6 +1223,13 @@ pub trait BlockProdStrategy {
             treasury: final_treasury,
         });
 
+        error!(
+            target: "treasury_debug",
+            block_height = %block_height,
+            treasury_in_header = %final_treasury,
+            "TREASURY_DEBUG: Treasury balance being written to block header"
+        );
+
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();
         block_signer.sign_block_header(&mut irys_block)?;
@@ -1265,7 +1254,7 @@ pub trait BlockProdStrategy {
         block: Arc<IrysBlockHeader>,
         stats: Option<AdjustmentStats>,
         transactions: BlockTransactions,
-        eth_built_payload: &EthBuiltPayload,
+        eth_built_payload: &IrysBuiltPayload,
     ) -> eyre::Result<Option<Arc<IrysBlockHeader>>> {
         let mut is_difficulty_updated = false;
         if let Some(stats) = stats {

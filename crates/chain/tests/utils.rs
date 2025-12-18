@@ -45,6 +45,7 @@ use irys_domain::{
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
+use irys_reth::IrysBuiltPayload;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_storage::ii;
 use irys_testing_utils::chunk_bytes_gen;
@@ -72,7 +73,6 @@ use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
 use reth::{
     network::{PeerInfo, Peers as _},
-    payload::EthBuiltPayload,
     rpc::types::RpcBlockHash,
     rpc::{api::EthApiServer as _, types::BlockNumberOrTag},
 };
@@ -1214,7 +1214,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_with_payload(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)> {
         // Ensure exactly one block is allowed even if a previous call set the guard to Some(0)
         self.node_ctx
             .service_senders
@@ -1245,7 +1245,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
     pub async fn mine_block_without_gossip(
         &self,
-    ) -> eyre::Result<(Arc<IrysBlockHeader>, EthBuiltPayload, BlockTransactions)> {
+    ) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)> {
         self.with_gossip_disabled(self.mine_block_with_payload())
             .await
     }
@@ -1254,7 +1254,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
     ) -> eyre::Result<(
         Arc<IrysBlockHeader>,
-        EthBuiltPayload,
+        IrysBuiltPayload,
         BlockTransactions,
         BlockValidationOutcome,
     )> {
@@ -2149,7 +2149,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         peer: &Self,
         irys_block_header: &IrysBlockHeader,
-        eth_payload: EthBuiltPayload,
+        eth_payload: IrysBuiltPayload,
         block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
         // Ingest data txs into peer's mempool

@@ -25,7 +25,6 @@ use reth::{
         BuilderContext, DebugNode, Node, NodeAdapter, NodeComponentsBuilder,
         PayloadBuilderConfig as _,
     },
-    payload::EthBuiltPayload,
     providers::{providers::ProviderFactoryBuilder, EthStorage},
     rpc::builder::constants::DEFAULT_TX_FEE_CAP_WEI,
 };
@@ -61,7 +60,9 @@ pub mod precompiles;
 pub mod shadow_tx;
 pub mod validator;
 
-pub use engine::{IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes};
+pub use engine::{
+    IrysBuiltPayload, IrysPayloadAttributes, IrysPayloadBuilderAttributes, IrysPayloadTypes,
+};
 pub use irys_types::chainspec::{IrysChainHardforks, IrysHardfork};
 pub use shadow_tx::{IRYS_SHADOW_EXEC, SHADOW_TX_DESTINATION_ADDR};
 pub use validator::{IrysEngineValidator, IrysEngineValidatorBuilder};
@@ -131,7 +132,7 @@ impl IrysEthereumNode {
     where
         Node: FullNodeTypes<Types = Self>,
         <Node::Types as NodeTypes>::Payload: PayloadTypes<
-            BuiltPayload = EthBuiltPayload,
+            BuiltPayload = IrysBuiltPayload,
             PayloadAttributes = IrysPayloadAttributes,
             PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
         >,
@@ -270,8 +271,9 @@ mod tests {
     };
     use crate::test_utils::*;
     use crate::test_utils::{
-        advance_blocks, block_reward, eth_payload_attributes_with_parent, get_balance, pledge,
-        sign_tx, stake, storage_fees, unpledge, unstake, DEFAULT_PRIORITY_FEE,
+        advance_block, advance_blocks, block_reward, eth_payload_attributes_with_parent,
+        get_balance, pledge, sign_shadow_tx, sign_tx, stake, storage_fees, treasury_deposit,
+        unpledge, unstake, DEFAULT_PRIORITY_FEE,
     };
     use alloy_consensus::{EthereumTxEnvelope, SignableTransaction as _, TxEip4844};
     use alloy_eips::Encodable2718 as _;
@@ -2441,6 +2443,54 @@ mod tests {
 
         Ok(())
     }
+
+    /// Validates that the treasury balance is correctly extracted and stored in IrysBuiltPayload
+    /// when a treasury_deposit shadow transaction is included in a block.
+    #[test_log::test(tokio::test)]
+    async fn test_treasury_balance_in_built_payload() -> eyre::Result<()> {
+        use crate::evm::TREASURY_ACCOUNT;
+
+        // Setup: Create a test context with a single node
+        let ctx = TestContext::new().await?;
+        let (mut node, ctx) = ctx.get_single_node()?;
+
+        // Get initial treasury balance before any deposits
+        let initial_treasury_balance = get_balance(&node.inner, (*TREASURY_ACCOUNT));
+
+        // Create a treasury deposit shadow transaction
+        let deposit_amount = U256::from(1_000_000_000_000_u64); // 1 trillion wei
+        let treasury_deposit_tx = treasury_deposit(deposit_amount);
+        let signed_tx = sign_shadow_tx(
+            treasury_deposit_tx,
+            &ctx.block_producer_a,
+            DEFAULT_PRIORITY_FEE,
+        )
+        .await?;
+
+        // Build a block with the treasury deposit
+        let payload = advance_block(&mut node, vec![signed_tx]).await?;
+
+        // Verify treasury balance in payload is non-zero and includes the deposit
+        let payload_treasury_balance = payload.treasury_balance();
+        let expected_min_balance = initial_treasury_balance + deposit_amount;
+
+        assert!(
+            payload_treasury_balance >= expected_min_balance,
+            "Treasury balance in payload ({}) should be >= initial ({}) + deposit ({})",
+            payload_treasury_balance,
+            initial_treasury_balance,
+            deposit_amount
+        );
+
+        // Also verify the on-chain treasury balance matches
+        let final_treasury_balance = get_balance(&node.inner, (*TREASURY_ACCOUNT));
+        assert_eq!(
+            payload_treasury_balance, final_treasury_balance,
+            "Payload treasury balance should match on-chain balance"
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "test-utils", test))]
@@ -2649,7 +2699,7 @@ pub mod test_utils {
 
     /// Helper for asserting transaction inclusion in blocks
     pub fn assert_txs_in_block(
-        block_payload: &EthBuiltPayload,
+        block_payload: &IrysBuiltPayload,
         expected_txs: &[alloy_primitives::FixedBytes<32>],
         message: &str,
     ) {
@@ -2671,7 +2721,7 @@ pub mod test_utils {
 
     /// Helper for asserting transaction exclusion from blocks
     pub fn assert_txs_not_in_block(
-        block_payload: &EthBuiltPayload,
+        block_payload: &IrysBuiltPayload,
         excluded_txs: &[alloy_primitives::FixedBytes<32>],
         message: &str,
     ) {
@@ -2693,7 +2743,7 @@ pub mod test_utils {
 
     /// Helper for asserting transaction ordering in blocks
     pub fn assert_shadow_txs_before_normal_txs(
-        block_payload: &EthBuiltPayload,
+        block_payload: &IrysBuiltPayload,
         shadow_txs: &[alloy_primitives::FixedBytes<32>],
         normal_txs: &[alloy_primitives::FixedBytes<32>],
     ) {
@@ -2764,7 +2814,7 @@ pub mod test_utils {
     pub async fn mine_block(
         node: &mut NodeHelperType<IrysEthereumNode>,
         shadow_txs: Vec<EthPooledTransaction>,
-    ) -> eyre::Result<EthBuiltPayload> {
+    ) -> eyre::Result<IrysBuiltPayload> {
         let block_payload = advance_block(node, shadow_txs).await?;
         Ok(block_payload)
     }
@@ -2774,7 +2824,7 @@ pub mod test_utils {
         node: &mut NodeHelperType<IrysEthereumNode>,
         shadow_txs: Vec<EthPooledTransaction>,
         expected_normal_txs: &[alloy_primitives::FixedBytes<32>],
-    ) -> eyre::Result<EthBuiltPayload> {
+    ) -> eyre::Result<IrysBuiltPayload> {
         let expected_shadow_tx_hashes = shadow_txs.iter().map(|tx| *tx.hash()).collect::<Vec<_>>();
         let block_payload = advance_block(node, shadow_txs).await?;
 
@@ -2815,7 +2865,7 @@ pub mod test_utils {
     pub async fn prepare_block(
         node: &mut NodeHelperType<IrysEthereumNode>,
         shadow_txs: Vec<EthPooledTransaction>,
-    ) -> Result<EthBuiltPayload, eyre::Error> {
+    ) -> Result<IrysBuiltPayload, eyre::Error> {
         node.payload.timestamp += 1;
         let base_attributes = (node.payload.attributes_generator)(node.payload.timestamp);
         // Create attributes with shadow transactions
@@ -2841,7 +2891,7 @@ pub mod test_utils {
     pub async fn advance_block(
         node: &mut NodeHelperType<IrysEthereumNode>,
         shadow_txs: Vec<EthPooledTransaction>,
-    ) -> Result<EthBuiltPayload, eyre::Error> {
+    ) -> Result<IrysBuiltPayload, eyre::Error> {
         let payload = prepare_block(node, shadow_txs).await?;
         node.update_forkchoice(payload.block().hash(), payload.block().hash())
             .await?;
@@ -2853,7 +2903,7 @@ pub mod test_utils {
         node: &mut NodeHelperType<IrysEthereumNode>,
         shadow_txs: Vec<Vec<ShadowTransaction>>,
         signer: &Arc<dyn alloy_network::TxSigner<Signature> + Send + Sync>,
-    ) -> Result<Vec<EthBuiltPayload>, eyre::Error> {
+    ) -> Result<Vec<IrysBuiltPayload>, eyre::Error> {
         let mut block_payloads = Vec::new();
 
         for shadow_txs_raw in shadow_txs {

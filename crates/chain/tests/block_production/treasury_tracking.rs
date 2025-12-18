@@ -17,6 +17,9 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     config.consensus.get_mut().chunk_size = 32;
     config.consensus.get_mut().block_migration_depth = 5;
 
+    // Disable Sprite hardfork so treasury is tracked via ShadowTxGenerator (pre-Sprite behavior)
+    config.consensus.get_mut().hardforks.sprite = None;
+
     let user1_signer = IrysSigner::random_signer(&config.consensus_config());
     let user2_signer = IrysSigner::random_signer(&config.consensus_config());
     config.fund_genesis_accounts(vec![&user1_signer, &user2_signer]);
@@ -244,5 +247,232 @@ async fn test_genesis_treasury_calculation() -> eyre::Result<()> {
     // Clean up
     node.stop().await;
 
+    Ok(())
+}
+
+/// Test that verifies treasury tracking works correctly when Sprite hardfork activates mid-chain.
+/// This tests the transition from pre-Sprite (ShadowTxGenerator tracking) to post-Sprite (EVM tracking).
+#[tokio::test]
+async fn heavy_test_treasury_tracking_with_sprite_activation() -> eyre::Result<()> {
+    initialize_tracing();
+
+    // ===== SETUP =====
+    // Configure Sprite to activate 10 seconds from now
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let sprite_activation = now_secs + 10;
+
+    let mut config = NodeConfig::testing();
+    config.consensus.get_mut().chunk_size = 32;
+
+    // Set Sprite activation to 10 seconds in the future
+    config
+        .consensus
+        .get_mut()
+        .hardforks
+        .sprite
+        .as_mut()
+        .expect("Sprite must be configured")
+        .activation_timestamp = UnixTimestamp::from_secs(sprite_activation);
+
+    let user_signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&user_signer]);
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("GENESIS", 10)
+        .await;
+
+    // ===== PRE-SPRITE PHASE =====
+    // Genesis block should NOT have Sprite active
+    let genesis_block = node.get_block_by_height(0).await?;
+    assert!(
+        !node
+            .node_ctx
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(genesis_block.timestamp_secs()),
+        "Sprite should NOT be active at genesis"
+    );
+    let pre_sprite_treasury = genesis_block.treasury;
+    info!("Genesis treasury (pre-Sprite): {}", pre_sprite_treasury);
+
+    // Mine a block before Sprite activates
+    let block1 = node.mine_block().await?;
+    assert!(
+        !node
+            .node_ctx
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(block1.timestamp_secs()),
+        "Sprite should NOT be active on block 1"
+    );
+    info!(
+        "Block 1 treasury (pre-Sprite): {}, timestamp: {}",
+        block1.treasury,
+        block1.timestamp_secs().as_secs()
+    );
+
+    // ===== WAIT FOR SPRITE ACTIVATION =====
+    // Mine blocks until Sprite activates, tracking the last pre-Sprite block
+    let mut last_pre_sprite_block = block1.clone();
+    let first_sprite_block = loop {
+        let block = node.mine_block().await?;
+        if node
+            .node_ctx
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(block.timestamp_secs())
+        {
+            break block;
+        }
+        last_pre_sprite_block = block.clone();
+        info!(
+            "Block {} treasury (pre-Sprite): {}, timestamp: {}",
+            block.height,
+            block.treasury,
+            block.timestamp_secs().as_secs()
+        );
+        // Small delay to let time pass
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    };
+
+    // ===== FIRST SPRITE BLOCK =====
+    // First Sprite block should emit TreasuryDeposit to initialize EVM treasury
+    assert!(
+        node.node_ctx
+            .config
+            .consensus
+            .hardforks
+            .is_sprite_active(first_sprite_block.timestamp_secs()),
+        "First Sprite block should have Sprite active"
+    );
+
+    info!(
+        "First Sprite block {} treasury: {}, timestamp: {}",
+        first_sprite_block.height,
+        first_sprite_block.treasury,
+        first_sprite_block.timestamp_secs().as_secs()
+    );
+
+    // First Sprite block treasury should equal last pre-Sprite block treasury
+    // (TreasuryDeposit seeds EVM with exact pre-Sprite balance)
+    assert_eq!(
+        first_sprite_block.treasury, last_pre_sprite_block.treasury,
+        "First Sprite block treasury should equal last pre-Sprite block treasury (seeded via TreasuryDeposit)"
+    );
+
+    // ===== EMPTY SPRITE BLOCKS =====
+    // Mine empty blocks after Sprite activation - treasury should remain unchanged
+    let empty_sprite_block1 = node.mine_block().await?;
+    let empty_sprite_block2 = node.mine_block().await?;
+
+    // Both should have Sprite active
+    assert!(node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_sprite_active(empty_sprite_block1.timestamp_secs()));
+    assert!(node
+        .node_ctx
+        .config
+        .consensus
+        .hardforks
+        .is_sprite_active(empty_sprite_block2.timestamp_secs()));
+
+    // Empty blocks should have unchanged treasury (verifies EVM state is correctly read)
+    assert_eq!(
+        empty_sprite_block1.treasury, first_sprite_block.treasury,
+        "Empty Sprite block 1 treasury should equal first Sprite block treasury"
+    );
+    assert_eq!(
+        empty_sprite_block2.treasury, empty_sprite_block1.treasury,
+        "Empty Sprite block 2 treasury should equal previous block treasury"
+    );
+
+    info!(
+        "Empty Sprite blocks verified: treasury unchanged at {}",
+        empty_sprite_block2.treasury
+    );
+
+    // ===== DATA TRANSACTION AFTER SPRITE =====
+    // Post a data transaction and verify treasury increases by expected fee amount
+    let consensus_config = config.consensus_config();
+    let number_of_ingress_proofs_total = node
+        .node_ctx
+        .config
+        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+    let data_tx = node
+        .post_data_tx(node.get_anchor().await?, vec![42_u8; 1024], &user_signer)
+        .await;
+    node.wait_for_mempool(data_tx.header.id, 10).await?;
+    node.mine_block().await?;
+    let block_with_data_tx = node
+        .get_block_by_height(empty_sprite_block2.height + 1)
+        .await?;
+
+    // Calculate expected treasury increase from data tx fees
+    let expected_fee_increase = {
+        let term_charges = TermFeeCharges::new(data_tx.header.term_fee, &consensus_config)?;
+        let publish_charges = PublishFeeCharges::new(
+            data_tx.header.perm_fee.unwrap(),
+            data_tx.header.term_fee,
+            &consensus_config,
+            number_of_ingress_proofs_total,
+        )?;
+        term_charges.term_fee_treasury + publish_charges.perm_fee_treasury
+    };
+
+    let min_expected_treasury = empty_sprite_block2.treasury + expected_fee_increase;
+    let actual_treasury_increase = block_with_data_tx.treasury - empty_sprite_block2.treasury;
+
+    // Treasury should increase by at least the calculated fee amount
+    // (may be slightly higher due to additional EVM base fees going to treasury)
+    assert!(
+        block_with_data_tx.treasury >= min_expected_treasury,
+        "Treasury after data tx should be at least previous treasury + fee increase.\n\
+         Previous: {}, Min fee increase: {}, Min expected: {}, Actual: {}",
+        empty_sprite_block2.treasury,
+        expected_fee_increase,
+        min_expected_treasury,
+        block_with_data_tx.treasury
+    );
+
+    // Verify treasury actually increased (not just unchanged)
+    assert!(
+        actual_treasury_increase > expected_fee_increase / 2,
+        "Treasury should have increased significantly. Actual increase: {}, Expected at least: {}",
+        actual_treasury_increase,
+        expected_fee_increase / 2
+    );
+
+    info!(
+        "Treasury tracking with Sprite activation test completed:\n\
+         - Genesis treasury (pre-Sprite): {}\n\
+         - Last pre-Sprite block {} treasury: {}\n\
+         - First Sprite block {} treasury: {} (equals pre-Sprite: {})\n\
+         - Empty Sprite block {} treasury: {} (unchanged)\n\
+         - Block with data tx {} treasury: {} (increased by {}, expected min {})",
+        pre_sprite_treasury,
+        last_pre_sprite_block.height,
+        last_pre_sprite_block.treasury,
+        first_sprite_block.height,
+        first_sprite_block.treasury,
+        first_sprite_block.treasury == last_pre_sprite_block.treasury,
+        empty_sprite_block2.height,
+        empty_sprite_block2.treasury,
+        block_with_data_tx.height,
+        block_with_data_tx.treasury,
+        actual_treasury_increase,
+        expected_fee_increase
+    );
+
+    node.stop().await;
     Ok(())
 }

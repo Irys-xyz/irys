@@ -221,6 +221,7 @@ reth-payload-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev =
 reth-revm = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-chain-state = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-errors = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
+reth-consensus-common = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-ethereum-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 

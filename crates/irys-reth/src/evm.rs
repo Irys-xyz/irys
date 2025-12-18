@@ -2543,8 +2543,8 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_pd_tx_rejected_then_accepted_after_funding() -> eyre::Result<()> {
         use crate::shadow_tx::BalanceIncrement;
-        use crate::shadow_tx::TreasuryDeposit;
         use crate::shadow_tx::TransactionPacket;
+        use crate::shadow_tx::TreasuryDeposit;
 
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;

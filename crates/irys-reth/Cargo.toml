@@ -46,6 +46,9 @@ reth-payload-builder-primitives.workspace = true
 reth-ethereum-payload-builder.workspace = true
 reth-node-builder.workspace = true
 reth-provider.workspace = true
+reth-revm.workspace = true
+reth-consensus-common.workspace = true
+reth-errors.workspace = true
 
 
 tokio.workspace = true

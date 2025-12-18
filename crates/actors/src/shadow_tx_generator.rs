@@ -235,10 +235,23 @@ impl<'a> ShadowTxGenerator<'a> {
             ));
         }
 
-        // Determine if this is the first Sprite block
-        // First Sprite block = parent was NOT Sprite-active AND current IS Sprite-active
-        let parent_sprite_active = config.hardforks.is_sprite_active(parent_block.timestamp_secs());
-        let is_first_sprite_block = !parent_sprite_active && is_sprite_active;
+        // Determine if this is the first Sprite block that needs to emit TreasuryDeposit
+        // This initializes the EVM TREASURY_ACCOUNT with the pre-Sprite treasury balance.
+        // Two cases:
+        // 1. Block 1 (parent is genesis at height 0): if Sprite is active, this is the first
+        //    "real" block that can emit TreasuryDeposit to seed the EVM treasury.
+        // 2. Subsequent blocks: emit only on the transition from pre-Sprite to Sprite
+        //    (i.e., parent was NOT Sprite-active AND current IS Sprite-active).
+        let parent_sprite_active = config
+            .hardforks
+            .is_sprite_active(parent_block.timestamp_secs());
+        let is_first_sprite_block = if parent_block.height == 0 {
+            // Block 1: emit TreasuryDeposit if Sprite is active (seeds EVM treasury from genesis)
+            is_sprite_active
+        } else {
+            // Subsequent blocks: emit only on the transition
+            !parent_sprite_active && is_sprite_active
+        };
 
         // Validate that no transaction in publish ledger has a refund
         // (promoted transactions should not get perm_fee refunds)
@@ -786,7 +799,9 @@ impl<'a> ShadowTxGenerator<'a> {
                                 )
                             }
                         },
-                        _ => unreachable!("commitment refund iterator contains only refund packets"),
+                        _ => {
+                            unreachable!("commitment refund iterator contains only refund packets")
+                        }
                     }
                 }
                 Ok(metadata)
