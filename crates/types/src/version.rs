@@ -22,14 +22,61 @@ pub enum PeerResponse {
 }
 
 // Explicit integer protocol versions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Arbitrary,
+)]
+#[serde(try_from = "u32", into = "u32")]
 #[repr(u32)]
 #[derive(Default)]
 pub enum ProtocolVersion {
     #[default]
     V1 = 1,
-    // V2 = 2,
+    V2 = 2,
     // V3 = 3,
+}
+
+impl ProtocolVersion {
+    pub fn current() -> Self {
+        Self::V2
+    }
+    pub fn current_u32() -> u32 {
+        Self::current() as u32
+    }
+
+    pub fn is_known(version: u32) -> bool {
+        Self::try_from(version).is_ok()
+    }
+
+    pub fn supported_versions() -> &'static [ProtocolVersion] {
+        &[Self::V1, Self::V2]
+    }
+
+    pub fn is_supported(version: u32) -> bool {
+        Self::supported_versions()
+            .iter()
+            .any(|&v| v as u32 == version)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Unsupported protocol version: {0}")]
+pub struct UnknownProtocolVersion(pub u32);
+
+impl TryFrom<u32> for ProtocolVersion {
+    type Error = UnknownProtocolVersion;
+
+    fn try_from(v: u32) -> Result<Self, Self::Error> {
+        match v {
+            1 => Ok(Self::V1),
+            _ => Err(UnknownProtocolVersion(v)),
+        }
+    }
+}
+
+impl From<ProtocolVersion> for u32 {
+    fn from(v: ProtocolVersion) -> Self {
+        v as Self
+    }
 }
 
 /// Builds a user-agent string to identify this node implementation in the P2P network.
@@ -120,7 +167,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionRequest {
     pub version: Version,
-    pub protocol_version: ProtocolVersion,
+    pub protocol_version: u32,
     pub mining_address: IrysAddress,
     pub chain_id: u64,
     pub address: PeerAddress,
@@ -134,7 +181,7 @@ impl Default for VersionRequest {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
             mining_address: IrysAddress::ZERO,
-            protocol_version: ProtocolVersion::default(),
+            protocol_version: ProtocolVersion::current_u32(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -154,7 +201,7 @@ impl VersionRequest {
     {
         let mut size = 0;
         size += encode_version_for_signing(&self.version, buf);
-        size += (self.protocol_version as u32).to_compact(buf);
+        size += self.protocol_version.to_compact(buf);
         size += self.mining_address.to_compact(buf);
         size += self.chain_id.to_compact(buf);
         size += self.address.to_compact(buf);
@@ -310,19 +357,19 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionReason {
-    MaxPeersReached,    // Node is at capacity for peer connections
-    VersionMismatch,    // Incompatible software versions
-    ProtocolMismatch,   // Incompatible protocol versions
-    InvalidCredentials, // If the network requires authentication
-    BlackListed,        // Requesting peer's address is blacklisted
-    InvalidFeatures,    // Requesting peer's features are incompatible
-    RegionRestricted,   // Geographical restrictions (if applicable)
-    MaintenanceMode,    // Node is in maintenance mode
-    RateLimited,        // Too many connection attempts
-    NetworkMismatch,    // Wrong network (e.g. testnet vs mainnet)
-    BadHandshake,       // Malformed or invalid handshake request
-    Untrusted,          // Peer doesn't meet trust requirements
-    InternalError,      // Unable to complete request
+    MaxPeersReached,      // Node is at capacity for peer connections
+    VersionMismatch,      // Incompatible software versions
+    ProtocolMismatch,     // Incompatible protocol versions
+    InvalidCredentials,   // If the network requires authentication
+    BlackListed,          // Requesting peer's address is blacklisted
+    InvalidFeatures,      // Requesting peer's features are incompatible
+    RegionRestricted,     // Geographical restrictions (if applicable)
+    MaintenanceMode,      // Node is in maintenance mode
+    RateLimited,          // Too many connection attempts
+    NetworkMismatch,      // Wrong network (e.g. testnet vs mainnet)
+    BadHandshake,         // Malformed or invalid handshake request
+    Untrusted,            // Peer doesn't meet trust requirements
+    InternalError,        // Unable to complete request
     UnableToVerifyOrigin, // Unable to verify the origin of the request
 }
 

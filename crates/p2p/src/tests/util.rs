@@ -745,6 +745,11 @@ impl FakeGossipServer {
                 .service(
                     web::resource("/gossip/block-index").route(web::get().to(handle_block_index)),
                 )
+                .service(
+                    web::resource("/gossip/protocol_version")
+                        .route(web::get().to(handle_protocol_version)),
+                )
+                .service(web::resource("/gossip/health").route(web::get().to(handle_health)))
                 .default_service(web::to(|| async {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
@@ -1006,4 +1011,12 @@ pub(crate) async fn wait_for_block(
 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+async fn handle_protocol_version() -> HttpResponse {
+    HttpResponse::Ok().json(1u32)
+}
+
+async fn handle_health() -> HttpResponse {
+    HttpResponse::Ok().json(GossipResponse::Accepted(true))
 }

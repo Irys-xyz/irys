@@ -6,7 +6,7 @@ use irys_database::walk_all;
 use irys_types::IrysAddress;
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
-    PeerNetworkSender,
+    PeerNetworkSender, ProtocolVersion,
 };
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
@@ -181,7 +181,11 @@ impl PeerList {
         }
     }
 
-    pub fn set_protocol_version(&self, mining_addr: &IrysAddress, protocol_version: u32) {
+    pub fn set_protocol_version(
+        &self,
+        mining_addr: &IrysAddress,
+        protocol_version: ProtocolVersion,
+    ) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
         if let Some(peer) = inner.persistent_peers_cache.get_mut(mining_addr) {
             peer.protocol_version = Some(protocol_version);

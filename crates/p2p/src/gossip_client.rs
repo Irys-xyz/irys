@@ -48,8 +48,6 @@ pub struct GossipClient {
 }
 
 impl GossipClient {
-    pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
-
     #[must_use]
     pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
         Self {
@@ -983,6 +981,14 @@ impl GossipClient {
                                 ));
                                 all_failures_were_handshake = false;
                             }
+                            RejectionReason::UnsupportedProtocolVersion(version) => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} does not support protocol version: {}",
+                                        peer.0, version
+                                    )),
+                                ));
+                            }
                         }
                         // Do not retry the same peer on rejection
                     }
@@ -1214,6 +1220,14 @@ impl GossipClient {
                                     )),
                                 ));
                                 round_failures_were_handshake = false;
+                            }
+                            RejectionReason::UnsupportedProtocolVersion(version) => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} does not support protocol version: {}",
+                                        peer.0, version
+                                    )),
+                                ));
                             }
                         },
                     },

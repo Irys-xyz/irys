@@ -9,7 +9,7 @@ use irys_types::{
     build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, GossipDataRequest,
     HandshakeMessage, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
     PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
+    ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -763,6 +763,14 @@ impl PeerNetworkService {
                                     )),
                                 ));
                             }
+                            RejectionReason::UnsupportedProtocolVersion(version) => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} does not support protocol version: {}",
+                                        peer.0, version
+                                    )),
+                                ));
+                            }
                         }
                     }
                     Err(err) => {
@@ -873,13 +881,25 @@ impl PeerNetworkService {
         };
 
         match gossip_client.get_protocol_version(peer_addr).await {
-            Ok(version) => {
-                if let Some(mining_addr) =
-                    peer_list.get_mining_address_by_gossip_ip(gossip_address.ip())
-                {
-                    peer_list.set_protocol_version(&mining_addr, version);
+            Ok(version) => match ProtocolVersion::try_from(version) {
+                Ok(pv) => {
+                    if let Some(mining_addr) =
+                        peer_list.get_mining_address_by_gossip_ip(gossip_address.ip())
+                    {
+                        peer_list.set_protocol_version(&mining_addr, pv);
+                    }
                 }
-            }
+                Err(err) => {
+                    warn!(
+                        "Peer {} has unsupported protocol version: {} ({:?})",
+                        gossip_address, version, err
+                    );
+                    return Err(PeerListServiceError::PostVersionError(format!(
+                        "Unsupported protocol version: {}",
+                        version
+                    )));
+                }
+            },
             Err(e) => {
                 warn!(
                     "Failed to get protocol version from {}: {}. Gossip IP might be unavailable.",

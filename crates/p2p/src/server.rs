@@ -477,18 +477,32 @@ where
         };
 
         let version_request = body.into_inner();
+        debug!(
+            "Handling version request from {:?}",
+            version_request.address
+        );
 
         if source_addr != version_request.address.gossip.ip() {
+            warn!(
+                "Version request IP mismatch: source {:?} != gossip {:?}",
+                source_addr,
+                version_request.address.gossip.ip()
+            );
             return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
 
-        if version_request.protocol_version != ProtocolVersion::V1 {
+        let Ok(protocol_version) = ProtocolVersion::try_from(version_request.protocol_version)
+        else {
+            warn!(
+                "Protocol version unsupported: {:?}",
+                version_request.protocol_version
+            );
             return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
-                RejectionReason::ProtocolMismatch,
+                RejectionReason::UnsupportedProtocolVersion(version_request.protocol_version),
             ));
-        }
+        };
 
         if !version_request.verify_signature() {
             return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
@@ -508,8 +522,10 @@ where
 
         let peer_address = version_request.address;
         let mining_addr = version_request.mining_address;
+
         let peer_list_entry = PeerListItem {
             address: peer_address,
+            protocol_version: Some(protocol_version),
             ..Default::default()
         };
 
@@ -581,7 +597,8 @@ where
         reason = "Actix-web handler signature requires handlers to be async"
     )]
     async fn handle_protocol_version() -> HttpResponse {
-        HttpResponse::Ok().json(crate::gossip_client::GossipClient::CURRENT_PROTOCOL_VERSION)
+        debug!("Handling protocol version request");
+        HttpResponse::Ok().json(ProtocolVersion::current_u32())
     }
 
     fn handle_invalid_data(
@@ -767,7 +784,9 @@ mod tests {
     use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{Config, DatabaseProvider, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore};
+    use irys_types::{
+        Config, DatabaseProvider, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore,
+    };
     use std::sync::Arc;
     use tokio::sync::mpsc;
 

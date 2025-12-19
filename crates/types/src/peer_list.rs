@@ -1,4 +1,4 @@
-use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress, ProtocolVersion};
 
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
@@ -82,7 +82,7 @@ pub struct PeerListItem {
     pub address: PeerAddress,
     pub last_seen: u64,
     pub is_online: bool,
-    pub protocol_version: Option<u32>,
+    pub protocol_version: Option<ProtocolVersion>,
 }
 
 impl Default for PeerListItem {
@@ -264,7 +264,7 @@ impl Compact for PeerListItem {
         // Encode protocol_version
         if let Some(version) = self.protocol_version {
             buf.put_u8(1); // Present
-            buf.put_u32(version);
+            buf.put_u32(version as u32);
             size += 5;
         } else {
             buf.put_u8(0); // Not present
@@ -359,9 +359,10 @@ impl Compact for PeerListItem {
             let has_version = buf[total_consumed] == 1;
             total_consumed += 1;
             if has_version && buf.len() >= total_consumed + 4 {
-                protocol_version = Some(u32::from_be_bytes(
+                protocol_version = ProtocolVersion::try_from(u32::from_be_bytes(
                     buf[total_consumed..total_consumed + 4].try_into().unwrap(),
-                ));
+                ))
+                .ok();
                 total_consumed += 4;
             }
         }
