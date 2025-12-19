@@ -121,6 +121,12 @@ where
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
             if peer.address.gossip.ip() != peer_address.ip() {
+                debug!(
+                    miner_address = %miner_address,
+                    expected_ip = %peer.address.gossip.ip(),
+                    actual_ip = %peer_address.ip(),
+                    "Rejecting gossip: IP mismatch requires handshake"
+                );
                 return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                     RejectionReason::HandshakeRequired(Some(
                         HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
@@ -129,6 +135,11 @@ where
             }
             Ok(peer)
         } else {
+            debug!(
+                miner_address = %miner_address,
+                peer_ip = %peer_address.ip(),
+                "Rejecting gossip: unknown miner address requires handshake"
+            );
             Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::HandshakeRequired(Some(
                     HandshakeRequirementReason::MinerAddressIsUnknown,
