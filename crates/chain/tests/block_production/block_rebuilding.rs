@@ -14,6 +14,7 @@
 //! OS scheduling congestion from concurrent test execution.
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
+use irys_reth::IrysBuiltPayload;
 use irys_types::{block_production::SolutionContext, IrysBlockHeader, NodeConfig, H256};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
@@ -48,7 +49,7 @@ impl BlockProdStrategy for TrackingStrategy {
     ) -> eyre::Result<
         Option<(
             Arc<IrysBlockHeader>,
-            reth::payload::EthBuiltPayload,
+            IrysBuiltPayload,
             irys_actors::block_discovery::BlockTransactions,
         )>,
     > {

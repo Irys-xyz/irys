@@ -13,6 +13,7 @@ use irys_actors::block_validation::ValidationError;
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
+use irys_reth::IrysBuiltPayload;
 use irys_types::{IrysBlockHeader, NodeConfig};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
@@ -21,7 +22,7 @@ use reth::primitives::Block;
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(
     genesis_node: &IrysNodeTest<IrysNodeCtx>,
-) -> eyre::Result<(Arc<IrysBlockHeader>, reth::payload::EthBuiltPayload)> {
+) -> eyre::Result<(Arc<IrysBlockHeader>, IrysBuiltPayload)> {
     let block_prod_strategy = ProductionStrategy {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
