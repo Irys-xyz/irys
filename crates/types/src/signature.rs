@@ -170,10 +170,7 @@ impl alloy_rlp::Decodable for IrysSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        BoundedFee, CommitmentTransaction, CommitmentType, IrysAddress, IrysTransactionCommon as _,
-        Signable as _,
-    };
+    use crate::{BoundedFee, CommitmentTransaction, CommitmentType, IrysAddress, Signable as _};
 
     use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
