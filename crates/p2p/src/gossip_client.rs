@@ -1548,6 +1548,7 @@ mod tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs(),
+                protocol_version: None,
             };
             (mining_addr, peer)
         }

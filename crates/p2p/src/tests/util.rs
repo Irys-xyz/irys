@@ -515,6 +515,7 @@ impl GossipServiceTestFixture {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: None,
         }
     }
 

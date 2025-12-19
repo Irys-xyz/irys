@@ -323,6 +323,7 @@ pub enum RejectionReason {
     BadHandshake,       // Malformed or invalid handshake request
     Untrusted,          // Peer doesn't meet trust requirements
     InternalError,      // Unable to complete request
+    UnableToVerifyOrigin, // Unable to verify the origin of the request
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]

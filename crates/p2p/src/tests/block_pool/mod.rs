@@ -260,6 +260,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: None,
         },
         true,
     );
@@ -428,6 +429,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: None,
         },
         true,
     );
@@ -670,6 +672,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: None,
         },
         true,
     );

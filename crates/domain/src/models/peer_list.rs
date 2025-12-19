@@ -181,6 +181,19 @@ impl PeerList {
         }
     }
 
+    pub fn set_protocol_version(&self, mining_addr: &IrysAddress, protocol_version: u32) {
+        let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
+        if let Some(peer) = inner.persistent_peers_cache.get_mut(mining_addr) {
+            peer.protocol_version = Some(protocol_version);
+        } else if let Some(peer) = inner.unstaked_peer_purgatory.get_mut(mining_addr) {
+            peer.protocol_version = Some(protocol_version);
+        }
+    }
+
+    pub fn get_mining_address_by_gossip_ip(&self, ip: IpAddr) -> Option<IrysAddress> {
+        self.read().gossip_addr_to_mining_addr_map.get(&ip).copied()
+    }
+
     /// Get a peer from any cache (persistent or purgatory)
     pub fn get_peer(&self, mining_addr: &IrysAddress) -> Option<PeerListItem> {
         let inner = self.read();
@@ -1079,6 +1092,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            protocol_version: None,
         };
         (mining_addr, peer)
     }

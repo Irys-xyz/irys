@@ -82,6 +82,7 @@ pub struct PeerListItem {
     pub address: PeerAddress,
     pub last_seen: u64,
     pub is_online: bool,
+    pub protocol_version: Option<u32>,
 }
 
 impl Default for PeerListItem {
@@ -99,6 +100,7 @@ impl Default for PeerListItem {
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_online: true,
+            protocol_version: None,
         }
     }
 }
@@ -259,6 +261,16 @@ impl Compact for PeerListItem {
         buf.put_u8(if self.is_online { 1 } else { 0 });
         size += 1;
 
+        // Encode protocol_version
+        if let Some(version) = self.protocol_version {
+            buf.put_u8(1); // Present
+            buf.put_u32(version);
+            size += 5;
+        } else {
+            buf.put_u8(0); // Not present
+            size += 1;
+        }
+
         size
     }
 
@@ -271,11 +283,12 @@ impl Compact for PeerListItem {
         // - RethPeerInfo (variable size; see its Compact impl)
         // - u64 last_seen (8 bytes, BE)
         // - optional u8 is_online (1 byte). Decoder tolerates it being absent and defaults to false.
+        // - optional protocol_version (1 byte tag + 4 bytes u32). Decoder tolerates it being absent and defaults to None.
         //
         // Decoding strategy:
         // - For the fixed-size prefix (score, response_time) we advance the buf slice in-place.
         // - For variable-size sections we call helpers that return the remaining slice.
-        // - For the tail (last_seen [+ optional is_online]) we read without immediately advancing,
+        // - For the tail (last_seen [+ optional is_online] [+ optional protocol_version]) we read without immediately advancing,
         //   track a local total_consumed, and compute the correct remainder to return.
         let mut buf = buf;
 
@@ -304,6 +317,7 @@ impl Compact for PeerListItem {
                     },
                     last_seen: 0,
                     is_online: false,
+                    protocol_version: None,
                 },
                 &[],
             );
@@ -340,6 +354,18 @@ impl Compact for PeerListItem {
             total_consumed += 1;
         }
 
+        let mut protocol_version = None;
+        if buf.len() > total_consumed {
+            let has_version = buf[total_consumed] == 1;
+            total_consumed += 1;
+            if has_version && buf.len() >= total_consumed + 4 {
+                protocol_version = Some(u32::from_be_bytes(
+                    buf[total_consumed..total_consumed + 4].try_into().unwrap(),
+                ));
+                total_consumed += 4;
+            }
+        }
+
         (
             Self {
                 reputation_score,
@@ -347,6 +373,7 @@ impl Compact for PeerListItem {
                 address,
                 last_seen,
                 is_online,
+                protocol_version,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
@@ -789,9 +816,9 @@ mod tests {
         let item = PeerListItem::default();
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
-        // Remove the optional is_online byte
-        assert!(!buf.is_empty());
-        buf.truncate(buf.len() - 1);
+        // Remove the optional is_online byte and protocol_version byte
+        assert!(buf.len() >= 2);
+        buf.truncate(buf.len() - 2);
 
         let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
         assert!(
@@ -804,5 +831,6 @@ mod tests {
         assert_eq!(decoded.address, item.address);
         assert_eq!(decoded.last_seen, item.last_seen);
         assert!(!decoded.is_online);
+        assert!(decoded.protocol_version.is_none());
     }
 }

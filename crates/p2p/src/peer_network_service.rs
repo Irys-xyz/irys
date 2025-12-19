@@ -866,6 +866,32 @@ impl PeerNetworkService {
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
+        let peer_addr = PeerAddress {
+            gossip: gossip_address,
+            api: api_address,
+            execution: RethPeerInfo::default(),
+        };
+
+        match gossip_client.get_protocol_version(peer_addr).await {
+            Ok(version) => {
+                if let Some(mining_addr) =
+                    peer_list.get_mining_address_by_gossip_ip(gossip_address.ip())
+                {
+                    peer_list.set_protocol_version(&mining_addr, version);
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to get protocol version from {}: {}. Gossip IP might be unavailable.",
+                    gossip_address, e
+                );
+                return Err(PeerListServiceError::PostVersionError(format!(
+                    "Failed to get protocol version: {}",
+                    e
+                )));
+            }
+        }
+
         let peer_response_result = gossip_client
             .post_version(gossip_address, version_request.clone())
             .await
@@ -1041,6 +1067,7 @@ mod tests {
             response_time: 100,
             last_seen: 123,
             is_online,
+            protocol_version: None,
         };
         (mining_addr, peer)
     }
