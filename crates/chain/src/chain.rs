@@ -162,15 +162,47 @@ impl IrysNodeCtx {
         if let Err(e) = self.reth_shutdown_sender.send(reason).await {
             error!("Failed to send shutdown signal to reth thread: {}", e);
         }
-        match self.reth_thread_handle.unwrap().join() {
-            Ok(reason) => {
-                info!("Reth thread stopped with reason: {}", reason);
-            }
-            Err(e) => {
-                error!("Reth thread panicked or failed: {:?}", e);
+        match self.reth_thread_handle {
+            Some(handle) => match handle.join() {
+                Ok(reason) => {
+                    info!("Reth thread stopped with reason: {}", reason);
+                }
+                Err(e) => {
+                    error!("Reth thread panicked or failed: {:?}", e);
+                }
+            },
+            None => {
+                error!("Reth thread handle was None during shutdown");
             }
         }
         debug!("Main actor thread and reth thread stopped");
+
+        // Flush telemetry before marking as stopped to ensure all logs are exported
+        #[cfg(feature = "telemetry")]
+        {
+            use std::time::Duration;
+
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                tokio::task::spawn_blocking(irys_utils::telemetry::flush_telemetry),
+            )
+            .await
+            {
+                Ok(Ok(Ok(_))) => {
+                    // Successfully shut down telemetry - all logs exported
+                }
+                Ok(Ok(Err(e))) => {
+                    error!("Telemetry shutdown error: {:?}", e);
+                }
+                Ok(Err(e)) => {
+                    error!("Telemetry shutdown task panicked: {:?}", e);
+                }
+                Err(_) => {
+                    error!("Telemetry shutdown timed out after 15s");
+                }
+            }
+        }
+
         self.stop_guard.mark_stopped();
     }
 
@@ -1076,9 +1108,8 @@ impl IrysNode {
                 reth_provider::cleanup_provider(&irys_provider);
 
                 info!("Reth thread finished with reason: {}", shutdown_reason);
-                if let Err(e) = irys_utils::telemetry::flush_telemetry() {
-                    error!("Unable to flush telemetry: {:?}", &e)
-                };
+                // Telemetry flush is now handled in main.rs after handle.stop()
+                // to ensure all logs are captured before tokio runtime drops
                 shutdown_reason
             })?;
 
