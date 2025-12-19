@@ -9,6 +9,7 @@ use irys_actors::services::ServiceSenders;
 use irys_actors::{MempoolFacade, TxIngressError};
 use irys_database::block_header_by_hash;
 use irys_database::db::IrysDatabaseExt as _;
+use irys_database::reth_db::Database as _;
 use irys_domain::chain_sync_state::ChainSyncState;
 
 #[cfg(test)]
@@ -820,33 +821,14 @@ where
             block_transactions.commitment_txs.len()
         );
 
-        // Insert transactions into mempool so validation service can find them later.
-        for commitment_tx in &block_transactions.commitment_txs {
-            if let Err(err) = self
-                .mempool
-                .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
-                .await
-            {
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
-                        commitment_tx.id(), current_block_hash, err
-                    );
-                }
-            }
-        }
-        for data_tx in block_transactions.all_data_txs() {
-            if let Err(err) = self
-                .mempool
-                .handle_data_transaction_ingress_gossip(data_tx.clone())
-                .await
-            {
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
-                        data_tx.id, current_block_hash, err
-                    );
-                }
+        // Cache data roots before validation (needed for publish tx ingress proof validation).
+        // Full tx ingestion happens after validation via BlockTransactionsValidated.
+        for data_tx in block_transactions.get_ledger_txs(DataLedger::Submit) {
+            if let Err(e) = self.db.update(|db_tx| {
+                irys_database::cache_data_root(db_tx, data_tx, Some(&block_header))?;
+                Ok::<_, eyre::Report>(())
+            }) {
+                warn!("Failed to cache data_root for tx {}: {:?}", data_tx.id, e);
             }
         }
 

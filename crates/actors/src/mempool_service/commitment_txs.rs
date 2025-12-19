@@ -1,11 +1,11 @@
 use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
+use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, GossipBroadcastMessage, IrysAddress,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, H256,
 };
-// Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 
@@ -157,10 +157,14 @@ impl Inner {
         self.precheck_commitment_ingress_common(commitment_tx)
             .await?;
 
+        // Reject transactions with zero balance
+        self.validate_commitment_gossip_nonzero_balance(commitment_tx)
+            .await?;
+
         // Gossip path: check only static fields from config (shape).
         // - Validate `fee` and `value` to reject clearly wrong Stake/Pledge/Unpledge/Unstake txs.
-        // - Do not check account balance here. That is verified on API ingress
-        //   and again during selection/block validation.
+        // - We skip full balance validation for gossip, as balances may differ across forks.
+        //   However, we do check for non-zero balance above to prevent DoS.
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
             self.mempool_state
                 .put_recent_invalid(commitment_tx.id())
@@ -245,6 +249,34 @@ impl Inner {
             );
             return Err(CommitmentValidationError::ForbiddenSigner.into());
         }
+        Ok(())
+    }
+
+    /// Validates that a gossip commitment transaction signer has non-zero balance.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id(), tx.signer = %tx.signer()))]
+    async fn validate_commitment_gossip_nonzero_balance(
+        &self,
+        tx: &CommitmentTransaction,
+    ) -> Result<(), TxIngressError> {
+        let balance: irys_types::U256 = self
+            .reth_node_adapter
+            .rpc
+            .get_balance_irys_canonical_and_pending(tx.signer(), None)
+            .await
+            .map_err(|e| TxIngressError::BalanceFetchError {
+                address: tx.signer().to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if balance.is_zero() {
+            tracing::debug!(
+                tx.id = %tx.id(),
+                tx.signer = %tx.signer(),
+                "Rejecting gossip commitment tx from zero-balance account"
+            );
+            return Err(TxIngressError::Unfunded(tx.id()));
+        }
+
         Ok(())
     }
 

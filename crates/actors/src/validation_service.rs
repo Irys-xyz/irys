@@ -264,6 +264,21 @@ impl ValidationService {
                 result = coordinator.concurrent_tasks.join_next(), if !coordinator.concurrent_tasks.is_empty() => {
                     match result {
                         Some(Ok(validation)) => {
+                            // On successful validation, send transactions to mempool
+                            if matches!(validation.validation_result, ValidationResult::Valid) {
+                                if let Err(e) = self.inner.service_senders.mempool.send(
+                                    crate::mempool_service::MempoolServiceMessage::BlockTransactionsValidated {
+                                        block: validation.block.clone(),
+                                        transactions: validation.transactions.clone(),
+                                    }
+                                ) {
+                                    error!(
+                                        block.hash = %validation.block_hash,
+                                        custom.error = ?e,
+                                        "Failed to send BlockTransactionsValidated to mempool"
+                                    );
+                                }
+                            }
 
                             // Send the validation result to the block tree service
                             if let Err(e) = self.inner.service_senders.block_tree.send(
