@@ -92,7 +92,7 @@ impl GossipCacheKey {
     }
 
     pub fn commitment_transaction(commitment_tx: &CommitmentTransaction) -> Self {
-        Self::Transaction(commitment_tx.id)
+        Self::Transaction(commitment_tx.id())
     }
 
     pub fn irys_block(block: &IrysBlockHeader) -> Self {
@@ -134,7 +134,7 @@ impl GossipData {
                 format!("transaction {}", tx.id)
             }
             Self::CommitmentTransaction(commitment_tx) => {
-                format!("commitment transaction {}", commitment_tx.id)
+                format!("commitment transaction {}", commitment_tx.id())
             }
             Self::Block(block) => {
                 format!("block {} height: {}", block.block_hash, block.height)

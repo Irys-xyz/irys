@@ -289,11 +289,11 @@ where
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
             transaction_request.miner_address,
-            transaction_request.data.id
+            transaction_request.data.id()
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
-        let tx_id = tx.id;
+        let tx_id = tx.id();
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
 
@@ -909,8 +909,10 @@ where
 
         // Collect cached tx IDs for quick lookup
         let cached_data_ids: HashSet<H256> = fetched_data_txs.iter().map(|tx| tx.id).collect();
-        let cached_commitment_ids: HashSet<H256> =
-            fetched_commitment_txs.iter().map(|tx| tx.id).collect();
+        let cached_commitment_ids: HashSet<H256> = fetched_commitment_txs
+            .iter()
+            .map(CommitmentTransaction::id)
+            .collect();
 
         // Collect required tx IDs from block header
         let data_tx_ids: Vec<H256> = block
@@ -1009,8 +1011,10 @@ where
 
         // Build sets of what we have now
         let have_data_ids: HashSet<H256> = fetched_data_txs.iter().map(|tx| tx.id).collect();
-        let have_commitment_ids: HashSet<H256> =
-            fetched_commitment_txs.iter().map(|tx| tx.id).collect();
+        let have_commitment_ids: HashSet<H256> = fetched_commitment_txs
+            .iter()
+            .map(CommitmentTransaction::id)
+            .collect();
 
         // Step 4: Determine what's still missing (not in cache, mempool, or DB)
         let missing_data_ids: Vec<H256> = data_tx_ids
@@ -1173,7 +1177,7 @@ where
                     let tx_id = match &tx_response {
                         IrysTransactionResponse::Commitment(commitment_tx) => {
                             fetched_commitment_txs.push(commitment_tx.clone());
-                            commitment_tx.id
+                            commitment_tx.id()
                         }
                         IrysTransactionResponse::Storage(tx) => {
                             fetched_data_txs.push(tx.clone());

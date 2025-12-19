@@ -58,7 +58,9 @@ fn commitment_tx_signing_uses_discriminant() {
 
     // Verify the signature is valid
     let sig_hash = tx.signature_hash();
-    assert!(tx.signature.validate_signature(sig_hash, signer.address()));
+    assert!(tx
+        .signature()
+        .validate_signature(sig_hash, signer.address()));
 }
 
 #[test]

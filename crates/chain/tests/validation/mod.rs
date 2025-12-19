@@ -133,11 +133,11 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     // Create a pledge commitment with invalid value
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.commitment_type = CommitmentType::Stake;
-    invalid_pledge.anchor = genesis_node.get_anchor().await?;
-    invalid_pledge.signer = genesis_config.signer().address();
-    invalid_pledge.fee = consensus_config.mempool.commitment_fee;
-    invalid_pledge.value = U256::from(1_000_000); // Invalid!
+    invalid_pledge.set_commitment_type(CommitmentType::Stake);
+    invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
+    invalid_pledge.set_signer(genesis_config.signer().address());
+    invalid_pledge.set_fee(consensus_config.mempool.commitment_fee);
+    invalid_pledge.set_value(U256::from(1_000_000)); // Invalid!
 
     // Sign the commitment
     genesis_config
@@ -239,13 +239,13 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let pledge_count = 0;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.commitment_type = CommitmentType::Pledge {
+    invalid_pledge.set_commitment_type(CommitmentType::Pledge {
         pledge_count_before_executing: pledge_count,
-    };
-    invalid_pledge.anchor = genesis_node.get_anchor().await?;
-    invalid_pledge.signer = genesis_config.signer().address();
-    invalid_pledge.fee = consensus_config.mempool.commitment_fee;
-    invalid_pledge.value = U256::from(1_000_000); // Invalid! Should use calculate_pledge_value_at_count
+    });
+    invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
+    invalid_pledge.set_signer(genesis_config.signer().address());
+    invalid_pledge.set_fee(consensus_config.mempool.commitment_fee);
+    invalid_pledge.set_value(U256::from(1_000_000)); // Invalid! Should use calculate_pledge_value_at_count
 
     // Sign the commitment
     genesis_config
@@ -347,8 +347,8 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     let miner_address = genesis_config.signer().address();
     let mut stake =
         CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
-    stake.signer = miner_address;
-    stake.fee = consensus_config.mempool.commitment_fee * 2; // Higher fee
+    stake.set_signer(miner_address);
+    stake.set_fee(consensus_config.mempool.commitment_fee * 2); // Higher fee
     genesis_config.signer().sign_commitment(&mut stake)?;
 
     // Create a pledge commitment
@@ -379,7 +379,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
     let mut irys_block = (*block).clone();
     irys_block.system_ledgers = vec![SystemTransactionLedger {
         ledger_id: SystemLedger::Commitment as u32,
-        tx_ids: H256List(vec![pledge.id, stake.id]), // Wrong order!
+        tx_ids: H256List(vec![pledge.id(), stake.id()]), // Wrong order!
     }];
     genesis_config.signer().sign_block_header(&mut irys_block)?;
     block = Arc::new(irys_block);
@@ -516,15 +516,15 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     // Peer 1: Create unstake with HIGH fee (should come FIRST)
     let mut unstake_high_fee =
         CommitmentTransaction::new_unstake(consensus_config, peer1_node.get_anchor().await?);
-    unstake_high_fee.signer = peer1_signer.address();
-    unstake_high_fee.fee = base_fee * 2; // HIGH fee
+    unstake_high_fee.set_signer(peer1_signer.address());
+    unstake_high_fee.set_fee(base_fee * 2); // HIGH fee
     peer1_signer.sign_commitment(&mut unstake_high_fee)?;
 
     // Peer 2: Create unstake with LOW fee (should come SECOND)
     let mut unstake_low_fee =
         CommitmentTransaction::new_unstake(consensus_config, peer2_node.get_anchor().await?);
-    unstake_low_fee.signer = peer2_signer.address();
-    unstake_low_fee.fee = base_fee; // LOW fee
+    unstake_low_fee.set_signer(peer2_signer.address());
+    unstake_low_fee.set_fee(base_fee); // LOW fee
     peer2_signer.sign_commitment(&mut unstake_low_fee)?;
 
     // Create evil block with WRONG order: [low fee, high fee]
@@ -545,7 +545,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
     let mut irys_block = (*block).clone();
     irys_block.system_ledgers = vec![SystemTransactionLedger {
         ledger_id: SystemLedger::Commitment as u32,
-        tx_ids: H256List(vec![unstake_low_fee.id, unstake_high_fee.id]), // WRONG order!
+        tx_ids: H256List(vec![unstake_low_fee.id(), unstake_high_fee.id()]), // WRONG order!
     }];
     peer1_signer.sign_block_header(&mut irys_block)?;
     block = Arc::new(irys_block);
@@ -635,7 +635,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut wrong_commitment =
         CommitmentTransaction::new_stake(consensus_config, genesis_node.get_anchor().await?);
-    wrong_commitment.signer = test_signer.address();
+    wrong_commitment.set_signer(test_signer.address());
     test_signer.sign_commitment(&mut wrong_commitment)?;
     genesis_node.mine_block().await?;
 
@@ -1079,7 +1079,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     // Post a valid stake commitment to be included in the epoch
     let pledge_tx = genesis_node.post_pledge_commitment(None).await?;
     genesis_node
-        .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
         .await?;
 
     // Mine block 1 to include the commitment

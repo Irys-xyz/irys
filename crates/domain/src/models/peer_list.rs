@@ -839,7 +839,10 @@ impl PeerListDataInner {
             existing_peer.last_seen = peer.last_seen;
             existing_peer.reputation_score = peer.reputation_score;
             if existing_peer.address != peer_address {
-                debug!("Peer address mismatch, updating to new address");
+                debug!(
+                    "Peer address mismatch, updating from {:?} to {:?}",
+                    existing_peer.address, peer_address
+                );
                 address_updater(self, mining_addr, peer_address);
                 if let Some(updated_peer) = self
                     .persistent_peers_cache
@@ -854,7 +857,10 @@ impl PeerListDataInner {
                 }
                 true
             } else if handshake_cooldown_expired {
-                debug!("Peer address is the same, but the handshake cooldown has expired, so we need to re-handshake");
+                debug!(
+                    "Peer address {} is the same, but the handshake cooldown has expired, so we need to re-handshake",
+                    peer_address.gossip.ip()
+                );
                 address_updater(self, mining_addr, peer_address);
                 if let Some(updated_peer) = self
                     .persistent_peers_cache
@@ -869,7 +875,11 @@ impl PeerListDataInner {
                 }
                 true
             } else {
-                debug!("Peer address is the same, no update needed");
+                debug!(
+                    "Peer {:?} ({}) address is the same, no update needed",
+                    mining_addr,
+                    peer_address.gossip.ip()
+                );
                 false
             }
         } else {
@@ -976,15 +986,21 @@ impl PeerListDataInner {
             (_, true, _) => {
                 let peer_type = if is_staked { "staked" } else { "unstaked" };
                 debug!(
-                    "Updating {} peer {:?} in persistent cache",
-                    peer_type, mining_addr
+                    "Updating {} peer {:?} ({}) in persistent cache",
+                    peer_type,
+                    mining_addr,
+                    peer_address.gossip.ip()
                 );
                 self.update_peer_in_persistent_cache(mining_addr, peer, peer_address)
             }
 
             // Case 2: is_staked is false and peer is in purgatory - update purgatory
             (false, false, true) => {
-                debug!("Updating unstaked peer {:?} in purgatory", mining_addr);
+                debug!(
+                    "Updating unstaked peer {:?} ({}) in purgatory",
+                    mining_addr,
+                    peer_address.gossip.ip()
+                );
                 self.update_peer_in_purgatory_cache(mining_addr, peer, peer_address)
             }
 
@@ -1032,14 +1048,16 @@ impl PeerListDataInner {
                         .insert(mining_addr, updated_peer);
                     self.known_peers_cache.insert(peer_address);
                     debug!(
-                        "Peer {:?} moved from purgatory to persistent cache",
-                        mining_addr
+                        "Peer {:?} ({}) moved from purgatory to persistent cache",
+                        mining_addr,
+                        peer_address.gossip.ip()
                     );
                     true
                 } else {
                     warn!(
-                        "Peer {:?} is not found in purgatory cache, which shouldn't happen",
-                        mining_addr
+                        "Peer {:?} ({}) is not found in purgatory cache, which shouldn't happen",
+                        mining_addr,
+                        peer_address.gossip.ip()
                     );
                     false
                 }

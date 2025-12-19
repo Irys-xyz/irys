@@ -130,7 +130,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let tx_id = commitment_tx.id;
+        let tx_id = commitment_tx.id();
         self.service
             .send(MempoolServiceMessage::IngestCommitmentTxFromApi(
                 commitment_tx,
@@ -153,7 +153,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let tx_id = commitment_tx.id;
+        let tx_id = commitment_tx.id();
         self.service
             .send(MempoolServiceMessage::IngestCommitmentTxFromGossip(
                 commitment_tx,

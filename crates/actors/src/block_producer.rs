@@ -1068,7 +1068,7 @@ pub trait BlockProdStrategy {
         let system_ledgers = if !mempool_bundle.commitment_txs.is_empty() {
             let mut txids = H256List::new();
             for ctx in mempool_bundle.commitment_txs.iter() {
-                txids.push(ctx.id);
+                txids.push(ctx.id());
             }
             vec![SystemTransactionLedger {
                 ledger_id: SystemLedger::Commitment.into(),
@@ -1350,7 +1350,7 @@ pub trait BlockProdStrategy {
                 custom.commitment_ids = ?mempool_txs
                     .commitment_tx
                     .iter()
-                    .map(|t| t.id)
+                    .map(CommitmentTransaction::id)
                     .collect::<Vec<_>>(),
                 "Selected best mempool txs"
             );
@@ -1433,7 +1433,7 @@ pub trait BlockProdStrategy {
         let mut txids = H256List::new();
         let commitments = commit_snapshot.get_epoch_commitments();
         for tx in commitments.iter() {
-            txids.push(tx.id);
+            txids.push(tx.id());
         }
         debug!(
             custom.tx_count = commitments.len(),

@@ -307,7 +307,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         ()
     );
     genesis_node
-        .wait_for_mempool_commitment_txs(vec![stake_tx.id], max_seconds)
+        .wait_for_mempool_commitment_txs(vec![stake_tx.id()], max_seconds)
         .await?;
     info!("Commitment whitelist test: stake tx from a whitelisted account accepted");
 
@@ -408,7 +408,7 @@ async fn slow_heavy_should_reject_commitment_transactions_from_unknown_sources()
         "Response from posting stake tx from a newly whitelisted account: {:?}",
         new_response2
     );
-    peer.wait_for_mempool_commitment_txs(vec![new_stake_tx2.id], max_seconds)
+    peer.wait_for_mempool_commitment_txs(vec![new_stake_tx2.id()], max_seconds)
         .await?;
 
     let mut stake_tx3 = CommitmentTransaction::new_stake(
@@ -462,7 +462,7 @@ async fn create_stake_tx(
         ..CommitmentTransactionV1::new(consensus)
     });
 
-    info!("Created stake_tx with value: {:?}", stake_tx.value);
+    info!("Created stake_tx with value: {:?}", stake_tx.value());
     signer.sign_commitment(&mut stake_tx).unwrap();
     stake_tx
 }

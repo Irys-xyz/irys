@@ -61,7 +61,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 
         genesis_node.post_commitment_tx(&unpledge).await?;
         genesis_node
-            .wait_for_mempool(unpledge.id, seconds_to_wait)
+            .wait_for_mempool(unpledge.id(), seconds_to_wait)
             .await?;
         unpledge_txs.push(unpledge);
     }
@@ -75,9 +75,9 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     let inclusion_commitments = unpledge_block.get_commitment_ledger_tx_ids();
     for tx in &unpledge_txs {
         assert!(
-            inclusion_commitments.contains(&tx.id),
+            inclusion_commitments.contains(&tx.id()),
             "Unpledge commitment {} missing from inclusion block",
-            tx.id
+            tx.id()
         );
     }
 
@@ -137,12 +137,12 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     // Submit unstake commitment and validate inclusion semantics
     let anchor = peer_node.get_anchor().await?;
     let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
-    let expected_refund_amount: U256 = unstake_tx.value;
+    let expected_refund_amount: U256 = unstake_tx.value();
     let signer = peer_node.cfg.signer();
     signer
         .sign_commitment(&mut unstake_tx)
         .expect("sign unstake commitment");
-    let expected_irys_ref: FixedBytes<32> = unstake_tx.id.into();
+    let expected_irys_ref: FixedBytes<32> = unstake_tx.id().into();
 
     let head_height = genesis_node.get_canonical_chain_height().await;
     let head_block = genesis_node.get_block_by_height(head_height).await?;
@@ -153,7 +153,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 
     genesis_node.post_commitment_tx(&unstake_tx).await?;
     genesis_node
-        .wait_for_mempool(unstake_tx.id, seconds_to_wait)
+        .wait_for_mempool(unstake_tx.id(), seconds_to_wait)
         .await?;
 
     let unstake_inclusion = genesis_node.mine_block().await?;
@@ -167,7 +167,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
 
     assert_commitment_in_ledger(
         &unstake_block,
-        unstake_tx.id,
+        unstake_tx.id(),
         "Unstake commitment must appear in the inclusion ledger",
     );
 
@@ -206,7 +206,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
         &genesis_node,
         peer_addr,
         unstake_block.evm_block_hash,
-        balance_before_unstake - U256::from(unstake_tx.fee),
+        balance_before_unstake - U256::from(unstake_tx.fee()),
         "Unstake inclusion should reduce balance by priority fee only",
     )
     .await;
@@ -272,7 +272,7 @@ async fn heavy_unstake_epoch_refund_flow() -> eyre::Result<()> {
     );
 
     let expected_final_balance =
-        balance_before_unstake - U256::from(unstake_tx.fee) + expected_refund_amount;
+        balance_before_unstake - U256::from(unstake_tx.fee()) + expected_refund_amount;
     assert_balance(
         &genesis_node,
         peer_addr,
@@ -325,7 +325,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Submit unstake while pledges are still active
     let anchor = peer_node.get_anchor().await?;
     let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
-    let _expected_refund_amount: U256 = unstake_tx.value;
+    let _expected_refund_amount: U256 = unstake_tx.value();
     let signer = peer_node.cfg.signer();
     signer
         .sign_commitment(&mut unstake_tx)
@@ -341,7 +341,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Submit the unstake transaction (should be accepted by mempool)
     genesis_node.post_commitment_tx(&unstake_tx).await?;
     genesis_node
-        .wait_for_mempool(unstake_tx.id, seconds_to_wait)
+        .wait_for_mempool(unstake_tx.id(), seconds_to_wait)
         .await?;
 
     // Mine a block - unstake should NOT be included due to HasActivePledges
@@ -357,7 +357,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Assert unstake is NOT in the commitment ledger
     assert_commitment_not_in_ledger(
         &first_block,
-        unstake_tx.id,
+        unstake_tx.id(),
         "Unstake commitment must NOT be included in block while pledges are active",
     );
 
@@ -444,7 +444,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Verify unstake remains pending in mempool
     // The unstake transaction should still be in mempool, waiting for pledges to clear
     let mempool_unstake = genesis_node
-        .get_commitment_tx_from_mempool(&unstake_tx.id)
+        .get_commitment_tx_from_mempool(&unstake_tx.id())
         .await;
     assert!(
         mempool_unstake.is_ok(),
@@ -465,7 +465,7 @@ async fn heavy_unstake_rejected_with_active_pledge() -> eyre::Result<()> {
     // Verify unstake is still NOT included
     assert_commitment_not_in_ledger(
         &second_block,
-        unstake_tx.id,
+        unstake_tx.id(),
         "Unstake must still not be included in subsequent blocks while pledges active",
     );
 
@@ -600,22 +600,22 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
         peer_addr,
     )
     .await;
-    let pledge_value = pledge_tx.value;
-    let pledge_fee = pledge_tx.fee;
+    let pledge_value = pledge_tx.value();
+    let pledge_fee = pledge_tx.fee();
     peer_signer
         .sign_commitment(&mut pledge_tx)
         .expect("sign pledge commitment");
 
     tracing::error!(
-        tx.id = ?pledge_tx.id,
-        tx.commitment_type = ?pledge_tx.commitment_type,
+        tx.id = ?pledge_tx.id(),
+        tx.commitment_type = ?pledge_tx.commitment_type(),
         tx.anchor = ?anchor,
         "Submitting NEW pledge transaction"
     );
     genesis_node.post_commitment_tx(&pledge_tx).await?;
 
     let pledge_mempool_result = genesis_node
-        .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
         .await;
     tracing::error!(
         tx.pledge_mempool_result = ?pledge_mempool_result,
@@ -625,21 +625,21 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 
     // Create and submit unstake transaction
     let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
-    let _unstake_value = unstake_tx.value;
+    let _unstake_value = unstake_tx.value();
     peer_signer
         .sign_commitment(&mut unstake_tx)
         .expect("sign unstake commitment");
 
     tracing::error!(
-        tx.id = ?unstake_tx.id,
-        tx.commitment_type = ?unstake_tx.commitment_type,
+        tx.id = ?unstake_tx.id(),
+        tx.commitment_type = ?unstake_tx.commitment_type(),
         tx.anchor = ?anchor,
         "Submitting NEW unstake transaction"
     );
     genesis_node.post_commitment_tx(&unstake_tx).await?;
 
     let unstake_mempool_result = genesis_node
-        .wait_for_mempool(unstake_tx.id, seconds_to_wait)
+        .wait_for_mempool(unstake_tx.id(), seconds_to_wait)
         .await;
     tracing::error!(
         tx.unstake_mempool_result = ?unstake_mempool_result,
@@ -656,14 +656,14 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     // Assert PLEDGE IS in the commitment ledger
     assert_commitment_in_ledger(
         &block_header,
-        pledge_tx.id,
+        pledge_tx.id(),
         "Pledge commitment MUST be included (higher priority than unstake)",
     );
 
     // Assert UNSTAKE is NOT in the commitment ledger
     assert_commitment_not_in_ledger(
         &block_header,
-        unstake_tx.id,
+        unstake_tx.id(),
         "Unstake commitment must NOT be included when pledge is being added in same block",
     );
 
@@ -763,7 +763,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
 
     // Verify unstake remains in mempool
     let mempool_unstake = genesis_node
-        .get_commitment_tx_from_mempool(&unstake_tx.id)
+        .get_commitment_tx_from_mempool(&unstake_tx.id())
         .await;
     assert!(
         mempool_unstake.is_ok(),
@@ -779,7 +779,7 @@ async fn heavy_unstake_rejected_with_pending_pledge() -> eyre::Result<()> {
     // Unstake should still NOT be included because pledge is now active
     assert_commitment_not_in_ledger(
         &second_block_header,
-        unstake_tx.id,
+        unstake_tx.id(),
         "Unstake must continue to be rejected in subsequent blocks while pledge is active",
     );
 
@@ -1068,12 +1068,12 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
             .sign_commitment(&mut unpledge)
             .expect("sign unpledge commitment");
 
-        total_unpledge_fee += U256::from(unpledge.fee);
-        total_unpledge_refund += unpledge.value;
+        total_unpledge_fee += U256::from(unpledge.fee());
+        total_unpledge_refund += unpledge.value();
 
         genesis_node.post_commitment_tx(&unpledge).await?;
         genesis_node
-            .wait_for_mempool(unpledge.id, seconds_to_wait)
+            .wait_for_mempool(unpledge.id(), seconds_to_wait)
             .await?;
         unpledge_txs.push(unpledge);
     }
@@ -1081,19 +1081,19 @@ async fn heavy_unpledge_and_unstake_concurrent_success_flow() -> eyre::Result<()
     // Submit unstake transaction
     let anchor = peer_node.get_anchor().await?;
     let mut unstake_tx = CommitmentTransaction::new_unstake(&consensus, anchor);
-    let unstake_refund_amount: U256 = unstake_tx.value;
+    let unstake_refund_amount: U256 = unstake_tx.value();
     let signer = peer_node.cfg.signer();
     signer
         .sign_commitment(&mut unstake_tx)
         .expect("sign unstake commitment");
-    let expected_irys_ref: FixedBytes<32> = unstake_tx.id.into();
+    let expected_irys_ref: FixedBytes<32> = unstake_tx.id().into();
 
     genesis_node.post_commitment_tx(&unstake_tx).await?;
     genesis_node
-        .wait_for_mempool(unstake_tx.id, seconds_to_wait)
+        .wait_for_mempool(unstake_tx.id(), seconds_to_wait)
         .await?;
 
-    let total_fees = total_unpledge_fee + U256::from(unstake_tx.fee);
+    let total_fees = total_unpledge_fee + U256::from(unstake_tx.fee());
     let total_refunds = total_unpledge_refund + unstake_refund_amount;
 
     // Mine until next epoch - this should process both unpledges and unstake

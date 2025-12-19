@@ -52,16 +52,16 @@ async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
 
     // Wait for all commitment tx to show up in the genesis_node's mempool
     genesis_node
-        .wait_for_mempool(peer1_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer1_stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer1_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer1_pledge_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer2_stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer2_pledge_tx.id(), seconds_to_wait)
         .await?;
 
     // Mine a block to get the commitments included
@@ -293,13 +293,13 @@ async fn slow_heavy_fork_recovery_epoch_test() -> eyre::Result<()> {
             let peer2_has_pledge = cs
                 .pledge_commitments
                 .get(&peer2_signer.address())
-                .map(|v| v.iter().any(|cse| cse.id == pledge2.id))
+                .map(|v| v.iter().any(|cse| cse.id == pledge2.id()))
                 .unwrap_or(false);
 
             let peer1_has_pledge = cs
                 .pledge_commitments
                 .get(&peer1_signer.address())
-                .map(|v| v.iter().any(|cse| cse.id == pledge1.id))
+                .map(|v| v.iter().any(|cse| cse.id == pledge1.id()))
                 .unwrap_or(false);
 
             if peer2_has_pledge && !peer1_has_pledge {

@@ -121,6 +121,12 @@ where
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
             if peer.address.gossip.ip() != peer_address.ip() {
+                debug!(
+                    miner_address = %miner_address,
+                    expected_ip = %peer.address.gossip.ip(),
+                    actual_ip = %peer_address.ip(),
+                    "Rejecting gossip: IP mismatch requires handshake"
+                );
                 return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                     RejectionReason::HandshakeRequired(Some(
                         HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
@@ -129,6 +135,11 @@ where
             }
             Ok(peer)
         } else {
+            debug!(
+                miner_address = %miner_address,
+                peer_ip = %peer_address.ip(),
+                "Rejecting gossip: unknown miner address requires handshake"
+            );
             Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::HandshakeRequired(Some(
                     HandshakeRequirementReason::MinerAddressIsUnknown,
@@ -296,7 +307,7 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = commitment_tx_json.0.data.id;
+            let tx_id = commitment_tx_json.0.data.id();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the commitment transaction {:?}",
                 node_id, tx_id

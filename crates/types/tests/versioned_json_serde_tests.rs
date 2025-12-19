@@ -7,7 +7,7 @@ use irys_types::{
 fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
     let config = ConsensusConfig::testing();
     let mut commitment_tx = CommitmentTransaction::new_stake(&config, H256::zero());
-    commitment_tx.id = H256::from([1_u8; 32]);
+    commitment_tx.set_id(H256::from([1_u8; 32]));
 
     // Serialize to JSON
     let json = serde_json::to_string(&commitment_tx).unwrap();
@@ -24,7 +24,7 @@ fn test_versioned_commitment_transaction_json_no_duplicate_type_field() {
     // Verify it deserializes correctly
     let deserialized: CommitmentTransaction =
         serde_json::from_str(&json).expect("Failed to deserialize commitment transaction");
-    assert_eq!(commitment_tx.id, deserialized.id);
+    assert_eq!(commitment_tx.id(), deserialized.id());
     assert_eq!(commitment_tx.version(), deserialized.version());
 }
 
@@ -70,7 +70,7 @@ fn test_versioned_block_header_json_roundtrip() {
 fn test_commitment_transaction_json_structure() {
     let config = ConsensusConfig::testing();
     let mut commitment_tx = CommitmentTransaction::new_stake(&config, H256::zero());
-    commitment_tx.id = H256::from([1_u8; 32]);
+    commitment_tx.set_id(H256::from([1_u8; 32]));
 
     // Serialize to pretty JSON for inspection
     // note: we use `NumericVersionWrapper` so version is serialized as a number, not a string.
