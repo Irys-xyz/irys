@@ -2,25 +2,13 @@
 set -e
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-REPO_ROOT="$SCRIPT_DIR/../../.."
 cd "$SCRIPT_DIR"
 
-# Default to debug image (has shell for test scripts)
-IMAGE_NAME="${IMAGE_NAME:-irys:debug}"
+IMAGE_NAME="${IMAGE_NAME:-irys:release}"
 export IMAGE_NAME
 
-# Function to cleanup on exit
-cleanup() {
-    echo ""
-    echo "Shutting down containers..."
-    docker compose down -v 2>/dev/null || true
-}
-
-# Set up trap to cleanup on exit
-trap cleanup EXIT
-
 echo "========================================"
-echo "Irys Remote Partition Sync Test"
+echo "Irys Release Cluster"
 echo "========================================"
 echo "Using image: $IMAGE_NAME"
 echo ""
@@ -35,7 +23,7 @@ fi
 # Check if containers are already running
 echo "Checking if containers are running..."
 containers_running=true
-for container in test-irys-1 test-irys-2 test-irys-3; do
+for container in irys-1 irys-2; do
     if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
         containers_running=false
         break
@@ -43,50 +31,44 @@ for container in test-irys-1 test-irys-2 test-irys-3; do
 done
 
 if [ "$containers_running" = false ]; then
-    echo "Containers not running. Starting..."
-    docker compose up -d
+    echo "Starting containers..."
+    docker compose -f docker-compose.release.yaml up -d
 
     # Wait for nodes to be ready
     echo "Waiting for nodes to initialize..."
-    for port in 19080 19081 19082; do
+    for port in 19080 19081; do
         echo -n "  Checking localhost:$port... "
         max_attempts=30
         attempt=0
 
         while [ $attempt -lt $max_attempts ]; do
             if curl -s http://localhost:$port/v1/info > /dev/null 2>&1; then
-                echo "✓ Ready"
+                echo "Ready"
                 break
             fi
             attempt=$((attempt + 1))
             if [ $attempt -eq $max_attempts ]; then
-                echo "✗ Failed"
+                echo "Failed"
                 echo "ERROR: Node on port $port not responding after 30 seconds"
+                echo ""
+                echo "Check logs with: docker compose -f docker-compose.release.yaml logs"
                 exit 1
             fi
-            sleep 5
+            sleep 1
         done
     done
 else
     echo "Containers already running."
 fi
 
-# Run the sync_partition_data_remote_test
-echo ""
-echo "Running sync_partition_data_remote_test..."
-echo "========================================"
-
-NODE_URLS="http://localhost:19080,http://localhost:19081,http://localhost:19082" \
-cargo test --package irys-chain --test mod sync_partition_data_remote_test -- --nocapture --ignored
-
-test_result=$?
-
 echo ""
 echo "========================================"
-if [ $test_result -eq 0 ]; then
-    echo "✓ Test passed"
-else
-    echo "✗ Test failed"
-fi
-
-exit $test_result
+echo "Cluster is running"
+echo ""
+echo "Nodes:"
+echo "  - http://localhost:19080"
+echo "  - http://localhost:19081"
+echo ""
+echo "Logs:  docker compose -f $SCRIPT_DIR/docker-compose.release.yaml logs -f"
+echo "Stop:  docker compose -f $SCRIPT_DIR/docker-compose.release.yaml down -v"
+echo "========================================"
