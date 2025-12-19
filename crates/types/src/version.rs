@@ -47,7 +47,7 @@ impl ProtocolVersion {
         Self::try_from(version).is_ok()
     }
 
-    pub fn supported_versions() -> &'static [ProtocolVersion] {
+    pub fn supported_versions() -> &'static [Self] {
         &[Self::V1, Self::V2]
     }
 
