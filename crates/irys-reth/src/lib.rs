@@ -2455,7 +2455,7 @@ mod tests {
         let (mut node, ctx) = ctx.get_single_node()?;
 
         // Get initial treasury balance before any deposits
-        let initial_treasury_balance = get_balance(&node.inner, (*TREASURY_ACCOUNT));
+        let initial_treasury_balance = get_balance(&node.inner, *TREASURY_ACCOUNT);
 
         // Create a treasury deposit shadow transaction
         let deposit_amount = U256::from(1_000_000_000_000_u64); // 1 trillion wei
@@ -2483,7 +2483,7 @@ mod tests {
         );
 
         // Also verify the on-chain treasury balance matches
-        let final_treasury_balance = get_balance(&node.inner, (*TREASURY_ACCOUNT));
+        let final_treasury_balance = get_balance(&node.inner, *TREASURY_ACCOUNT);
         assert_eq!(
             payload_treasury_balance, final_treasury_balance,
             "Payload treasury balance should match on-chain balance"

@@ -245,12 +245,10 @@ pub fn extract_pd_base_fee_from_block(
                         .ok_or_eyre("Transaction at index 2 is not a shadow transaction")?;
 
                     match &shadow_tx_2 {
-                        irys_reth::shadow_tx::ShadowTransaction::V1 { packet, .. } => {
-                            match packet {
-                                TransactionPacket::PdBaseFeeUpdate(update) => Some(update.clone()),
-                                _ => None,
-                            }
-                        }
+                        irys_reth::shadow_tx::ShadowTransaction::V1 {
+                            packet: TransactionPacket::PdBaseFeeUpdate(update),
+                            ..
+                        } => Some(update.clone()),
                         _ => None,
                     }
                 }
