@@ -676,16 +676,13 @@ impl BlockDiscoveryServiceInner {
 
                     // Validate epoch block has expected commitments in correct order
                     // Compare using Deref - versioned types deref to inner types
-                    let commitments_match = expected_commitment_tx
-                        .iter()
-                        .map(|c| c) // Deref to inner CommitmentTransaction
-                        .eq(commitment_txs.iter().map(|v| v));
+                    let commitments_match = expected_commitment_tx.iter().eq(commitment_txs.iter());
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
                                 new_block_header.block_hash,
-                                expected_commitment_tx.iter().map(|x| x.id()).collect::<Vec<_>>(),
-                                commitment_txs.iter().map(|x| x.id()).collect::<Vec<_>>()
+                                expected_commitment_tx.iter().map(CommitmentTransaction::id).collect::<Vec<_>>(),
+                                commitment_txs.iter().map(CommitmentTransaction::id).collect::<Vec<_>>()
                             );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),

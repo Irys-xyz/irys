@@ -522,7 +522,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn signature(&self) -> &IrysSignature {
-        &self.signature()
+        self.signature()
     }
 
     fn user_fee(&self) -> U256 {

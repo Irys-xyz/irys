@@ -666,7 +666,7 @@ impl Inner {
 
         // Remove all commitments from mempool in one batch operation
         self.mempool_state
-            .remove_commitment_txs(commitments.values().map(|x| x.id()))
+            .remove_commitment_txs(commitments.values().map(CommitmentTransaction::id))
             .await;
 
         // stage 1: insert commitment transactions into database

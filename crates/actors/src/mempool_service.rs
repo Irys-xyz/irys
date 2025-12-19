@@ -1955,7 +1955,7 @@ impl AtomicMempoolState {
             .get(user_address)
             .map(|txs| {
                 txs.iter()
-                    .filter(|tx| commitment_type_filter(&tx.commitment_type()))
+                    .filter(|tx| commitment_type_filter(tx.commitment_type()))
                     .filter(|tx| seen_ids.insert(tx.id()))
                     .count() as u64
             })

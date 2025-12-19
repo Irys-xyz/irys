@@ -1350,7 +1350,7 @@ pub trait BlockProdStrategy {
                 custom.commitment_ids = ?mempool_txs
                     .commitment_tx
                     .iter()
-                    .map(|t| t.id())
+                    .map(CommitmentTransaction::id)
                     .collect::<Vec<_>>(),
                 "Selected best mempool txs"
             );
