@@ -403,10 +403,6 @@ async fn heavy_test_treasury_tracking_with_sprite_activation() -> eyre::Result<(
     // ===== DATA TRANSACTION AFTER SPRITE =====
     // Post a data transaction and verify treasury increases by expected fee amount
     let consensus_config = config.consensus_config();
-    let number_of_ingress_proofs_total = node
-        .node_ctx
-        .config
-        .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
     let data_tx = node
         .post_data_tx(node.get_anchor().await?, vec![42_u8; 1024], &user_signer)
@@ -418,59 +414,26 @@ async fn heavy_test_treasury_tracking_with_sprite_activation() -> eyre::Result<(
         .await?;
 
     // Calculate expected treasury increase from data tx fees
+    // Treasury receives: term_fee_treasury (95% of term_fee) + full perm_fee
+    // See shadow_tx_generator.rs create_submit_shadow_tx() for the exact calculation
     let expected_fee_increase = {
         let term_charges = TermFeeCharges::new(data_tx.header.term_fee, &consensus_config)?;
-        let publish_charges = PublishFeeCharges::new(
-            data_tx.header.perm_fee.unwrap(),
-            data_tx.header.term_fee,
-            &consensus_config,
-            number_of_ingress_proofs_total,
-        )?;
-        term_charges.term_fee_treasury + publish_charges.perm_fee_treasury
+        // Treasury gets full perm_fee upfront; ingress proof rewards are deducted later
+        // when the tx is promoted to publish ledger
+        term_charges.term_fee_treasury + data_tx.header.perm_fee.unwrap().get()
     };
 
-    let min_expected_treasury = empty_sprite_block2.treasury + expected_fee_increase;
-    let actual_treasury_increase = block_with_data_tx.treasury - empty_sprite_block2.treasury;
+    let expected_treasury = empty_sprite_block2.treasury + expected_fee_increase;
 
-    // Treasury should increase by at least the calculated fee amount
-    // (may be slightly higher due to additional EVM base fees going to treasury)
-    assert!(
-        block_with_data_tx.treasury >= min_expected_treasury,
-        "Treasury after data tx should be at least previous treasury + fee increase.\n\
-         Previous: {}, Min fee increase: {}, Min expected: {}, Actual: {}",
+    assert_eq!(
+        block_with_data_tx.treasury,
+        expected_treasury,
+        "Treasury after data tx should be previous treasury + exact fee increase.\n\
+         Previous: {}, Fee increase: {}, Expected: {}, Actual: {}",
         empty_sprite_block2.treasury,
         expected_fee_increase,
-        min_expected_treasury,
+        expected_treasury,
         block_with_data_tx.treasury
-    );
-
-    // Verify treasury actually increased (not just unchanged)
-    assert!(
-        actual_treasury_increase > expected_fee_increase / 2,
-        "Treasury should have increased significantly. Actual increase: {}, Expected at least: {}",
-        actual_treasury_increase,
-        expected_fee_increase / 2
-    );
-
-    info!(
-        "Treasury tracking with Sprite activation test completed:\n\
-         - Genesis treasury (pre-Sprite): {}\n\
-         - Last pre-Sprite block {} treasury: {}\n\
-         - First Sprite block {} treasury: {} (equals pre-Sprite: {})\n\
-         - Empty Sprite block {} treasury: {} (unchanged)\n\
-         - Block with data tx {} treasury: {} (increased by {}, expected min {})",
-        pre_sprite_treasury,
-        last_pre_sprite_block.height,
-        last_pre_sprite_block.treasury,
-        first_sprite_block.height,
-        first_sprite_block.treasury,
-        first_sprite_block.treasury == last_pre_sprite_block.treasury,
-        empty_sprite_block2.height,
-        empty_sprite_block2.treasury,
-        block_with_data_tx.height,
-        block_with_data_tx.treasury,
-        actual_treasury_increase,
-        expected_fee_increase
     );
 
     node.stop().await;
