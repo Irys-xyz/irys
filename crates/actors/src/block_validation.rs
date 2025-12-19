@@ -1546,12 +1546,6 @@ async fn generate_expected_shadow_transactions(
 
     // Get treasury balance from previous block
     let initial_treasury_balance = parent_block.treasury;
-    error!(
-        target: "treasury_debug",
-        parent_treasury = %initial_treasury_balance,
-        parent_height = %parent_block.height,
-        "TREASURY_DEBUG: Starting treasury validation with parent treasury"
-    );
 
     // Calculate expired ledger fees for epoch blocks
     let expired_ledger_fees = if is_epoch_block {
@@ -1635,15 +1629,6 @@ async fn generate_expected_shadow_transactions(
         .consensus
         .hardforks
         .is_sprite_active(block.timestamp_secs());
-
-    error!(
-        target: "treasury_debug",
-        expected_treasury = %expected_treasury,
-        block_treasury = %block.treasury,
-        block_height = %block.height,
-        is_sprite_active = %is_sprite_active,
-        "TREASURY_DEBUG: Treasury comparison - expected (from shadow_tx_gen) vs actual (from block)"
-    );
 
     // Validate that the block's treasury matches the expected value
     // Note: For post-Sprite blocks, ShadowTxGenerator doesn't track treasury changes because

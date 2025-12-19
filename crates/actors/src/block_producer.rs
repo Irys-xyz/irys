@@ -896,26 +896,11 @@ pub trait BlockProdStrategy {
             .hardforks
             .is_sprite_active(timestamp_ms.to_secs());
 
-        error!(
-            target: "treasury_debug",
-            payload_treasury = %payload.treasury_balance(),
-            shadow_gen_treasury = %shadow_tx_generator.treasury_balance(),
-            is_sprite_active = %is_sprite_active,
-            "TREASURY_DEBUG: Treasury balances from payload and shadow_tx_generator"
-        );
-
         let final_treasury_balance = if is_sprite_active {
             U256::from_le_bytes(payload.treasury_balance().to_le_bytes())
         } else {
             shadow_tx_generator.treasury_balance()
         };
-
-        error!(
-            target: "treasury_debug",
-            final_treasury = %final_treasury_balance,
-            source = if is_sprite_active { "payload" } else { "shadow_tx_generator" },
-            "TREASURY_DEBUG: Final treasury balance selected for block"
-        );
 
         Ok((payload, final_treasury_balance))
     }
@@ -1222,13 +1207,6 @@ pub trait BlockProdStrategy {
             ema_irys_price: ema_calculation.ema,
             treasury: final_treasury,
         });
-
-        error!(
-            target: "treasury_debug",
-            block_height = %block_height,
-            treasury_in_header = %final_treasury,
-            "TREASURY_DEBUG: Treasury balance being written to block header"
-        );
 
         // Now that all fields are initialized, Sign the block and initialize its block_hash
         let block_signer = self.inner().config.irys_signer();

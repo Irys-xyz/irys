@@ -74,7 +74,7 @@ use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_transaction_pool::error::Eip4844PoolTransactionError;
 use revm::context_interface::Block as _;
 use revm::database_interface::Database as _;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, trace, warn};
 
 type BestTransactionsIter =
     Box<dyn BestTransactions<Item = Arc<ValidPoolTransaction<EthPooledTransaction>>>>;
@@ -88,7 +88,6 @@ type BestTransactionsIter =
 /// Post-Sprite, the treasury is an EVM account (TREASURY_ACCOUNT) whose balance changes
 /// through shadow transactions and PD fees. Pre-Sprite, we return zero as treasury is
 /// tracked externally.
-#[expect(clippy::too_many_arguments)]
 pub fn irys_ethereum_payload<EvmConfig, Client, F>(
     evm_config: EvmConfig,
     client: Client,
@@ -284,18 +283,7 @@ where
         // Use db.basic() which queries both bundle_state (modified accounts) AND
         // the underlying StateProviderDatabase (parent state)
         let treasury_addr = *TREASURY_ACCOUNT;
-        error!(
-            target: "treasury_debug",
-            is_sprite_active = %is_sprite_active,
-            ?treasury_addr,
-            "TREASURY_DEBUG: Extracting treasury balance using db.basic()"
-        );
         let treasury_account = db.basic(treasury_addr);
-        error!(
-            target: "treasury_debug",
-            treasury_account_result = ?treasury_account,
-            "TREASURY_DEBUG: Treasury account lookup result from db.basic()"
-        );
         treasury_account
             .ok()
             .flatten()
@@ -305,12 +293,6 @@ where
         // Pre-Sprite: treasury tracked externally by shadow_tx_generator
         U256::ZERO
     };
-    error!(
-        target: "treasury_debug",
-        %treasury_balance,
-        block_number = %block.header().number,
-        "TREASURY_DEBUG: Final treasury balance extracted for payload"
-    );
 
     let requests = chain_spec
         .is_prague_active_at_timestamp(attributes.timestamp())
