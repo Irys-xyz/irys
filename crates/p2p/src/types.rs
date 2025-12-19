@@ -224,8 +224,15 @@ impl GossipResponse<()> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Copy)]
+pub enum HandshakeRequirementReason {
+    RequestOriginIsNotInThePeerList,
+    RequestOriginDoesNotMatchExpected,
+    MinerAddressIsUnknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Copy)]
 pub enum RejectionReason {
-    HandshakeRequired,
+    HandshakeRequired(Option<HandshakeRequirementReason>),
     GossipDisabled,
     InvalidData,
     RateLimited,
