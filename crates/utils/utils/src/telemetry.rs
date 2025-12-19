@@ -191,33 +191,31 @@ pub fn init_telemetry() -> Result<()> {
     Ok(())
 }
 
-/// Shutdown and flush all pending telemetry before process termination.
+/// Flush all pending telemetry (logs, traces/spans) before process termination.
 ///
 /// This properly drains all pending log/trace batches and waits for HTTP exports
-/// to complete. After calling this, no further telemetry will be processed.
+/// to complete.
 ///
 /// # Important
 ///
-/// This is a blocking call. When using tokio, call from `spawn_blocking`
-///
-/// Should be called once at application exit.
+/// This is a blocking call. When using tokio, call from `spawn_blocking`.
 #[cfg(feature = "telemetry")]
 pub fn flush_telemetry() -> Result<bool> {
     let mut flushed = false;
 
-    // Shutdown logger provider
+    // force flush logger provider
     if let Some(logger) = LOGGER_PROVIDER.get() {
-        if let Err(e) = logger.shutdown() {
-            eprintln!("Logger provider shutdown error: {:?}", e);
+        if let Err(e) = logger.force_flush() {
+            eprintln!("Logger provider force flush error: {:?}", e);
         } else {
             flushed = true;
         }
     }
 
-    // Shutdown tracer provider - drains pending spans
+    // force flush tracer provider - drains pending spans
     if let Some(tracer) = TRACER_PROVIDER.get() {
-        if let Err(e) = tracer.shutdown() {
-            eprintln!("Tracer provider shutdown error: {:?}", e);
+        if let Err(e) = tracer.force_flush() {
+            eprintln!("Tracer provider force flush error: {:?}", e);
         } else {
             flushed = true;
         }
