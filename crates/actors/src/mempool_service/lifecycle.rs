@@ -170,7 +170,7 @@ impl Inner {
         }
         for (_address, txs) in valid_commitment_tx {
             for tx in txs {
-                let id = tx.id;
+                let id = tx.id();
                 match self.handle_ingress_commitment_tx_message_gossip(tx).await {
                     Ok(_) => debug!("resubmitted commitment tx {} to mempool", &id),
                     Err(err) => debug!(
@@ -302,9 +302,9 @@ impl Inner {
             if let Some(txs) = txs {
                 for tx in txs {
                     if self.should_prune_tx(current_height, &tx) {
-                        self.mempool_state.remove_commitment_tx(&tx.id).await;
+                        self.mempool_state.remove_commitment_tx(&tx.id()).await;
                         self.mempool_state
-                            .mark_tx_as_invalid(tx.id, TxIngressError::InvalidAnchor(tx.anchor))
+                            .mark_tx_as_invalid(tx.id(), TxIngressError::InvalidAnchor(tx.anchor()))
                             .await;
                     }
                 }
@@ -410,7 +410,7 @@ impl Inner {
             for orphan_commitment_tx_id in orphaned_commitment_tx_ids.iter() {
                 if let Some(commitment_tx) = all_commitments
                     .iter()
-                    .find(|c| c.id == *orphan_commitment_tx_id)
+                    .find(|c| c.id() == *orphan_commitment_tx_id)
                 {
                     orphaned_full_commitment_txs
                         .insert(*orphan_commitment_tx_id, commitment_tx.clone());
@@ -666,7 +666,7 @@ impl Inner {
 
         // Remove all commitments from mempool in one batch operation
         self.mempool_state
-            .remove_commitment_txs(commitments.values().map(|x| x.id))
+            .remove_commitment_txs(commitments.values().map(CommitmentTransaction::id))
             .await;
 
         // stage 1: insert commitment transactions into database

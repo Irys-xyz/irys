@@ -396,7 +396,7 @@ async fn heavy_pending_pledges_test() -> eyre::Result<()> {
     let block = genesis_node.get_block_by_height(1).await.unwrap();
     assert_eq!(
         block.system_ledgers[0].tx_ids,
-        vec![stake_tx.id, pledge_tx.id]
+        vec![stake_tx.id(), pledge_tx.id()]
     );
 
     genesis_node.stop().await;
@@ -437,7 +437,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
     genesis_node.post_commitment_tx(&stake_tx).await?;
     genesis_node.mine_block().await.unwrap();
 
-    let expected_txs = vec![stake_tx.id];
+    let expected_txs = vec![stake_tx.id()];
     let result = genesis_node
         .wait_for_mempool_commitment_txs(expected_txs, 20)
         .await;
@@ -485,7 +485,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 
     // confirm the commitment tx has appeared back in the mempool after a restart
     let result = restarted_node
-        .wait_for_mempool_commitment_txs(vec![pledge_tx.id], 10)
+        .wait_for_mempool_commitment_txs(vec![pledge_tx.id()], 10)
         .await;
     assert!(result.is_ok());
 
@@ -553,16 +553,16 @@ async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
 
     // Wait for all commitment tx to show up in the genesis_node's mempool
     genesis_node
-        .wait_for_mempool(peer1_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer1_stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer1_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer1_pledge_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer2_stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer2_pledge_tx.id(), seconds_to_wait)
         .await?;
 
     let mut expected_height = num_blocks_in_epoch;
@@ -940,16 +940,16 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 
         // Wait for all commitment tx to show up in the node_a's mempool
         a_node
-            .wait_for_mempool(b_stake_tx.id, seconds_to_wait)
+            .wait_for_mempool(b_stake_tx.id(), seconds_to_wait)
             .await?;
         a_node
-            .wait_for_mempool(b_pledge_tx.id, seconds_to_wait)
+            .wait_for_mempool(b_pledge_tx.id(), seconds_to_wait)
             .await?;
         a_node
-            .wait_for_mempool(c_stake_tx.id, seconds_to_wait)
+            .wait_for_mempool(c_stake_tx.id(), seconds_to_wait)
             .await?;
         a_node
-            .wait_for_mempool(c_pledge_tx.id, seconds_to_wait)
+            .wait_for_mempool(c_pledge_tx.id(), seconds_to_wait)
             .await?;
 
         // Mine blocks to get the commitments included, epoch tasks performed, and assignments of partition_hash's to the peers
@@ -1359,16 +1359,16 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
         // Wait for all commitment tx to show up in the node_a's mempool
         a_node
-            .wait_for_mempool(b_stake_tx.id, seconds_to_wait)
+            .wait_for_mempool(b_stake_tx.id(), seconds_to_wait)
             .await?;
         a_node
-            .wait_for_mempool(b_pledge_tx.id, seconds_to_wait)
+            .wait_for_mempool(b_pledge_tx.id(), seconds_to_wait)
             .await?;
         a_node
-            .wait_for_mempool(c_stake_tx.id, seconds_to_wait)
+            .wait_for_mempool(c_stake_tx.id(), seconds_to_wait)
             .await?;
         a_node
-            .wait_for_mempool(c_pledge_tx.id, seconds_to_wait)
+            .wait_for_mempool(c_pledge_tx.id(), seconds_to_wait)
             .await?;
 
         // Mine blocks to get the commitments included, epoch tasks performed, and assignments of partition_hash's to the peers
@@ -1433,7 +1433,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
     // check that a_blk1 contains a_blk1_tx1 in the SystemLedger
     assert_eq!(
         a_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
-        vec![a_blk1_tx1.id]
+        vec![a_blk1_tx1.id()]
     );
 
     // B: mine block 1
@@ -1447,7 +1447,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     assert_eq!(
         b_blk1.system_ledgers[SystemLedger::Commitment].tx_ids,
-        vec![b_blk1_tx1.id]
+        vec![b_blk1_tx1.id()]
     );
 
     // B: Tx & Block 2
@@ -1463,7 +1463,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
 
     assert_eq!(
         b_blk2.system_ledgers[SystemLedger::Commitment].tx_ids,
-        vec![b_blk2_tx1.id]
+        vec![b_blk2_tx1.id()]
     );
 
     // // Gossip B1&2 to A, causing a reorg
@@ -1525,7 +1525,7 @@ async fn slow_heavy_mempool_commitment_fork_recovery_test() -> eyre::Result<()> 
     // ensure a_blk1_tx1 is included
     assert_eq!(
         b_blk3.system_ledgers[SystemLedger::Commitment].tx_ids,
-        vec![a_blk1_tx1.id]
+        vec![a_blk1_tx1.id()]
     );
 
     // now we gossip B3 back to A
@@ -1653,11 +1653,11 @@ async fn slow_heavy_evm_mempool_fork_recovery_test() -> eyre::Result<()> {
                -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
             let stake_tx = peer.post_stake_commitment(None).await?;
             genesis
-                .wait_for_mempool(stake_tx.id, seconds_to_wait)
+                .wait_for_mempool(stake_tx.id(), seconds_to_wait)
                 .await?;
             let pledge_tx = peer.post_pledge_commitment(None).await?;
             genesis
-                .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+                .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
                 .await?;
             Ok((stake_tx, pledge_tx))
         };
@@ -2009,11 +2009,11 @@ async fn slow_heavy_test_evm_gossip() -> eyre::Result<()> {
                -> eyre::Result<(CommitmentTransaction, CommitmentTransaction)> {
             let stake_tx = peer.post_stake_commitment(None).await?;
             genesis
-                .wait_for_mempool(stake_tx.id, seconds_to_wait)
+                .wait_for_mempool(stake_tx.id(), seconds_to_wait)
                 .await?;
             let pledge_tx = peer.post_pledge_commitment(None).await?;
             genesis
-                .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+                .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
                 .await?;
             Ok((stake_tx, pledge_tx))
         };
@@ -2136,9 +2136,9 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     let stake_anchor = genesis_node.get_anchor().await?;
     let stake_tx = new_stake_tx(&stake_anchor, &signer, &genesis_config.consensus_config());
     let mut stake_tx_invalid = stake_tx.clone();
-    let mut bytes = stake_tx_invalid.id.to_fixed_bytes();
+    let mut bytes = stake_tx_invalid.id().to_fixed_bytes();
     bytes[0] ^= 0x01;
-    stake_tx_invalid.id = H256::from(bytes);
+    stake_tx_invalid.set_id(H256::from(bytes));
 
     // ingest invalid stake tx directly to the mempool
     let res = genesis_node
@@ -2161,7 +2161,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     // Test case 2: staked pledge commitment txs
     //
 
-    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used to check mempool ingress
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id()]; // txs used to check mempool ingress
     let pledge_tx = new_pledge_tx(
         &stake_anchor,
         &signer,
@@ -2174,9 +2174,9 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
     genesis_node.mine_block().await?;
 
     let mut pledge_tx_invalid = pledge_tx.clone();
-    let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
+    let mut bytes = pledge_tx_invalid.id().to_fixed_bytes();
     bytes[1] ^= 0x01; // flip second bit to be different from pledge_tx_invalid_pending_anchor.id
-    pledge_tx_invalid.id = H256::from(bytes);
+    pledge_tx_invalid.set_id(H256::from(bytes));
     // check an invalid id on a pledge, that also has a valid non pending anchor
     let res = genesis_node
         .ingest_commitment_tx(pledge_tx_invalid.clone())
@@ -2191,7 +2191,7 @@ async fn staked_pledge_commitment_tx_signature_validation_on_ingress_test() -> e
         }
     }
     genesis_node.ingest_commitment_tx(pledge_tx.clone()).await?;
-    tx_ids.push(pledge_tx.id);
+    tx_ids.push(pledge_tx.id());
 
     // wait for all txs to ingress mempool
     genesis_node
@@ -2227,9 +2227,9 @@ async fn unstaked_pledge_commitment_tx_signature_validation_on_ingress_test() ->
         genesis_node.node_ctx.mempool_pledge_provider.as_ref(),
     )
     .await;
-    let mut bytes = pledge_tx_invalid.id.to_fixed_bytes();
+    let mut bytes = pledge_tx_invalid.id().to_fixed_bytes();
     bytes[1] ^= 0x01; // flip second bit i.e. tamper with it
-    pledge_tx_invalid.id = H256::from(bytes);
+    pledge_tx_invalid.set_id(H256::from(bytes));
     // check an invalid id on a pledge
     let res = genesis_node
         .ingest_commitment_tx(pledge_tx_invalid.clone())
@@ -2308,22 +2308,22 @@ async fn data_tx_signature_validation_on_ingress_test() -> eyre::Result<()> {
 #[rstest::rstest]
 #[case::invalid_fee_less_than_required(
     |tx: &mut CommitmentTransaction, required_fee: u64, _required_value: irys_types::U256| {
-        tx.fee = required_fee / 2; // 50 instead of 100
+        tx.set_fee(required_fee / 2); // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
     |tx: &mut CommitmentTransaction, _required_fee: u64, _required_value: irys_types::U256| {
-        tx.fee = 0;
+        tx.set_fee(0);
     },
 )]
 #[case::invalid_value_less_than_required(
     |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
-        tx.value = required_value / irys_types::U256::from(2); // 10000 instead of 20000
+        tx.set_value(required_value / irys_types::U256::from(2)); // 10000 instead of 20000
     },
 )]
 #[case::invalid_value_more_than_required(
     |tx: &mut CommitmentTransaction, _required_fee: u64, required_value: irys_types::U256| {
-        tx.value = required_value + irys_types::U256::from(10000); // 30000 instead of 20000
+        tx.set_value(required_value + irys_types::U256::from(10000)); // 30000 instead of 20000
     },
 )]
 #[test_log::test(tokio::test)]
@@ -2367,34 +2367,34 @@ async fn stake_tx_fee_and_value_validation_test(
 #[case::invalid_fee_less_than_required(
     0_u64, // pledge count
     |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, required_fee: u64| {
-        tx.fee = required_fee / 2; // 50 instead of 100
+        tx.set_fee(required_fee / 2); // 50 instead of 100
     },
 )]
 #[case::invalid_fee_zero(
     0_u64, // pledge count
     |tx: &mut CommitmentTransaction, _config: &ConsensusConfig, _count: u64, _required_fee: u64| {
-        tx.fee = 0;
+        tx.set_fee(0);
     },
 )]
 #[case::invalid_value_too_low(
     0_u64, // pledge count
     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
         let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
-        tx.value = expected / irys_types::U256::from(2); // Half the expected value
+        tx.set_value(expected / irys_types::U256::from(2)); // Half the expected value
     },
 )]
 #[case::invalid_value_too_high(
     1_u64, // pledge count
     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, count: u64, _required_fee: u64| {
         let expected = CommitmentTransaction::calculate_pledge_value_at_count(config, count);
-        tx.value = expected * irys_types::U256::from(2); // Double the expected value
+        tx.set_value(expected * irys_types::U256::from(2)); // Double the expected value
     },
 )]
 #[case::invalid_value_wrong_count(
     2_u64, // pledge count
     |tx: &mut CommitmentTransaction, config: &ConsensusConfig, _count: u64, _required_fee: u64| {
         // Set value that would be correct for pledge count 0, but we're using count 2
-        tx.value = CommitmentTransaction::calculate_pledge_value_at_count(config, 0);
+        tx.set_value(CommitmentTransaction::calculate_pledge_value_at_count(config, 0));
     },
 )]
 #[test_log::test(tokio::test)]
@@ -2484,7 +2484,7 @@ async fn commitment_tx_valid_higher_fee_test(
     };
 
     // Apply the fee multiplier
-    commitment_tx.fee = required_fee * fee_multiplier;
+    commitment_tx.set_fee(required_fee * fee_multiplier);
     signer.sign_commitment(&mut commitment_tx)?;
 
     // Should be accepted
@@ -2494,7 +2494,7 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Wait for tx to appear in mempool
     genesis_node
-        .wait_for_mempool_commitment_txs(vec![commitment_tx.id], 10)
+        .wait_for_mempool_commitment_txs(vec![commitment_tx.id()], 10)
         .await?;
 
     genesis_node.stop().await;
@@ -2571,9 +2571,9 @@ async fn commitment_tx_cumulative_fee_validation_test(
     let mut third_block_commitments = HashSet::new();
 
     if can_afford_stake {
-        first_block_commitments.insert(stake.id);
+        first_block_commitments.insert(stake.id());
     } else {
-        third_block_commitments.insert(stake.id);
+        third_block_commitments.insert(stake.id());
     }
 
     let mut commitments = vec![stake];
@@ -2596,9 +2596,9 @@ async fn commitment_tx_cumulative_fee_validation_test(
             &pledge_tx.total_cost()
         );
         if fee_total <= starting_balance {
-            first_block_commitments.insert(pledge_tx.id);
+            first_block_commitments.insert(pledge_tx.id());
         } else {
-            third_block_commitments.insert(pledge_tx.id);
+            third_block_commitments.insert(pledge_tx.id());
         }
         commitments.push(pledge_tx);
     }

@@ -29,7 +29,6 @@ use reth::{
     },
     rpc::types::TransactionRequest,
 };
-use std::ops::Deref as _;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
@@ -950,20 +949,20 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
 
     // Assert that the fees are greater than 0
     assert!(
-        stake_tx.fee > 0,
+        stake_tx.fee() > 0,
         "Stake transaction fee should be greater than 0"
     );
     assert!(
-        pledge_tx.fee > 0,
+        pledge_tx.fee() > 0,
         "Pledge transaction fee should be greater than 0"
     );
 
     // Wait for commitment tx to show up in the genesis_node's mempool
     genesis_node
-        .wait_for_mempool(stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(pledge_tx.id(), seconds_to_wait)
         .await?;
 
     // Mine a block to get the stake commitment included
@@ -1050,11 +1049,11 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
     // - fee: actual fee for including the tx in a block
     // - value: stake_fee.amount or pledge_fee.amount
     // Total cost per transaction = fee + value
-    let stake_tx_fee = U256::from(stake_tx.fee);
+    let stake_tx_fee = U256::from(stake_tx.fee());
     let stake_config_amount = U256::from_le_bytes(stake_fee_amount.to_le_bytes());
     let stake_total_cost = stake_tx_fee + stake_config_amount;
 
-    let pledge_tx_fee = U256::from(pledge_tx.fee);
+    let pledge_tx_fee = U256::from(pledge_tx.fee());
     let pledge_config_amount = U256::from_le_bytes(pledge_fee_amount.to_le_bytes());
     let pledge_total_cost = pledge_tx_fee + pledge_config_amount;
 
@@ -1174,7 +1173,7 @@ async fn heavy_staking_pledging_txs_included() -> eyre::Result<()> {
         .expect("Fifth transaction should be decodable as shadow transaction");
     if let Some(TransactionPacket::Stake(bd)) = stake_shadow_tx.as_v1() {
         assert_eq!(bd.target, peer_signer.alloy_address());
-        let expected_stake_amount: U256 = stake_tx.deref().value.into();
+        let expected_stake_amount: U256 = stake_tx.value().into();
         assert_eq!(
             bd.amount, expected_stake_amount,
             "Stake amount should be fee + stake_fee.amount"
@@ -1766,12 +1765,12 @@ async fn commitment_txs_are_capped_per_block() -> eyre::Result<()> {
     let stake_anchor = genesis_node.get_anchor().await?;
     let stake_tx = new_stake_tx(&stake_anchor, &signer, &genesis_config.consensus_config());
     genesis_node.post_commitment_tx(&stake_tx).await?;
-    let mut tx_ids: Vec<H256> = vec![stake_tx.id]; // txs used for anchor chain and later to check mempool ingress
+    let mut tx_ids: Vec<H256> = vec![stake_tx.id()]; // txs used for anchor chain and later to check mempool ingress
     for _ in 0..11 {
         let tx = genesis_node
             .post_pledge_commitment_with_signer(&signer)
             .await;
-        tx_ids.push(tx.id);
+        tx_ids.push(tx.id());
     }
 
     // wait for all txs to ingress mempool

@@ -307,7 +307,7 @@ where
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let tx_id = commitment_tx_json.0.data.id;
+            let tx_id = commitment_tx_json.0.data.id();
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring the commitment transaction {:?}",
                 node_id, tx_id

@@ -55,7 +55,7 @@ fn test_versioned_data_transaction_header_compact_roundtrip() {
 fn test_versioned_commitment_transaction_compact_roundtrip() {
     let config = ConsensusConfig::testing();
     let mut versioned = CommitmentTransaction::new_stake(&config, H256::random());
-    versioned.id = H256::random();
+    versioned.set_id(H256::random());
 
     // Encode to compact format
     let mut buf = Vec::new();

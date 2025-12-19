@@ -1738,10 +1738,12 @@ pub async fn commitment_txs_are_valid(
         tx.validate_value(&config.consensus).map_err(|e| {
             error!(
                 "Commitment transaction {} at position {} has invalid value: {}",
-                tx.id, idx, e
+                tx.id(),
+                idx,
+                e
             );
             ValidationError::CommitmentValueInvalid {
-                tx_id: tx.id,
+                tx_id: tx.id(),
                 position: idx,
                 reason: e.to_string(),
             }
@@ -1819,16 +1821,16 @@ pub async fn commitment_txs_are_valid(
     };
 
     for tx in commitment_txs {
-        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type {
+        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type() {
             let owner = parent_epoch_snapshot
                 .partition_assignments
-                .get_assignment(partition_hash)
+                .get_assignment(*partition_hash)
                 .map(|assignment| assignment.miner_address);
-            if owner != Some(tx.signer) {
+            if owner != Some(tx.signer()) {
                 return Err(ValidationError::UnpledgePartitionNotOwned {
-                    tx_id: tx.id,
-                    partition_hash,
-                    signer: tx.signer,
+                    tx_id: tx.id(),
+                    partition_hash: *partition_hash,
+                    signer: tx.signer(),
                 });
             }
         }
@@ -1836,7 +1838,7 @@ pub async fn commitment_txs_are_valid(
         let status = simulated_snapshot.add_commitment(tx, &parent_epoch_snapshot);
         if status != CommitmentSnapshotStatus::Accepted {
             return Err(ValidationError::CommitmentSnapshotRejected {
-                tx_id: tx.id,
+                tx_id: tx.id(),
                 status,
             });
         }
@@ -1858,10 +1860,10 @@ pub async fn commitment_txs_are_valid(
     {
         match pair {
             EitherOrBoth::Both(actual, expected) => {
-                if actual.id != expected.id {
+                if actual.id() != expected.id() {
                     error!(
                         "Commitment transaction at position {} in wrong order. Expected: {}, Got: {}",
-                        idx, expected.id, actual.id
+                        idx, expected.id(), actual.id()
                     );
                     return Err(ValidationError::CommitmentWrongOrder { position: idx });
                 }

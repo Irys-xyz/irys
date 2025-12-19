@@ -44,13 +44,13 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
         commitment
     };
     node.post_commitment_tx(&stake_tx).await?;
-    node.wait_for_mempool(stake_tx.id, 10).await?;
+    node.wait_for_mempool(stake_tx.id(), 10).await?;
     node.mine_block().await?;
     let block1 = node.get_block_by_height(1).await?;
 
     // Block 2: Pledge commitment
     let pledge_tx = node.post_pledge_commitment_with_signer(&user1_signer).await;
-    node.wait_for_mempool(pledge_tx.id, 10).await?;
+    node.wait_for_mempool(pledge_tx.id(), 10).await?;
     node.mine_block().await?;
     let block2 = node.get_block_by_height(2).await?;
 
@@ -58,7 +58,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
     let data_tx1 = node
         .post_data_tx(node.get_anchor().await?, vec![1_u8; 1024], &user2_signer)
         .await;
-    node.wait_for_mempool(data_tx1.header.id, 10).await?;
+    node.wait_for_mempool(data_tx1.header.id(), 10).await?;
     node.mine_block().await?;
     let block3 = node.get_block_by_height(3).await?;
 
@@ -75,7 +75,7 @@ async fn heavy_test_treasury_tracking() -> eyre::Result<()> {
         .post_data_tx(node.get_anchor().await?, vec![2_u8; 2048], &user1_signer)
         .await;
 
-    node.wait_for_mempool(stake_tx2.id, 10).await?;
+    node.wait_for_mempool(stake_tx2.id(), 10).await?;
     node.wait_for_mempool(data_tx2.header.id, 10).await?;
     node.mine_block().await?;
     let block4 = node.get_block_by_height(4).await?;

@@ -301,7 +301,7 @@ mod tests {
         });
 
         irys_signer.sign_commitment(&mut transaction)?;
-        assert!(transaction.signature.validate_signature(
+        assert!(transaction.signature().validate_signature(
             transaction.signature_hash(),
             IrysAddress::from_slice(hex::decode(DEV_ADDRESS)?.as_slice())
         ));
@@ -309,16 +309,16 @@ mod tests {
         // encode and decode the signature
         //compact
         let mut bytes = Vec::new();
-        transaction.signature.to_compact(&mut bytes);
+        transaction.signature().to_compact(&mut bytes);
 
         let (signature2, _) = IrysSignature::from_compact(&bytes, bytes.len());
 
-        assert_eq!(transaction.signature, signature2);
+        assert_eq!(*transaction.signature(), signature2);
 
         // serde-json base58 roundtrip
-        let ser = serde_json::to_string(&transaction.signature)?;
+        let ser = serde_json::to_string(&transaction.signature())?;
         let de_ser: IrysSignature = serde_json::from_str(&ser)?;
-        assert_eq!(transaction.signature, de_ser);
+        assert_eq!(*transaction.signature(), de_ser);
 
         // Verify base58 encoding matches expected (parity check with JS client)
         assert_eq!(ser, format!("\"{}\"", SIG_BS58));
@@ -328,22 +328,22 @@ mod tests {
         // assert parity against regenerated hex
         let decoded_js_sig = Signature::try_from(&hex::decode(&SIG_HEX[2..])?[..])?;
 
-        let d2 = hex::encode(transaction.signature.as_bytes());
+        let d2 = hex::encode(transaction.signature().as_bytes());
         // println!("{}", &d2);
         assert_eq!(
-            transaction.signature,
+            *transaction.signature(),
             Signature::try_from(&hex::decode(&d2)?[..])?.into()
         );
         assert_eq!(SIG_HEX, format!("0x{}", d2));
 
-        assert_eq!(transaction.signature, decoded_js_sig.into());
+        assert_eq!(*transaction.signature(), decoded_js_sig.into());
 
         // test RLP roundtrip
         let mut bytes = Vec::new();
-        transaction.signature.encode(&mut bytes);
+        transaction.signature().encode(&mut bytes);
         assert_eq!(
             IrysSignature::decode(&mut &bytes[..]).unwrap(),
-            transaction.signature
+            *transaction.signature()
         );
 
         Ok(())

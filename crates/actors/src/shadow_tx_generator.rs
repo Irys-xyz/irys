@@ -495,50 +495,50 @@ impl<'a> ShadowTxGenerator<'a> {
 
     /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
-        match tx.commitment_type {
+        match tx.commitment_type() {
             irys_types::CommitmentType::Stake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
-                        amount: tx.value.into(),
-                        target: tx.signer.into(),
-                        irys_ref: tx.id.into(),
+                        amount: tx.value().into(),
+                        target: tx.signer().into(),
+                        irys_ref: tx.id().into(),
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee: tx.fee as u128,
+                transaction_fee: tx.fee() as u128,
             }),
             irys_types::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
-                        amount: tx.value.into(),
-                        target: tx.signer.into(),
-                        irys_ref: tx.id.into(),
+                        amount: tx.value().into(),
+                        target: tx.signer().into(),
+                        irys_ref: tx.id().into(),
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee: tx.fee as u128,
+                transaction_fee: tx.fee() as u128,
             }),
             irys_types::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
-                        target: tx.signer.into(),
-                        irys_ref: tx.id.into(),
+                        target: tx.signer().into(),
+                        irys_ref: tx.id().into(),
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee: tx.fee as u128,
+                transaction_fee: tx.fee() as u128,
             }),
             irys_types::CommitmentType::Unstake => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
-                        target: tx.signer.into(),
-                        irys_ref: tx.id.into(),
+                        target: tx.signer().into(),
+                        irys_ref: tx.id().into(),
                     }),
                     (*self.solution_hash).into(),
                 ),
-                transaction_fee: tx.fee as u128,
+                transaction_fee: tx.fee() as u128,
             }),
         }
     }
@@ -671,13 +671,15 @@ impl<'a> ShadowTxGenerator<'a> {
         // Update treasury based on commitment type (only pre-Sprite)
         // Post-Sprite: EVM handles treasury accounting via handle_balance_decrement
         if !self.is_sprite_active {
-            match tx.commitment_type {
+            match tx.commitment_type() {
                 irys_types::CommitmentType::Stake | irys_types::CommitmentType::Pledge { .. } => {
                     // Stake and Pledge lock funds in the treasury
                     self.treasury_balance =
-                        self.treasury_balance.checked_add(tx.value).ok_or_else(|| {
-                            eyre!("Treasury balance overflow when adding commitment value")
-                        })?;
+                        self.treasury_balance
+                            .checked_add(tx.value())
+                            .ok_or_else(|| {
+                                eyre!("Treasury balance overflow when adding commitment value")
+                            })?;
                 }
                 irys_types::CommitmentType::Unstake => {
                     // Unstake handled on epoch boundary
@@ -1137,8 +1139,8 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: stake_value.into(),
-                        target: commitments[0].signer.into(),
-                        irys_ref: commitments[0].id.into(),
+                        target: commitments[0].signer().into(),
+                        irys_ref: commitments[0].id().into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1149,8 +1151,8 @@ mod tests {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: pledge_value.into(),
-                        target: commitments[1].signer.into(),
-                        irys_ref: commitments[1].id.into(),
+                        target: commitments[1].signer().into(),
+                        irys_ref: commitments[1].id().into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1160,8 +1162,8 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
-                        target: commitments[2].signer.into(),
-                        irys_ref: commitments[2].id.into(),
+                        target: commitments[2].signer().into(),
+                        irys_ref: commitments[2].id().into(),
                     }),
                     H256::zero().into(),
                 ),
@@ -1171,8 +1173,8 @@ mod tests {
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
-                        target: commitments[3].signer.into(),
-                        irys_ref: commitments[3].id.into(),
+                        target: commitments[3].signer().into(),
+                        irys_ref: commitments[3].id().into(),
                     }),
                     H256::zero().into(),
                 ),

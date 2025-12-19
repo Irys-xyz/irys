@@ -111,11 +111,14 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         debug!(
             "Post Commitments:\nstake1: {:?}\nstake2: {:?}\npledge1: {:?}\npledge2: {:?}\n",
-            stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id
+            stake_tx1.id(),
+            stake_tx2.id(),
+            pledge1.id(),
+            pledge2.id()
         );
 
         // Block height: 1 should have two stake and two pledge commitments
-        let expected_ids = [stake_tx1.id, stake_tx2.id, pledge1.id, pledge2.id];
+        let expected_ids = [stake_tx1.id(), stake_tx2.id(), pledge1.id(), pledge2.id()];
         let block_1 = node.get_block_by_height(1).await.unwrap();
         let commitments_1 = block_1.get_commitment_ledger_tx_ids();
         debug!(
@@ -182,7 +185,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
         // ===== PHASE 4: Second Epoch - Add More Commitments =====
         // Create pledge for second test signer
         let pledge3 = post_pledge_commitment(&node, &signer2, node.get_anchor().await?).await;
-        info!("signer2: {} post pledge: {}", signer2_address, pledge3.id);
+        info!("signer2: {} post pledge: {}", signer2_address, pledge3.id());
 
         // Add some data so that the submit ledger grows and a capacity
         // partition is assigned to submit ledger slot 1
@@ -216,7 +219,7 @@ async fn heavy_test_commitments_3epochs_test() -> eyre::Result<()> {
 
         // Block height: 3 should have 1 pledge commitment
         assert_eq!(commitments_3.len(), 1);
-        assert_eq!(commitments_3, vec![pledge3.id]);
+        assert_eq!(commitments_3, vec![pledge3.id()]);
 
         // ===== PHASE 5: Verify Second Epoch Assignments =====
         let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
@@ -404,7 +407,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // Create a new stake commitment transaction
     let stake_tx = post_stake_commitment(&node, &signer).await;
 
-    info!("Generated stake_tx.id: {}", stake_tx.id);
+    info!("Generated stake_tx.id: {}", stake_tx.id());
 
     // Verify stake commitment starts in 'Unknown' state (already posted by helper)
     let status = node.get_commitment_snapshot_status(&stake_tx);
@@ -420,7 +423,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     // ===== TEST CASE 2: Pledge Creation for Staked Address =====
     // Create a pledge commitment for the already staked address using the pricing API pattern
     let pledge_tx = post_pledge_commitment(&node, &signer, node.get_anchor().await?).await;
-    info!("Generated pledge_tx.id: {}", pledge_tx.id);
+    info!("Generated pledge_tx.id: {}", pledge_tx.id());
 
     // Verify pledge starts in 'Unknown' state (already posted by helper)
     let status = node.get_commitment_snapshot_status(&pledge_tx);
@@ -465,7 +468,7 @@ async fn heavy_test_commitments_basic_test() -> eyre::Result<()> {
     )
     .await;
     signer2.sign_commitment(&mut pledge_tx).unwrap();
-    info!("Generated pledge_tx.id: {}", pledge_tx.id);
+    info!("Generated pledge_tx.id: {}", pledge_tx.id());
 
     // Verify pledge starts in 'Unstaked' state
     let status = node.get_commitment_snapshot_status(&pledge_tx);
@@ -510,9 +513,9 @@ async fn post_stake_commitment(
         ..CommitmentTransactionV1::new(consensus)
     });
 
-    info!("Created stake_tx with value: {:?}", stake_tx.value);
+    info!("Created stake_tx with value: {:?}", stake_tx.value());
     signer.sign_commitment(&mut stake_tx).unwrap();
-    info!("Generated stake_tx.id: {}", stake_tx.id);
+    info!("Generated stake_tx.id: {}", stake_tx.id());
 
     // Submit stake commitment via API
     node.post_commitment_tx(&stake_tx)
@@ -544,7 +547,7 @@ async fn post_pledge_commitment(
     });
 
     signer.sign_commitment(&mut pledge_tx).unwrap();
-    info!("Generated pledge_tx.id: {}", pledge_tx.id);
+    info!("Generated pledge_tx.id: {}", pledge_tx.id());
 
     // Submit pledge commitment via API
     node.post_commitment_tx(&pledge_tx)

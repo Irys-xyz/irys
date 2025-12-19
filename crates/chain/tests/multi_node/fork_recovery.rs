@@ -58,16 +58,16 @@ async fn slow_heavy_fork_recovery_submit_tx_test() -> eyre::Result<()> {
 
     // Wait for all commitment tx to show up in the genesis_node's mempool
     genesis_node
-        .wait_for_mempool(peer1_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer1_stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer1_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer1_pledge_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_stake_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer2_stake_tx.id(), seconds_to_wait)
         .await?;
     genesis_node
-        .wait_for_mempool(peer2_pledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(peer2_pledge_tx.id(), seconds_to_wait)
         .await?;
 
     // Mine a block to get the commitments included
@@ -809,9 +809,9 @@ async fn heavy_reorg_tip_moves_across_nodes_commitment_txs() -> eyre::Result<()>
     // confirm that all txs have made it to all peers, regardless of canon status
     // Canonical blocks by mining peer: A1, B2, B3, C4
     {
-        let mut peer_b_commitment_txs = vec![peer_b_b2_stake_tx.id, peer_b_b2_pledge_tx.id];
+        let mut peer_b_commitment_txs = vec![peer_b_b2_stake_tx.id(), peer_b_b2_pledge_tx.id()];
         peer_b_commitment_txs.sort();
-        let mut peer_c_commitment_txs = vec![peer_c_b2_stake_tx.id, peer_c_b2_pledge_tx.id];
+        let mut peer_c_commitment_txs = vec![peer_c_b2_stake_tx.id(), peer_c_b2_pledge_tx.id()];
         peer_c_commitment_txs.sort();
         let mut all_commitment_txs = peer_b_commitment_txs.clone();
         all_commitment_txs.extend(&peer_c_commitment_txs);
@@ -1736,7 +1736,7 @@ async fn slow_heavy_reorg_upto_block_migration_depth() -> eyre::Result<()> {
     // confirm that all txs have made it to all peers, regardless of canon status
     // Canonical blocks by mining peer: A1, B2, B3, C4
     {
-        let mut peer_b_commitment_txs = vec![peer_b_b2_stake_tx.id, peer_b_b2_pledge_tx.id];
+        let mut peer_b_commitment_txs = vec![peer_b_b2_stake_tx.id(), peer_b_b2_pledge_tx.id()];
         peer_b_commitment_txs.sort();
         let mut all_commitment_txs = peer_b_commitment_txs.clone();
         all_commitment_txs.sort();

@@ -131,17 +131,17 @@ impl IrysSigner {
 
     pub fn sign_commitment(&self, commitment: &mut CommitmentTransaction) -> Result<()> {
         // Store the signer address
-        commitment.signer = IrysAddress::from_public_key(self.signer.verifying_key());
+        commitment.set_signer(IrysAddress::from_public_key(self.signer.verifying_key()));
 
         // Create the signature hash and sign it
         let prehash = commitment.signature_hash();
         let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
 
-        commitment.signature = IrysSignature::new(signature);
+        commitment.set_signature(IrysSignature::new(signature));
 
         // Derive the txid by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
-        commitment.id = H256::from(id);
+        commitment.set_id(H256::from(id));
         Ok(())
     }
 

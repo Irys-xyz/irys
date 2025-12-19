@@ -11,6 +11,7 @@ pub mod chunk;
 pub mod chunk_provider;
 pub mod chunked;
 pub mod commitment;
+pub mod commitment_transaction;
 pub mod config;
 pub mod conversions;
 pub mod difficulty_adjustment_config;
@@ -51,6 +52,7 @@ use std::sync::{atomic::AtomicU64, Arc};
 
 pub use block::*;
 pub use commitment::*;
+pub use commitment_transaction::*;
 pub use config::*;
 pub use difficulty_adjustment_config::*;
 pub use gossip::*;
