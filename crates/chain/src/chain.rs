@@ -620,7 +620,7 @@ impl IrysNode {
 
         // Insert all commitment transactions
         for commitment_tx in genesis_commitments {
-            debug!("Persisting genesis commitment: {}", commitment_tx.id);
+            debug!("Persisting genesis commitment: {}", commitment_tx.id());
             database::insert_commitment_tx(&write_tx, commitment_tx)?;
         }
 
@@ -2136,9 +2136,11 @@ async fn stake_and_pledge(
         post_commitment_tx(&stake_tx).await.unwrap();
         debug!(
             "Posted stake tx {:?} (value: {}, fee: {})",
-            &stake_tx.id, &stake_tx.value, &stake_tx.fee
+            &stake_tx.id(),
+            &stake_tx.value(),
+            &stake_tx.fee()
         );
-        stake_tx.id
+        stake_tx.id()
     } else {
         debug!("Local mining address {:?} is staked", &address);
         // latest_block.previous_block_hash
@@ -2179,9 +2181,9 @@ async fn stake_and_pledge(
             "Posted pledge tx {}/{} {:?} (value: {}, fee {})",
             idx + 1,
             to_pledge_count,
-            &pledge_tx.id,
-            &pledge_tx.value,
-            &pledge_tx.fee
+            &pledge_tx.id(),
+            &pledge_tx.value(),
+            &pledge_tx.fee()
         );
     }
     debug!(

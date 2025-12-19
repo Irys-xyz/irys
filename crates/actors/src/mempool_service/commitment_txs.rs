@@ -13,7 +13,7 @@ impl Inner {
     // Shared pre-checks for both API and Gossip commitment ingress paths.
     // Performs signature validation, whitelist check, mempool/db duplicate detection, and anchor validation.
     #[inline]
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id(), tx.signer = ?commitment_tx.signer()))]
     async fn precheck_commitment_ingress_common(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -28,7 +28,7 @@ impl Inner {
                 .is_a_recent_invalid_fingerprint(&fingerprint)
                 .await
             {
-                return Err(TxIngressError::InvalidSignature(commitment_tx.signer));
+                return Err(TxIngressError::InvalidSignature(commitment_tx.signer()));
             }
         }
         // Validate tx signature first to prevent ID poisoning
@@ -38,7 +38,7 @@ impl Inner {
                 &commitment_tx,
                 e
             );
-            return Err(TxIngressError::InvalidSignature(commitment_tx.signer));
+            return Err(TxIngressError::InvalidSignature(commitment_tx.signer()));
         }
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted
@@ -47,14 +47,14 @@ impl Inner {
         // Early out if we already know about this transaction (invalid/recent valid/valid_commitment_tx)
         if self
             .mempool_state
-            .is_known_commitment_in_mempool(&commitment_tx.id, commitment_tx.signer)
+            .is_known_commitment_in_mempool(&commitment_tx.id(), commitment_tx.signer())
             .await
         {
             return Err(TxIngressError::Skipped);
         }
 
-        // Early out if we already know about this transaction in index / database
-        if self.is_known_commitment_in_db(&commitment_tx.id)? {
+        // Early out if we already know about this transacti)on in index / database
+        if self.is_known_commitment_in_db(&commitment_tx.id())? {
             return Err(TxIngressError::Skipped);
         }
 
@@ -69,7 +69,7 @@ impl Inner {
     // The log_status_debug flag controls whether the status log is at debug (API) or trace (Gossip) level.
     // The warn_on_unstaked flag controls whether we emit a warning on Unstaked status (true for API only).
     #[inline]
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id(), tx.signer = ?commitment_tx.signer()))]
     async fn process_commitment_after_prechecks(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -79,7 +79,8 @@ impl Inner {
         let commitment_status = self.get_commitment_status(commitment_tx).await;
         debug!(
             "commitment tx {} status {:?}",
-            &commitment_tx.id, &commitment_status
+            &commitment_tx.id(),
+            &commitment_status
         );
 
         match commitment_status {
@@ -99,7 +100,7 @@ impl Inner {
             }
             CommitmentSnapshotStatus::Unstaked => {
                 warn!(
-                    tx.id = ?commitment_tx.id,
+                    tx.id = ?commitment_tx.id(),
                     tx.commitment_status = ?commitment_status,
                     "commitment tx cached while address is unstaked"
                 );
@@ -132,7 +133,7 @@ impl Inner {
 
         if need_to_process_pending_pledges_and_then_gossip {
             // Process any pending pledges for this newly staked address
-            self.process_pending_pledges_for_new_stake(commitment_tx.signer)
+            self.process_pending_pledges_for_new_stake(commitment_tx.signer())
                 .await;
             // Gossip transaction
             self.broadcast_commitment_gossip(&commitment_tx);
@@ -141,14 +142,14 @@ impl Inner {
         Ok(())
     }
 
-    #[instrument(skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+    #[instrument(skip_all, fields(tx.id = ?commitment_tx.id(), tx.signer = ?commitment_tx.signer()))]
     async fn ingress_commitment_tx_gossip(
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<bool, TxIngressError> {
         debug!(
-            tx.id = ?commitment_tx.id,
-            tx.signer = ?commitment_tx.signer,
+            tx.id = ?commitment_tx.id(),
+            tx.signer = ?commitment_tx.signer(),
             "Received commitment tx from Gossip"
         );
 
@@ -162,14 +163,14 @@ impl Inner {
         //   and again during selection/block validation.
         if let Err(e) = commitment_tx.validate_fee(&self.config.consensus) {
             self.mempool_state
-                .put_recent_invalid(commitment_tx.id)
+                .put_recent_invalid(commitment_tx.id())
                 .await;
 
             return Err(e.into());
         }
         if let Err(e) = commitment_tx.validate_value(&self.config.consensus) {
             self.mempool_state
-                .put_recent_invalid(commitment_tx.id)
+                .put_recent_invalid(commitment_tx.id())
                 .await;
 
             return Err(e.into());
@@ -185,8 +186,8 @@ impl Inner {
         commitment_tx: CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         debug!(
-            tx.id = ?commitment_tx.id,
-            tx.signer = ?commitment_tx.signer,
+            tx.id = ?commitment_tx.id(),
+            tx.signer = ?commitment_tx.signer(),
             "Received commitment tx from API"
         );
 
@@ -204,7 +205,7 @@ impl Inner {
         .await
         {
             self.mempool_state
-                .put_recent_invalid(commitment_tx.id)
+                .put_recent_invalid(commitment_tx.id())
                 .await;
 
             return Err(e);
@@ -217,7 +218,7 @@ impl Inner {
 
         if need_to_process_pending_pledges_and_then_gossip {
             // Process any pending pledges for this newly staked address
-            self.process_pending_pledges_for_new_stake(commitment_tx.signer)
+            self.process_pending_pledges_for_new_stake(commitment_tx.signer())
                 .await;
             // Gossip transaction
             self.broadcast_commitment_gossip(&commitment_tx);
@@ -227,19 +228,20 @@ impl Inner {
     }
 
     /// Check stake/pledge whitelist; reject if address is not whitelisted.
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id(), tx.signer = ?commitment_tx.signer()))]
     async fn check_commitment_whitelist(
         &self,
         commitment_tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         if !self
             .mempool_state
-            .is_address_in_a_whitelist(&commitment_tx.signer)
+            .is_address_in_a_whitelist(&commitment_tx.signer())
             .await
         {
             warn!(
                 "Commitment tx {} from address {} rejected: not in stake/pledge whitelist",
-                commitment_tx.id, commitment_tx.signer
+                commitment_tx.id(),
+                commitment_tx.signer()
             );
             return Err(CommitmentValidationError::ForbiddenSigner.into());
         }
@@ -271,7 +273,7 @@ impl Inner {
                 .collect();
 
             for pledge_tx in pledges {
-                let tx_id = pledge_tx.id;
+                let tx_id = pledge_tx.id();
                 if let Err(e) = self.ingress_commitment_tx_gossip(&pledge_tx).await {
                     warn!(
                         tx.id = ?tx_id,
@@ -343,7 +345,7 @@ impl Inner {
         filtered_map
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id))]
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id()))]
     pub async fn get_commitment_status(
         &self,
         commitment_tx: &CommitmentTransaction,
@@ -372,7 +374,8 @@ impl Inner {
             | CommitmentSnapshotStatus::UnpledgePending => {
                 warn!(
                     "Commitment rejected: {:?} id={} ",
-                    cache_status, commitment_tx.id
+                    cache_status,
+                    commitment_tx.id()
                 );
                 return cache_status;
             }
@@ -380,14 +383,14 @@ impl Inner {
                 // For unstaked addresses, check for pending stake transactions
                 if self
                     .mempool_state
-                    .is_there_a_pledge_for_unstaked_address(&commitment_tx.signer)
+                    .is_there_a_pledge_for_unstaked_address(&commitment_tx.signer())
                     .await
                 {
                     // Pending local stake makes this pledge/unpledge schedulable; mark as Unknown (fresh)
                     CommitmentSnapshotStatus::Unknown
                 } else {
                     // No pending stakes found
-                    warn!("Commitment is unstaked: {}", commitment_tx.id);
+                    warn!("Commitment is unstaked: {}", commitment_tx.id());
                     CommitmentSnapshotStatus::Unstaked
                 }
             }

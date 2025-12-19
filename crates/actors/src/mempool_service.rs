@@ -75,7 +75,7 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument as _, Span
 /// Checks the current balance of the signer via the provided reth adapter and ensures it
 /// covers the total cost (value + fee) of the transaction.
 #[inline]
-#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id(), tx.signer = ?commitment_tx.signer()))]
 pub async fn validate_funding(
     reth_adapter: &IrysRethNodeAdapter,
     commitment_tx: &irys_types::CommitmentTransaction,
@@ -84,17 +84,17 @@ pub async fn validate_funding(
     // Fetch the current balance of the signer
     let balance: irys_types::U256 = reth_adapter
         .rpc
-        .get_balance_irys_canonical_and_pending(commitment_tx.signer, parent_evm_block_id)
+        .get_balance_irys_canonical_and_pending(commitment_tx.signer(), parent_evm_block_id)
         .await
         .map_err(|e| {
             tracing::error!(
-                tx.id = %commitment_tx.id,
-                tx.signer = %commitment_tx.signer,
+                tx.id = %commitment_tx.id(),
+                tx.signer = %commitment_tx.signer(),
                 tx.error = %e,
                 "Failed to fetch balance for commitment tx"
             );
             TxIngressError::BalanceFetchError {
-                address: commitment_tx.signer.to_string(),
+                address: commitment_tx.signer().to_string(),
                 reason: e.to_string(),
             }
         })?;
@@ -103,17 +103,17 @@ pub async fn validate_funding(
 
     if balance < required {
         tracing::warn!(
-            tx.id = %commitment_tx.id,
+            tx.id = %commitment_tx.id(),
             account.balance = %balance,
             tx.required_balance = %required,
-            tx.signer = %commitment_tx.signer,
+            tx.signer = %commitment_tx.signer(),
             "Insufficient balance for commitment tx"
         );
-        return Err(TxIngressError::Unfunded(commitment_tx.id));
+        return Err(TxIngressError::Unfunded(commitment_tx.id()));
     }
 
     tracing::debug!(
-        tx.id = %commitment_tx.id,
+        tx.id = %commitment_tx.id(),
         account.balance = %balance,
         tx.required_balance = %required,
         "Funding validated for commitment tx"
@@ -129,7 +129,7 @@ pub async fn validate_funding(
 ///   transactions - this will validate against the current canonical tip)
 /// - value must match the commitment type rules
 #[inline]
-#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id, tx.signer = ?commitment_tx.signer))]
+#[tracing::instrument(level = "trace", skip_all, fields(tx.id = ?commitment_tx.id(), tx.signer = ?commitment_tx.signer()))]
 pub async fn validate_commitment_transaction(
     reth_adapter: &IrysRethNodeAdapter,
     consensus: &irys_types::ConsensusConfig,
@@ -137,15 +137,15 @@ pub async fn validate_commitment_transaction(
     parent_evm_block_id: Option<BlockId>,
 ) -> Result<(), TxIngressError> {
     debug!(
-        tx.id = ?commitment_tx.id,
-        tx.signer = ?commitment_tx.signer,
+        tx.id = ?commitment_tx.id(),
+        tx.signer = ?commitment_tx.signer(),
         "Validating commitment transaction"
     );
     // Fee
     commitment_tx.validate_fee(consensus).map_err(|e| {
         warn!(
-            tx.id = ?commitment_tx.id,
-            tx.signer = ?commitment_tx.signer,
+            tx.id = ?commitment_tx.id(),
+            tx.signer = ?commitment_tx.signer(),
             tx.error = ?e,
             "Commitment tx fee validation failed"
         );
@@ -157,8 +157,8 @@ pub async fn validate_commitment_transaction(
         .await
         .map_err(|e| {
             warn!(
-                tx.id = ?commitment_tx.id,
-                tx.signer = ?commitment_tx.signer,
+                tx.id = ?commitment_tx.id(),
+                tx.signer = ?commitment_tx.signer(),
                 tx.error = ?e,
                 "Commitment tx funding validation failed"
             );
@@ -168,8 +168,8 @@ pub async fn validate_commitment_transaction(
     // Value
     commitment_tx.validate_value(consensus).map_err(|e| {
         warn!(
-            tx.id = ?commitment_tx.id,
-            tx.signer = ?commitment_tx.signer,
+            tx.id = ?commitment_tx.id(),
+            tx.signer = ?commitment_tx.signer(),
             tx.error = ?e,
             "Commitment tx value validation failed"
         );
@@ -654,11 +654,11 @@ impl Inner {
         // create a throw away commitment snapshot so we can simulate behaviour before including a commitment tx in returned txs
         let mut simulation_commitment_snapshot = commitment_snapshot.as_ref().clone();
         for tx in &sorted_commitments {
-            if confirmed_commitments.contains(&tx.id) {
+            if confirmed_commitments.contains(&tx.id()) {
                 debug!(
-                    tx.id = ?tx.id,
-                    tx.commitment_type = ?tx.commitment_type,
-                    tx.signer = ?tx.signer,
+                    tx.id = ?tx.id(),
+                    tx.commitment_type = ?tx.commitment_type(),
+                    tx.signer = ?tx.signer(),
                     "Skipping already confirmed commitment transaction"
                 );
                 continue;
@@ -682,10 +682,10 @@ impl Inner {
                 .await?
             {
                 debug!(
-                    tx.id = ?tx.id,
-                    tx.signer = ?tx.signer,
-                    tx.commitment_type = ?tx.commitment_type,
-                    tx.anchor = ?tx.anchor,
+                    tx.id = ?tx.id(),
+                    tx.signer = ?tx.signer(),
+                    tx.commitment_type = ?tx.commitment_type(),
+                    tx.anchor = ?tx.anchor(),
                     min_anchor_height = min_anchor_height,
                     max_anchor_height = max_anchor_height,
                     "Not promoting commitment tx - anchor validation failed"
@@ -694,20 +694,20 @@ impl Inner {
             }
 
             // signer stake status check
-            if matches!(tx.commitment_type, CommitmentType::Stake) {
-                let is_staked = epoch_snapshot.is_staked(tx.signer);
+            if matches!(tx.commitment_type(), CommitmentType::Stake) {
+                let is_staked = epoch_snapshot.is_staked(tx.signer());
                 debug!(
-                    tx.id = ?tx.id,
-                    tx.signer = ?tx.signer,
+                    tx.id = ?tx.id(),
+                    tx.signer = ?tx.signer(),
                     tx.is_staked = is_staked,
                     "Checking stake status for commitment tx"
                 );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
                     debug!(
-                        tx.id = ?tx.id,
-                        tx.signer = ?tx.signer,
-                        tx.commitment_type = ?tx.commitment_type,
+                        tx.id = ?tx.id(),
+                        tx.signer = ?tx.signer(),
+                        tx.commitment_type = ?tx.commitment_type(),
                         "Not promoting commitment tx - signer already staked"
                     );
                     continue;
@@ -720,8 +720,8 @@ impl Inner {
                 // skip commitments that would not be accepted
                 if simulation != CommitmentSnapshotStatus::Accepted {
                     warn!(
-                        tx.commitment_type = ?tx.commitment_type,
-                        tx.id = ?tx.id,
+                        tx.commitment_type = ?tx.commitment_type(),
+                        tx.id = ?tx.id(),
                         tx.simulation_status = ?simulation,
                         "Commitment tx rejected by simulation"
                     );
@@ -730,7 +730,7 @@ impl Inner {
             }
 
             trace!(
-                tx.id = ?tx.id,
+                tx.id = ?tx.id(),
                 tx.signer = ?tx.signer(),
                 tx.fee = ?tx.total_cost(),
                 "Checking funding for commitment transaction"
@@ -742,7 +742,7 @@ impl Inner {
                 &mut fees_spent_per_address,
             ) {
                 trace!(
-                    tx.id = ?tx.id,
+                    tx.id = ?tx.id(),
                     tx.signer = ?tx.signer(),
                     tx.fee = ?tx.total_cost(),
                     tx.selected_count = commitment_tx.len() + 1,
@@ -751,7 +751,7 @@ impl Inner {
                 );
             } else {
                 trace!(
-                    tx.id = ?tx.id,
+                    tx.id = ?tx.id(),
                     tx.signer = ?tx.signer(),
                     tx.fee = ?tx.total_cost(),
                     tx.validation_failed_reason = "insufficient_funds",
@@ -761,9 +761,9 @@ impl Inner {
             }
 
             debug!(
-                tx.id = ?tx.id,
-                tx.commitment_type = ?tx.commitment_type,
-                tx.signer = ?tx.signer,
+                tx.id = ?tx.id(),
+                tx.commitment_type = ?tx.commitment_type(),
+                tx.signer = ?tx.signer(),
                 tx.fee = ?tx.total_cost(),
                 tx.selected_count = commitment_tx.len() + 1,
                 tx.max_commitments = max_commitments,
@@ -785,7 +785,7 @@ impl Inner {
                 commitment_tx
                     .iter()
                     .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
-                        match tx.commitment_type {
+                        match tx.commitment_type() {
                             CommitmentType::Stake => (stakes + 1, pledges),
                             CommitmentType::Pledge { .. } => (stakes, pledges + 1),
                             _ => (stakes, pledges),
@@ -1486,7 +1486,7 @@ impl Inner {
         let commitment_hash_map = self.mempool_state.get_all_commitment_tx().await;
         for tx in commitment_hash_map.values() {
             // Create a filepath for this transaction
-            let tx_path = commitment_tx_path.join(format!("{}.json", tx.id));
+            let tx_path = commitment_tx_path.join(format!("{}.json", tx.id()));
 
             // Check to see if the file exists
             if tx_path.exists() {
@@ -1768,7 +1768,7 @@ impl AtomicMempoolState {
         // Collect from valid_commitment_tx
         for txs in mempool_state_guard.valid_commitment_tx.values() {
             for tx in txs {
-                all_txs.insert(tx.id, tx);
+                all_txs.insert(tx.id(), tx);
             }
         }
 
@@ -1955,8 +1955,8 @@ impl AtomicMempoolState {
             .get(user_address)
             .map(|txs| {
                 txs.iter()
-                    .filter(|tx| commitment_type_filter(&tx.commitment_type))
-                    .filter(|tx| seen_ids.insert(tx.id))
+                    .filter(|tx| commitment_type_filter(tx.commitment_type()))
+                    .filter(|tx| seen_ids.insert(tx.id()))
                     .count() as u64
             })
             .unwrap_or(0)
@@ -2072,7 +2072,7 @@ impl AtomicMempoolState {
             if let Some(transactions) = mempool_state_guard.valid_commitment_tx.get_mut(&address) {
                 // Remove all transactions that match any of the txids
                 let original_len = transactions.len();
-                transactions.retain(|tx| !txids_set.contains(&tx.id));
+                transactions.retain(|tx| !txids_set.contains(&tx.id()));
 
                 if transactions.len() < original_len {
                     found = true;
@@ -2177,7 +2177,7 @@ impl AtomicMempoolState {
             .valid_commitment_tx
             .values()
             .flat_map(|txs| txs.iter())
-            .any(|tx| &tx.id == commitment_tx_id)
+            .any(|tx| &tx.id() == commitment_tx_id)
         {
             Some(TxKnownStatus::Valid)
         }
@@ -2210,7 +2210,7 @@ impl AtomicMempoolState {
         if guard
             .valid_commitment_tx
             .get(&signer)
-            .is_some_and(|txs| txs.iter().any(|c| c.id == *tx_id))
+            .is_some_and(|txs| txs.iter().any(|c| c.id() == *tx_id))
         {
             return true;
         }
@@ -2231,7 +2231,7 @@ impl AtomicMempoolState {
             .values()
             .flat_map(|txs| txs.iter())
             .for_each(|tx| {
-                hash_map.insert(tx.id, tx.clone());
+                hash_map.insert(tx.id(), tx.clone());
             });
 
         // Get any CommitmentTransactions from the pending commitments
@@ -2260,19 +2260,19 @@ impl AtomicMempoolState {
         max_pending_pledge_items: usize,
     ) {
         let mut guard = self.write().await;
-        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer) {
+        if let Some(pledges_cache) = guard.pending_pledges.get_mut(&tx.signer()) {
             // Address already exists in cache - add this pledge transaction to its lru cache
-            pledges_cache.put(tx.id, tx.clone());
+            pledges_cache.put(tx.id(), tx.clone());
         } else {
             // First pledge from this address - create a new nested lru cache
             let mut new_address_cache =
                 LruCache::new(NonZeroUsize::new(max_pending_pledge_items).unwrap());
 
             // Add the pledge transaction to the new lru cache for the address
-            new_address_cache.put(tx.id, tx.clone());
+            new_address_cache.put(tx.id(), tx.clone());
 
             // Add the address cache to the primary lru cache
-            guard.pending_pledges.put(tx.signer, new_address_cache);
+            guard.pending_pledges.put(tx.signer(), new_address_cache);
         }
     }
 
@@ -2284,7 +2284,7 @@ impl AtomicMempoolState {
     ) -> Result<(), TxIngressError> {
         let mut guard = self.write().await;
         guard.bounded_insert_commitment_tx(tx)?;
-        guard.recent_valid_tx.put(tx.id, ());
+        guard.recent_valid_tx.put(tx.id(), ());
         Ok(())
     }
 
@@ -2296,7 +2296,7 @@ impl AtomicMempoolState {
             // Check if there's at least one pending stake transaction
             if pending
                 .iter()
-                .any(|c| c.commitment_type == CommitmentType::Stake)
+                .any(|c| *c.commitment_type() == CommitmentType::Stake)
             {
                 return true;
             }
@@ -2319,7 +2319,7 @@ impl AtomicMempoolState {
             .values()
             .flat_map(|txs| txs.iter())
             .for_each(|tx| {
-                hash_map.insert(tx.id, tx.clone());
+                hash_map.insert(tx.id(), tx.clone());
             });
 
         // Get any CommitmentTransactions from the pending commitments LRU cache
@@ -2476,11 +2476,11 @@ impl MempoolState {
         &mut self,
         tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        let address = tx.signer;
+        let address = tx.signer();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
         if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id == tx.id) {
+            if existing_txs.iter().any(|t| t.id() == tx.id()) {
                 return Ok(()); // Duplicate, already have this commitment
             }
         }
@@ -2535,7 +2535,7 @@ impl MempoolState {
                 address = ?address,
                 current_count = txs.len(),
                 max_allowed = self.max_commitments_per_address,
-                new.tx_id = ?tx.id,
+                new.tx_id = ?tx.id(),
                 "Address commitment pool full: rejecting new commitment"
             );
             return Err(TxIngressError::MempoolFull(format!(
@@ -3184,10 +3184,10 @@ mod bounded_mempool_tests {
         // Assert: Original 3 commitments preserved (no eviction)
         let txs = state.valid_commitment_tx.get(&address).unwrap();
         assert_eq!(txs.len(), 3);
-        assert!(txs.iter().any(|t| t.id == tx1.id));
-        assert!(txs.iter().any(|t| t.id == tx2.id));
-        assert!(txs.iter().any(|t| t.id == tx3.id));
-        assert!(!txs.iter().any(|t| t.id == tx4.id));
+        assert!(txs.iter().any(|t| t.id() == tx1.id()));
+        assert!(txs.iter().any(|t| t.id() == tx2.id()));
+        assert!(txs.iter().any(|t| t.id() == tx3.id()));
+        assert!(!txs.iter().any(|t| t.id() == tx4.id()));
     }
 
     #[test]

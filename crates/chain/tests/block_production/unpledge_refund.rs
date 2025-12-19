@@ -58,12 +58,12 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     signer
         .sign_commitment(&mut unpledge_tx)
         .expect("sign unpledge tx");
-    let expected_refund_amount: U256 = unpledge_tx.value; // refund amount at epoch
+    let expected_refund_amount: U256 = unpledge_tx.value(); // refund amount at epoch
 
     // ---------- Action: submit and include unpledge ----------
     genesis_node.post_commitment_tx(&unpledge_tx).await?;
     genesis_node
-        .wait_for_mempool(unpledge_tx.id, seconds_to_wait)
+        .wait_for_mempool(unpledge_tx.id(), seconds_to_wait)
         .await?;
     // Mine exactly one block to include the unpledge (non-epoch block).
     // Refund will occur later at the epoch boundary.
@@ -94,11 +94,11 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
     let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
     warn!(
         custom.inclusion_commitments = ?inclusion_commitments,
-        tx.expected_unpledge = ?unpledge_tx.id,
+        tx.expected_unpledge = ?unpledge_tx.id(),
         "Commitment txs present in inclusion block"
     );
     assert!(
-        inclusion_commitments.contains(&unpledge_tx.id),
+        inclusion_commitments.contains(&unpledge_tx.id()),
         "Inclusion block should contain the unpledge commitment id"
     );
 
@@ -154,7 +154,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
                     peer_addr.to_alloy_address(),
                     "Unpledge target mismatch"
                 );
-                let expected_irys_ref: FixedBytes<32> = unpledge_tx.id.into();
+                let expected_irys_ref: FixedBytes<32> = unpledge_tx.id().into();
                 assert_eq!(
                     debit.irys_ref, expected_irys_ref,
                     "Unpledge irys_ref should match commitment tx id"
@@ -175,7 +175,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
         .await;
     assert_eq!(
         balance_after_inclusion,
-        balance_before_inclusion - U256::from(unpledge_tx.fee),
+        balance_before_inclusion - U256::from(unpledge_tx.fee()),
         "Unpledge inclusion should reduce balance by fee only"
     );
 
@@ -288,7 +288,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // Net effect from before inclusion: -fee at inclusion + refund at epoch
     let expected_final =
-        balance_before_inclusion - U256::from(unpledge_tx.fee) + expected_refund_amount;
+        balance_before_inclusion - U256::from(unpledge_tx.fee()) + expected_refund_amount;
     assert_eq!(
         balance_after_epoch, expected_final,
         "Final balance should equal initial - inclusion fee + refund"
@@ -378,10 +378,10 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
             .sign_commitment(&mut unsigned)
             .expect("sign genesis unpledge tx");
 
-        total_refund += unsigned.value;
+        total_refund += unsigned.value();
         genesis_node.post_commitment_tx(&unsigned).await?;
         genesis_node
-            .wait_for_mempool_commitment_txs(vec![unsigned.id], seconds_to_wait)
+            .wait_for_mempool_commitment_txs(vec![unsigned.id()], seconds_to_wait)
             .await?;
         unpledge_txs.push((unsigned, *target));
     }
@@ -410,9 +410,9 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
     let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
     for (tx, _) in &unpledge_txs {
         assert!(
-            inclusion_commitments.contains(&tx.id),
+            inclusion_commitments.contains(&tx.id()),
             "Inclusion block missing unpledge commitment {}",
-            tx.id
+            tx.id()
         );
     }
 
@@ -451,7 +451,7 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("transactions should exist for inclusion block");
     let expected_irys_refs: HashSet<FixedBytes<32>> =
-        unpledge_txs.iter().map(|(tx, _)| tx.id.into()).collect();
+        unpledge_txs.iter().map(|(tx, _)| tx.id().into()).collect();
     let mut matched_irys_refs: HashSet<FixedBytes<32>> = HashSet::new();
     for tx in inclusion_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
@@ -514,7 +514,7 @@ async fn heavy_genesis_unpledge_two_partitions_refund_flow() -> eyre::Result<()>
         .expect("epoch block should have transactions");
     let expected_refunds: HashMap<FixedBytes<32>, U256> = unpledge_txs
         .iter()
-        .map(|(tx, _)| (tx.id.into(), tx.value))
+        .map(|(tx, _)| (tx.id().into(), tx.value()))
         .collect();
     let mut matched_refunds: HashMap<FixedBytes<32>, U256> = HashMap::new();
     for tx in epoch_txs {
@@ -644,9 +644,9 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
     let inclusion_commitments = inclusion_block.get_commitment_ledger_tx_ids();
     for (tx, _) in &unpledge_txs {
         assert!(
-            inclusion_commitments.contains(&tx.id),
+            inclusion_commitments.contains(&tx.id()),
             "Unpledge commitment {tx_id:?} missing from inclusion block",
-            tx_id = tx.id
+            tx_id = tx.id()
         );
     }
 
@@ -685,7 +685,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         .transactions_by_block(HashOrNumber::Hash(inclusion_block.evm_block_hash))?
         .expect("transactions available for inclusion block");
     let expected_irys_refs: HashSet<FixedBytes<32>> =
-        unpledge_txs.iter().map(|(tx, _)| tx.id.into()).collect();
+        unpledge_txs.iter().map(|(tx, _)| tx.id().into()).collect();
     let mut matched_irys_refs: HashSet<FixedBytes<32>> = HashSet::new();
     for tx in inclusion_txs {
         if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
@@ -762,7 +762,7 @@ async fn heavy_unpledge_all_partitions_refund_flow() -> eyre::Result<()> {
         .transactions_by_block(HashOrNumber::Hash(epoch_block.evm_block_hash))?
         .expect("epoch transactions available");
     let expected_refunds: HashSet<FixedBytes<32>> =
-        unpledge_txs.iter().map(|(tx, _)| tx.id.into()).collect();
+        unpledge_txs.iter().map(|(tx, _)| tx.id().into()).collect();
     let mut seen_refs: HashSet<FixedBytes<32>> = HashSet::new();
     let mut refund_amounts: Vec<U256> = Vec::new();
     for tx in epoch_txs {
@@ -869,12 +869,12 @@ pub async fn send_unpledge_all(
         signer
             .sign_commitment(&mut unsigned)
             .expect("sign multi-unpledge tx");
-        total_fee += U256::from(unsigned.fee);
-        total_refund += unsigned.value;
+        total_fee += U256::from(unsigned.fee());
+        total_refund += unsigned.value();
 
         peer_node.post_commitment_tx(&unsigned).await?;
         genesis_node
-            .wait_for_mempool(unsigned.id, seconds_to_wait)
+            .wait_for_mempool(unsigned.id(), seconds_to_wait)
             .await?;
         unpledge_txs.push((unsigned, Arc::clone(target)));
     }
