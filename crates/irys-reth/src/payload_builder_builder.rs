@@ -3,7 +3,6 @@
 
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_chainspec::{EthChainSpec as _, EthereumHardforks};
-use reth_ethereum_engine_primitives::EthBuiltPayload;
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;
@@ -14,7 +13,7 @@ use reth_node_builder::{
 use reth_transaction_pool::{EthPooledTransaction, TransactionPool};
 use std::sync::Arc;
 
-use crate::{IrysPayloadAttributes, IrysPayloadBuilderAttributes};
+use crate::{IrysBuiltPayload, IrysPayloadAttributes, IrysPayloadBuilderAttributes};
 
 /// A basic ethereum payload service.
 #[derive(Clone, Debug)]
@@ -33,7 +32,7 @@ where
             NextBlockEnvCtx = reth_evm::NextBlockEnvAttributes,
         > + 'static,
     Types::Payload: PayloadTypes<
-        BuiltPayload = EthBuiltPayload,
+        BuiltPayload = IrysBuiltPayload,
         PayloadAttributes = IrysPayloadAttributes,
         PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
     >,

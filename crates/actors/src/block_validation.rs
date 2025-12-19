@@ -1624,14 +1624,26 @@ async fn generate_expected_shadow_transactions(
     // Get final treasury balance after processing all transactions
     let expected_treasury = shadow_tx_generator.treasury_balance();
 
+    // Check if Sprite hardfork is active for this block
+    let is_sprite_active = config
+        .consensus
+        .hardforks
+        .is_sprite_active(block.timestamp_secs());
+
     // Validate that the block's treasury matches the expected value
-    ensure!(
-        block.treasury == expected_treasury,
-        "Treasury mismatch: expected {} but found {} at block height {}",
-        expected_treasury,
-        block.treasury,
-        block.height
-    );
+    // Note: For post-Sprite blocks, ShadowTxGenerator doesn't track treasury changes because
+    // the EVM handles treasury accounting. Treasury validation for Sprite blocks is done via
+    // EVM state validation (shadow transactions execute correctly and update TREASURY_ACCOUNT).
+    // Pre-Sprite blocks use the generator's tracked balance.
+    if !is_sprite_active {
+        ensure!(
+            block.treasury == expected_treasury,
+            "Treasury mismatch: expected {} but found {} at block height {}",
+            expected_treasury,
+            block.treasury,
+            block.height
+        );
+    }
 
     Ok(shadow_txs_vec)
 }

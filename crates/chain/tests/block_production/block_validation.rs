@@ -9,12 +9,13 @@ use irys_actors::{
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
+use irys_reth::IrysBuiltPayload;
 use irys_types::{
     block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
     CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     UnixTimestampMs, H256, U256,
 };
-use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
+use reth::core::primitives::SealedBlock;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -154,7 +155,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             _timestamp_ms: UnixTimestampMs,
             solution_hash: H256,
             current_ema_for_pricing: &irys_types::IrysTokenPrice,
-        ) -> Result<(EthBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
+        ) -> Result<(IrysBuiltPayload, U256), irys_actors::block_producer::BlockProductionError>
         {
             self.prod
                 .create_evm_block(

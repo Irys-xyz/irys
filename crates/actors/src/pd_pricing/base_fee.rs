@@ -198,37 +198,72 @@ pub fn extract_pd_base_fee_from_block(
         return Ok(floor_per_chunk_irys);
     }
 
-    // Extract current PD base fee from block's 2nd shadow transaction (PdBaseFeeUpdate)
-    // The ordering is: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs
-    let second_tx = evm_block
+    // Extract current PD base fee from block's shadow transactions.
+    // Normal ordering: [0] BlockReward, [1] PdBaseFeeUpdate, [2+] other shadow txs
+    // First Sprite block: [0] BlockReward, [1] TreasuryDeposit, [2] PdBaseFeeUpdate, [3+] other
+    //
+    // On the first Sprite block, TreasuryDeposit is at index 1, pushing PdBaseFeeUpdate to index 2.
+    // We try index 1 first, and if it's TreasuryDeposit, we try index 2.
+    let tx_at_index_1 = evm_block
         .body
         .transactions
         .get(PD_BASE_FEE_INDEX)
         .ok_or_eyre("Block must have at least 2 transactions (BlockReward + PdBaseFeeUpdate)")?;
 
-    let shadow_tx = detect_and_decode(second_tx)
-        .map_err(|e| eyre!("Failed to decode 2nd transaction as shadow tx: {}", e))?
-        .ok_or_eyre("2nd transaction in block is not a shadow transaction")?;
+    let shadow_tx_1 = detect_and_decode(tx_at_index_1)
+        .map_err(|e| {
+            eyre!(
+                "Failed to decode transaction at index 1 as shadow tx: {}",
+                e
+            )
+        })?
+        .ok_or_eyre("Transaction at index 1 is not a shadow transaction")?;
 
-    match &shadow_tx {
+    // Check if index 1 is PdBaseFeeUpdate (normal case) or TreasuryDeposit (first Sprite block)
+    let pd_base_fee_update = match &shadow_tx_1 {
         irys_reth::shadow_tx::ShadowTransaction::V1 { packet, .. } => {
             match packet {
                 TransactionPacket::PdBaseFeeUpdate(update) => {
-                    // Convert alloy U256 to irys U256
-                    Ok(Amount::new(update.per_chunk.into()))
+                    // Normal case: PdBaseFeeUpdate is at index 1
+                    Some(update.clone())
                 }
-                _ => {
-                    eyre::bail!(
-                        "2nd transaction in block is not a PdBaseFeeUpdate (found: {:?})",
-                        packet
-                    );
+                TransactionPacket::TreasuryDeposit(_) => {
+                    // First Sprite block: TreasuryDeposit is at index 1, check index 2
+                    let tx_at_index_2 = evm_block
+                        .body
+                        .transactions
+                        .get(PD_BASE_FEE_INDEX + 1)
+                        .ok_or_eyre("First Sprite block must have at least 3 transactions")?;
+
+                    let shadow_tx_2 = detect_and_decode(tx_at_index_2)
+                        .map_err(|e| {
+                            eyre!(
+                                "Failed to decode transaction at index 2 as shadow tx: {}",
+                                e
+                            )
+                        })?
+                        .ok_or_eyre("Transaction at index 2 is not a shadow transaction")?;
+
+                    match &shadow_tx_2 {
+                        irys_reth::shadow_tx::ShadowTransaction::V1 {
+                            packet: TransactionPacket::PdBaseFeeUpdate(update),
+                            ..
+                        } => Some(update.clone()),
+                        _ => None,
+                    }
                 }
+                _ => None,
             }
         }
-        _ => {
-            eyre::bail!("Unsupported shadow transaction version in block's 2nd transaction");
-        }
-    }
+        _ => None,
+    };
+
+    let update = pd_base_fee_update.ok_or_eyre(
+        "Could not find PdBaseFeeUpdate at expected index (1 or 2 if TreasuryDeposit present)",
+    )?;
+
+    // Convert alloy U256 to irys U256
+    Ok(Amount::new(update.per_chunk.into()))
 }
 
 /// Count the total number of PD chunks used in an EVM block.

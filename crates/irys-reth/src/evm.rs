@@ -66,6 +66,11 @@ pub static PD_BASE_FEE_ACCOUNT: LazyLock<Address> =
 pub static IRYS_USD_PRICE_ACCOUNT: LazyLock<Address> =
     LazyLock::new(|| Address::from_word(keccak256("irys_usd_price_account")));
 
+/// Account address used to track treasury balance in EVM state.
+/// The balance of this account represents the current treasury holdings.
+pub static TREASURY_ACCOUNT: LazyLock<Address> =
+    LazyLock::new(|| Address::from_word(keccak256("irys_treasury_account")));
+
 /// Irys block executor that handles execution of both regular and shadow transactions.
 #[derive(Debug)]
 pub struct IrysBlockExecutor<'a, Evm> {
@@ -728,9 +733,12 @@ where
                 // Fee payer is the transaction caller; priority recipient is block beneficiary.
                 let fee_payer = tx.caller;
                 let beneficiary = self.block().beneficiary;
-                // TODO: Burn/treasury sink placeholder. Ideally we bring the treasury into EVM state.
-                // that will also make accounting easier on irys side
-                let treasury = Address::ZERO;
+                // Pre-Sprite: burn to Address::ZERO, Post-Sprite: send to treasury
+                let treasury = if self.is_sprite_active {
+                    *TREASURY_ACCOUNT
+                } else {
+                    Address::ZERO
+                };
 
                 // Pre-validate fee_payer has sufficient balance for total PD fees
                 let total_pd_fees = base_total.saturating_add(prio_total);
@@ -1115,6 +1123,51 @@ where
         Ok(price)
     }
 
+    /// Reads the current treasury balance from the EVM state.
+    /// The balance is stored as the balance of the TREASURY_ACCOUNT.
+    pub fn read_treasury_balance(&mut self) -> U256 {
+        match self.load_account(*TREASURY_ACCOUNT) {
+            Ok(Some(acc)) => acc.info.balance,
+            _ => U256::ZERO,
+        }
+    }
+
+    /// Increments the treasury balance by the specified amount.
+    /// Creates the treasury account if it doesn't exist.
+    fn increment_treasury_balance(&mut self, amount: U256) -> Result<(), <Self as Evm>::Error> {
+        let target = *TREASURY_ACCOUNT;
+        let mut account = if let Some(acc) = self.load_account(target)? {
+            acc
+        } else {
+            Account::new_not_existing(0)
+        };
+        account.info.balance = account.info.balance.saturating_add(amount);
+        self.commit_account_change(target, account);
+        Ok(())
+    }
+
+    /// Decrements the treasury balance by the specified amount.
+    /// Returns an error if treasury has insufficient balance.
+    fn decrement_treasury_balance(&mut self, amount: U256) -> Result<(), <Self as Evm>::Error> {
+        let target = *TREASURY_ACCOUNT;
+        let account = self.load_account(target)?;
+        let Some(mut account) = account else {
+            return Err(Self::create_internal_error(format!(
+                "Treasury account does not exist, cannot decrement by {}",
+                amount
+            )));
+        };
+        if account.info.balance < amount {
+            return Err(Self::create_internal_error(format!(
+                "Insufficient treasury balance: {} < {}",
+                account.info.balance, amount
+            )));
+        }
+        account.info.balance = account.info.balance.saturating_sub(amount);
+        self.commit_account_change(target, account);
+        Ok(())
+    }
+
     /// Loads an account from the underlying state, or the database if there are no preexisting changes.
     /// NOTE: you MUST commit an account change before calling `load_account` for the same account, otherwise you will not get the latest version.
     /// TODO: improve this ^, and make this function responsible for account _creation_, i.e if an account doesn't exist, we use `Account::new_not_existing()`, instead of deferring this to the caller.
@@ -1373,7 +1426,7 @@ where
                     );
                     let target = balance_increment.target;
                     let (plain_account, execution_result, account_existed) =
-                        self.handle_balance_increment(log, balance_increment)?;
+                        self.handle_balance_increment(log, balance_increment, true)?;
                     Ok((
                         Ok((plain_account, execution_result, account_existed)),
                         target,
@@ -1416,8 +1469,9 @@ where
                         target: beneficiary,
                         irys_ref: alloy_primitives::FixedBytes::ZERO,
                     };
+                    // BlockReward is minted from consensus, not from treasury
                     let (plain_account, execution_result, account_existed) =
-                        self.handle_balance_increment(log, &balance_increment)?;
+                        self.handle_balance_increment(log, &balance_increment, false)?;
                     Ok((
                         Ok((plain_account, execution_result, account_existed)),
                         target,
@@ -1456,8 +1510,9 @@ where
                         ],
                     );
                     let target = balance_increment.target;
+                    // These are refund/reward transactions - funds come from treasury
                     let (plain_account, execution_result, account_existed) =
-                        self.handle_balance_increment(log, balance_increment)?;
+                        self.handle_balance_increment(log, balance_increment, true)?;
                     Ok((
                         Ok((plain_account, execution_result, account_existed)),
                         target,
@@ -1531,6 +1586,40 @@ where
                     let execution_result = Self::create_success_result(log);
                     Ok((Ok((account, execution_result, existed)), target))
                 }
+                shadow_tx::TransactionPacket::TreasuryDeposit(deposit) => {
+                    // TreasuryDeposit is only allowed when Sprite hardfork is active.
+                    // This provides defense-in-depth; the consensus layer already guards generation.
+                    if !self.is_sprite_active {
+                        tracing::warn!(
+                            "TreasuryDeposit shadow transaction received before Sprite hardfork is active"
+                        );
+                        return Err(Self::create_internal_error(
+                            "TreasuryDeposit not allowed before Sprite hardfork".to_string(),
+                        ));
+                    }
+
+                    // TreasuryDeposit is a protocol-level operation to add funds to treasury
+                    let target = *TREASURY_ACCOUNT;
+
+                    // Load existing or create new treasury account
+                    let existed;
+                    let mut account = if let Some(acc) = self.load_account(target)? {
+                        existed = true;
+                        acc
+                    } else {
+                        existed = false;
+                        Account::new_not_existing(0)
+                    };
+                    account.info.balance = account.info.balance.saturating_add(deposit.amount);
+
+                    let log = Self::create_shadow_log(
+                        target,
+                        vec![topic],
+                        vec![DynSolValue::Uint(deposit.amount, 256)],
+                    );
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Ok((account, execution_result, existed)), target))
+                }
             },
         }
     }
@@ -1548,13 +1637,27 @@ where
         }
     }
 
-    /// Handles shadow transaction that increases account balance
+    /// Handles shadow transaction that increases account balance.
+    ///
+    /// If `deduct_from_treasury` is true, the funds come from the treasury account.
+    /// This is used for refund transactions (UnstakeRefund, UnpledgeRefund, PermFeeRefund)
+    /// and reward transactions (TermFeeReward, IngressProofReward).
+    ///
+    /// If `deduct_from_treasury` is false, the funds are minted from consensus.
+    /// This is used for BlockReward transactions.
     fn handle_balance_increment(
         &mut self,
         log: Log,
         balance_increment: &shadow_tx::BalanceIncrement,
+        deduct_from_treasury: bool,
     ) -> Result<(Account, ExecutionResult<<Self as Evm>::HaltReason>, bool), <Self as Evm>::Error>
     {
+        // If deducting from treasury and Sprite is active, validate and deduct first.
+        // Pre-Sprite: funds are effectively minted from nowhere (old behavior).
+        if deduct_from_treasury && self.is_sprite_active {
+            self.decrement_treasury_balance(balance_increment.amount)?;
+        }
+
         let account = self.load_account(balance_increment.target)?;
 
         // Get the existing account or create a new one if it doesn't exist
@@ -1639,6 +1742,11 @@ where
             .info
             .balance
             .saturating_sub(balance_decrement.amount);
+
+        // Transfer decremented funds to treasury (only post-Sprite)
+        if self.is_sprite_active {
+            self.increment_treasury_balance(balance_decrement.amount)?;
+        }
 
         let execution_result = Self::create_success_result(log);
 
@@ -1820,7 +1928,7 @@ mod tests {
 
         let payer = ctx.normal_signer.address();
         let beneficiary = ctx.block_producer_a.address();
-        let treasury = Address::ZERO;
+        let treasury = *TREASURY_ACCOUNT;
 
         // Fee values must exceed min_pd_transaction_cost ($0.01 USD at $1/IRYS = 0.01 tokens = 10^16 wei)
         // With 3 chunks: total fees = 3 * (base + prio) >= 10^16, so per chunk >= 3.33e15
@@ -2117,7 +2225,7 @@ mod tests {
 
         let payer = ctx.normal_signer.address();
         let beneficiary = ctx.block_producer_a.address();
-        let treasury = Address::ZERO;
+        let treasury = *TREASURY_ACCOUNT;
 
         // Set PD base fee - must exceed min_pd_transaction_cost ($0.01 at $1/IRYS)
         // With 3 chunks: total >= 10^16, so per chunk needs ~3.33e15
@@ -2435,10 +2543,24 @@ mod tests {
     #[test_log::test(tokio::test)]
     async fn test_pd_tx_rejected_then_accepted_after_funding() -> eyre::Result<()> {
         use crate::shadow_tx::BalanceIncrement;
+        use crate::shadow_tx::TransactionPacket;
+        use crate::shadow_tx::TreasuryDeposit;
 
         let ctx = TestContext::new().await?;
         let (mut node, ctx) = ctx.get_single_node()?;
         let solution_hash = FixedBytes::<32>::from_slice(&[0x22; 32]);
+
+        // Seed treasury with enough funds for the UnstakeRefund (10M tokens)
+        let treasury_seed_amount = U256::from(10_000_000_000_000_000_000_000_000_u128); // 10M tokens
+        let treasury_deposit = ShadowTransaction::new_v1(
+            TransactionPacket::TreasuryDeposit(TreasuryDeposit {
+                amount: treasury_seed_amount,
+            }),
+            solution_hash,
+        );
+        let treasury_deposit_signed =
+            sign_shadow_tx(treasury_deposit, &ctx.block_producer_a, 0).await?;
+        advance_block(&mut node, vec![treasury_deposit_signed]).await?;
 
         // Use target_account which may have zero or low initial balance
         // We'll set PD fees high enough to exceed any reasonable balance
