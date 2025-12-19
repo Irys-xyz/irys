@@ -3,7 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::block_pool::CriticalBlockPoolError;
-use crate::types::{GossipResponse, RejectionReason};
+use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
@@ -121,14 +121,29 @@ where
 
         if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
             if peer.address.gossip.ip() != peer_address.ip() {
+                debug!(
+                    miner_address = %miner_address,
+                    expected_ip = %peer.address.gossip.ip(),
+                    actual_ip = %peer_address.ip(),
+                    "Rejecting gossip: IP mismatch requires handshake"
+                );
                 return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                    RejectionReason::HandshakeRequired,
+                    RejectionReason::HandshakeRequired(Some(
+                        HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+                    )),
                 )));
             }
             Ok(peer)
         } else {
+            debug!(
+                miner_address = %miner_address,
+                peer_ip = %peer_address.ip(),
+                "Rejecting gossip: unknown miner address requires handshake"
+            );
             Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired,
+                RejectionReason::HandshakeRequired(Some(
+                    HandshakeRequirementReason::MinerAddressIsUnknown,
+                )),
             )))
         }
     }
@@ -389,7 +404,9 @@ where
                 }
             }
             None => HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                RejectionReason::HandshakeRequired,
+                RejectionReason::HandshakeRequired(Some(
+                    HandshakeRequirementReason::RequestOriginIsNotInThePeerList,
+                )),
             )),
         }
     }
