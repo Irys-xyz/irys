@@ -287,7 +287,7 @@ impl InnerCacheTask {
 
             // Skip if an ingress proof is actively being generated for this root
             if self.ingress_proof_generation_state.is_generating(data_root) {
-                debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation");
+                debug!(ingress_proof.data_root = ?data_root, "Skipping chunk prune due to active proof generation for {data_root:?}");
                 continue;
             }
 
@@ -326,7 +326,7 @@ impl InnerCacheTask {
                     )?;
                     if pruned > 0 {
                         evictions_performed = evictions_performed.saturating_add(1);
-                        debug!(chunk.data_root = ?root, chunk.pruined_chunks = pruned, "Pruned chunks for data root without active proofs");
+                        debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned {pruned} chunks for data root {root:?} without active proofs");
                     }
                 }
                 write_tx.commit()?;
@@ -344,7 +344,7 @@ impl InnerCacheTask {
                 )?;
                 if pruned > 0 {
                     evictions_performed = evictions_performed.saturating_add(1);
-                    debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned chunks for data root without active proofs");
+                    debug!(chunk.data_root = ?root, chunk.pruned_chunks = pruned, "Pruned {pruned} chunks for data root {root:?} without active proofs");
                 }
             }
             write_tx.commit()?;
@@ -448,7 +448,7 @@ impl InnerCacheTask {
                 eviction_count += 1;
             }
         }
-        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned chunks");
+        debug!(data_root.chunks_pruned = ?chunks_pruned, "Pruned {chunks_pruned} chunks");
         write_tx.commit()?;
 
         Ok(())
@@ -494,7 +494,7 @@ impl InnerCacheTask {
 
             // Associated txids
             let Some(cached_data_root) = cached_data_root_by_data_root(&tx, data_root)? else {
-                debug!(ingress_proof.data_root = ?data_root, "Proof has no cached data root; marking for deletion");
+                debug!(ingress_proof.data_root = ?data_root, "Proof for {data_root:?} has no cached data root; marking for deletion");
                 to_delete.push(data_root);
                 continue;
             };
@@ -513,7 +513,7 @@ impl InnerCacheTask {
                 if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
                     if tx_header.promoted_height.is_none() {
                         any_unpromoted = true;
-                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
+                        debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx {:?} for data root {data_root:?}", tx_header.id);
                         break;
                     }
                 }
@@ -524,16 +524,16 @@ impl InnerCacheTask {
             if at_capacity {
                 // Unpromoted + expired + at capacity: delete
                 to_delete.push(data_root);
-                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof for deletion (at capacity)");
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = true, "Marking expired proof {data_root:?} for deletion (at capacity)");
             } else if is_locally_produced && any_unpromoted {
                 match check_result.regeneration_action {
                     RegenAction::Reanchor => {
                         to_reanchor.push(proof);
-                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for reanchoring");
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof {data_root:?} for reanchoring");
                     }
                     RegenAction::Regenerate => {
                         to_regen.push(proof);
-                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof for full regeneration");
+                        debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired local proof {data_root:?} for full regeneration");
                     }
                     RegenAction::DoNotRegenerate => {
                         error!("We're under capacity, and the proof is expired and local with unpromoted txs, but proof with data root {} does not meet reanchoring or regeneration criteria. This should not happen.", &data_root);
@@ -542,7 +542,7 @@ impl InnerCacheTask {
             } else {
                 // Not local + expired: delete
                 to_delete.push(data_root);
-                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof for deletion (promoted)");
+                debug!(ingress_proof.data_root = ?data_root, cache.at_capacity = false, "Marking expired proof {data_root:?} for deletion (promoted)");
             }
         }
 
@@ -550,7 +550,7 @@ impl InnerCacheTask {
         if !to_delete.is_empty() {
             for root in to_delete.iter() {
                 if let Err(e) = Inner::remove_ingress_proof(&self.db, *root) {
-                    warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?root, "Failed to remove ingress proof {root:?}: {e}");
                 }
             }
             info!(
@@ -571,15 +571,15 @@ impl InnerCacheTask {
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof {:?}: {e}", proof.data_root);
                 }
             } else {
                 debug!(
                     ingress_proof.data_root = ?proof.data_root,
-                    "Skipping reanchoring of ingress proof due to REGENERATE_PROOFS = false"
+                    "Skipping reanchoring of ingress proof {:?} due to REGENERATE_PROOFS = false", proof.data_root
                 );
                 if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
-                    warn!(ingress_proof.data_root = ?proof, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof {:?}: {e}", proof.data_root);
                 }
             }
         }
@@ -595,15 +595,15 @@ impl InnerCacheTask {
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof {:?}: {report}", proof.data_root);
                 }
             } else {
                 debug!(
                     ingress_proof.data_root = ?proof.data_root,
-                    "Regeneration disabled, removing ingress proof for data root"
+                    "Regeneration disabled, removing ingress proof for data root {:?}", proof.data_root
                 );
                 if let Err(e) = Inner::remove_ingress_proof(&self.db, proof.data_root) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof: {e}");
+                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to remove ingress proof {:?}: {e}", proof.data_root);
                 }
             }
         }
@@ -632,7 +632,7 @@ impl InnerCacheTask {
             };
             if let Some(sender) = response_sender {
                 if let Err(error) = sender.send(res) {
-                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated");
+                    warn!(custom.error = ?error, "RX failure for OnBlockMigrated: {error:?}");
                 }
             }
             // Notify service that pruning finished (drive the queue)
@@ -640,7 +640,7 @@ impl InnerCacheTask {
                 .cache_sender
                 .send(CacheServiceAction::PruneCompleted(completion))
             {
-                warn!(custom.error = ?e, "Failed to notify PruneCompleted");
+                warn!(custom.error = ?e, "Failed to notify PruneCompleted: {e}");
             }
         });
     }
@@ -659,7 +659,7 @@ impl InnerCacheTask {
             };
             if let Some(sender) = response_sender {
                 if let Err(e) = sender.send(res) {
-                    warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed")
+                    warn!(custom.error = ?e, "Unable to send a response for OnEpochProcessed: {e:?}")
                 }
             }
             // Notify service that epoch processing finished (drive the queue)
@@ -667,7 +667,7 @@ impl InnerCacheTask {
                 .cache_sender
                 .send(CacheServiceAction::EpochProcessingCompleted(completion))
             {
-                warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted");
+                warn!(custom.error = ?e, "Failed to notify EpochProcessingCompleted: {e}");
             }
         });
     }
@@ -782,7 +782,7 @@ impl ChunkCacheService {
             }
         }
 
-        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last {} in-bound messages before shutdown", self.msg_rx.len());
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.on_handle_message(msg);
         }
@@ -861,7 +861,7 @@ impl ChunkCacheService {
                     .ingress_proof_generation_state
                     .is_generating(data_root);
                 if let Err(e) = response_sender.send(is_generating) {
-                    warn!(custom.error = ?e, "Failed to respond to RequestIngressProofGenerationState");
+                    warn!(custom.error = ?e, "Failed to respond to RequestIngressProofGenerationState: {e:?}");
                 }
             }
         }

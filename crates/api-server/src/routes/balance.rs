@@ -95,11 +95,11 @@ pub async fn get_balance(
                 })?;
                 match mempool_response {
                     Some(h) => {
-                        debug!(block.hash = %irys_block_hash, "Found block in mempool");
+                        debug!(block.hash = %irys_block_hash, "Found block {irys_block_hash} in mempool");
                         h
                     }
                     None => {
-                        debug!(block.hash = %irys_block_hash, "Block not in mempool, checking database");
+                        debug!(block.hash = %irys_block_hash, "Block {irys_block_hash} not in mempool, checking database");
                         state
                             .db
                             .view_eyre(|tx| block_header_by_hash(tx, &irys_block_hash, false))
@@ -110,7 +110,7 @@ pub async fn get_balance(
                                 }
                             })?
                             .ok_or_else(|| {
-                                error!(block.hash = %irys_block_hash, "Irys block not found in mempool or database");
+                                error!(block.hash = %irys_block_hash, "Irys block {irys_block_hash} not found in mempool or database");
                                 ApiError::BalanceUnavailable {
                                     reason: "Block not found".to_string(),
                                 }

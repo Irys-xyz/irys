@@ -63,7 +63,7 @@ async fn evm_block_hash_from_block_hash(
     db: &DatabaseProvider,
     irys_hash: H256,
 ) -> eyre::Result<B256> {
-    debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block");
+    debug!(block.hash = %irys_hash, "Resolving EVM block hash for Irys block {irys_hash}");
 
     let irys_header = {
         let (tx, rx) = oneshot::channel();
@@ -73,15 +73,15 @@ async fn evm_block_hash_from_block_hash(
         let mempool_response = rx.await?;
         match mempool_response {
             Some(h) => {
-                debug!(block.hash = %irys_hash, "Found block in mempool");
+                debug!(block.hash = %irys_hash, "Found block {irys_hash} in mempool");
                 h
             }
             None => {
-                debug!(block.hash = %irys_hash, "Block not in mempool, checking database");
+                debug!(block.hash = %irys_hash, "Block {irys_hash} not in mempool, checking database");
                 db
                     .view_eyre(|tx| database::block_header_by_hash(tx, &irys_hash, false))?
                     .ok_or_else(|| {
-                        error!(block.hash = %irys_hash, "Irys block not found in mempool or database");
+                        error!(block.hash = %irys_hash, "Irys block {irys_hash} not found in mempool or database");
                         eyre!("Missing irys block {} in DB!", irys_hash)
                     })?
             }
@@ -297,7 +297,7 @@ impl RethService {
             .inner
             .network
             .add_peer(peer.peer_id, peer.peering_tcp_addr);
-        debug!(reth_peer.id = %peer.peer_id, "Peer connection initiated");
+        debug!(reth_peer.id = %peer.peer_id, "Peer connection initiated for {}", peer.peer_id);
         Ok(())
     }
 

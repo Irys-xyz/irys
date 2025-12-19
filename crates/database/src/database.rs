@@ -75,7 +75,7 @@ pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre:
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
     } else {
-        tracing::error!(block.hash = ?block.block_hash, target = "db::block_header", "poa chunk not present when writing the header");
+        tracing::error!(block.hash = ?block.block_hash, target = "db::block_header", "poa chunk not present when writing the header for block {:?}", block.block_hash);
     };
     let mut block_without_chunk = block.clone();
     block_without_chunk.poa.chunk = None;
@@ -98,7 +98,7 @@ pub fn block_header_by_hash<T: DbTx>(
         if let Some(ref mut b) = block {
             b.poa.chunk = tx.get::<IrysPoAChunks>(*block_hash)?.map(Into::into);
             if b.poa.chunk.is_none() && b.height != 0 {
-                tracing::error!(block.hash = ?b.block_hash, height = b.height,  target = "db::block_header", "poa chunk not present when reading the header");
+                tracing::error!(block.hash = ?b.block_hash, height = b.height, target = "db::block_header", "poa chunk not present when reading the header for block {:?} at height {}", b.block_hash, b.height);
             }
         }
     }

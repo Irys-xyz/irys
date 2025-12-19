@@ -115,7 +115,7 @@ async fn heavy_slow_tip_updated_correctly_in_forks_with_variying_cumulative_diff
         (&fork_creator_1.mine_block_without_gossip().await?, true),
     ];
     for ((block, _eth_block, _), _new_tip) in order.iter() {
-        tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
+        tracing::error!(block.height = block.height, block.cumulative_diff = ?block.cumulative_diff, "block at height {} with cumulative_diff {:?}", block.height, block.cumulative_diff);
         send_block_to_block_tree(
             &genesis_node.node_ctx,
             block.clone(),
@@ -135,7 +135,7 @@ async fn heavy_slow_tip_updated_correctly_in_forks_with_variying_cumulative_diff
         .service_senders
         .subscribe_block_state_updates();
     'outer: for ((block, eth_block, _), new_tip) in order.iter() {
-        tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
+        tracing::error!(block.height = block.height, block.cumulative_diff = ?block.cumulative_diff, "block at height {} with cumulative_diff {:?}", block.height, block.cumulative_diff);
         genesis_node
             .node_ctx
             .block_pool

@@ -205,7 +205,7 @@ impl BlockValidationTask {
             }
 
             // 3. Wait for relevant state changes
-            debug!(block.parent_hash = %parent_hash, "Waiting for parent validation");
+            debug!(block.parent_hash = %parent_hash, "Waiting for parent {parent_hash} validation");
             match block_state_rx.recv().await {
                 Ok(event) if event.block_hash == parent_hash => {
                     // Parent state changed, loop back to check
@@ -316,7 +316,7 @@ impl BlockValidationTask {
             let block_height = self.block.height;
             tokio::task::spawn_blocking(move || {
                 if skip_vdf_validation {
-                    debug!(block.hash = ?block_hash, "Skipping POA validation due to skip_vdf_validation flag");
+                    debug!(block.hash = ?block_hash, "Skipping POA validation for block {block_hash:?} due to skip_vdf_validation flag");
                     return Ok(ValidationResult::Valid);
                 }
                 poa_is_valid(
@@ -521,7 +521,7 @@ impl BlockValidationTask {
         let execution_data = match shadow_tx_result {
             Ok(data) => data,
             Err(err) => {
-                tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth");
+                tracing::error!(custom.error = ?err, "Shadow transaction validation failed, not submitting to reth: {err:?}");
                 return ValidationResult::Invalid(ValidationError::ShadowTransactionInvalid(
                     err.to_string(),
                 ));
@@ -563,7 +563,7 @@ impl BlockValidationTask {
                         ValidationResult::Valid
                     }
                     Err(err) => {
-                        tracing::error!(custom.error = ?err, "Reth execution layer validation failed");
+                        tracing::error!(custom.error = ?err, "Reth execution layer validation failed: {err:?}");
                         ValidationResult::Invalid(ValidationError::ExecutionLayerFailed(
                             err.to_string(),
                         ))

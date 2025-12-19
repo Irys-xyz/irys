@@ -930,7 +930,7 @@ pub trait BlockProdStrategy {
             .map_err(classify_payload_error)?;
 
         let evm_block_hash = built_payload.block().hash();
-        tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block");
+        tracing::debug!(payload.evm_block_hash = ?evm_block_hash, "produced a new evm block {evm_block_hash:?}");
         let sidecar = ExecutionPayloadSidecar::from_block(&built_payload.block().clone().unseal());
         let payload = built_payload.clone().try_into_v5().unwrap_or_else(|e| {
             panic!(

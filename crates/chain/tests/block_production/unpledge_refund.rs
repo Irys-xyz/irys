@@ -259,7 +259,7 @@ async fn heavy_unpledge_epoch_refund_flow() -> eyre::Result<()> {
 
     // ---------- Assert (epoch): storage module released for target (if it was assigned) ----------
     let epoch_hashes = assigned_sm_hashes(&peer_node);
-    tracing::error!(custom.part_hash = ?capacity_pa.partition_hash, "hash unassigned");
+    tracing::error!(custom.part_hash = ?capacity_pa.partition_hash, "partition hash {:?} unassigned", capacity_pa.partition_hash);
     assert!(
         !epoch_hashes.contains(&capacity_pa.partition_hash),
         "Target partition must be unassigned from storage modules at epoch boundary"
@@ -865,7 +865,7 @@ pub async fn send_unpledge_all(
             target.partition_hash().unwrap(),
         )
         .await;
-        tracing::debug!(custom.part_hash = ?target.partition_hash());
+        tracing::debug!(custom.part_hash = ?target.partition_hash(), "Unpledging partition hash {:?}", target.partition_hash());
         signer
             .sign_commitment(&mut unsigned)
             .expect("sign multi-unpledge tx");

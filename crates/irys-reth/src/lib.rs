@@ -365,7 +365,7 @@ where
             Err(outcome) => return outcome,
         };
 
-        tracing::trace!(shadow_tx.hash = ?transaction.hash(), "non shadow tx, passing to eth validator");
+        tracing::trace!(shadow_tx.hash = ?transaction.hash(), "non shadow tx {:?}, passing to eth validator", transaction.hash());
         self.eth_tx_validator.validate_one(origin, transaction)
     }
 

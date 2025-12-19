@@ -622,7 +622,7 @@ impl Inner {
         info!(
             block.height = parent_block_height,
             block.hash = ?parent_block_hash,
-            "Starting mempool transaction selection"
+            "Starting mempool transaction selection for block {parent_block_hash:?} at height {parent_block_height}"
         );
 
         // Collect confirmed commitment transactions from canonical chain to avoid duplicates
@@ -659,7 +659,7 @@ impl Inner {
                     tx.id = ?tx.id,
                     tx.commitment_type = ?tx.commitment_type,
                     tx.signer = ?tx.signer,
-                    "Skipping already confirmed commitment transaction"
+                    "Skipping already confirmed commitment transaction {:?} type {:?} from signer {:?}", tx.id, tx.commitment_type, tx.signer
                 );
                 continue;
             }
@@ -688,7 +688,7 @@ impl Inner {
                     tx.anchor = ?tx.anchor,
                     min_anchor_height = min_anchor_height,
                     max_anchor_height = max_anchor_height,
-                    "Not promoting commitment tx - anchor validation failed"
+                    "Not promoting commitment tx {:?} - anchor {:?} validation failed (min: {min_anchor_height}, max: {max_anchor_height})", tx.id, tx.anchor
                 );
                 continue;
             }
@@ -700,7 +700,7 @@ impl Inner {
                     tx.id = ?tx.id,
                     tx.signer = ?tx.signer,
                     tx.is_staked = is_staked,
-                    "Checking stake status for commitment tx"
+                    "Checking stake status for commitment tx {:?} from signer {:?} (is_staked: {is_staked})", tx.id, tx.signer
                 );
                 if is_staked {
                     // if a signer has stake commitments in the mempool, but is already staked, we should ignore them
@@ -708,7 +708,7 @@ impl Inner {
                         tx.id = ?tx.id,
                         tx.signer = ?tx.signer,
                         tx.commitment_type = ?tx.commitment_type,
-                        "Not promoting commitment tx - signer already staked"
+                        "Not promoting commitment tx {:?} - signer {:?} already staked", tx.id, tx.signer
                     );
                     continue;
                 }
@@ -723,7 +723,7 @@ impl Inner {
                         tx.commitment_type = ?tx.commitment_type,
                         tx.id = ?tx.id,
                         tx.simulation_status = ?simulation,
-                        "Commitment tx rejected by simulation"
+                        "Commitment tx {:?} type {:?} rejected by simulation: {:?}", tx.id, tx.commitment_type, simulation
                     );
                     continue;
                 }
@@ -733,7 +733,7 @@ impl Inner {
                 tx.id = ?tx.id,
                 tx.signer = ?tx.signer(),
                 tx.fee = ?tx.total_cost(),
-                "Checking funding for commitment transaction"
+                "Checking funding for commitment transaction {:?} from {:?} with fee {:?}", tx.id, tx.signer(), tx.total_cost()
             );
             if check_funding(
                 tx,
@@ -747,7 +747,7 @@ impl Inner {
                     tx.fee = ?tx.total_cost(),
                     tx.selected_count = commitment_tx.len() + 1,
                     tx.max_commitments = max_commitments,
-                    "Commitment transaction passed funding check"
+                    "Commitment transaction {:?} passed funding check ({}/{max_commitments} selected)", tx.id, commitment_tx.len() + 1
                 );
             } else {
                 trace!(
@@ -755,7 +755,7 @@ impl Inner {
                     tx.signer = ?tx.signer(),
                     tx.fee = ?tx.total_cost(),
                     tx.validation_failed_reason = "insufficient_funds",
-                    "Data transaction failed funding check"
+                    "Transaction {:?} failed funding check - insufficient funds", tx.id
                 );
                 continue;
             }
@@ -767,7 +767,7 @@ impl Inner {
                 tx.fee = ?tx.total_cost(),
                 tx.selected_count = commitment_tx.len() + 1,
                 tx.max_commitments = max_commitments,
-                "Adding commitment transaction to block"
+                "Adding commitment tx {:?} type {:?} to block ({}/{max_commitments} selected)", tx.id, tx.commitment_type, commitment_tx.len() + 1
             );
 
             commitment_tx.push(tx.clone());
@@ -796,7 +796,7 @@ impl Inner {
                 commitment_selection.stake_txs = commitment_summary.0,
                 commitment_selection.pledge_txs = commitment_summary.1,
                 commitment_selection.max_allowed = max_commitments,
-                "Completed commitment transaction selection"
+                "Completed commitment transaction selection: {} selected ({} stakes, {} pledges, max {})", commitment_tx.len(), commitment_summary.0, commitment_summary.1, max_commitments
             );
         }
 
@@ -839,7 +839,7 @@ impl Inner {
                 debug!(
                     tx.id = ?tx.id,
                     tx.ledger_id = tx.ledger_id,
-                    "Skipping tx: invalid ledger ID"
+                    "Skipping tx {:?}: invalid ledger ID {}", tx.id, tx.ledger_id
                 );
                 continue;
             };
@@ -856,7 +856,7 @@ impl Inner {
                         debug!(
                             tx.id = ?tx.id,
                             tx.data_size = tx.data_size,
-                            "Failed to calculate term fee"
+                            "Failed to calculate term fee for tx {:?} with data_size {}", tx.id, tx.data_size
                         );
                         continue;
                     };
@@ -870,7 +870,7 @@ impl Inner {
                         debug!(
                             tx.id = ?tx.id,
                             tx.data_size = tx.data_size,
-                            "Failed to calculate perm fee"
+                            "Failed to calculate perm fee for tx {:?} with data_size {}", tx.id, tx.data_size
                         );
                         continue;
                     };
@@ -881,7 +881,7 @@ impl Inner {
                             tx.id = ?tx.id,
                             tx.actual_term_fee = ?tx.term_fee,
                             tx.expected_term_fee = ?expected_term_fee,
-                            "Skipping Publish tx: insufficient term_fee"
+                            "Skipping Publish tx {:?}: insufficient term_fee {:?} (expected {:?})", tx.id, tx.term_fee, expected_term_fee
                         );
                         continue;
                     }
@@ -892,7 +892,7 @@ impl Inner {
                         warn!(
                             tx.id = ?tx.id,
                             tx.signer = ?tx.signer,
-                            "Invalid Publish tx: missing perm_fee"
+                            "Invalid Publish tx {:?} from {:?}: missing perm_fee", tx.id, tx.signer
                         );
                         // todo: add to list of invalid txs because all publish txs must have perm fee present
                         continue;
@@ -902,7 +902,7 @@ impl Inner {
                             tx.id = ?tx.id,
                             tx.actual_perm_fee = ?perm_fee,
                             tx.expected_perm_fee = ?expected_perm_fee.amount,
-                            "Skipping Publish tx: insufficient perm_fee"
+                            "Skipping Publish tx {:?}: insufficient perm_fee {:?} (expected {:?})", tx.id, perm_fee, expected_perm_fee.amount
                         );
                         continue;
                     }
@@ -914,7 +914,7 @@ impl Inner {
                         debug!(
                             tx.id = ?tx.id,
                             tx.term_fee = ?tx.term_fee,
-                            "Skipping Publish tx: invalid term fee structure"
+                            "Skipping Publish tx {:?}: invalid term fee structure {:?}", tx.id, tx.term_fee
                         );
                         continue;
                     }
@@ -934,7 +934,7 @@ impl Inner {
                             tx.id = ?tx.id,
                             tx.perm_fee = ?perm_fee,
                             tx.term_fee = ?tx.term_fee,
-                            "Skipping Publish tx: invalid perm fee structure"
+                            "Skipping Publish tx {:?}: invalid perm fee structure (perm: {:?}, term: {:?})", tx.id, perm_fee, tx.term_fee
                         );
                         continue;
                     }
@@ -944,7 +944,7 @@ impl Inner {
                     debug!(
                         tx.id = ?tx.id,
                         tx.signer = ?tx.signer(),
-                        "Not promoting data tx - Submit ledger not eligible for promotion"
+                        "Not promoting data tx {:?} from {:?} - Submit ledger not eligible for promotion", tx.id, tx.signer()
                     );
                     continue;
                 }
@@ -960,7 +960,7 @@ impl Inner {
                     tx.anchor = ?tx.anchor,
                     min_anchor_height = min_anchor_height,
                     max_anchor_height = max_anchor_height,
-                    "Not promoting data tx - anchor validation failed"
+                    "Not promoting data tx {:?} - anchor {:?} validation failed (min: {min_anchor_height}, max: {max_anchor_height})", tx.id, tx.anchor
                 );
                 continue;
             }
@@ -969,7 +969,7 @@ impl Inner {
                 tx.id = ?tx.id,
                 tx.signer = ?tx.signer(),
                 tx.fee = ?tx.total_cost(),
-                "Checking funding for data transaction"
+                "Checking funding for data transaction {:?} from {:?} with fee {:?}", tx.id, tx.signer(), tx.total_cost()
             );
             if check_funding(
                 &tx,
@@ -983,7 +983,7 @@ impl Inner {
                     tx.fee = ?tx.total_cost(),
                     tx.selected_count = submit_tx.len() + 1,
                     tx.max_data_txs = max_data_txs,
-                    "Data transaction passed funding check"
+                    "Data transaction {:?} passed funding check ({}/{max_data_txs} selected)", tx.id, submit_tx.len() + 1
                 );
                 submit_tx.push(tx);
                 if submit_tx.len() >= max_data_txs {
@@ -995,7 +995,7 @@ impl Inner {
                     tx.signer = ?tx.signer(),
                     tx.fee = ?tx.total_cost(),
                     tx.validation_failed_reason = "insufficient_funds",
-                    "Data transaction failed funding check"
+                    "Data transaction {:?} failed funding check - insufficient funds", tx.id
                 );
             }
         }
@@ -1023,7 +1023,7 @@ impl Inner {
             mempool_selected.publish_txs = publish_txs_and_proofs.txs.len(),
             mempool_selected.total_fee_collected = ?total_fee_collected,
             mempool_selected.unfunded_addresses = unfunded_address.len(),
-            "Mempool transaction selection completed"
+            "Mempool transaction selection completed: {} commitments, {} data, {} publish, fee {:?}", commitment_tx.len(), submit_tx.len(), publish_txs_and_proofs.txs.len(), total_fee_collected
         );
 
         // Check for high rejection rate
@@ -1044,7 +1044,7 @@ impl Inner {
                     mempool_selected.data_available = total_data_available,
                     mempool_selected.data_selected = submit_tx.len(),
                     mempool_selected.unfunded_addresses = unfunded_address.len(),
-                    "High transaction rejection rate detected"
+                    "High transaction rejection rate {rejection_rate}%: {total_selected}/{total_available} selected"
                 );
             }
         }
@@ -1102,7 +1102,7 @@ impl Inner {
                             cached_data_root_by_data_root(tx, *data_root).unwrap();
                         if let Some(cached_data_root) = cached_data_root {
                             let txids = cached_data_root.txid_set.clone();
-                            trace!(tx.ids = ?txids, "Publish candidates");
+                            trace!(tx.ids = ?txids, "Publish candidates: {txids:?}");
                             publish_txids.extend(txids);
                             cached_data_roots.insert(*data_root, cached_data_root);
                         }
@@ -1344,7 +1344,7 @@ impl Inner {
         }
 
         let txs = &publish_txs.iter().map(|h| h.id).collect::<Vec<_>>();
-        debug!(tx.ids = ?txs, "Publish transactions");
+        debug!(tx.ids = ?txs, "Publish transactions: {txs:?}");
 
         debug!("Processing Publish transactions {:#?}", &publish_txs);
 
@@ -2125,7 +2125,7 @@ impl AtomicMempoolState {
         if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
             header.promoted_height = None;
             state.recent_valid_tx.put(txid, ());
-            tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
+            tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool for tx {txid}");
             cleared = true;
         }
         cleared
@@ -2869,7 +2869,7 @@ impl MempoolService {
             }
         }
 
-        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last {} in-bound messages before shutdown", self.msg_rx.len());
 
         // Process remaining messages with timeout
         let process_remaining = async {

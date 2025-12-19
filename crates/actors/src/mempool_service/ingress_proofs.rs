@@ -451,12 +451,12 @@ pub fn gossip_ingress_proof(
         Ok(()) => {
             let msg = GossipBroadcastMessage::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send(msg) {
-                tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
+                tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof {:?}: {e}", ingress_proof.data_root);
             }
         }
         Err(e) => {
             // Skip gossip; proof stored for potential later use/regeneration.
-            tracing::debug!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof anchor invalid (not gossiped): {e}");
+            tracing::debug!(proof.data_root = ?ingress_proof.data_root, "Generated ingress proof {:?} anchor invalid (not gossiped): {e}", ingress_proof.data_root);
         }
     }
 }

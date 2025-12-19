@@ -487,7 +487,7 @@ impl BlockTree {
             self.blocks.get(&hash).map(|b| b.chain_state),
             Some(ChainState::Onchain)
         ) {
-            debug!(block.hash = ?hash, "already part of the main chian state");
+            debug!(block.hash = ?hash, "block {hash:?} already part of the main chain state");
             return Ok(());
         }
 

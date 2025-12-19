@@ -199,7 +199,7 @@ impl BlockTreeService {
             }
         }
 
-        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last in-bound messages before shutdown");
+        tracing::debug!(custom.amount_of_messages = ?self.msg_rx.len(), "processing last {} in-bound messages before shutdown", self.msg_rx.len());
         while let Ok(msg) = self.msg_rx.try_recv() {
             self.inner.handle_message(msg).await?;
         }
@@ -439,7 +439,7 @@ impl BlockTreeServiceInner {
         // Check if the block is already in the block index
         // let binding = self.block_index_guard.clone();
 
-        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block");
+        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block {} at height {}", block.block_hash, block.height);
 
         // Collect blocks to migrate by walking backwards from the current migration block
         let blocks_to_migrate = self.get_blocks_to_migrate(block)?;

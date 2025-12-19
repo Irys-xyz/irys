@@ -91,8 +91,8 @@ async fn reth_restarts_use_block_index_before_sync() -> eyre::Result<()> {
         genesis_safe_block.evm_block_hash
     );
     let genesis_node = genesis_node.stop().await.start().await;
-    tracing::error!(evm.hash = ?genesis_safe_block.evm_block_hash);
-    tracing::error!(evm.hash = ?genesis_head.evm_block_hash);
+    tracing::error!(evm.hash = ?genesis_safe_block.evm_block_hash, "Genesis safe block EVM hash: {:?}", genesis_safe_block.evm_block_hash);
+    tracing::error!(evm.hash = ?genesis_head.evm_block_hash, "Genesis head block EVM hash: {:?}", genesis_head.evm_block_hash);
 
     genesis_node
         .wait_for_reth_marker(

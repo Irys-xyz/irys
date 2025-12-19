@@ -365,7 +365,7 @@ impl ValidationCoordinator {
                     self.vdf_scheduler.pending.push(task, priority);
                 }
                 VdfValidationResult::Invalid(error) => {
-                    tracing::error!(block.hash =? hash, "invalid vdf {error}");
+                    tracing::error!(block.hash =? hash, "invalid vdf for block {hash:?}: {error}");
                     // Invalid tasks are not re-queued
                 }
             }
