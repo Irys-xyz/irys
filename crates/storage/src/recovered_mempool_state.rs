@@ -33,7 +33,7 @@ impl RecoveredMempoolState {
                     match tokio::fs::read_to_string(&path).await {
                         Ok(json) => match serde_json::from_str::<CommitmentTransaction>(&json) {
                             Ok(tx) => {
-                                commitment_txs.insert(tx.id, tx);
+                                commitment_txs.insert(tx.id(), tx);
                             }
                             Err(_) => tracing::warn!("Failed to parse {:?}", path),
                         },

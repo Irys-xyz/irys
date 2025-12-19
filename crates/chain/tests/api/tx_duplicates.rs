@@ -69,7 +69,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     // Post the stake commitment and await it in the mempool
     signer.sign_commitment(&mut stake_tx).unwrap();
     node.post_commitment_tx(&stake_tx).await?;
-    node.wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
+    node.wait_for_mempool_commitment_txs(vec![stake_tx.id()], seconds_to_wait)
         .await?;
 
     // Mine a block and verify the stake commitment is included
@@ -78,13 +78,13 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     let block3 = node.get_block_by_height(3).await?;
     let tx_ids = block3.get_commitment_ledger_tx_ids();
     let txid_map = block3.get_data_ledger_tx_ids();
-    assert_eq!(tx_ids, vec![stake_tx.id]);
+    assert_eq!(tx_ids, vec![stake_tx.id()]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // Post the stake commitment again
     node.post_commitment_tx(&stake_tx).await?;
-    node.wait_for_mempool_commitment_txs(vec![stake_tx.id], seconds_to_wait)
+    node.wait_for_mempool_commitment_txs(vec![stake_tx.id()], seconds_to_wait)
         .await?;
 
     // Mine a block and make sure the commitment isn't included again
@@ -110,7 +110,7 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
 
     // Post pledge commitment
     node.post_commitment_tx(&pledge_tx).await?;
-    node.wait_for_mempool_commitment_txs(vec![pledge_tx.id], seconds_to_wait)
+    node.wait_for_mempool_commitment_txs(vec![pledge_tx.id()], seconds_to_wait)
         .await?;
 
     // Mine a block and verify the pledge commitment is included
@@ -119,13 +119,13 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     let block5 = node.get_block_by_height(5).await?;
     let tx_ids = block5.get_commitment_ledger_tx_ids();
     let txid_map = block5.get_data_ledger_tx_ids();
-    assert_eq!(tx_ids, vec![pledge_tx.id]);
+    assert_eq!(tx_ids, vec![pledge_tx.id()]);
     assert_eq!(txid_map.get(&DataLedger::Submit).unwrap().len(), 0);
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // Post the pledge commitment again
     node.post_commitment_tx(&pledge_tx).await?;
-    node.wait_for_mempool_commitment_txs(vec![pledge_tx.id], seconds_to_wait)
+    node.wait_for_mempool_commitment_txs(vec![pledge_tx.id()], seconds_to_wait)
         .await?;
 
     // Mine a block and verify the pledge is not included again
@@ -148,14 +148,14 @@ async fn heavy_test_rejection_of_duplicate_tx() -> eyre::Result<()> {
     assert_eq!(txid_map.get(&DataLedger::Publish).unwrap().len(), 0);
 
     // Validate the stake and pledge tx are in the commitments roll up
-    assert_eq!(tx_ids, vec![stake_tx.id, pledge_tx.id]);
+    assert_eq!(tx_ids, vec![stake_tx.id(), pledge_tx.id()]);
 
     // Post all the transactions again
     node.post_data_tx_raw(&tx).await;
     node.post_commitment_tx(&stake_tx).await?;
     node.post_commitment_tx(&pledge_tx).await?;
     node.wait_for_mempool(tx.id, seconds_to_wait).await?;
-    node.wait_for_mempool_commitment_txs(vec![stake_tx.id, pledge_tx.id], seconds_to_wait)
+    node.wait_for_mempool_commitment_txs(vec![stake_tx.id(), pledge_tx.id()], seconds_to_wait)
         .await?;
 
     // Post the chunks for the data again

@@ -1,5 +1,5 @@
-use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, IrysAddress};
+use irys_types::{CommitmentType, IrysTransactionCommon as _};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
@@ -54,9 +54,9 @@ impl CommitmentSnapshot {
     ) -> CommitmentSnapshotStatus {
         debug!("GetCommitmentStatus message received");
 
-        let commitment_type = &commitment_tx.commitment_type;
-        let txid = commitment_tx.id;
-        let signer = &commitment_tx.signer;
+        let commitment_type = &commitment_tx.commitment_type();
+        let txid = commitment_tx.id();
+        let signer = &commitment_tx.signer();
 
         // Handle by the input values commitment type
         let status = match commitment_type {
@@ -68,7 +68,7 @@ impl CommitmentSnapshot {
                     // Only check local commitments if not staked in current epoch
                     if let Some(commitments) = self.commitments.get(signer) {
                         // Check for duplicate stake transaction
-                        if commitments.stake.as_ref().is_some_and(|s| s.id == txid) {
+                        if commitments.stake.as_ref().is_some_and(|s| s.id() == txid) {
                             CommitmentSnapshotStatus::Accepted
                         } else {
                             CommitmentSnapshotStatus::Unknown
@@ -88,7 +88,7 @@ impl CommitmentSnapshot {
                         if commitments.unstake.is_some() {
                             return CommitmentSnapshotStatus::UnstakePending;
                         }
-                        if commitments.pledges.iter().any(|p| p.id == txid) {
+                        if commitments.pledges.iter().any(|p| p.id() == txid) {
                             CommitmentSnapshotStatus::Accepted
                         } else {
                             CommitmentSnapshotStatus::Unknown
@@ -101,7 +101,7 @@ impl CommitmentSnapshot {
                     // Not staked in current epoch, check local commitments
                     if let Some(commitments) = self.commitments.get(signer) {
                         // Check for duplicate pledge transaction and unstake gating
-                        if commitments.pledges.iter().any(|p| p.id == txid) {
+                        if commitments.pledges.iter().any(|p| p.id() == txid) {
                             CommitmentSnapshotStatus::Accepted
                         } else if commitments.unstake.is_some() {
                             CommitmentSnapshotStatus::UnstakePending
@@ -130,7 +130,7 @@ impl CommitmentSnapshot {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
                 if let Some(commitments) = self.commitments.get(signer) {
-                    if commitments.unstake.as_ref().is_some_and(|u| u.id == txid) {
+                    if commitments.unstake.as_ref().is_some_and(|u| u.id() == txid) {
                         CommitmentSnapshotStatus::Accepted
                     } else if commitments.unstake.is_some() {
                         CommitmentSnapshotStatus::UnstakePending
@@ -158,19 +158,20 @@ impl CommitmentSnapshot {
         commitment_tx: &CommitmentTransaction,
         epoch_snapshot: &EpochSnapshot,
     ) -> CommitmentSnapshotStatus {
-        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer);
+        let is_staked_in_current_epoch = epoch_snapshot.is_staked(commitment_tx.signer());
         let pledges_in_epoch = epoch_snapshot
             .commitment_state
             .pledge_commitments
-            .get(&commitment_tx.signer)
+            .get(&commitment_tx.signer())
             .map(std::vec::Vec::len)
             .unwrap_or_default();
-        let signer = &commitment_tx.signer;
-        let tx_type = &commitment_tx.commitment_type;
+        let signer = &commitment_tx.signer();
+        let tx_type = &commitment_tx.commitment_type();
 
         debug!(
             "add_commitment() called for tx {}, address {}",
-            commitment_tx.id, &signer
+            commitment_tx.id(),
+            &signer
         );
 
         // Handle commitment by type
@@ -222,7 +223,7 @@ impl CommitmentSnapshot {
                 let existing = miner_commitments
                     .pledges
                     .iter()
-                    .find(|t| t.id == commitment_tx.id);
+                    .find(|t| t.id() == commitment_tx.id());
 
                 if let Some(_existing) = existing {
                     return CommitmentSnapshotStatus::Accepted;
@@ -234,7 +235,7 @@ impl CommitmentSnapshot {
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
                         "Invalid pledge count for {}: expected {}, but miner {} has {} pledges",
-                        commitment_tx.id,
+                        commitment_tx.id(),
                         pledge_count_before_executing,
                         &signer,
                         current_pledge_count
@@ -268,7 +269,7 @@ impl CommitmentSnapshot {
                     Self::active_pledge_count(miner_commitments, pledges_in_epoch) as u64;
                 if *pledge_count_before_executing != current_pledge_count {
                     tracing::error!(
-                        tx.id = ?commitment_tx.id,
+                        tx.id = ?commitment_tx.id(),
                         custom.pledge_count_before_executing = ?pledge_count_before_executing,
                         custom.current_pledge_count = ?current_pledge_count,
                         "rejected"
@@ -288,8 +289,8 @@ impl CommitmentSnapshot {
                 // Duplicate check
                 if miner_commitments.unpledges.iter().any(|tx| {
                     matches!(
-                        tx.commitment_type,
-                        CommitmentType::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
+                        tx.commitment_type(),
+                        CommitmentType::Unpledge { partition_hash: ph, .. } if ph == partition_hash
                     )
                 }) {
                     return CommitmentSnapshotStatus::UnpledgePending;
@@ -402,7 +403,7 @@ mod tests {
             chain_id: 1,
         });
         // Generate a proper ID for the transaction
-        tx.id = H256::random();
+        tx.set_id(H256::random());
         tx
     }
 
@@ -708,7 +709,7 @@ mod tests {
             },
             U256::from(1000),
         );
-        let pledge_id = pledge.id;
+        let pledge_id = pledge.id();
         let status = snapshot.add_commitment(&pledge, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
@@ -718,7 +719,7 @@ mod tests {
 
         // Verify only one pledge exists
         assert_eq!(snapshot.commitments[&signer].pledges.len(), 1);
-        assert_eq!(snapshot.commitments[&signer].pledges[0].id, pledge_id);
+        assert_eq!(snapshot.commitments[&signer].pledges[0].id(), pledge_id);
     }
 
     #[test]
@@ -743,11 +744,11 @@ mod tests {
 
         // Add stakes with different fees
         let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake, U256::from(1000));
-        stake1.fee = 100;
+        stake1.set_fee(100);
         snapshot.add_commitment(&stake1, &EpochSnapshot::default());
 
         let mut stake2 = create_test_commitment(signer2, CommitmentType::Stake, U256::from(1000));
-        stake2.fee = 200;
+        stake2.set_fee(200);
         snapshot.add_commitment(&stake2, &EpochSnapshot::default());
 
         // Add pledges with different counts and fees
@@ -758,7 +759,7 @@ mod tests {
             },
             U256::from(1000),
         );
-        pledge1_count0.fee = 50;
+        pledge1_count0.set_fee(50);
         snapshot.add_commitment(&pledge1_count0, &EpochSnapshot::default());
 
         let mut pledge2_count0 = create_test_commitment(
@@ -768,12 +769,12 @@ mod tests {
             },
             U256::from(1000),
         );
-        pledge2_count0.fee = 150;
+        pledge2_count0.set_fee(150);
         snapshot.add_commitment(&pledge2_count0, &EpochSnapshot::default());
 
         // Add another stake after some pledges
         let mut stake3 = create_test_commitment(signer3, CommitmentType::Stake, U256::from(1000));
-        stake3.fee = 50;
+        stake3.set_fee(50);
         snapshot.add_commitment(&stake3, &EpochSnapshot::default());
 
         // Add pledge with higher count
@@ -784,7 +785,7 @@ mod tests {
             },
             U256::from(1000),
         );
-        pledge1_count1.fee = 300;
+        pledge1_count1.set_fee(300);
         snapshot.add_commitment(&pledge1_count1, &EpochSnapshot::default());
 
         // Get commitments and verify order
@@ -795,12 +796,12 @@ mod tests {
         // 2. Pledges count 0 (by fee descending): pledge2_count0 (150), pledge1_count0 (50)
         // 3. Pledges count 1: pledge1_count1 (300)
         assert_eq!(commitments.len(), 6);
-        assert_eq!(commitments[0].id, stake2.id); // Stake with fee 200
-        assert_eq!(commitments[1].id, stake1.id); // Stake with fee 100
-        assert_eq!(commitments[2].id, stake3.id); // Stake with fee 50
-        assert_eq!(commitments[3].id, pledge2_count0.id); // Pledge count 0, fee 150
-        assert_eq!(commitments[4].id, pledge1_count0.id); // Pledge count 0, fee 50
-        assert_eq!(commitments[5].id, pledge1_count1.id); // Pledge count 1, fee 300
+        assert_eq!(commitments[0].id(), stake2.id()); // Stake with fee 200
+        assert_eq!(commitments[1].id(), stake1.id()); // Stake with fee 100
+        assert_eq!(commitments[2].id(), stake3.id()); // Stake with fee 50
+        assert_eq!(commitments[3].id(), pledge2_count0.id()); // Pledge count 0, fee 150
+        assert_eq!(commitments[4].id(), pledge1_count0.id()); // Pledge count 0, fee 50
+        assert_eq!(commitments[5].id(), pledge1_count1.id()); // Pledge count 1, fee 300
     }
 
     #[test]
@@ -831,7 +832,7 @@ mod tests {
         // Verify all amounts are correctly stored
         for (signer, expected_amount) in &test_cases {
             assert_eq!(
-                snapshot.commitments[signer].stake.as_ref().unwrap().value,
+                snapshot.commitments[signer].stake.as_ref().unwrap().value(),
                 *expected_amount
             );
         }
@@ -872,7 +873,11 @@ mod tests {
 
         // Verify stake amount
         assert_eq!(
-            snapshot.commitments[&signer].stake.as_ref().unwrap().value,
+            snapshot.commitments[&signer]
+                .stake
+                .as_ref()
+                .unwrap()
+                .value(),
             stake_amount
         );
 
@@ -880,7 +885,7 @@ mod tests {
         let pledges = &snapshot.commitments[&signer].pledges;
         assert_eq!(pledges.len(), pledge_amounts.len());
         for (pledge, &expected) in pledges.iter().zip(&pledge_amounts) {
-            assert_eq!(pledge.value, expected);
+            assert_eq!(pledge.value(), expected);
         }
     }
 }

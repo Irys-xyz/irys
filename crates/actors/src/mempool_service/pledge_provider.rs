@@ -72,7 +72,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
         let chain_pledge_count = epoch_pledges
             .into_iter()
             .map(|p| p.id)
-            .chain(commitment_pledges.into_iter().map(|p| p.id))
+            .chain(commitment_pledges.into_iter().map(|p| p.id()))
             .filter(|id| seen_ids.insert(*id))
             .count() as u64;
 

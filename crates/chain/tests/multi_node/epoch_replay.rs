@@ -89,7 +89,7 @@ async fn heavy_test_multi_node_epoch_replay() -> eyre::Result<()> {
         let block_1 = genesis_node.get_block_by_height(1).await.unwrap();
         let block_2 = genesis_node.get_block_by_height(2).await.unwrap();
 
-        let expected_commitment_ids = [stake_tx1.id, pledge1.id];
+        let expected_commitment_ids = [stake_tx1.id(), pledge1.id()];
         assert_eq!(block_1.get_commitment_ledger_tx_ids().len(), 2);
         assert_eq!(block_2.get_commitment_ledger_tx_ids().len(), 2);
         assert!(expected_commitment_ids

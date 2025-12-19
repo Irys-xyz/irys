@@ -161,14 +161,14 @@ pub async fn get_genesis_commitments(config: &Config) -> Vec<CommitmentTransacti
     // When the configuration catches up to the StorageModule functionality,
     // this method as well as [`epoch_serve::map_storage_modules_to_partition_assignments()`]
     // will have to be updated.
-    let mut anchor = stake_commitment.id;
+    let mut anchor = stake_commitment.id();
     for i in 0..num_submodules {
         let pledge_tx =
             create_pledge_commitment_transaction(&signer, anchor, config, &(i as u64)).await;
 
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
-        anchor = pledge_tx.id;
+        anchor = pledge_tx.id();
 
         commitments.push(pledge_tx);
     }
@@ -221,9 +221,9 @@ pub async fn add_genesis_commitments(
 
     // Add the commitment txids to the commitment ledger one by one
     for commitment in commitments.iter() {
-        commitment_ledger.tx_ids.push(commitment.id);
+        commitment_ledger.tx_ids.push(commitment.id());
         // Add commitment value to total (this represents locked funds)
-        total_value = total_value.saturating_add(commitment.value);
+        total_value = total_value.saturating_add(commitment.value());
     }
 
     (commitments, total_value)
@@ -279,7 +279,7 @@ pub async fn add_test_commitments_for_signer(
             .sign_commitment(&mut stake_commitment)
             .expect("commitment transaction to be signable");
 
-        anchor = stake_commitment.id;
+        anchor = stake_commitment.id();
         commitments.push(stake_commitment);
     }
 
@@ -288,7 +288,7 @@ pub async fn add_test_commitments_for_signer(
             create_pledge_commitment_transaction(signer, anchor, config, &(i as u64)).await;
         // We have to rotate the anchors on these TX so they produce unique signatures
         // and unique txids
-        anchor = pledge_tx.id;
+        anchor = pledge_tx.id();
         commitments.push(pledge_tx);
     }
 
@@ -300,8 +300,8 @@ pub async fn add_test_commitments_for_signer(
 
     // Add the pledge commitment txids to the system ledger one by one
     for commitment in commitments.iter() {
-        commitment_ledger.tx_ids.push(commitment.id);
-        total_value = total_value.saturating_add(commitment.value);
+        commitment_ledger.tx_ids.push(commitment.id());
+        total_value = total_value.saturating_add(commitment.value());
     }
 
     (commitments, total_value)

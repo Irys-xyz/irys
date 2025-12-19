@@ -41,8 +41,8 @@ async fn test_get_tx() -> eyre::Result<()> {
 
     let consensus = &node.node_ctx.config.consensus;
     let mut commitment_tx = CommitmentTransaction::new_stake(consensus, node.get_anchor().await?);
-    commitment_tx.id = H256::random();
-    info!("Generated commitment_tx.id: {}", commitment_tx.id);
+    commitment_tx.set_id(H256::random());
+    info!("Generated commitment_tx.id: {}", commitment_tx.id());
 
     // Insert the storage_tx and make sure it's in the database
     let _ = db.update(|tx| -> eyre::Result<()> { database::insert_tx_header(tx, &storage_tx) })?;
@@ -54,7 +54,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     // Insert the commitment_tx and make sure it's in the database
     let _ =
         db.update(|tx| -> eyre::Result<()> { database::insert_commitment_tx(tx, &commitment_tx) })?;
-    match db.view_eyre(|tx| database::commitment_tx_by_txid(tx, &commitment_tx.id))? {
+    match db.view_eyre(|tx| database::commitment_tx_by_txid(tx, &commitment_tx.id()))? {
         None => error!("tx not found, test db error!"),
         Some(_tx_header) => info!("commitment_tx found!"),
     };
@@ -82,7 +82,7 @@ async fn test_get_tx() -> eyre::Result<()> {
     assert_eq!(storage_tx, storage);
 
     // Test commitment transaction
-    let id: String = commitment_tx.id.to_string();
+    let id: String = commitment_tx.id().to_string();
     let req = actix_web::test::TestRequest::get()
         .uri(&format!("/v1/tx/{}", &id))
         .to_request();

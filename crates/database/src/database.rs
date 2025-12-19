@@ -126,7 +126,7 @@ pub fn insert_commitment_tx<T: DbTxMut>(
     tx: &T,
     commitment_tx: &CommitmentTransaction,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<IrysCommitments>(commitment_tx.id, commitment_tx.clone().into())?)
+    Ok(tx.put::<IrysCommitments>(commitment_tx.id(), commitment_tx.clone().into())?)
 }
 
 /// Gets a [`CommitmentTransaction`] by it's [`IrysTransactionId`]
@@ -534,7 +534,7 @@ mod tests {
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 
         // Read a commitment tx
-        let result = db.view_eyre(|tx| commitment_tx_by_txid(tx, &commitment_tx.id))?;
+        let result = db.view_eyre(|tx| commitment_tx_by_txid(tx, &commitment_tx.id()))?;
         assert_eq!(result, Some(commitment_tx));
 
         let mut block_header = IrysBlockHeader::new_mock_header();

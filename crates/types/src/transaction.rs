@@ -4,7 +4,7 @@ pub use crate::{
     address_base58_stringify, optional_string_u64, string_u64, Arbitrary, Base64, Compact,
     ConsensusConfig, IrysAddress, IrysSignature, Node, Proof, Signature, H256, U256,
 };
-use crate::{decode_rlp_version, TxChunkOffset, UnpackedChunk};
+use crate::{decode_rlp_version, CommitmentTransaction, TxChunkOffset, UnpackedChunk};
 use crate::{
     encode_rlp_version,
     versioning::{
@@ -185,172 +185,6 @@ impl Versioned for DataTransactionHeaderV1 {
 //         self.VERSION
 //     }
 // }
-
-// Commitment Transaction versioned wrapper
-#[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary, Hash)]
-#[repr(u8)]
-#[integer_tagged(tag = "version")]
-pub enum CommitmentTransaction {
-    #[integer_tagged(version = 1)]
-    V1(CommitmentTransactionV1) = 1,
-}
-
-impl Default for CommitmentTransaction {
-    fn default() -> Self {
-        Self::V1(CommitmentTransactionV1::default())
-    }
-}
-
-impl Ord for CommitmentTransaction {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::V1(a), Self::V1(b)) => a.cmp(b),
-        }
-    }
-}
-
-impl PartialOrd for CommitmentTransaction {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl VersionDiscriminant for CommitmentTransaction {
-    fn version(&self) -> u8 {
-        match self {
-            Self::V1(_) => 1,
-        }
-    }
-}
-
-impl Deref for CommitmentTransaction {
-    type Target = CommitmentTransactionV1;
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::V1(v) => v,
-        }
-    }
-}
-impl DerefMut for CommitmentTransaction {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        match self {
-            Self::V1(v) => v,
-        }
-    }
-}
-
-impl CommitmentTransaction {
-    /// Calculate the value for a pledge at the given count
-    /// Delegates to the inner type's implementation
-    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
-        CommitmentTransactionV1::calculate_pledge_value_at_count(config, pledge_count)
-    }
-}
-
-impl Compact for CommitmentTransaction {
-    fn to_compact<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        match self {
-            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
-        }
-    }
-    fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
-        let (disc, rest) = split_discriminant(buf);
-        match disc {
-            1 => {
-                let (inner, rest2) = CommitmentTransactionV1::from_compact(rest, rest.len());
-                (Self::V1(inner), rest2)
-            }
-            other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
-        }
-    }
-}
-
-impl Signable for CommitmentTransaction {
-    fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
-        self.encode(out);
-    }
-}
-
-impl alloy_rlp::Encodable for CommitmentTransaction {
-    fn encode(&self, out: &mut dyn bytes::BufMut) {
-        let mut buf = Vec::new();
-        match self {
-            Self::V1(inner) => inner.encode(&mut buf),
-        }
-        encode_rlp_version(buf, self.version(), out);
-    }
-}
-
-impl alloy_rlp::Decodable for CommitmentTransaction {
-    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let (version, buf) = decode_rlp_version(buf)?;
-        let buf = &mut &buf[..];
-
-        match version {
-            1 => {
-                let inner = CommitmentTransactionV1::decode(buf)?;
-                Ok(Self::V1(inner))
-            }
-            _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
-        }
-    }
-}
-
-impl CommitmentTransaction {
-    /// Create a new CommitmentTransaction wrapped in the versioned wrapper
-    pub fn new(config: &ConsensusConfig) -> Self {
-        Self::V1(CommitmentTransactionV1::new(config))
-    }
-
-    /// Create a new stake transaction with the configured stake fee as value
-    pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self::V1(CommitmentTransactionV1::new_stake(config, anchor))
-    }
-
-    /// Create a new unstake transaction with the configured stake fee as value
-    pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self::V1(CommitmentTransactionV1::new_unstake(config, anchor))
-    }
-
-    /// Create a new pledge transaction with decreasing cost per pledge
-    pub async fn new_pledge(
-        config: &ConsensusConfig,
-        anchor: H256,
-        provider: &impl PledgeDataProvider,
-        signer_address: IrysAddress,
-    ) -> Self {
-        Self::V1(
-            CommitmentTransactionV1::new_pledge(config, anchor, provider, signer_address).await,
-        )
-    }
-
-    /// Create a new unpledge transaction that refunds the most recent pledge's cost
-    pub async fn new_unpledge(
-        config: &ConsensusConfig,
-        anchor: H256,
-        provider: &impl PledgeDataProvider,
-        signer_address: IrysAddress,
-        partition_hash: H256,
-    ) -> Self {
-        Self::V1(
-            CommitmentTransactionV1::new_unpledge(
-                config,
-                anchor,
-                provider,
-                signer_address,
-                partition_hash,
-            )
-            .await,
-        )
-    }
-}
-
-impl Versioned for CommitmentTransactionV1 {
-    const VERSION: u8 = 1;
-}
 
 #[derive(
     Clone,
@@ -555,342 +389,6 @@ pub type TxPath = Vec<u8>;
 /// sha256(tx_path)
 pub type TxPathHash = H256;
 
-#[derive(
-    Clone,
-    Debug,
-    Default,
-    Eq,
-    Serialize,
-    Deserialize,
-    PartialEq,
-    Arbitrary,
-    Compact,
-    RlpEncodable,
-    RlpDecodable,
-    Hash,
-)]
-#[rlp(trailing)]
-/// Stores deserialized fields from a JSON formatted commitment transaction.
-/// NOTE: be CAREFUL with using serde(default) it should ONLY be for `Option`al fields.
-#[serde(rename_all = "camelCase")]
-pub struct CommitmentTransactionV1 {
-    // NOTE: both rlp skip AND rlp default must be present in order for field skipping to work
-    #[rlp(skip)]
-    #[rlp(default)]
-    /// A SHA-256 hash of the transaction signature.
-    pub id: H256,
-
-    /// block_hash of a recent (last 50) blocks or the a recent transaction id
-    /// from the signer. Multiple transactions can share the same anchor.
-    pub anchor: H256,
-
-    /// The ecdsa/secp256k1 public key of the transaction signer
-    // #[serde(with = "address_base58_stringify")]
-    pub signer: IrysAddress,
-
-    /// The type of commitment Stake/UnStake Pledge/UnPledge
-    pub commitment_type: CommitmentType,
-
-    /// EVM chain ID - used to prevent cross-chain replays
-    #[serde(with = "string_u64")]
-    pub chain_id: u64,
-
-    /// Pay the fee required to mitigate tx spam
-    #[serde(with = "string_u64")]
-    pub fee: u64,
-
-    /// The value being staked, pledged, unstaked or unpledged
-    pub value: U256,
-
-    /// Transaction signature bytes
-    #[rlp(skip)]
-    #[rlp(default)]
-    pub signature: IrysSignature,
-}
-
-/// Ordering for `CommitmentTransactionV1` prioritizes transactions as follows:
-/// 1. Stake commitments (fee desc, then id tie-breaker)
-/// 2. Pledge commitments (count asc, then fee desc, then id tie-breaker)
-/// 3. Unpledge commitments (count asc, then fee desc, then id tie-breaker)
-/// 4. Unstake commitments (last, fee desc, then id tie-breaker)
-impl Ord for CommitmentTransactionV1 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-
-        fn commitment_priority(commitment_type: &CommitmentType) -> u8 {
-            match commitment_type {
-                CommitmentType::Stake => 0,
-                CommitmentType::Pledge { .. } => 1,
-                CommitmentType::Unpledge { .. } => 2,
-                CommitmentType::Unstake => 3,
-            }
-        }
-
-        let self_priority = commitment_priority(&self.commitment_type);
-        let other_priority = commitment_priority(&other.commitment_type);
-
-        match self_priority.cmp(&other_priority) {
-            Ordering::Less => Ordering::Less,
-            Ordering::Greater => Ordering::Greater,
-            Ordering::Equal => match (&self.commitment_type, &other.commitment_type) {
-                (CommitmentType::Stake, CommitmentType::Stake) => other
-                    .user_fee()
-                    .cmp(&self.user_fee())
-                    .then_with(|| self.id.cmp(&other.id)),
-                (
-                    CommitmentType::Pledge {
-                        pledge_count_before_executing: count_a,
-                    },
-                    CommitmentType::Pledge {
-                        pledge_count_before_executing: count_b,
-                    },
-                ) => count_a
-                    .cmp(count_b)
-                    .then_with(|| other.user_fee().cmp(&self.user_fee()))
-                    .then_with(|| self.id.cmp(&other.id)),
-                (
-                    CommitmentType::Unpledge {
-                        pledge_count_before_executing: count_a,
-                        ..
-                    },
-                    CommitmentType::Unpledge {
-                        pledge_count_before_executing: count_b,
-                        ..
-                    },
-                ) => count_b
-                    .cmp(count_a)
-                    .then_with(|| other.user_fee().cmp(&self.user_fee()))
-                    .then_with(|| self.id.cmp(&other.id)),
-                (CommitmentType::Unstake, CommitmentType::Unstake) => other
-                    .user_fee()
-                    .cmp(&self.user_fee())
-                    .then_with(|| self.id.cmp(&other.id)),
-                // With unique priorities we should never reach a mixed-type Ordering::Equal
-                _ => Ordering::Equal,
-            },
-        }
-    }
-}
-
-impl PartialOrd for CommitmentTransactionV1 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl CommitmentTransactionV1 {
-    /// Create a new CommitmentTransaction with default values from config
-    pub fn new(config: &ConsensusConfig) -> Self {
-        Self {
-            id: H256::zero(),
-            anchor: H256::zero(),
-            signer: IrysAddress::default(),
-            commitment_type: CommitmentType::default(),
-            chain_id: config.chain_id,
-            fee: 0,
-            value: U256::zero(),
-            signature: IrysSignature::new(Signature::test_signature()),
-        }
-    }
-
-    /// Calculate the value for a pledge at the given count
-    /// For pledge N, use count = N
-    /// For unpledge refund, use count = N - 1 (to get the value of the most recent pledge)
-    pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
-        config
-            .pledge_base_value
-            .apply_pledge_decay(pledge_count, config.pledge_decay)
-            .map(|a| a.amount)
-            .unwrap_or(config.pledge_base_value.amount)
-    }
-
-    /// Create a new stake transaction with the configured stake fee as value
-    pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self {
-            commitment_type: CommitmentType::Stake,
-            anchor,
-            fee: config.mempool.commitment_fee,
-            value: config.stake_value.amount,
-            ..Self::new(config)
-        }
-    }
-
-    /// Create a new unstake transaction with the configured stake fee as value
-    pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self {
-            commitment_type: CommitmentType::Unstake,
-            anchor,
-            fee: config.mempool.commitment_fee,
-            value: config.stake_value.amount,
-            ..Self::new(config)
-        }
-    }
-
-    /// Create a new pledge transaction with decreasing cost per pledge.
-    /// Cost = pledge_base_fee / ((existing_pledges + 1) ^ pledge_decay)
-    /// The calculated cost is stored in the transaction's `value` field.
-    pub async fn new_pledge(
-        config: &ConsensusConfig,
-        anchor: H256,
-        provider: &impl PledgeDataProvider,
-        signer_address: IrysAddress,
-    ) -> Self {
-        let count = provider.pledge_count(signer_address).await;
-        let value = Self::calculate_pledge_value_at_count(config, count);
-
-        Self {
-            commitment_type: CommitmentType::Pledge {
-                pledge_count_before_executing: count,
-            },
-            anchor,
-            fee: config.mempool.commitment_fee,
-            value,
-            ..Self::new(config)
-        }
-    }
-
-    /// Create a new unpledge transaction that refunds the most recent pledge's cost.
-    /// Refund = cost of the last pledge made (existing_pledges - 1)
-    /// Returns 0 if user has no pledges. The refund is in the `value` field.
-    pub async fn new_unpledge(
-        config: &ConsensusConfig,
-        anchor: H256,
-        provider: &impl PledgeDataProvider,
-        signer_address: IrysAddress,
-        partition_hash: H256,
-    ) -> Self {
-        let count = provider.pledge_count(signer_address).await;
-        let value = Self::calculate_pledge_value_at_count(config, count.checked_sub(1).unwrap());
-
-        Self {
-            commitment_type: CommitmentType::Unpledge {
-                pledge_count_before_executing: count,
-                partition_hash,
-            },
-            anchor,
-            fee: config.mempool.commitment_fee,
-            value,
-            ..Self::new(config)
-        }
-    }
-
-    /// Rely on RLP encoding for signing
-    pub fn encode_for_signing(&self, out: &mut dyn alloy_rlp::BufMut) {
-        self.encode(out)
-    }
-
-    /// Returns the value stored in the transaction
-    pub fn commitment_value(&self) -> U256 {
-        self.value
-    }
-
-    /// Returns the user fee for prioritization
-    pub fn user_fee(&self) -> U256 {
-        U256::from(self.fee)
-    }
-
-    /// Returns the total cost including value
-    pub fn total_cost(&self) -> U256 {
-        let additional_fee = match &self.commitment_type {
-            CommitmentType::Stake => self.value,
-            CommitmentType::Pledge { .. } => self.value,
-            CommitmentType::Unpledge { .. } => U256::zero(),
-            CommitmentType::Unstake => U256::zero(),
-        };
-        U256::from(self.fee).saturating_add(additional_fee)
-    }
-
-    /// Simple getter methods for IrysTransaction compatibility
-    pub fn id(&self) -> IrysTransactionId {
-        self.id
-    }
-
-    pub fn signer(&self) -> IrysAddress {
-        self.signer
-    }
-
-    pub fn signature(&self) -> &IrysSignature {
-        &self.signature
-    }
-
-    pub fn anchor(&self) -> H256 {
-        self.anchor
-    }
-
-    /// Validates that the commitment transaction has a sufficient fee
-    pub fn validate_fee(&self, config: &ConsensusConfig) -> Result<(), CommitmentValidationError> {
-        let required_fee = config.mempool.commitment_fee;
-
-        if self.fee < required_fee {
-            return Err(CommitmentValidationError::InsufficientFee {
-                provided: self.fee,
-                required: required_fee,
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Validates the value field based on commitment type
-    pub fn validate_value(
-        &self,
-        config: &ConsensusConfig,
-    ) -> Result<(), CommitmentValidationError> {
-        match &self.commitment_type {
-            CommitmentType::Stake | CommitmentType::Unstake => {
-                // For stake/unstake, value must match configured stake value
-                let expected_value = config.stake_value.amount;
-                if self.value != expected_value {
-                    return Err(CommitmentValidationError::InvalidStakeValue {
-                        provided: self.value,
-                        expected: expected_value,
-                    });
-                }
-            }
-            CommitmentType::Pledge {
-                pledge_count_before_executing,
-            } => {
-                // For pledge, validate using the embedded pledge count
-                let expected_value =
-                    Self::calculate_pledge_value_at_count(config, *pledge_count_before_executing);
-
-                if self.value != expected_value {
-                    return Err(CommitmentValidationError::InvalidPledgeValue {
-                        provided: self.value,
-                        expected: expected_value,
-                        pledge_count: *pledge_count_before_executing,
-                    });
-                }
-            }
-            CommitmentType::Unpledge {
-                pledge_count_before_executing,
-                ..
-            } => {
-                // Unpledge must reference an existing pledge (count > 0)
-                if *pledge_count_before_executing == 0 {
-                    return Err(CommitmentValidationError::InvalidUnpledgeCountZero);
-                }
-
-                // Calculate expected refund value: value of the most recent pledge (count-1)
-                let expected_value = Self::calculate_pledge_value_at_count(
-                    config,
-                    *pledge_count_before_executing - 1,
-                );
-
-                if self.value != expected_value {
-                    return Err(CommitmentValidationError::InvalidUnpledgeValue {
-                        provided: self.value,
-                        expected: expected_value,
-                        pledge_count: *pledge_count_before_executing,
-                    });
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
 // Trait to abstract common behavior
 pub trait IrysTransactionCommon {
     fn is_signature_valid(&self) -> bool;
@@ -986,29 +484,29 @@ impl IrysTransactionCommon for DataTransactionHeader {
 
 impl CommitmentTransaction {
     pub fn user_fee(&self) -> U256 {
-        U256::from(self.fee)
+        U256::from(self.fee())
     }
 
     pub fn total_cost(&self) -> U256 {
-        let additional_fee = match &self.commitment_type {
-            CommitmentType::Stake => self.value,
-            CommitmentType::Pledge { .. } => self.value,
+        let additional_fee = match &self.commitment_type() {
+            CommitmentType::Stake => self.value(),
+            CommitmentType::Pledge { .. } => self.value(),
             CommitmentType::Unpledge { .. } => U256::zero(),
             CommitmentType::Unstake => U256::zero(),
         };
-        U256::from(self.fee).saturating_add(additional_fee)
+        U256::from(self.fee()).saturating_add(additional_fee)
     }
 }
 
 impl IrysTransactionCommon for CommitmentTransaction {
     fn is_signature_valid(&self) -> bool {
-        self.signature
-            .validate_signature(self.signature_hash(), self.signer)
-            && keccak256(self.signature.as_bytes()).0 == self.id.0
+        self.signature()
+            .validate_signature(self.signature_hash(), self.signer())
+            && keccak256(self.signature().as_bytes()).0 == self.id().0
     }
 
     fn id(&self) -> IrysTransactionId {
-        self.id
+        self.id()
     }
 
     fn total_cost(&self) -> U256 {
@@ -1016,15 +514,15 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 
     fn signer(&self) -> IrysAddress {
-        self.signer
+        self.signer()
     }
 
     fn anchor(&self) -> H256 {
-        self.anchor
+        self.anchor()
     }
 
     fn signature(&self) -> &IrysSignature {
-        &self.signature
+        &self.signature()
     }
 
     fn user_fee(&self) -> U256 {
@@ -1035,17 +533,17 @@ impl IrysTransactionCommon for CommitmentTransaction {
         use alloy_primitives::keccak256;
 
         // Store the signer address
-        self.signer = signer.address();
+        self.set_signer(signer.address());
 
         // Create the signature hash and sign it
         let prehash = self.signature_hash();
         let signature: Signature = signer.signer.sign_prehash_recoverable(&prehash)?.into();
 
-        self.signature = IrysSignature::new(signature);
+        self.set_signature(IrysSignature::new(signature));
 
         // Derive the txid by hashing the signature
         let id: [u8; 32] = keccak256(signature.as_bytes()).into();
-        self.id = H256::from(id);
+        self.set_id(H256::from(id));
 
         Ok(self)
     }
@@ -1054,9 +552,9 @@ impl IrysTransactionCommon for CommitmentTransaction {
         // Compute composite fingerprint: keccak(signature + prehash + id)
         let prehash = self.signature_hash();
         let mut buf = Vec::with_capacity(65 + 32 + 32);
-        buf.extend_from_slice(&self.signature.as_bytes());
+        buf.extend_from_slice(&self.signature().as_bytes());
         buf.extend_from_slice(&prehash);
-        buf.extend_from_slice(&self.id.0);
+        buf.extend_from_slice(&self.id().0);
         H256::from(alloy_primitives::keccak256(&buf).0)
     }
 }
@@ -1415,8 +913,10 @@ mod tests {
 
         // Assert
         // zero out the id and signature, those do not get encoded
-        header.id = H256::zero();
-        header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
+        header.set_id(H256::zero());
+        header.set_signature(IrysSignature::new(
+            Signature::try_from([0_u8; 65].as_slice()).unwrap(),
+        ));
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
         assert_eq!(decoded.version(), 1);
@@ -1590,7 +1090,7 @@ mod tests {
         assert!(signed_tx.is_signature_valid());
 
         // Test: changing the ID should make validation fail
-        signed_tx.id = H256::random();
+        signed_tx.set_id(H256::random());
         assert!(
             !signed_tx.is_signature_valid(),
             "Signature validation should fail when ID is changed"
@@ -1617,9 +1117,9 @@ mod tests {
 
     fn mock_commitment_tx(config: &ConsensusConfig) -> CommitmentTransaction {
         let mut tx = CommitmentTransaction::new_stake(config, H256::from([1_u8; 32]));
-        tx.id = H256::from([255_u8; 32]);
-        tx.signer = IrysAddress::default();
-        tx.signature = Signature::test_signature().into();
+        tx.set_id(H256::from([255_u8; 32]));
+        tx.set_signer(IrysAddress::default());
+        tx.set_signature(Signature::test_signature().into());
         tx
     }
 }
@@ -1665,6 +1165,8 @@ mod pledge_decay_parametrized_tests {
         #[case] expected_cost: Decimal,
     ) {
         // Setup config with $20,000 base fee and 0.9 decay rate
+
+        use crate::CommitmentTransactionV1;
         let mut config = ConsensusConfig::testing();
         config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
@@ -1718,6 +1220,8 @@ mod pledge_decay_parametrized_tests {
         #[case] expected_unpledge_value: Decimal,
     ) {
         // Setup config with 20,000 IRYS base fee and 0.9 decay rate (same as test_pledge_cost_with_decay)
+
+        use crate::CommitmentTransactionV1;
         let mut config = ConsensusConfig::testing();
         config.pledge_base_value = crate::storage_pricing::Amount::token(dec!(20000.0)).unwrap();
         config.pledge_decay = crate::storage_pricing::Amount::percentage(dec!(0.9)).unwrap();
@@ -1770,13 +1274,13 @@ mod pledge_decay_parametrized_tests {
         let tx =
             CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer, ph).await;
 
-        match tx.commitment_type {
+        match tx.commitment_type() {
             CommitmentType::Unpledge {
                 partition_hash,
                 pledge_count_before_executing,
             } => {
-                assert_eq!(pledge_count_before_executing, 2);
-                assert_eq!(partition_hash, ph);
+                assert_eq!(*pledge_count_before_executing, 2);
+                assert_eq!(*partition_hash, ph);
             }
             _ => panic!("unexpected type"),
         }
@@ -1785,6 +1289,8 @@ mod pledge_decay_parametrized_tests {
 
 #[cfg(test)]
 mod commitment_ordering_tests {
+    use crate::CommitmentTransactionV1;
+
     use super::*;
 
     fn create_test_commitment(

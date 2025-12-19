@@ -580,10 +580,10 @@ impl BlockDiscoveryServiceInner {
         // epoch blocks rollup all the commitment txs from the epoch - which means they can have anchors from anywhere in the epoch. we assume if they're in the snapshot their anchor has been validated previously.
         if !is_epoch_block {
             for tx in commitment_txs.iter() {
-                if !valid_tx_anchor_blocks.contains(&tx.anchor) {
+                if !valid_tx_anchor_blocks.contains(&tx.anchor()) {
                     return Err(BlockDiscoveryError::InvalidAnchor {
-                        item_type: AnchorItemType::SystemTransaction { tx_id: tx.id },
-                        anchor: tx.anchor,
+                        item_type: AnchorItemType::SystemTransaction { tx_id: tx.id() },
+                        anchor: tx.anchor(),
                     });
                 }
             }
@@ -678,14 +678,14 @@ impl BlockDiscoveryServiceInner {
                     // Compare using Deref - versioned types deref to inner types
                     let commitments_match = expected_commitment_tx
                         .iter()
-                        .map(|c| &**c) // Deref to inner CommitmentTransaction
-                        .eq(commitment_txs.iter().map(|v| &**v));
+                        .map(|c| c) // Deref to inner CommitmentTransaction
+                        .eq(commitment_txs.iter().map(|v| v));
                     if !commitments_match {
                         debug!(
                                 "Epoch block commitment tx for block height: {block_height} hash: {}\nexpected: {:#?}\nactual: {:#?}",
                                 new_block_header.block_hash,
-                                expected_commitment_tx.iter().map(|x| x.id).collect::<Vec<_>>(),
-                                commitment_txs.iter().map(|x| x.id).collect::<Vec<_>>()
+                                expected_commitment_tx.iter().map(|x| x.id()).collect::<Vec<_>>(),
+                                commitment_txs.iter().map(|x| x.id()).collect::<Vec<_>>()
                             );
                         return Err(BlockDiscoveryError::InvalidEpochBlock(
                             "Epoch block commitments don't match expected".to_string(),
@@ -703,7 +703,8 @@ impl BlockDiscoveryServiceInner {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     format!(
                                         "{:?} Commitment tx {:?} included in prior block",
-                                        commitment_tx.commitment_type, commitment_tx.id
+                                        commitment_tx.commitment_type(),
+                                        commitment_tx.id()
                                     ),
                                 ));
                             }
@@ -711,7 +712,8 @@ impl BlockDiscoveryServiceInner {
                                 return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
                                     format!(
                                         "Commitment tx {} from unstaked address {:?}",
-                                        commitment_tx.id, commitment_tx.signer
+                                        commitment_tx.id(),
+                                        commitment_tx.signer()
                                     ),
                                 ));
                             }
