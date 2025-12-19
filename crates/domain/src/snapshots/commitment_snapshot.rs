@@ -1,5 +1,5 @@
+use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, IrysAddress};
-use irys_types::{CommitmentType, IrysTransactionCommon as _};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
