@@ -642,6 +642,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the commitment type from any version
+    #[inline]
     pub fn commitment_type(&self) -> &CommitmentType {
         match self {
             Self::V1(v1) => &v1.commitment_type,
@@ -650,6 +651,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the ID from any version
+    #[inline]
     pub fn id(&self) -> H256 {
         match self {
             Self::V1(v1) => v1.id,
@@ -658,6 +660,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the fee from any version
+    #[inline]
     pub fn fee(&self) -> u64 {
         match self {
             Self::V1(v1) => v1.fee,
@@ -666,6 +669,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the value from any version
+    #[inline]
     pub fn value(&self) -> U256 {
         match self {
             Self::V1(v1) => v1.value,
@@ -674,6 +678,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the signer address from any version
+    #[inline]
     pub fn signer(&self) -> IrysAddress {
         match self {
             Self::V1(v1) => v1.signer,
@@ -682,6 +687,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the anchor from any version
+    #[inline]
     pub fn anchor(&self) -> H256 {
         match self {
             Self::V1(v1) => v1.anchor,
@@ -690,6 +696,7 @@ impl CommitmentTransaction {
     }
 
     /// Get the signature from any version
+    #[inline]
     pub fn signature(&self) -> &IrysSignature {
         match self {
             Self::V1(v1) => &v1.signature,
@@ -698,6 +705,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the signer address
+    #[inline]
     pub fn set_signer(&mut self, signer: IrysAddress) {
         match self {
             Self::V1(v1) => v1.signer = signer,
@@ -706,6 +714,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the signature
+    #[inline]
     pub fn set_signature(&mut self, signature: IrysSignature) {
         match self {
             Self::V1(v1) => v1.signature = signature,
@@ -714,6 +723,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the transaction ID
+    #[inline]
     pub fn set_id(&mut self, id: H256) {
         match self {
             Self::V1(v1) => v1.id = id,
@@ -722,6 +732,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the anchor
+    #[inline]
     pub fn set_anchor(&mut self, anchor: H256) {
         match self {
             Self::V1(v1) => v1.anchor = anchor,
@@ -730,6 +741,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the fee
+    #[inline]
     pub fn set_fee(&mut self, fee: u64) {
         match self {
             Self::V1(v1) => v1.fee = fee,
@@ -738,6 +750,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the value
+    #[inline]
     pub fn set_value(&mut self, value: U256) {
         match self {
             Self::V1(v1) => v1.value = value,
@@ -746,6 +759,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the commitment type
+    #[inline]
     pub fn set_commitment_type(&mut self, commitment_type: CommitmentType) {
         match self {
             Self::V1(v1) => v1.commitment_type = commitment_type,
@@ -754,6 +768,7 @@ impl CommitmentTransaction {
     }
 
     /// Set the chain ID
+    #[inline]
     pub fn set_chain_id(&mut self, chain_id: u64) {
         match self {
             Self::V1(v1) => v1.chain_id = chain_id,
