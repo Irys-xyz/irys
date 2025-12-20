@@ -12,7 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{BlockTransactions, CommitmentType};
+use irys_types::{BlockTransactions, CommitmentTypeV1};
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 use std::collections::HashMap;
 
@@ -247,7 +247,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         .await;
 
         let count = target_counts[idx];
-        tx.set_commitment_type(CommitmentType::Unpledge {
+        tx.set_commitment_type(CommitmentTypeV1::Unpledge {
             pledge_count_before_executing: count,
             partition_hash: assignment.partition_hash,
         });

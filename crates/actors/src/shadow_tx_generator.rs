@@ -376,7 +376,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         match tx.commitment_type() {
-            irys_types::CommitmentType::Stake => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV1::Stake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: tx.value().into(),
@@ -387,7 +387,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentType::Pledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV1::Pledge { .. } => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: tx.value().into(),
@@ -398,7 +398,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentType::Unpledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV1::Unpledge { .. } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
@@ -409,7 +409,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentType::Unstake => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV1::Unstake => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
@@ -545,7 +545,7 @@ impl<'a> ShadowTxGenerator<'a> {
 
         // Update treasury based on commitment type
         match tx.commitment_type() {
-            irys_types::CommitmentType::Stake | irys_types::CommitmentType::Pledge { .. } => {
+            irys_types::CommitmentTypeV1::Stake | irys_types::CommitmentTypeV1::Pledge { .. } => {
                 // Stake and Pledge lock funds in the treasury
                 self.treasury_balance =
                     self.treasury_balance
@@ -554,10 +554,10 @@ impl<'a> ShadowTxGenerator<'a> {
                             eyre!("Treasury balance overflow when adding commitment value")
                         })?;
             }
-            irys_types::CommitmentType::Unstake => {
+            irys_types::CommitmentTypeV1::Unstake => {
                 // Unstake handled on epoch boundary
             }
-            irys_types::CommitmentType::Unpledge { .. } => {
+            irys_types::CommitmentTypeV1::Unpledge { .. } => {
                 // Unpledge handled on epoch boundary
             }
         }
@@ -758,11 +758,11 @@ mod tests {
         ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
         IrysBlockHeader, IrysSignature, Signature, H256,
     };
-    use irys_types::{BlockHash, CommitmentType};
+    use irys_types::{BlockHash, CommitmentTypeV1};
     use itertools::Itertools as _;
 
     fn create_test_commitment(
-        commitment_type: CommitmentType,
+        commitment_type: CommitmentTypeV1,
         value: U256,
         fee: u64,
     ) -> CommitmentTransaction {
@@ -904,17 +904,17 @@ mod tests {
         let pledge_value = U256::from(100000);
         let pledge_fee = 500;
         let commitments = vec![
-            create_test_commitment(CommitmentType::Stake, stake_value, stake_fee),
+            create_test_commitment(CommitmentTypeV1::Stake, stake_value, stake_fee),
             create_test_commitment(
-                CommitmentType::Pledge {
+                CommitmentTypeV1::Pledge {
                     pledge_count_before_executing: 2,
                 },
                 pledge_value,
                 pledge_fee,
             ),
-            create_test_commitment(CommitmentType::Unstake, stake_value, stake_fee),
+            create_test_commitment(CommitmentTypeV1::Unstake, stake_value, stake_fee),
             create_test_commitment(
-                CommitmentType::Unpledge {
+                CommitmentTypeV1::Unpledge {
                     pledge_count_before_executing: 1,
                     partition_hash: [0_u8; 32].into(),
                 },

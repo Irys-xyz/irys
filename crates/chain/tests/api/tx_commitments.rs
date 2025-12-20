@@ -6,8 +6,8 @@ use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, CommitmentType, IrysAddress,
-    NodeConfig, H256,
+    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, CommitmentTypeV1,
+    IrysAddress, NodeConfig, H256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -506,7 +506,7 @@ async fn post_stake_commitment(
         .await
         .expect("anchor should be available for stake commitment");
     let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
-        commitment_type: CommitmentType::Stake,
+        commitment_type: CommitmentTypeV1::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
@@ -537,7 +537,7 @@ async fn post_pledge_commitment(
 
     let consensus = &node.node_ctx.config.consensus;
     let mut pledge_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
-        commitment_type: CommitmentType::Pledge {
+        commitment_type: CommitmentTypeV1::Pledge {
             pledge_count_before_executing: 0, // First pledge
         },
         anchor,

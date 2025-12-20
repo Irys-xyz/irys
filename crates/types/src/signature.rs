@@ -170,7 +170,7 @@ impl alloy_rlp::Decodable for IrysSignature {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BoundedFee, CommitmentTransaction, CommitmentType, IrysAddress, Signable as _};
+    use crate::{BoundedFee, CommitmentTransaction, CommitmentTypeV1, IrysAddress, Signable as _};
 
     use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
@@ -290,7 +290,7 @@ mod tests {
             id: Default::default(),
             anchor: H256::from([1_u8; 32]),
             signer: IrysAddress::ZERO,
-            commitment_type: CommitmentType::Unpledge {
+            commitment_type: CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 12,
                 partition_hash: [2_u8; 32].into(),
             },

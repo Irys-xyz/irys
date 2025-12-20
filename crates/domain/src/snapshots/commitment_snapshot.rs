@@ -1,5 +1,5 @@
-use irys_types::CommitmentType;
 use irys_types::{CommitmentTransaction, IrysAddress};
+use irys_types::{CommitmentTypeV1, CommitmentTypeV2};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
@@ -60,7 +60,7 @@ impl CommitmentSnapshot {
 
         // Handle by the input values commitment type
         let status = match commitment_type {
-            CommitmentType::Stake => {
+            CommitmentTypeV1::Stake => {
                 // If already staked in current epoch, just return Accepted
                 if epoch_snapshot.is_staked(*signer) {
                     CommitmentSnapshotStatus::Accepted
@@ -79,7 +79,7 @@ impl CommitmentSnapshot {
                     }
                 }
             }
-            CommitmentType::Pledge { .. } | CommitmentType::Unpledge { .. } => {
+            CommitmentTypeV1::Pledge { .. } | CommitmentTypeV1::Unpledge { .. } => {
                 // For pledges, we need to ensure there's a stake (either current epoch or local)
                 if epoch_snapshot.is_staked(*signer) {
                     // Has stake in current epoch, check for duplicate pledge locally
@@ -117,7 +117,7 @@ impl CommitmentSnapshot {
                     }
                 }
             }
-            CommitmentType::Unstake => {
+            CommitmentTypeV1::Unstake => {
                 // Unstake requires signer to be staked (epoch or local) and not already pending unstake
                 let has_stake = if epoch_snapshot.is_staked(*signer) {
                     true
@@ -176,7 +176,7 @@ impl CommitmentSnapshot {
 
         // Handle commitment by type
         match tx_type {
-            CommitmentType::Stake => {
+            CommitmentTypeV1::Stake => {
                 // Check existing commitments in epoch service
                 if is_staked_in_current_epoch {
                     // Already staked in current epoch, no need to add again
@@ -195,7 +195,7 @@ impl CommitmentSnapshot {
                 miner_commitments.stake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing,
             } => {
                 // First, check if the address has a stake (either in current epoch or pending)
@@ -247,7 +247,7 @@ impl CommitmentSnapshot {
                 miner_commitments.pledges.push(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing,
                 partition_hash,
             } => {
@@ -290,7 +290,7 @@ impl CommitmentSnapshot {
                 if miner_commitments.unpledges.iter().any(|tx| {
                     matches!(
                         tx.commitment_type(),
-                        CommitmentType::Unpledge { partition_hash: ph, .. } if ph == partition_hash
+                        CommitmentTypeV1::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
                     )
                 }) {
                     return CommitmentSnapshotStatus::UnpledgePending;
@@ -299,7 +299,7 @@ impl CommitmentSnapshot {
                 miner_commitments.unpledges.push(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentType::Unstake => {
+            CommitmentTypeV1::Unstake => {
                 // Require staked or pending local stake
                 let has_stake = if is_staked_in_current_epoch {
                     true
@@ -389,7 +389,7 @@ mod tests {
 
     fn create_test_commitment(
         signer: IrysAddress,
-        commitment_type: CommitmentType,
+        commitment_type: CommitmentTypeV1,
         value: U256,
     ) -> CommitmentTransaction {
         let mut tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
@@ -413,14 +413,14 @@ mod tests {
         let signer = IrysAddress::random();
 
         // Add stake first
-        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
+        let stake = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Add first pledge with count 0
         let pledge1 = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 0,
             },
             U256::from(1000),
@@ -431,7 +431,7 @@ mod tests {
         // Add second pledge with count 1
         let pledge2 = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 1,
             },
             U256::from(1000),
@@ -449,14 +449,14 @@ mod tests {
         let signer = IrysAddress::random();
 
         // Add stake first
-        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
+        let stake = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Try to add pledge with wrong count (should be 0, but using 1)
         let pledge_wrong_count = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 1,
             },
             U256::from(1000),
@@ -516,7 +516,7 @@ mod tests {
         // First unpledge should see 3 total pledges
         let first_unpledge = create_test_commitment(
             signer,
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 3,
                 partition_hash: partition_hashes[0],
             },
@@ -530,7 +530,7 @@ mod tests {
         // Second unpledge should observe that one pledge is already pending removal
         let second_unpledge = create_test_commitment(
             signer,
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 2,
                 partition_hash: partition_hashes[1],
             },
@@ -590,7 +590,7 @@ mod tests {
         // Remove the newest pledge (count should be 2 before executing)
         let unpledge = create_test_commitment(
             signer,
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 2,
                 partition_hash: partition_hashes[0],
             },
@@ -604,7 +604,7 @@ mod tests {
         // Adding a pledge should now see only one active pledge remaining
         let pledge = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 1,
             },
             U256::from(750_u64),
@@ -623,7 +623,7 @@ mod tests {
         // Try to add pledge without stake
         let pledge = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 0,
             },
             U256::from(1000),
@@ -640,7 +640,7 @@ mod tests {
         // Add pledge when already staked in current epoch
         let pledge = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 0,
             },
             U256::from(1000),
@@ -663,7 +663,7 @@ mod tests {
         // Add second pledge with correct count
         let pledge2 = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 1,
             },
             U256::from(1000),
@@ -679,12 +679,12 @@ mod tests {
         let signer = IrysAddress::random();
 
         // Add stake
-        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
+        let stake = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
         // Try to add another stake (should be accepted but not added)
-        let stake2 = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
+        let stake2 = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
         let status = snapshot.add_commitment(&stake2, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
@@ -698,13 +698,13 @@ mod tests {
         let signer = IrysAddress::random();
 
         // Add stake
-        let stake = create_test_commitment(signer, CommitmentType::Stake, U256::from(1000));
+        let stake = create_test_commitment(signer, CommitmentTypeV1::Stake, U256::from(1000));
         snapshot.add_commitment(&stake, &EpochSnapshot::default());
 
         // Add pledge
         let pledge = create_test_commitment(
             signer,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 0,
             },
             U256::from(1000),
@@ -728,7 +728,7 @@ mod tests {
         let signer = IrysAddress::random();
 
         // Try to add unstake
-        let unstake = create_test_commitment(signer, CommitmentType::Unstake, U256::from(1000));
+        let unstake = create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000));
         let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
@@ -743,18 +743,18 @@ mod tests {
         let signer3 = IrysAddress::random();
 
         // Add stakes with different fees
-        let mut stake1 = create_test_commitment(signer1, CommitmentType::Stake, U256::from(1000));
+        let mut stake1 = create_test_commitment(signer1, CommitmentTypeV1::Stake, U256::from(1000));
         stake1.set_fee(100);
         snapshot.add_commitment(&stake1, &EpochSnapshot::default());
 
-        let mut stake2 = create_test_commitment(signer2, CommitmentType::Stake, U256::from(1000));
+        let mut stake2 = create_test_commitment(signer2, CommitmentTypeV1::Stake, U256::from(1000));
         stake2.set_fee(200);
         snapshot.add_commitment(&stake2, &EpochSnapshot::default());
 
         // Add pledges with different counts and fees
         let mut pledge1_count0 = create_test_commitment(
             signer1,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 0,
             },
             U256::from(1000),
@@ -764,7 +764,7 @@ mod tests {
 
         let mut pledge2_count0 = create_test_commitment(
             signer2,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 0,
             },
             U256::from(1000),
@@ -773,14 +773,14 @@ mod tests {
         snapshot.add_commitment(&pledge2_count0, &EpochSnapshot::default());
 
         // Add another stake after some pledges
-        let mut stake3 = create_test_commitment(signer3, CommitmentType::Stake, U256::from(1000));
+        let mut stake3 = create_test_commitment(signer3, CommitmentTypeV1::Stake, U256::from(1000));
         stake3.set_fee(50);
         snapshot.add_commitment(&stake3, &EpochSnapshot::default());
 
         // Add pledge with higher count
         let mut pledge1_count1 = create_test_commitment(
             signer1,
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 1,
             },
             U256::from(1000),
@@ -825,7 +825,7 @@ mod tests {
         ];
 
         for (signer, amount) in &test_cases {
-            let stake = create_test_commitment(*signer, CommitmentType::Stake, *amount);
+            let stake = create_test_commitment(*signer, CommitmentTypeV1::Stake, *amount);
             snapshot.add_commitment(&stake, &EpochSnapshot::default());
         }
 
@@ -846,7 +846,7 @@ mod tests {
         // Add stake first
         let stake_amount = U256::from(20_000_000_000_000_000_000_000_u128); // 20k tokens
         snapshot.add_commitment(
-            &create_test_commitment(signer, CommitmentType::Stake, stake_amount),
+            &create_test_commitment(signer, CommitmentTypeV1::Stake, stake_amount),
             &EpochSnapshot::default(),
         );
 
@@ -862,7 +862,7 @@ mod tests {
             snapshot.add_commitment(
                 &create_test_commitment(
                     signer,
-                    CommitmentType::Pledge {
+                    CommitmentTypeV1::Pledge {
                         pledge_count_before_executing: i as u64,
                     },
                     amount,
