@@ -1,12 +1,10 @@
-use irys_types::{CommitmentTransaction, IrysAddress};
-use irys_types::{CommitmentTypeV1, CommitmentTypeV2};
+use super::EpochSnapshot;
+use irys_types::{CommitmentTransaction, CommitmentTypeV1, IrysAddress};
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
 };
 use tracing::debug;
-
-use super::EpochSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitmentSnapshotStatus {
