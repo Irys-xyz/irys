@@ -10,8 +10,8 @@ use alloy_genesis::GenesisAccount;
 
 use irys_domain::ScoreDecreaseReason;
 use irys_types::{
-    build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
-    RethPeerInfo, VersionRequest,
+    build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequest, NodeConfig, PeerAddress,
+    PeerResponse, RethPeerInfo,
 };
 use tracing::{debug, error, info};
 
@@ -59,7 +59,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
-    let mut version_request = VersionRequest {
+    let mut version_request = HandshakeRequest {
         chain_id: miner_signer_1.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
@@ -233,7 +233,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     }
 
     let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
-    let mut version_request = VersionRequest {
+    let mut version_request = HandshakeRequest {
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),

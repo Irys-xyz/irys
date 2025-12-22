@@ -10,8 +10,8 @@ use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey,
-    GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion, VersionRequest,
+    GossipRequest, HandshakeRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
+    NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion,
     DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
@@ -292,9 +292,14 @@ impl GossipClient {
     pub async fn post_version(
         &self,
         peer: SocketAddr,
-        version: VersionRequest,
+        version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
-        let url = format!("http://{}/gossip/version", peer);
+        let path = if version.protocol_version == ProtocolVersion::V1 {
+            "gossip/version"
+        } else {
+            "gossip/v2/version"
+        };
+        let url = format!("http://{}/{}", peer, path);
         let response = self
             .internal_client()
             .post(&url)

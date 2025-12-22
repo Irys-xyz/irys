@@ -20,8 +20,8 @@ use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, AcceptedResponse, BlockBody, BlockIndexQuery, CommitmentTransaction,
-    DataTransactionHeader, GossipRequest, IngressProof, IrysAddress, IrysBlockHeader, PeerListItem,
-    ProtocolVersion, UnpackedChunk, VersionRequest,
+    DataTransactionHeader, GossipRequest, HandshakeRequest, IngressProof, IrysAddress,
+    IrysBlockHeader, PeerListItem, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
@@ -531,7 +531,7 @@ where
     async fn handle_version(
         server: Data<Self>,
         req: actix_web::HttpRequest,
-        body: web::Json<VersionRequest>,
+        body: web::Json<HandshakeRequest>,
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
@@ -555,7 +555,9 @@ where
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
             return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
-                RejectionReason::UnsupportedProtocolVersion(version_request.protocol_version as u32),
+                RejectionReason::UnsupportedProtocolVersion(
+                    version_request.protocol_version as u32,
+                ),
             ));
         }
 
@@ -603,7 +605,7 @@ where
 
         let response = AcceptedResponse {
             version: Version::new(1, 2, 0),
-            protocol_version: ProtocolVersion::V1,
+            protocol_version: version_request.protocol_version,
             peers,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -853,7 +855,8 @@ where
                                     web::post().to(Self::handle_execution_payload),
                                 )
                                 .route("/get_data", web::post().to(Self::handle_data_request))
-                                .route("/pull_data", web::post().to(Self::handle_pull_data)),
+                                .route("/pull_data", web::post().to(Self::handle_pull_data))
+                                .route("/version", web::post().to(Self::handle_version)),
                         )
                         .route("/transaction", web::post().to(Self::handle_transaction))
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))

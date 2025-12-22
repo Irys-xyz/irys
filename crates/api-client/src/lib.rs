@@ -1,7 +1,7 @@
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, CommitmentTransaction,
-    DataTransactionHeader, IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
+    DataTransactionHeader, HandshakeRequest, IrysTransactionResponse, NodeInfo, PeerResponse, H256,
 };
 pub use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -52,8 +52,11 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
 
     /// Post a version request to a peer. Version request contains protocol version and peer
     /// information.
-    async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
-        -> Result<PeerResponse>;
+    async fn post_version(
+        &self,
+        peer: SocketAddr,
+        version: HandshakeRequest,
+    ) -> Result<PeerResponse>;
 
     /// Gets block by hash
     async fn get_block_by_hash(
@@ -219,7 +222,7 @@ impl ApiClient for IrysApiClient {
     async fn post_version(
         &self,
         peer: SocketAddr,
-        version: VersionRequest,
+        version: HandshakeRequest,
     ) -> Result<PeerResponse> {
         let path = "/version";
         let response = self
@@ -351,7 +354,7 @@ pub mod test_utils {
         async fn post_version(
             &self,
             peer: std::net::SocketAddr,
-            _version: VersionRequest,
+            _version: HandshakeRequest,
         ) -> eyre::Result<PeerResponse> {
             debug!("post_version called with peer: {}", peer);
             let mut calls = self.post_version_calls.lock().await;
@@ -458,7 +461,7 @@ mod tests {
         async fn post_version(
             &self,
             _peer: SocketAddr,
-            _version: VersionRequest,
+            _version: HandshakeRequest,
         ) -> Result<PeerResponse> {
             Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
         }

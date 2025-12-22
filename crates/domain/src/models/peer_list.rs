@@ -3,11 +3,11 @@ use alloy_core::primitives::B256;
 use irys_database::reth_db::Database as _;
 use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
-use irys_types::{IrysAddress, ProtocolVersion};
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
     PeerNetworkSender,
 };
+use irys_types::{IrysAddress, ProtocolVersion};
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
 use std::iter::Chain;
@@ -1066,7 +1066,12 @@ impl PeerListDataInner {
         }
     }
 
-    fn update_peer_address(&mut self, mining_addr: IrysAddress, new_address: PeerAddress, new_protocol_version: ProtocolVersion) {
+    fn update_peer_address(
+        &mut self,
+        mining_addr: IrysAddress,
+        new_address: PeerAddress,
+        new_protocol_version: ProtocolVersion,
+    ) {
         if let Some(peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;

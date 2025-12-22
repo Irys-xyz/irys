@@ -48,8 +48,12 @@ impl ProtocolVersion {
         Self::V2
     }
 
-    pub fn supported_versions() -> &'static [ProtocolVersion] {
+    pub fn supported_versions() -> &'static [Self] {
         &[Self::V1, Self::V2]
+    }
+
+    pub fn supported_versions_u32() -> &'static [u32] {
+        &[Self::V1 as u32, Self::V2 as u32]
     }
 }
 
@@ -139,7 +143,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionRequest {
+pub struct HandshakeRequest {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     pub mining_address: IrysAddress,
@@ -150,12 +154,12 @@ pub struct VersionRequest {
     pub signature: IrysSignature,
 }
 
-impl Default for VersionRequest {
+impl Default for HandshakeRequest {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
             mining_address: IrysAddress::ZERO,
-            protocol_version: ProtocolVersion::default(),
+            protocol_version: ProtocolVersion::current(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -168,7 +172,7 @@ impl Default for VersionRequest {
     }
 }
 
-impl VersionRequest {
+impl HandshakeRequest {
     fn encode_for_signing<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -374,13 +378,13 @@ pub struct NodeInfo {
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
-    use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
+    use crate::{Config, HandshakeRequest, IrysSignature, NodeConfig, H256};
     use crate::{IrysAddress, U256};
     use serde_json;
 
     #[test]
     fn should_sign_and_verify_signature() {
-        let mut version_request = VersionRequest::default();
+        let mut version_request = HandshakeRequest::default();
         let testing_config = NodeConfig::testing();
         let config = Config::new(testing_config);
         let signer = config.irys_signer();

@@ -8,9 +8,9 @@ use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason}
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
-    IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode, PeerListItem,
-    PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse, RejectedResponse,
-    RethPeerInfo, TokioServiceHandle, VersionRequest,
+    HandshakeRequest, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
+    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
+    RejectedResponse, RethPeerInfo, TokioServiceHandle,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -71,7 +71,8 @@ struct PeerNetworkServiceState {
 struct HandshakeTask {
     api_address: SocketAddr,
     gossip_address: SocketAddr,
-    version_request: VersionRequest,
+    handshake_request: HandshakeRequest,
+    config: Config,
     is_trusted_peer: bool,
     peer_filter_mode: PeerFilterMode,
     peer_list: PeerList,
@@ -208,20 +209,20 @@ impl PeerNetworkServiceInner {
         self.peer_list.decrease_peer_score(mining_addr, reason);
     }
 
-    async fn create_version_request(&self) -> VersionRequest {
+    async fn create_handshake_request(&self) -> HandshakeRequest {
         let state = self.state.lock().await;
-        let mut version_request = VersionRequest {
+        let mut handshake_request = HandshakeRequest {
             address: state.peer_address,
             chain_id: state.chain_id,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
-            ..VersionRequest::default()
+            ..HandshakeRequest::default()
         };
         state
             .config
             .irys_signer()
-            .sign_p2p_handshake(&mut version_request)
+            .sign_p2p_handshake(&mut handshake_request)
             .expect("Failed to sign version request");
-        version_request
+        handshake_request
     }
 
     fn sender(&self) -> PeerNetworkSender {
@@ -378,9 +379,17 @@ impl PeerNetworkService {
         let peer_gossip_addr = peer.address.gossip;
         let reth_peer_info = peer.address.execution;
 
-        let version_request = self.inner.create_version_request().await;
+        let handshake_request = self.inner.create_handshake_request().await;
         let is_trusted_peer = self.inner.peer_list().is_trusted_peer(&peer_api_addr);
-        let (gossip_client, peer_filter_mode, peer_list, sender, reth_peer_sender, peers_limit) = {
+        let (
+            gossip_client,
+            peer_filter_mode,
+            peer_list,
+            sender,
+            reth_peer_sender,
+            peers_limit,
+            config,
+        ) = {
             let state = self.inner.state.lock().await;
             (
                 state.gossip_client.clone(),
@@ -389,6 +398,7 @@ impl PeerNetworkService {
                 self.inner.sender(),
                 state.reth_peer_sender.clone(),
                 state.peers_limit,
+                state.config.clone(),
             )
         };
 
@@ -396,7 +406,8 @@ impl PeerNetworkService {
             gossip_client,
             peer_api_addr,
             peer_gossip_addr,
-            version_request,
+            handshake_request,
+            config,
             sender,
             is_trusted_peer,
             peer_filter_mode,
@@ -465,16 +476,16 @@ impl PeerNetworkService {
             debug!("Need to announce yourself to peer {:?}", api_address);
             state.currently_running_announcements.insert(api_address);
 
-            let mut version_request = VersionRequest {
+            let mut handshake_request = HandshakeRequest {
                 address: state.peer_address,
                 chain_id: state.chain_id,
                 user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
-                ..VersionRequest::default()
+                ..HandshakeRequest::default()
             };
             state
                 .config
                 .irys_signer()
-                .sign_p2p_handshake(&mut version_request)
+                .sign_p2p_handshake(&mut handshake_request)
                 .expect("Failed to sign version request");
 
             let gossip_address = handshake.gossip_address;
@@ -482,7 +493,8 @@ impl PeerNetworkService {
             HandshakeTask {
                 api_address,
                 gossip_address,
-                version_request,
+                handshake_request,
+                config: state.config.clone(),
                 is_trusted_peer: self.inner.peer_list().is_trusted_peer(&api_address),
                 peer_filter_mode: state.config.node_config.peer_filter_mode,
                 peer_list: self.inner.peer_list(),
@@ -504,7 +516,8 @@ impl PeerNetworkService {
                 task.gossip_client,
                 task.api_address,
                 task.gossip_address,
-                task.version_request,
+                task.handshake_request,
+                task.config,
                 task.sender,
                 task.is_trusted_peer,
                 task.peer_filter_mode,
@@ -833,7 +846,8 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         api_address: SocketAddr,
         gossip_address: SocketAddr,
-        version_request: VersionRequest,
+        handshake_request: HandshakeRequest,
+        config: Config,
         sender: PeerNetworkSender,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
@@ -844,7 +858,8 @@ impl PeerNetworkService {
             gossip_client,
             api_address,
             gossip_address,
-            version_request,
+            handshake_request,
+            config,
             sender.clone(),
             is_trusted_peer,
             peer_filter_mode,
@@ -869,15 +884,57 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         api_address: SocketAddr,
         gossip_address: SocketAddr,
-        version_request: VersionRequest,
+        mut handshake_request: HandshakeRequest,
+        config: Config,
         sender: PeerNetworkSender,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
+        let peer_protocol_version = gossip_client
+            .get_protocol_version(PeerAddress {
+                gossip: gossip_address,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                warn!(
+                    "Failed to get protocol version from gossip address {}: {}",
+                    gossip_address, e
+                );
+                PeerListServiceError::PostVersionError(e.to_string())
+            })?;
+
+        if !irys_types::ProtocolVersion::supported_versions_u32().contains(&peer_protocol_version) {
+            warn!(
+                "Peer at {} has unsupported protocol version {}",
+                gossip_address, peer_protocol_version
+            );
+            return Err(PeerListServiceError::PostVersionError(format!(
+                "Peer {} has an unsupported protocol version {}",
+                gossip_address, peer_protocol_version
+            )));
+        }
+
+        let my_version = irys_types::ProtocolVersion::current() as u32;
+        let protocol_version = if peer_protocol_version != my_version {
+            peer_protocol_version
+        } else {
+            my_version
+        }
+        .into();
+
+        if handshake_request.protocol_version != protocol_version {
+            handshake_request.protocol_version = protocol_version;
+            config
+                .irys_signer()
+                .sign_p2p_handshake(&mut handshake_request)
+                .expect("Failed to sign version request");
+        }
+
         let peer_response_result = gossip_client
-            .post_version(gossip_address, version_request.clone())
+            .post_version(gossip_address, handshake_request.clone())
             .await
             .map_err(|e| {
                 warn!(

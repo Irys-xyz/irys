@@ -9,8 +9,8 @@ use actix_web::{
     HttpRequest, HttpResponse,
 };
 use irys_types::{
-    parse_user_agent, AcceptedResponse, PeerListItem, PeerResponse, ProtocolVersion,
-    RejectedResponse, RejectionReason, VersionRequest,
+    parse_user_agent, AcceptedResponse, HandshakeRequest, PeerListItem, PeerResponse,
+    ProtocolVersion, RejectedResponse, RejectionReason,
 };
 use reth::revm::primitives::alloy_primitives::private::rand;
 use semver::Version;
@@ -18,7 +18,7 @@ use semver::Version;
 pub async fn post_version(
     req: HttpRequest,
     state: web::Data<ApiState>,
-    body: Json<VersionRequest>,
+    body: Json<HandshakeRequest>,
 ) -> actix_web::Result<HttpResponse> {
     let connection_info = req.connection_info();
     let Some(source_addr_str) = connection_info.peer_addr() else {

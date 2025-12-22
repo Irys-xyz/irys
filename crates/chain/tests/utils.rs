@@ -55,7 +55,7 @@ use irys_types::{
     LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
     UnpackedChunk,
 };
-use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
+use irys_types::{HandshakeRequest, Interval, PartitionChunkOffset};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
@@ -2346,12 +2346,12 @@ impl IrysNodeTest<IrysNodeCtx> {
     }
 
     // Build a signed VersionRequest describing this node
-    pub fn build_version_request(&self) -> VersionRequest {
-        let mut vr = VersionRequest {
+    pub fn build_version_request(&self) -> HandshakeRequest {
+        let mut vr = HandshakeRequest {
             chain_id: self.node_ctx.config.consensus.chain_id,
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
-            ..VersionRequest::default()
+            ..HandshakeRequest::default()
         };
         self.node_ctx
             .config

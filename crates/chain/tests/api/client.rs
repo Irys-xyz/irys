@@ -5,8 +5,8 @@ use irys_api_client::ApiClientExt as _;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
 use irys_types::{
-    AcceptedResponse, BlockIndexQuery, Config, IrysTransactionResponse, NodeConfig, PeerResponse,
-    ProtocolVersion, VersionRequest,
+    AcceptedResponse, BlockIndexQuery, Config, HandshakeRequest, IrysTransactionResponse,
+    NodeConfig, PeerResponse, ProtocolVersion,
 };
 use semver::Version;
 use std::{
@@ -16,7 +16,7 @@ use std::{
 use tracing::debug;
 
 async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
-    let mut version_request = VersionRequest::default();
+    let mut version_request = HandshakeRequest::default();
     let testing_config = NodeConfig::testing();
     let config = Config::new(testing_config);
     let signer = config.irys_signer();
