@@ -67,10 +67,10 @@ pub struct CommitmentTransactionV1 {
 impl Ord for CommitmentTransactionV1 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         compare_commitment_transactions(
-            &self.commitment_type.into(),
+            &self.commitment_type,
             self.user_fee(),
             self.id,
-            &other.commitment_type.into(),
+            &other.commitment_type,
             other.user_fee(),
             other.id,
         )
