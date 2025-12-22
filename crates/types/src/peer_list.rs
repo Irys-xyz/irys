@@ -3,7 +3,7 @@ use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress, ProtocolVersion};
 use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
-use bytes::{Buf as _, BufMut};
+use bytes::Buf as _;
 use reth::providers::errors::db::DatabaseError;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};

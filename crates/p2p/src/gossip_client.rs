@@ -92,16 +92,17 @@ impl GossipClient {
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
-        let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
 
         let res = if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+            let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
             if let Some(req_v1) = requested_data.to_v1() {
                 self.send_data_internal(url, &req_v1).await
             } else {
                 self.send_data_internal(url, &requested_data).await
             }
         } else {
+            let url = format!("http://{}/gossip/v2/get_data", peer.1.address.gossip);
             self.send_data_internal(url, &requested_data).await
         };
 
@@ -110,19 +111,73 @@ impl GossipClient {
         res
     }
 
+    async fn pull_block_body_from_v1_peer(
+        &self,
+        peer: &(IrysAddress, PeerListItem),
+        header: &IrysBlockHeader,
+        peer_list: &PeerList,
+    ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
+        let commitment_tx_ids = header.get_commitment_ledger_tx_ids();
+        let data_tx_ids_map = header.get_data_ledger_tx_ids();
+        let data_tx_ids: Vec<H256> = data_tx_ids_map.values().flatten().copied().collect();
+
+        let mut commitment_transactions = Vec::new();
+        let mut data_transactions = Vec::new();
+
+        // Pull commitment transactions
+        for tx_id in commitment_tx_ids {
+            match self
+                .pull_transaction_from_peer(tx_id, peer, peer_list)
+                .await
+            {
+                Ok((_, IrysTransactionResponse::Commitment(tx))) => {
+                    commitment_transactions.push(tx)
+                }
+                Ok((_, IrysTransactionResponse::Storage(_))) => {
+                    return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
+                }
+                Err(_) => return Ok(GossipResponse::Accepted(None)),
+            }
+        }
+
+        // Pull data transactions
+        for tx_id in data_tx_ids {
+            match self
+                .pull_transaction_from_peer(tx_id, peer, peer_list)
+                .await
+            {
+                Ok((_, IrysTransactionResponse::Storage(tx))) => data_transactions.push(tx),
+                Ok((_, IrysTransactionResponse::Commitment(_))) => {
+                    return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
+                }
+                Err(_) => return Ok(GossipResponse::Accepted(None)),
+            }
+        }
+
+        let block_body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions,
+            commitment_transactions,
+        };
+
+        Ok(GossipResponse::Accepted(Some(GossipDataV2::BlockBody(
+            Arc::new(block_body),
+        ))))
+    }
+
     /// Request specific data from the peer. Returns the data right away if the peer has it
     /// and updates the peer's score based on the result.
-    async fn pull_data_and_update_the_score(
+    async fn pull_primitive_data_and_update_the_score(
         &self,
         peer: &(IrysAddress, PeerListItem),
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
-        let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
             if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+                let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
                 if let Some(req_v1) = requested_data.to_v1() {
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
                         self.send_data_internal(url, &req_v1).await;
@@ -137,6 +192,7 @@ impl GossipClient {
                     self.send_data_internal(url, &requested_data).await
                 }
             } else {
+                let url = format!("http://{}/gossip/v2/pull_data", peer.1.address.gossip);
                 self.send_data_internal(url, &requested_data).await
             };
 
@@ -144,6 +200,25 @@ impl GossipClient {
         Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
 
         res
+    }
+
+    /// Request specific data from the peer. Returns the data right away if the peer has it
+    /// and updates the peer's score based on the result.
+    async fn pull_data_and_update_the_score(
+        &self,
+        peer: &(IrysAddress, PeerListItem),
+        requested_data: GossipDataRequestV2,
+        peer_list: &PeerList,
+    ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
+        if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+            if let GossipDataRequestV2::BlockBody(ref header) = requested_data {
+                return self
+                    .pull_block_body_from_v1_peer(peer, header, peer_list)
+                    .await;
+            }
+        }
+        self.pull_primitive_data_and_update_the_score(peer, requested_data, peer_list)
+            .await
     }
 
     pub async fn get_info(&self, peer: PeerAddress) -> Result<NodeInfo, GossipClientError> {
@@ -396,21 +471,21 @@ impl GossipClient {
         match data {
             GossipDataV2::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/chunk", peer.address.gossip),
+                    format!("http://{}/gossip/v2/chunk", peer.address.gossip),
                     unpacked_chunk,
                 )
                 .await
             }
             GossipDataV2::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    format!("http://{}/gossip/v2/transaction", peer.address.gossip),
                     irys_transaction_header,
                 )
                 .await
             }
             GossipDataV2::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/commitment_tx", peer.address.gossip),
+                    format!("http://{}/gossip/v2/commitment_tx", peer.address.gossip),
                     commitment_tx,
                 )
                 .await
@@ -424,28 +499,28 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!("http://{}/gossip/block", peer.address.gossip),
+                    format!("http://{}/gossip/v2/block", peer.address.gossip),
                     &irys_block_header,
                 )
                 .await
             }
             GossipDataV2::BlockBody(block_body) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/block_body", peer.address.gossip),
+                    format!("http://{}/gossip/v2/block_body", peer.address.gossip),
                     &block_body,
                 )
                 .await
             }
             GossipDataV2::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/execution_payload", peer.address.gossip),
+                    format!("http://{}/gossip/v2/execution_payload", peer.address.gossip),
                     &execution_payload,
                 )
                 .await
             }
             GossipDataV2::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/ingress_proof", peer.address.gossip),
+                    format!("http://{}/gossip/v2/ingress_proof", peer.address.gossip),
                     ingress_proof,
                 )
                 .await
@@ -732,11 +807,11 @@ impl GossipClient {
 
     pub async fn pull_block_body_from_network(
         &self,
-        block_hash: BlockHash,
+        header: Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<BlockBody>), PeerNetworkError> {
-        let data_request = GossipDataRequestV2::BlockBody(block_hash);
+        let data_request = GossipDataRequestV2::BlockBody(header);
         self.pull_data_from_network(
             data_request,
             use_trusted_peers_only,
@@ -860,7 +935,7 @@ impl GossipClient {
         let data_request = GossipDataRequestV2::Transaction(tx_id);
         for attempt in 0..2 {
             match self
-                .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
+                .pull_primitive_data_and_update_the_score(peer, data_request.clone(), peer_list)
                 .await
             {
                 Ok(response) => match response {

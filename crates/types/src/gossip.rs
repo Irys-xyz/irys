@@ -335,7 +335,7 @@ pub mod v2 {
     pub enum GossipDataRequestV2 {
         ExecutionPayload(B256),
         BlockHeader(BlockHash),
-        BlockBody(BlockHash),
+        BlockBody(Arc<IrysBlockHeader>),
         Chunk(ChunkPathHash),
         Transaction(H256),
     }
@@ -360,11 +360,26 @@ pub mod v2 {
         }
     }
 
+    impl From<super::v1::GossipDataRequestV1> for GossipDataRequestV2 {
+        fn from(v1: super::v1::GossipDataRequestV1) -> Self {
+            match v1 {
+                super::v1::GossipDataRequestV1::ExecutionPayload(b256) => {
+                    Self::ExecutionPayload(b256)
+                }
+                super::v1::GossipDataRequestV1::Block(block_hash) => Self::BlockHeader(block_hash),
+                super::v1::GossipDataRequestV1::Chunk(chunk_path_hash) => {
+                    Self::Chunk(chunk_path_hash)
+                }
+                super::v1::GossipDataRequestV1::Transaction(tx_id) => Self::Transaction(tx_id),
+            }
+        }
+    }
+
     impl Debug for GossipDataRequestV2 {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::BlockHeader(hash) => write!(f, "block header {hash:?}"),
-                Self::BlockBody(hash) => write!(f, "block body {hash:?}"),
+                Self::BlockBody(header) => write!(f, "block body {:?}", header.block_hash),
                 Self::ExecutionPayload(block_hash) => {
                     write!(f, "execution payload for block {block_hash:?}")
                 }

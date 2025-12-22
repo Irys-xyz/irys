@@ -925,7 +925,8 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequestV2::BlockBody(block_hash) => {
+            GossipDataRequestV2::BlockBody(header) => {
+                let block_hash = header.block_hash;
                 debug!(
                     "Node {}: handling block body request for block {:?}",
                     self.gossip_client.mining_address, block_hash
@@ -1082,7 +1083,8 @@ where
                 }
                 Ok(maybe_block.map(GossipDataV2::BlockHeader))
             }
-            GossipDataRequestV2::BlockBody(block_hash) => {
+            GossipDataRequestV2::BlockBody(header) => {
+                let block_hash = header.block_hash;
                 let maybe_block_body = if let Some(block_body) =
                     self.block_pool.get_cached_block_body(&block_hash).await
                 {
@@ -1188,7 +1190,11 @@ where
 
         let (source_address, irys_block_body) = self
             .gossip_client
-            .pull_block_body_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
+            .pull_block_body_from_network(
+                Arc::new(header.clone()),
+                use_trusted_peers_only,
+                &self.peer_list,
+            )
             .await?;
 
         debug!(

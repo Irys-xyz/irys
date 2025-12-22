@@ -16,6 +16,7 @@ use actix_web::{
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
+use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, AcceptedResponse, BlockBody, BlockIndexQuery, CommitmentTransaction,
@@ -680,6 +681,59 @@ where
     }
 
     #[tracing::instrument(skip_all)]
+    async fn handle_data_request_v1(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v1_request = data_request.0;
+        let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+        let v2_request = GossipRequest {
+            miner_address: v1_request.miner_address,
+            data: v2_data_request,
+        };
+
+        Self::handle_data_request(server, web::Json(v2_request), req).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_pull_data_v1(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v1_request = data_request.0;
+        let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+        let v2_request = GossipRequest {
+            miner_address: v1_request.miner_address,
+            data: v2_data_request,
+        };
+
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, v2_request.miner_address)
+        {
+            return error_response;
+        };
+
+        match server
+            .data_handler
+            .handle_get_data_sync(v2_request)
+            .in_current_span()
+            .await
+        {
+            Ok(maybe_data) => {
+                let maybe_data_v1 = maybe_data.and_then(|d| d.to_v1());
+                HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data_v1))
+            }
+            Err(error) => {
+                error!("Failed to handle get data request: {}", error);
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,
         data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
@@ -697,7 +751,9 @@ where
                 GossipDataRequestV2::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
-                GossipDataRequestV2::BlockBody(hash) => format!("block body {:?}", hash),
+                GossipDataRequestV2::BlockBody(header) => {
+                    format!("block body {:?}", header.block_hash)
+                }
                 GossipDataRequestV2::Transaction(hash) => format!("transaction {:?}", hash),
             };
             warn!(
@@ -783,6 +839,21 @@ where
                 .wrap(TracingLogger::default())
                 .service(
                     web::scope("/gossip")
+                        .service(
+                            web::scope("/v2")
+                                .route("/transaction", web::post().to(Self::handle_transaction))
+                                .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
+                                .route("/chunk", web::post().to(Self::handle_chunk))
+                                .route("/block", web::post().to(Self::handle_block_header))
+                                .route("/block_body", web::post().to(Self::handle_block_body))
+                                .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
+                                .route(
+                                    "/execution_payload",
+                                    web::post().to(Self::handle_execution_payload),
+                                )
+                                .route("/get_data", web::post().to(Self::handle_data_request))
+                                .route("/pull_data", web::post().to(Self::handle_pull_data)),
+                        )
                         .route("/transaction", web::post().to(Self::handle_transaction))
                         .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
                         .route("/chunk", web::post().to(Self::handle_chunk))
@@ -793,8 +864,8 @@ where
                             "/execution_payload",
                             web::post().to(Self::handle_execution_payload),
                         )
-                        .route("/get_data", web::post().to(Self::handle_data_request))
-                        .route("/pull_data", web::post().to(Self::handle_pull_data))
+                        .route("/get_data", web::post().to(Self::handle_data_request_v1))
+                        .route("/pull_data", web::post().to(Self::handle_pull_data_v1))
                         .route("/health", web::get().to(Self::handle_health_check))
                         .route(
                             "/stake_and_pledge_whitelist",

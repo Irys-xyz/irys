@@ -781,9 +781,9 @@ async fn handle_get_data(
     warn!("Fake server got request: {:?}", data_request.data);
 
     match handler.read() {
-        Ok(handler) => match data_request.data {
+        Ok(handler) => match &data_request.data {
             GossipDataRequestV2::BlockHeader(block_hash) => {
-                let res = handler.call_on_block_data_request(block_hash);
+                let res = handler.call_on_block_data_request(*block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {:?}",
                     block_hash, res
@@ -792,8 +792,8 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            GossipDataRequestV2::BlockBody(block_hash) => {
-                warn!("Block body request for hash {:?}", block_hash);
+            GossipDataRequestV2::BlockBody(header) => {
+                warn!("Block body request for hash {:?}", header.block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(false)
