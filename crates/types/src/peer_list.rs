@@ -1,9 +1,9 @@
-use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress, ProtocolVersion};
 
 use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
-use bytes::Buf as _;
+use bytes::{Buf as _, BufMut};
 use reth::providers::errors::db::DatabaseError;
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -83,6 +83,7 @@ pub struct PeerListItem {
     pub address: PeerAddress,
     pub last_seen: u64,
     pub is_online: bool,
+    pub protocol_version: ProtocolVersion,
 }
 
 impl Default for PeerListItem {
@@ -100,6 +101,7 @@ impl Default for PeerListItem {
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         }
     }
 }
@@ -260,6 +262,9 @@ impl Compact for PeerListItem {
         buf.put_u8(if self.is_online { 1 } else { 0 });
         size += 1;
 
+        buf.put_u32(self.protocol_version as u32);
+        size += 4;
+
         size
     }
 
@@ -305,6 +310,7 @@ impl Compact for PeerListItem {
                     },
                     last_seen: 0,
                     is_online: false,
+                    protocol_version: ProtocolVersion::default(),
                 },
                 &[],
             );
@@ -341,6 +347,15 @@ impl Compact for PeerListItem {
             total_consumed += 1;
         }
 
+        let mut protocol_version = ProtocolVersion::default();
+        if buf.len() > total_consumed {
+            let (version_u32, remaining_slice) =
+                u32::from_compact(&buf[total_consumed..], buf.len() - total_consumed);
+            protocol_version = ProtocolVersion::from(version_u32);
+            let consumed_bytes = (buf.len() - total_consumed) - remaining_slice.len();
+            total_consumed += consumed_bytes;
+        }
+
         (
             Self {
                 reputation_score,
@@ -348,6 +363,7 @@ impl Compact for PeerListItem {
                 address,
                 last_seen,
                 is_online,
+                protocol_version,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],

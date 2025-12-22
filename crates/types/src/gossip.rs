@@ -261,6 +261,23 @@ pub mod v2 {
         }
     }
 
+    impl From<super::v1::GossipDataV1> for GossipDataV2 {
+        fn from(v1: super::v1::GossipDataV1) -> Self {
+            match v1 {
+                super::v1::GossipDataV1::Chunk(chunk) => Self::Chunk(chunk),
+                super::v1::GossipDataV1::Transaction(tx) => Self::Transaction(tx),
+                super::v1::GossipDataV1::CommitmentTransaction(tx) => {
+                    Self::CommitmentTransaction(tx)
+                }
+                super::v1::GossipDataV1::Block(block) => Self::BlockHeader(block),
+                super::v1::GossipDataV1::ExecutionPayload(payload) => {
+                    Self::ExecutionPayload(payload)
+                }
+                super::v1::GossipDataV1::IngressProof(proof) => Self::IngressProof(proof),
+            }
+        }
+    }
+
     impl GossipDataV2 {
         pub fn to_v1(&self) -> Option<super::v1::GossipDataV1> {
             match self {

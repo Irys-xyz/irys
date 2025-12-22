@@ -1097,6 +1097,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            protocol_version: irys_types::ProtocolVersion::default(),
         };
         (mining_addr, peer)
     }

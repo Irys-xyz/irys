@@ -94,7 +94,17 @@ impl GossipClient {
     ) -> GossipResult<GossipResponse<bool>> {
         let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
-        let res = self.send_data_internal(url, &requested_data).await;
+
+        let res = if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+            if let Some(req_v1) = requested_data.to_v1() {
+                self.send_data_internal(url, &req_v1).await
+            } else {
+                self.send_data_internal(url, &requested_data).await
+            }
+        } else {
+            self.send_data_internal(url, &requested_data).await
+        };
+
         let response_time = start_time.elapsed();
         Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
         res
@@ -110,7 +120,26 @@ impl GossipClient {
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
         let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
         let start_time = std::time::Instant::now();
-        let res = self.send_data_internal(url, &requested_data).await;
+
+        let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
+            if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+                if let Some(req_v1) = requested_data.to_v1() {
+                    let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
+                        self.send_data_internal(url, &req_v1).await;
+
+                    res_v1.map(|response| match response {
+                        GossipResponse::Accepted(maybe_data) => {
+                            GossipResponse::Accepted(maybe_data.map(GossipDataV2::from))
+                        }
+                        GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
+                    })
+                } else {
+                    self.send_data_internal(url, &requested_data).await
+                }
+            } else {
+                self.send_data_internal(url, &requested_data).await
+            };
+
         let response_time = start_time.elapsed();
         Self::handle_data_retrieval_score(peer_list, &res, &peer.0, response_time);
 
@@ -358,6 +387,12 @@ impl GossipClient {
         peer: &PeerListItem,
         data: &GossipDataV2,
     ) -> GossipResult<GossipResponse<()>> {
+        if peer.protocol_version == irys_types::ProtocolVersion::V1 {
+            if let Some(data_v1) = data.to_v1() {
+                return self.send_data_v1(peer, &data_v1).await;
+            }
+        }
+
         match data {
             GossipDataV2::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
@@ -411,7 +446,66 @@ impl GossipClient {
             GossipDataV2::IngressProof(ingress_proof) => {
                 self.send_data_internal(
                     format!("http://{}/gossip/ingress_proof", peer.address.gossip),
-                    &ingress_proof,
+                    ingress_proof,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn send_data_v1(
+        &self,
+        peer: &PeerListItem,
+        data: &irys_types::v1::GossipDataV1,
+    ) -> GossipResult<GossipResponse<()>> {
+        use irys_types::v1::GossipDataV1;
+        match data {
+            GossipDataV1::Chunk(unpacked_chunk) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/chunk", peer.address.gossip),
+                    unpacked_chunk,
+                )
+                .await
+            }
+            GossipDataV1::Transaction(irys_transaction_header) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    irys_transaction_header,
+                )
+                .await
+            }
+            GossipDataV1::CommitmentTransaction(commitment_tx) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/commitment_tx", peer.address.gossip),
+                    commitment_tx,
+                )
+                .await
+            }
+            GossipDataV1::Block(irys_block_header) => {
+                if irys_block_header.poa.chunk.is_none() {
+                    error!(
+                        target = "p2p::gossip_client::send_data",
+                        block.hash = ?irys_block_header.block_hash,
+                        "Sending a block header without the POA chunk"
+                    );
+                }
+                self.send_data_internal(
+                    format!("http://{}/gossip/block", peer.address.gossip),
+                    irys_block_header,
+                )
+                .await
+            }
+            GossipDataV1::ExecutionPayload(execution_payload) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/execution_payload", peer.address.gossip),
+                    execution_payload,
+                )
+                .await
+            }
+            GossipDataV1::IngressProof(ingress_proof) => {
+                self.send_data_internal(
+                    format!("http://{}/gossip/ingress_proof", peer.address.gossip),
+                    ingress_proof,
                 )
                 .await
             }
@@ -1577,6 +1671,7 @@ mod tests {
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
                     .as_secs(),
+                protocol_version: Default::default(),
             };
             (mining_addr, peer)
         }

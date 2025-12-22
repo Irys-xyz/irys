@@ -1043,6 +1043,7 @@ mod tests {
             response_time: 100,
             last_seen: 123,
             is_online,
+            protocol_version: Default::default(),
         };
         (mining_addr, peer)
     }

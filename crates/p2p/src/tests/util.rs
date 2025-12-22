@@ -30,8 +30,8 @@ use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
     DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
     IrysBlockHeader, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset, TxKnownStatus,
-    UnpackedChunk, H256,
+    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
+    TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_types::{BlockTransactions, IrysAddress};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -524,6 +524,7 @@ impl GossipServiceTestFixture {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         }
     }
 

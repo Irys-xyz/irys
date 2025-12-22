@@ -1623,6 +1623,7 @@ mod tests {
                     address: fake_peer_address,
                     last_seen: 0,
                     is_online: true,
+                    protocol_version: Default::default(),
                 },
                 true,
             );
@@ -1726,6 +1727,7 @@ mod tests {
                     address: fake_peer_address,
                     last_seen: 0,
                     is_online: true,
+                    protocol_version: Default::default(),
                 },
                 true,
             );
@@ -1857,6 +1859,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
                 reputation_score: PeerScore::new(99),
@@ -1868,6 +1871,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
 
             let addr_a = IrysAddress::repeat_byte(0xA0);
@@ -1981,6 +1985,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
                 reputation_score: PeerScore::new(99),
@@ -1992,6 +1997,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
             let addr_a = IrysAddress::repeat_byte(0xA1);
             let addr_b = IrysAddress::repeat_byte(0xB1);
