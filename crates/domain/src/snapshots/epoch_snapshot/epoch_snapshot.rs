@@ -194,7 +194,7 @@ impl EpochSnapshot {
             // Verify each commitment transaction ID in the ledger has a corresponding commitment
             for txid in commitment_ledger.tx_ids.iter() {
                 // If we can't find the commitment transaction for a referenced txid, return an error
-                if !commitments.iter().any(|c| c.id == *txid) {
+                if !commitments.iter().any(|c| c.id() == *txid) {
                     return Err(eyre::eyre!(
                         "Missing commitment transaction {} for block {}",
                         txid,
@@ -206,10 +206,10 @@ impl EpochSnapshot {
             // Also check the other way around to verify each provided commitment is referenced in
             // the ledger (no extra commitments)
             for commitment in commitments.iter() {
-                if !commitment_ledger.tx_ids.contains(&commitment.id) {
+                if !commitment_ledger.tx_ids.contains(&commitment.id()) {
                     return Err(eyre::eyre!(
                         "Extra commitment transaction {} not referenced in block {} ledger",
-                        commitment.id,
+                        commitment.id(),
                         block_header.block_hash
                     ));
                 }
@@ -318,10 +318,10 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentType::Unstake = &commitment.commitment_type else {
+            let irys_types::CommitmentType::Unstake = &commitment.commitment_type() else {
                 continue;
             };
-            let signer = commitment.signer;
+            let signer = commitment.signer();
 
             // Effective pledges after unpledges applied
             let remaining = self
@@ -748,7 +748,7 @@ impl EpochSnapshot {
         let mut stake_commitments: Vec<&CommitmentTransaction> = Vec::new();
         let mut pledge_commitments: Vec<&CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments.iter() {
-            match commitment_tx.commitment_type {
+            match commitment_tx.commitment_type() {
                 irys_types::CommitmentType::Stake => stake_commitments.push(commitment_tx),
                 irys_types::CommitmentType::Pledge { .. } => pledge_commitments.push(commitment_tx),
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
@@ -763,20 +763,20 @@ impl EpochSnapshot {
             // Register the commitment in the state
             // Assumption: Commitments are pre-validated, so we don't check for duplicates
             let value = CommitmentStateEntry {
-                id: stake_commitment.id,
+                id: stake_commitment.id(),
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
-                signer: stake_commitment.signer,
-                amount: stake_commitment.commitment_value(),
+                signer: stake_commitment.signer(),
+                amount: stake_commitment.value(),
             };
             self.commitment_state
                 .stake_commitments
-                .insert(stake_commitment.signer, value);
+                .insert(stake_commitment.signer(), value);
         }
 
         // Process pledge commitments - miners committing resources to the network
         for pledge_commitment in pledge_commitments {
-            let address = pledge_commitment.signer;
+            let address = pledge_commitment.signer();
 
             // Skip pledges that don't have a corresponding active stake
             // This ensures only staked miners can make pledges
@@ -791,11 +791,11 @@ impl EpochSnapshot {
 
             // Create the state entry for the pledge commitment
             let value = CommitmentStateEntry {
-                id: pledge_commitment.id,
+                id: pledge_commitment.id(),
                 commitment_status: CommitmentStatus::Active,
                 partition_hash: None,
-                signer: pledge_commitment.signer,
-                amount: pledge_commitment.commitment_value(),
+                signer: pledge_commitment.signer(),
+                amount: pledge_commitment.value(),
             };
 
             // Add the pledge state to the signer's collection (or create a new collection if first pledge)
@@ -824,11 +824,11 @@ impl EpochSnapshot {
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
             let irys_types::CommitmentType::Unpledge { partition_hash, .. } =
-                &commitment.commitment_type
+                &commitment.commitment_type()
             else {
                 continue;
             };
-            let signer = commitment.signer;
+            let signer = commitment.signer();
             let ph: irys_types::H256 = *partition_hash;
 
             let cap_present = self.partition_assignments.capacity_partitions.remove(&ph);
@@ -1402,13 +1402,13 @@ mod tests {
             let mut comm_tx_2 = irys_types::CommitmentTransaction::new(&config);
             let mut unrelated_tx = irys_types::CommitmentTransaction::new(&config);
 
-            comm_tx_1.id = [1; 32].into();
-            comm_tx_2.id = [2; 32].into();
-            unrelated_tx.id = [3; 32].into();
+            comm_tx_1.set_id([1; 32].into());
+            comm_tx_2.set_id([2; 32].into());
+            unrelated_tx.set_id([3; 32].into());
 
             mocked_block.system_ledgers.push(SystemTransactionLedger {
                 ledger_id: SystemLedger::Commitment.into(),
-                tx_ids: H256List(vec![comm_tx_1.id, comm_tx_2.id]),
+                tx_ids: H256List(vec![comm_tx_1.id(), comm_tx_2.id()]),
             });
 
             let valid_commitments = vec![comm_tx_1.clone(), comm_tx_2.clone()];
@@ -1502,11 +1502,11 @@ mod tests {
             ph: H256,
         ) -> CommitmentTransaction {
             let mut tx = CommitmentTransaction::new(config);
-            tx.signer = signer;
-            tx.commitment_type = CommitmentType::Unpledge {
+            tx.set_signer(signer);
+            tx.set_commitment_type(CommitmentType::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: ph,
-            };
+            });
             tx
         }
 

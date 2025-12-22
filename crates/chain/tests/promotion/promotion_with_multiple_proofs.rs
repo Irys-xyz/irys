@@ -69,7 +69,7 @@ async fn slow_heavy_promotion_with_multiple_proofs_test() -> eyre::Result<()> {
 
     genesis_node
         .wait_for_mempool_commitment_txs(
-            vec![peer1_stake_tx.id, peer2_stake_tx.id],
+            vec![peer1_stake_tx.id(), peer2_stake_tx.id()],
             seconds_to_wait,
         )
         .await?;

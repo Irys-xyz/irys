@@ -98,7 +98,7 @@ fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
     (0..count)
         .map(|i| {
             let mut tx = CommitmentTransaction::default();
-            tx.id = H256::from_low_u64_be(i as u64);
+            tx.set_id(H256::from_low_u64_be(i as u64));
             tx
         })
         .collect()

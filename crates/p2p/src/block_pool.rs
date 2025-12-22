@@ -849,7 +849,7 @@ where
                 if !matches!(err, TxIngressError::Skipped) {
                     warn!(
                         "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
-                        commitment_tx.id, current_block_hash, err
+                        commitment_tx.id(), current_block_hash, err
                     );
                 }
             }
@@ -1253,7 +1253,7 @@ pub(crate) fn order_transactions_for_block(
     }
 
     for commitment_tx in commitment_txs {
-        commitment_txs_map.insert(commitment_tx.id, commitment_tx);
+        commitment_txs_map.insert(commitment_tx.id(), commitment_tx);
     }
 
     // Build final vectors in the exact order specified by block header

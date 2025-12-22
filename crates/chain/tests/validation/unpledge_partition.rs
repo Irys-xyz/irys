@@ -245,16 +245,16 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         .await;
 
         let count = target_counts[idx];
-        tx.commitment_type = CommitmentType::Unpledge {
+        tx.set_commitment_type(CommitmentType::Unpledge {
             pledge_count_before_executing: count,
             partition_hash: assignment.partition_hash,
-        };
-        tx.value = CommitmentTransaction::calculate_pledge_value_at_count(
+        });
+        tx.set_value(CommitmentTransaction::calculate_pledge_value_at_count(
             consensus,
             count
                 .checked_sub(1)
                 .ok_or_else(|| eyre::eyre!("pledge count must be greater than zero"))?,
-        );
+        ));
 
         genesis_signer.sign_commitment(&mut tx)?;
         unpledge_txs.push(tx);
@@ -370,7 +370,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
     .await;
 
     // Corrupt the refund amount
-    unpledge_tx.value = unpledge_tx.value.saturating_add(U256::from(1_u64));
+    unpledge_tx.set_value(unpledge_tx.value().saturating_add(U256::from(1_u64)));
 
     genesis_signer.sign_commitment(&mut unpledge_tx)?;
     let invalid_unpledge = unpledge_tx;

@@ -68,7 +68,7 @@ async fn test_auto_stake_pledge(
         peer_signer.sign_commitment(&mut stake_tx)?;
 
         genesis_node.post_commitment_tx(&stake_tx).await?;
-        debug!("stake: {}", &stake_tx.id);
+        debug!("stake: {}", &stake_tx.id());
         // just the stake
         already_processed_count += 1;
         genesis_node
@@ -83,10 +83,10 @@ async fn test_auto_stake_pledge(
                 .post_pledge_commitment_with_signer(&peer_signer)
                 .await;
             assert!(
-                tx.value < prev_price,
+                tx.value() < prev_price,
                 "the price we pay for a pledge should go down with every tx"
             );
-            prev_price = tx.value;
+            prev_price = tx.value();
             already_processed_count += 1;
             // don't wait if we haven't posted a stake (stuck in the LRU)
             if stake {

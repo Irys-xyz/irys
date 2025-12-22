@@ -22,15 +22,15 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
     unpledges.sort();
     let mut out = Vec::with_capacity(unpledges.len());
     for tx in unpledges {
-        let amount = match tx.commitment_type {
+        let amount = match tx.commitment_type() {
             CommitmentType::Unpledge {
                 pledge_count_before_executing,
                 ..
             } => {
-                if pledge_count_before_executing == 0 {
+                if *pledge_count_before_executing == 0 {
                     bail!(
                         "Invalid unpledge in epoch snapshot: pledge_count_before_executing = 0 (tx: {:?})",
-                        tx.id
+                        tx.id()
                     );
                 }
                 CommitmentTransaction::calculate_pledge_value_at_count(
@@ -41,9 +41,9 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
             _ => unreachable!("only unpledge expected here"),
         };
         out.push(UnpledgeRefundEvent {
-            account: tx.signer,
+            account: tx.signer(),
             amount,
-            irys_ref_txid: tx.id,
+            irys_ref_txid: tx.id(),
         });
     }
     Ok(out)
@@ -69,9 +69,9 @@ pub(crate) fn derive_unstake_refunds_from_snapshot(
         // Refund equals the staked value (from config); inclusion was fee-only
         let amount = config.stake_value.amount;
         out.push(UnstakeRefundEvent {
-            account: tx.signer,
+            account: tx.signer(),
             amount,
-            irys_ref_txid: tx.id,
+            irys_ref_txid: tx.id(),
         });
     }
     Ok(out)

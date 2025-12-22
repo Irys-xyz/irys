@@ -61,7 +61,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
     // create commitment tx that will remain in the mempool
     let pledge_for_mempool = node.post_pledge_commitment(Some(anchor)).await?;
     node.wait_for_mempool_commitment_txs(
-        vec![stake_for_mempool.id, pledge_for_mempool.id],
+        vec![stake_for_mempool.id(), pledge_for_mempool.id()],
         seconds_to_wait,
     )
     .await?;
@@ -128,7 +128,7 @@ async fn heavy_double_spend_rejection_after_block_migration() -> eyre::Result<()
         .get_block_by_height(config.consensus.get_mut().block_migration_depth as u64 + 2)
         .await?;
     let commitment_ids = final_block.get_commitment_ledger_tx_ids();
-    assert_eq!(commitment_ids, vec![pledge_for_mempool.id]);
+    assert_eq!(commitment_ids, vec![pledge_for_mempool.id()]);
 
     //
     // TEST CASE 3: Post stake txs that were staked in previous epoch and see they are skipped

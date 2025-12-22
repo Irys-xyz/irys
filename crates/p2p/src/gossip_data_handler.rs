@@ -30,6 +30,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, error, instrument, warn, Instrument as _};
+use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 
 const HEADER_AND_BODY_RETRIES: usize = 3;
 
@@ -290,11 +291,11 @@ where
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
             transaction_request.miner_address,
-            transaction_request.data.id
+            transaction_request.data.id()
         );
         let tx = transaction_request.data;
         let source_miner_address = transaction_request.miner_address;
-        let tx_id = tx.id;
+        let tx_id = tx.id();
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
 
@@ -1175,12 +1176,176 @@ where
 
     pub async fn pull_block_body(
         &self,
+        block: &IrysBlockHeader,
+        source_peer: Option<(SocketAddr, IrysAddress)>,
+    ) -> GossipResult<BlockTransactions> {
+        let block_hash = block.block_hash;
+
+        // Take any cached transactions for this block
+        let cached_txs = self.block_pool.take_cached_txs_for_block(&block_hash).await;
+
+        // Separate cached txs by type
+        let (cached_data_txs, cached_commitment_txs): (Vec<_>, Vec<_>) = cached_txs
+            .into_iter()
+            .partition(|tx| matches!(tx, IrysTransactionResponse::Storage(_)));
+
+        let mut fetched_data_txs: Vec<DataTransactionHeader> = cached_data_txs
+            .into_iter()
+            .filter_map(|tx| match tx {
+                IrysTransactionResponse::Storage(header) => Some(header),
+                _ => None,
+            })
+            .collect();
+
+        let mut fetched_commitment_txs: Vec<CommitmentTransaction> = cached_commitment_txs
+            .into_iter()
+            .filter_map(|tx| match tx {
+                IrysTransactionResponse::Commitment(tx) => Some(tx),
+                _ => None,
+            })
+            .collect();
+
+        // Collect cached tx IDs for quick lookup
+        let cached_data_ids: HashSet<H256> = fetched_data_txs.iter().map(|tx| tx.id).collect();
+        let cached_commitment_ids: HashSet<H256> = fetched_commitment_txs
+            .iter()
+            .map(CommitmentTransaction::id)
+            .collect();
+
+        // Collect required tx IDs from block header
+        let data_tx_ids: Vec<H256> = block
+            .data_ledgers
+            .iter()
+            .flat_map(|ledger| ledger.tx_ids.0.clone())
+            .collect();
+        let commitment_tx_ids: Vec<H256> = block
+            .system_ledgers
+            .iter()
+            .flat_map(|ledger| ledger.tx_ids.0.clone())
+            .collect();
+
+        // Filter out already-cached IDs
+        let data_ids_to_query: Vec<H256> = data_tx_ids
+            .iter()
+            .filter(|id| !cached_data_ids.contains(id))
+            .copied()
+            .collect();
+        let commitment_ids_to_query: Vec<H256> = commitment_tx_ids
+            .iter()
+            .filter(|id| !cached_commitment_ids.contains(id))
+            .copied()
+            .collect();
+
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
     ) -> GossipResult<Arc<BlockBody>> {
         // TODO: check that transactions in the body match those in the header
         let block_hash = header.block_hash;
         debug!(
+            "Batch querying mempool for {} data txs and {} commitment txs for block {} height {} (cached: {} data, {} commitment)",
+            data_ids_to_query.len(),
+            commitment_ids_to_query.len(),
+            block_hash,
+            block.height,
+            cached_data_ids.len(),
+            cached_commitment_ids.len()
+        );
+
+        // Query mempool+DB in parallel for remaining transactions
+        // Note: We query both sources in parallel and combine results, allowing partial matches
+        // since any missing txs will be fetched from network in the next step.
+        let mempool_guard = &self.block_pool.mempool_guard;
+        let db = &self.block_pool.db;
+
+        // Query mempool and DB in parallel for data transactions
+        let (mempool_data, db_data) =
+            tokio::join!(mempool_guard.get_data_txs(&data_ids_to_query), async {
+                let db_tx = db.tx().ok()?;
+                let mut results = std::collections::HashMap::new();
+                for tx_id in &data_ids_to_query {
+                    if let Ok(Some(header)) = irys_database::tx_header_by_txid(&db_tx, tx_id) {
+                        results.insert(*tx_id, header);
+                    }
+                }
+                Some(results)
+            });
+
+        // Query mempool and DB in parallel for commitment transactions
+        let (mempool_commitment, db_commitment) = tokio::join!(
+            mempool_guard.get_commitment_txs(&commitment_ids_to_query),
+            async {
+                let db_tx = db.tx().ok()?;
+                let mut results = std::collections::HashMap::new();
+                for tx_id in &commitment_ids_to_query {
+                    if let Ok(Some(tx)) = irys_database::commitment_tx_by_txid(&db_tx, tx_id) {
+                        results.insert(*tx_id, tx);
+                    }
+                }
+                Some(results)
+            }
+        );
+
+        // Combine results, preferring mempool (for promoted_height updates)
+        let mut found_data_map = mempool_data;
+        if let Some(db_results) = db_data {
+            for (id, header) in db_results {
+                found_data_map.entry(id).or_insert(header);
+            }
+        }
+
+        let mut found_commitment_map = mempool_commitment;
+        if let Some(db_results) = db_commitment {
+            for (id, tx) in db_results {
+                found_commitment_map.entry(id).or_insert(tx);
+            }
+        }
+
+        debug!(
+            "Found {} data txs and {} commitment txs in mempool+DB for block {} height {}",
+            found_data_map.len(),
+            found_commitment_map.len(),
+            block_hash,
+            block.height
+        );
+
+        // Add results to our collection
+        fetched_data_txs.extend(found_data_map.into_values());
+        fetched_commitment_txs.extend(found_commitment_map.into_values());
+
+        // Build sets of what we have now
+        let have_data_ids: HashSet<H256> = fetched_data_txs.iter().map(|tx| tx.id).collect();
+        let have_commitment_ids: HashSet<H256> = fetched_commitment_txs
+            .iter()
+            .map(CommitmentTransaction::id)
+            .collect();
+
+        // Step 4: Determine what's still missing (not in cache, mempool, or DB)
+        let missing_data_ids: Vec<H256> = data_tx_ids
+            .iter()
+            .filter(|id| !have_data_ids.contains(id))
+            .copied()
+            .collect();
+        let missing_commitment_ids: Vec<H256> = commitment_tx_ids
+            .iter()
+            .filter(|id| !have_commitment_ids.contains(id))
+            .copied()
+            .collect();
+
+        let missing_tx_ids: Vec<H256> = missing_data_ids
+            .iter()
+            .chain(missing_commitment_ids.iter())
+            .copied()
+            .collect();
+
+        // Step 5: Fetch missing transactions from network
+        if !missing_tx_ids.is_empty() {
+            debug!(
+                "Missing transactions to fetch from network for block {} height {}: {} data, {} commitment",
+                block_hash,
+                block.height,
+                missing_data_ids.len(),
+                missing_commitment_ids.len()
+            );
             "Fetching block body for block {} height {} from the network",
             block_hash, header.height
         );
@@ -1194,6 +1359,96 @@ where
             "Fetched block body for block {} from peer {}",
             block_hash, source_address
         );
+
+        // Fetch missing transactions in parallel with a concurrency limit of 10
+        let fetch_results: Vec<_> = stream::iter(missing_tx_ids)
+            .map(|tx_id_to_fetch| {
+                async move {
+                    let mut fetched: Option<(IrysTransactionResponse, IrysAddress)> = None;
+                    let mut last_err: Option<String> = None;
+
+                    // Try source peer first if provided
+                    if let Some((source_api_address, source_miner_address)) = source_peer {
+                        if let Some(peer_item) =
+                            self.peer_list.peer_by_mining_address(&source_miner_address)
+                        {
+                            match self
+                                .gossip_client
+                                .pull_transaction_from_peer(
+                                    tx_id_to_fetch,
+                                    &(source_miner_address, peer_item),
+                                    &self.peer_list,
+                                )
+                                .await
+                            {
+                                Ok((_, resp)) => {
+                                    fetched = Some((resp, source_miner_address));
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to fetch tx {} from source peer {}: {}",
+                                        tx_id_to_fetch, source_api_address, e
+                                    );
+                                    last_err = Some(e.to_string());
+                                }
+                            }
+                        }
+                    }
+
+                    // If source failed or not provided, try random peers from top active
+                    if fetched.is_none() {
+                        match self
+                            .gossip_client
+                            .pull_transaction_from_network(tx_id_to_fetch, false, &self.peer_list)
+                            .await
+                        {
+                            Ok((addr, resp)) => {
+                                fetched = Some((resp, addr));
+                            }
+                            Err(e) => {
+                                last_err = Some(e.to_string());
+                            }
+                        }
+                    }
+
+                    match fetched {
+                        Some((tx_response, from_miner_addr)) => Ok((tx_response, from_miner_addr)),
+                        None => {
+                            let source_info = source_peer
+                                .map(|(addr, _)| format!(" from source {}", addr))
+                                .unwrap_or_default();
+                            let err_msg = format!(
+                                "Failed to fetch transaction {:?}{} and top peers{}",
+                                tx_id_to_fetch,
+                                source_info,
+                                last_err
+                                    .as_ref()
+                                    .map(|e| format!("; last error: {}", e))
+                                    .unwrap_or_default()
+                            );
+                            Err(err_msg)
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(10)
+            .collect()
+            .await;
+
+        // Process network fetch results
+        for result in fetch_results {
+            match result {
+                Ok((tx_response, from_miner_addr)) => {
+                    let tx_id = match &tx_response {
+                        IrysTransactionResponse::Commitment(commitment_tx) => {
+                            fetched_commitment_txs.push(commitment_tx.clone());
+                            commitment_tx.id()
+                        }
+                        IrysTransactionResponse::Storage(tx) => {
+                            fetched_data_txs.push(tx.clone());
+                            tx.id
+                        }
+                    };
 
         Ok(irys_block_body)
     }

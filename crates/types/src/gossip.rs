@@ -93,6 +93,17 @@ pub mod v1 {
         IngressProof(IngressProof),
     }
 
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GossipData {
+    Chunk(UnpackedChunk),
+    Transaction(DataTransactionHeader),
+    CommitmentTransaction(CommitmentTransaction),
+    Block(Arc<IrysBlockHeader>),
+    ExecutionPayload(Block),
+    IngressProof(IngressProof),
+}
+
     impl From<SealedBlock<Block>> for GossipDataV1 {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
             Self::ExecutionPayload(sealed_block.into_block())

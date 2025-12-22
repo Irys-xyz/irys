@@ -19,7 +19,7 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
     let consensus = &genesis_node.cfg.consensus_config();
     let anchor = genesis_node.get_anchor().await?;
     let mut tx = CommitmentTransaction::new_stake(consensus, anchor);
-    tx.value = consensus.stake_value.amount.saturating_add(1.into()); // wrong value
+    tx.set_value(consensus.stake_value.amount.saturating_add(1.into())); // wrong value
     signer.sign_commitment(&mut tx)?;
 
     // Gossip it and expect an error
@@ -34,11 +34,9 @@ async fn gossip_rejects_commitment_with_wrong_value_and_blacklists() -> eyre::Re
 
     // It should not be present in the mempool
     let (exists_tx, exists_rx) = oneshot::channel();
-    genesis_node
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::CommitmentTxExists(tx.id, exists_tx))?;
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::CommitmentTxExists(tx.id(), exists_tx),
+    )?;
     let exists = exists_rx
         .await
         .expect("mempool responded")
@@ -75,7 +73,7 @@ async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result
     let consensus = &genesis_node.cfg.consensus_config();
     let anchor = genesis_node.get_anchor().await?;
     let mut tx = CommitmentTransaction::new_stake(consensus, anchor);
-    tx.fee = consensus.mempool.commitment_fee.saturating_sub(1); // insufficient fee
+    tx.set_fee(consensus.mempool.commitment_fee.saturating_sub(1)); // insufficient fee
     signer.sign_commitment(&mut tx)?;
 
     // Gossip it and expect an error
@@ -88,11 +86,9 @@ async fn gossip_rejects_commitment_with_low_fee_and_blacklists() -> eyre::Result
 
     // It should not be present in the mempool
     let (exists_tx, exists_rx) = oneshot::channel();
-    genesis_node
-        .node_ctx
-        .service_senders
-        .mempool
-        .send(MempoolServiceMessage::CommitmentTxExists(tx.id, exists_tx))?;
+    genesis_node.node_ctx.service_senders.mempool.send(
+        MempoolServiceMessage::CommitmentTxExists(tx.id(), exists_tx),
+    )?;
     let exists = exists_rx
         .await
         .expect("mempool responded")

@@ -30,14 +30,14 @@ async fn gossip_commitment_to_node(
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
             debug!(
-                tx.id = ?commitment.id,
+                tx.id = ?commitment.id(),
                 tx.err = ?err,
                 "Commitment gossip rejected by mempool"
             );
         }
         Err(recv_err) => {
             debug!(
-                tx.id = ?commitment.id,
+                tx.id = ?commitment.id(),
                 tx.err = ?recv_err,
                 "Commitment gossip channel dropped"
             );
@@ -126,7 +126,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
 
     // Create an unstake commitment for a peer that still has active pledges (invalid!)
     let mut invalid_unstake = CommitmentTransaction::new_unstake(consensus_config, anchor);
-    invalid_unstake.signer = peer_addr;
+    invalid_unstake.set_signer(peer_addr);
     peer_signer.sign_commitment(&mut invalid_unstake)?;
 
     let block_prod_strategy = EvilBlockProdStrategy {
@@ -286,7 +286,7 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
 
     // Create an unstake commitment for a user that was never staked (invalid!)
     let mut invalid_unstake = CommitmentTransaction::new_unstake(consensus_config, anchor);
-    invalid_unstake.signer = never_staked_addr;
+    invalid_unstake.set_signer(never_staked_addr);
     never_staked_signer.sign_commitment(&mut invalid_unstake)?;
 
     let block_prod_strategy = EvilBlockProdStrategy {

@@ -528,10 +528,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         let pledge_tx = peer_node.post_pledge_commitment(None).await?;
 
         // Wait for commitment transactions to show up in this node's mempool
-        self.wait_for_mempool(stake_tx.id, seconds_to_wait)
+        self.wait_for_mempool(stake_tx.id(), seconds_to_wait)
             .await
             .expect("stake tx to be in mempool");
-        self.wait_for_mempool(pledge_tx.id, seconds_to_wait)
+        self.wait_for_mempool(pledge_tx.id(), seconds_to_wait)
             .await
             .expect("pledge tx to be in mempool");
 
@@ -2083,7 +2083,7 @@ impl IrysNodeTest<IrysNodeCtx> {
 
         // Ingest commitment txs into peer's mempool
         for commitment_tx in block_transactions.commitment_txs.iter() {
-            tracing::error!(?commitment_tx.id);
+            tracing::error!("{}", commitment_tx.id());
 
             let (tx, rx) = tokio::sync::oneshot::channel();
             peer.node_ctx
@@ -2550,7 +2550,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         .await;
 
         signer.sign_commitment(&mut pledge_tx).unwrap();
-        info!("Generated pledge_tx.id: {}", pledge_tx.id);
+        info!("Generated pledge_tx.id: {}", pledge_tx.id());
 
         // Submit pledge commitment via API
         let api_uri = self.node_ctx.config.node_config.local_api_url();
@@ -2578,7 +2578,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         )
         .await;
         signer.sign_commitment(&mut pledge_tx).unwrap();
-        info!("Generated pledge_tx.id: {}", pledge_tx.id);
+        info!("Generated pledge_tx.id: {}", pledge_tx.id());
 
         // Submit pledge commitment via API
         self.post_commitment_tx(&pledge_tx)
@@ -2612,7 +2612,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
         let signer = self.cfg.signer();
         signer.sign_commitment(&mut stake_tx).unwrap();
-        info!("Generated stake_tx.id: {}", stake_tx.id);
+        info!("Generated stake_tx.id: {}", stake_tx.id());
 
         // Submit stake commitment via public API
         let api_uri = self.node_ctx.config.node_config.local_api_url();
@@ -2631,7 +2631,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let anchor = self.get_anchor().await?;
         let mut stake_tx = CommitmentTransaction::new_stake(config, anchor);
         signer.sign_commitment(&mut stake_tx).unwrap();
-        info!("Generated stake_tx.id: {}", stake_tx.id);
+        info!("Generated stake_tx.id: {}", stake_tx.id());
 
         // Submit stake commitment via public API
         let api_uri = self.node_ctx.config.node_config.local_api_url();
@@ -2668,7 +2668,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         api_uri: &str,
         commitment_tx: &CommitmentTransaction,
     ) -> eyre::Result<()> {
-        info!("Posting Commitment TX: {}", commitment_tx.id);
+        info!("Posting Commitment TX: {}", commitment_tx.id());
 
         let client = reqwest::Client::new();
         let url = format!("{}/v1/commitment-tx", api_uri);
@@ -2680,7 +2680,7 @@ impl IrysNodeTest<IrysNodeCtx> {
                 error!("Failed to post commitment transaction: {e}");
                 return Err(eyre::eyre!(
                     "Failed to post commitment transaction {}: {e}",
-                    &commitment_tx.id
+                    &commitment_tx.id()
                 ));
             }
         };
@@ -2704,7 +2704,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             );
             Err(eyre::eyre!(
                 "Posted commitment transaction {} but got HTTP response code: {:?}",
-                &commitment_tx.id,
+                &commitment_tx.id(),
                 status
             ))
         } else {
