@@ -17,9 +17,10 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash,
-    GossipBroadcastMessageV2, IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
+    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;

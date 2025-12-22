@@ -25,12 +25,13 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
+use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessageV2, GossipDataV2,
-    GossipDataRequestV2, GossipRequest, IngressProof, IrysBlockHeader, MempoolConfig, NodeConfig,
-    NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
-    TokioServiceHandle, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
+    IrysBlockHeader, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerScore, RethPeerInfo, TokioServiceHandle, TxChunkOffset, TxKnownStatus,
+    UnpackedChunk, H256,
 };
 use irys_types::{BlockTransactions, IrysAddress};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
@@ -54,7 +55,9 @@ pub(crate) struct MempoolStub {
 
 impl MempoolStub {
     #[must_use]
-    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>) -> Self {
+    pub(crate) fn new(
+        internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+    ) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),

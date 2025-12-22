@@ -1,23 +1,24 @@
 use crate::{
-    BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
-    IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
+    BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
+    IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
 use reth_primitives::Block;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
-use std::sync::Arc;
 
 pub mod v1 {
-    use std::fmt::Debug;
-    use std::sync::Arc;
+    use crate::{
+        BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, GossipCacheKey,
+        IngressProof, IrysBlockHeader, UnpackedChunk, H256,
+    };
     use alloy_primitives::B256;
     use reth_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
-    use crate::{BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256};
-    use crate::v2::GossipDataRequestV2;
+    use std::fmt::Debug;
+    use std::sync::Arc;
 
     #[derive(Clone, Debug)]
     pub struct GossipBroadcastMessageV1 {
@@ -93,16 +94,15 @@ pub mod v1 {
         IngressProof(IngressProof),
     }
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GossipData {
-    Chunk(UnpackedChunk),
-    Transaction(DataTransactionHeader),
-    CommitmentTransaction(CommitmentTransaction),
-    Block(Arc<IrysBlockHeader>),
-    ExecutionPayload(Block),
-    IngressProof(IngressProof),
-}
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub enum GossipData {
+        Chunk(UnpackedChunk),
+        Transaction(DataTransactionHeader),
+        CommitmentTransaction(CommitmentTransaction),
+        Block(Arc<IrysBlockHeader>),
+        ExecutionPayload(Block),
+        IngressProof(IngressProof),
+    }
 
     impl From<SealedBlock<Block>> for GossipDataV1 {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
@@ -120,7 +120,7 @@ pub enum GossipData {
                     format!("transaction {}", tx.id)
                 }
                 Self::CommitmentTransaction(commitment_tx) => {
-                    format!("commitment transaction {}", commitment_tx.id)
+                    format!("commitment transaction {}", commitment_tx.id())
                 }
                 Self::Block(block) => {
                     format!("block {} height: {}", block.block_hash, block.height)
@@ -169,13 +169,16 @@ pub enum GossipData {
 }
 
 pub mod v2 {
-    use std::fmt::Debug;
-    use std::sync::Arc;
+    use crate::{
+        BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader,
+        GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256,
+    };
     use alloy_primitives::B256;
     use reth_primitives::Block;
     use reth_primitives_traits::SealedBlock;
     use serde::{Deserialize, Serialize};
-    use crate::{BlockBody, BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, GossipCacheKey, IngressProof, IrysBlockHeader, UnpackedChunk, H256};
+    use std::fmt::Debug;
+    use std::sync::Arc;
 
     #[derive(Clone, Debug)]
     pub struct GossipBroadcastMessageV2 {
@@ -262,22 +265,14 @@ pub mod v2 {
         pub fn to_v1(&self) -> Option<super::v1::GossipDataV1> {
             match self {
                 Self::Chunk(chunk) => Some(super::v1::GossipDataV1::Chunk(chunk.clone())),
-                Self::Transaction(tx) => {
-                    Some(super::v1::GossipDataV1::Transaction(tx.clone()))
-                }
-                Self::CommitmentTransaction(commitment_tx) => {
-                    Some(super::v1::GossipDataV1::CommitmentTransaction(
-                        commitment_tx.clone(),
-                    ))
-                }
-                Self::BlockHeader(block) => {
-                    Some(super::v1::GossipDataV1::Block(block.clone()))
-                }
-                Self::ExecutionPayload(execution_payload_data) => {
-                    Some(super::v1::GossipDataV1::ExecutionPayload(
-                        execution_payload_data.clone(),
-                    ))
-                }
+                Self::Transaction(tx) => Some(super::v1::GossipDataV1::Transaction(tx.clone())),
+                Self::CommitmentTransaction(commitment_tx) => Some(
+                    super::v1::GossipDataV1::CommitmentTransaction(commitment_tx.clone()),
+                ),
+                Self::BlockHeader(block) => Some(super::v1::GossipDataV1::Block(block.clone())),
+                Self::ExecutionPayload(execution_payload_data) => Some(
+                    super::v1::GossipDataV1::ExecutionPayload(execution_payload_data.clone()),
+                ),
                 Self::IngressProof(ingress_proof) => {
                     Some(super::v1::GossipDataV1::IngressProof(ingress_proof.clone()))
                 }
@@ -294,7 +289,7 @@ pub mod v2 {
                     format!("transaction {}", tx.id)
                 }
                 Self::CommitmentTransaction(commitment_tx) => {
-                    format!("commitment transaction {}", commitment_tx.id)
+                    format!("commitment transaction {}", commitment_tx.id())
                 }
                 Self::BlockHeader(block) => {
                     format!("block {} height: {}", block.block_hash, block.height)
@@ -386,7 +381,7 @@ impl GossipCacheKey {
     }
 
     pub fn commitment_transaction(commitment_tx: &CommitmentTransaction) -> Self {
-        Self::Transaction(commitment_tx.id)
+        Self::Transaction(commitment_tx.id())
     }
 
     pub fn irys_block(block: &IrysBlockHeader) -> Self {

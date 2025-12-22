@@ -25,7 +25,8 @@ use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::Mempoo
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
-use irys_types::{Config, DatabaseProvider, GossipBroadcastMessageV2, IrysAddress, P2PGossipConfig};
+use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::{Config, DatabaseProvider, IrysAddress, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;

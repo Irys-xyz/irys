@@ -16,10 +16,11 @@ use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
 };
 use irys_reward_curve::HalvingCurve;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     get_ingress_proofs, BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config,
-    DataLedger, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessageV2, IrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle, H256,
+    DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId,
+    TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;

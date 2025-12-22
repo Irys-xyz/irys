@@ -32,9 +32,9 @@ use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockTransactions,
     CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    GossipBroadcastMessageV2, H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
-    Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs,
-    VDFLimiterInfo, H256, U256,
+    H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
+    SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo,
+    H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -93,6 +93,7 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
 mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
+use irys_types::v2::GossipBroadcastMessageV2;
 
 /// Result of checking parent validity and solution compatibility
 #[derive(Debug)]

@@ -7,11 +7,11 @@ use irys_database::{
 use irys_domain::get_optimistic_chain;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, calculate_term_fee};
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::TxKnownStatus;
 use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
-    DataLedger, DataTransactionHeader, GossipBroadcastMessageV2, IrysTransactionCommon as _,
-    IrysTransactionId, H256, U256,
+    DataLedger, DataTransactionHeader, IrysTransactionCommon as _, IrysTransactionId, H256, U256,
 };
 use reth_db::transaction::DbTxMut as _;
 use reth_db::Database as _;

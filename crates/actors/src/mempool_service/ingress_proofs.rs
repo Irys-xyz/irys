@@ -8,7 +8,8 @@ use irys_database::{
 use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
-use irys_types::{Config, DataRoot, DatabaseProvider, GossipBroadcastMessageV2, IngressProof, H256};
+use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::{Config, DataRoot, DatabaseProvider, IngressProof, H256};
 use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, instrument, warn};
 

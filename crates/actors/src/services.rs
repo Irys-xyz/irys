@@ -16,7 +16,8 @@ use crate::{
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
-use irys_types::{GossipBroadcastMessageV2, PeerNetworkSender, PeerNetworkServiceMessage};
+use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{

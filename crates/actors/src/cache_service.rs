@@ -12,9 +12,10 @@ use irys_database::{
 };
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::ingress::CachedIngressProof;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    Config, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessageV2, IngressProof,
-    LedgerChunkOffset, TokioServiceHandle, UnixTimestamp, GIGABYTE,
+    Config, DataLedger, DataRoot, DatabaseProvider, IngressProof, LedgerChunkOffset,
+    TokioServiceHandle, UnixTimestamp, GIGABYTE,
 };
 use reth::tasks::shutdown::Shutdown;
 use reth_db::cursor::DbCursorRO as _;

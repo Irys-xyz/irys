@@ -7,11 +7,11 @@ use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey,
-    GossipDataV2, GossipDataRequestV2, GossipRequest, IrysAddress, IrysBlockHeader,
-    IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
-    VersionRequest, DATA_REQUEST_RETRIES, H256,
+    GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse, NodeInfo, PeerAddress,
+    PeerListItem, PeerNetworkError, PeerResponse, VersionRequest, DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -21,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, error, warn};
-use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
@@ -692,13 +691,13 @@ impl GossipClient {
     }
 
     /// Pull a block from a specific peer, updating its score accordingly.
-    pub async fn pull_block_from_peer(
+    pub async fn pull_block_header_from_peer(
         &self,
         block_hash: BlockHash,
         peer: &(IrysAddress, PeerListItem),
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
-        let data_request = GossipDataRequestV2::Block(block_hash);
+        let data_request = GossipDataRequestV2::BlockHeader(block_hash);
         for attempt in 0..2 {
             match self
                 .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)

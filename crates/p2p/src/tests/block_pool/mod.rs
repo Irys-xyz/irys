@@ -14,9 +14,10 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, GossipDataV2, GossipDataRequestV2, IrysAddress, NodeConfig,
-    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
+    BlockBody, Config, DatabaseProvider, IrysAddress, NodeConfig, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerScore, RethPeerInfo,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -318,7 +319,9 @@ async fn should_process_block_with_intermediate_block_in_api() {
                 .await
                 .expect("to process block");
             });
-            GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(block_for_response))))
+            GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
+                block_for_response,
+            ))))
         }
         GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
         GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),

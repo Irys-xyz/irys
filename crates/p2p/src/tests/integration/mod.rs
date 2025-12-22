@@ -3,10 +3,8 @@ use crate::SyncChainServiceMessage;
 use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
-use irys_types::{
-    BlockHash, DataTransactionLedger, GossipBroadcastMessageV2, H256List, IrysBlockHeader,
-    IrysBlockHeaderV1,
-};
+use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::{BlockHash, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1};
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;

@@ -1,5 +1,6 @@
 use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress};
 
+use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;

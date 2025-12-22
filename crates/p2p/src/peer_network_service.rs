@@ -5,11 +5,12 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, GossipDataRequestV2,
-    HandshakeMessage, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
-    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
+    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
+    IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode, PeerListItem,
+    PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse, RejectedResponse,
+    RethPeerInfo, TokioServiceHandle, VersionRequest,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -23,6 +24,7 @@ use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::{debug, error, info, instrument, warn};
+
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);

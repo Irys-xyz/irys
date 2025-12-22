@@ -1514,9 +1514,10 @@ mod tests {
         use crate::types::GossipResponse;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, GossipDataV2, GossipDataRequestV2, IrysAddress, IrysBlockHeader,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1759,10 +1760,10 @@ mod tests {
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, GossipDataV2, GossipDataRequestV2, IrysAddress, IrysBlockHeader,
-            NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
-            SyncMode,
+            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, NodeInfo,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
