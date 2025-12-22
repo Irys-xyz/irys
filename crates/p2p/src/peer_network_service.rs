@@ -765,6 +765,14 @@ impl PeerNetworkService {
                                     )),
                                 ));
                             }
+                            RejectionReason::UnsupportedProtocolVersion(unsupported_version) => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} has unsupported protocol version {}",
+                                        peer.0, unsupported_version
+                                    )),
+                                ));
+                            }
                         }
                     }
                     Err(err) => {

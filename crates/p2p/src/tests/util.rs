@@ -25,6 +25,7 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
+use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
@@ -750,6 +751,13 @@ impl FakeGossipServer {
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
                 .service(web::resource("/gossip/pull_data").route(web::post().to(handle_pull_data)))
+                .service(
+                    web::resource("/gossip/v2/get_data").route(web::post().to(handle_get_data_v2)),
+                )
+                .service(
+                    web::resource("/gossip/v2/pull_data")
+                        .route(web::post().to(handle_pull_data_v2)),
+                )
                 .service(web::resource("/gossip/info").route(web::get().to(handle_info)))
                 .service(
                     web::resource("/gossip/block-index").route(web::get().to(handle_block_index)),
@@ -773,7 +781,7 @@ impl FakeGossipServer {
     }
 }
 
-async fn handle_get_data(
+async fn handle_get_data_v2(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
     data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
     _req: actix_web::HttpRequest,
@@ -826,7 +834,21 @@ async fn handle_get_data(
     }
 }
 
-async fn handle_pull_data(
+async fn handle_get_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+    req: actix_web::HttpRequest,
+) -> HttpResponse {
+    let v1_request = data_request.0;
+    let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+    let v2_request = GossipRequest {
+        miner_address: v1_request.miner_address,
+        data: v2_data_request,
+    };
+    handle_get_data_v2(handler, web::Json(v2_request), req).await
+}
+
+async fn handle_pull_data_v2(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
     data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
     _req: actix_web::HttpRequest,
@@ -840,6 +862,49 @@ async fn handle_pull_data(
             HttpResponse::Ok()
                 .content_type("application/json")
                 .json(response)
+        }
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process a request")
+        }
+    }
+}
+
+async fn handle_pull_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    let v1_request = data_request.0;
+    let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+    let v2_request = GossipRequest {
+        miner_address: v1_request.miner_address,
+        data: v2_data_request,
+    };
+
+    warn!(
+        "Fake server got pull data v1 request: {:?}",
+        v2_request.data
+    );
+
+    match handler.read() {
+        Ok(handler) => {
+            let data_request = v2_request.data.clone();
+            let response = handler.call_on_pull_data_request(data_request);
+            // response is GossipResponse<Option<GossipDataV2>>
+
+            let response_v1 = match response {
+                GossipResponse::Accepted(maybe_data) => {
+                    GossipResponse::Accepted(maybe_data.and_then(|d| d.to_v1()))
+                }
+                GossipResponse::Rejected(r) => GossipResponse::Rejected(r),
+            };
+
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .json(response_v1)
         }
         Err(e) => {
             warn!("Failed to acquire read lock on handler: {}", e);

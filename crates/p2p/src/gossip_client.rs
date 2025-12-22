@@ -11,7 +11,8 @@ use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey,
     GossipRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse, NodeInfo, PeerAddress,
-    PeerListItem, PeerNetworkError, PeerResponse, VersionRequest, DATA_REQUEST_RETRIES, H256,
+    PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion, VersionRequest,
+    DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -48,7 +49,7 @@ pub struct GossipClient {
 }
 
 impl GossipClient {
-    pub const CURRENT_PROTOCOL_VERSION: u32 = 1;
+    pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
     #[must_use]
     pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
@@ -1181,6 +1182,15 @@ impl GossipClient {
                                 ));
                                 all_failures_were_handshake = false;
                             }
+                            RejectionReason::UnsupportedProtocolVersion(unsupported_version) => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Request {:?}: Peer {:?} doesn't support protocol version {:?}",
+                                        data_request, address, unsupported_version
+                                    )),
+                                ));
+                                all_failures_were_handshake = false;
+                            }
                         }
                         // Do not retry the same peer on rejection
                     }
@@ -1409,6 +1419,15 @@ impl GossipClient {
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "{}: Peer {:?} rejected with {:?}",
                                         url, peer.0, reason
+                                    )),
+                                ));
+                                round_failures_were_handshake = false;
+                            }
+                            RejectionReason::UnsupportedProtocolVersion(unsupported_version) => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "{}: Peer {:?} doesn't support protocol version {:?}",
+                                        url, peer.0, unsupported_version
                                     )),
                                 ));
                                 round_failures_were_handshake = false;

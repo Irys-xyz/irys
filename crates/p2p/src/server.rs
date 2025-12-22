@@ -553,9 +553,9 @@ where
             ));
         }
 
-        if version_request.protocol_version != ProtocolVersion::V1 {
+        if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
             return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
-                RejectionReason::ProtocolMismatch,
+                RejectionReason::UnsupportedProtocolVersion(version_request.protocol_version as u32),
             ));
         }
 
@@ -581,6 +581,7 @@ where
         let mining_addr = version_request.mining_address;
         let peer_list_entry = PeerListItem {
             address: peer_address,
+            protocol_version: version_request.protocol_version,
             ..Default::default()
         };
 

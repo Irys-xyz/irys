@@ -241,4 +241,5 @@ pub enum RejectionReason {
     UnableToVerifyOrigin,
     InvalidCredentials,
     ProtocolMismatch,
+    UnsupportedProtocolVersion(u32),
 }

@@ -30,16 +30,26 @@ pub enum PeerResponse {
 pub enum ProtocolVersion {
     #[default]
     V1 = 1,
-    // V2 = 2,
-    // V3 = 3,
+    V2 = 2,
 }
 
 impl From<u32> for ProtocolVersion {
     fn from(v: u32) -> Self {
         match v {
             1 => Self::V1,
+            2 => Self::V2,
             _ => Self::default(),
         }
+    }
+}
+
+impl ProtocolVersion {
+    pub const fn current() -> Self {
+        Self::V2
+    }
+
+    pub fn supported_versions() -> &'static [ProtocolVersion] {
+        &[Self::V1, Self::V2]
     }
 }
 

@@ -802,13 +802,16 @@ mod tests {
     }
 
     #[test]
-    fn peer_list_item_from_compact_missing_is_online() {
-        let item = PeerListItem::default();
+    fn peer_list_item_from_compact_missing_is_online_and_protocol_version() {
+        let item = PeerListItem {
+            protocol_version: ProtocolVersion::V2,
+            ..PeerListItem::default()
+        };
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
-        // Remove the optional is_online byte
+        // Remove the optional is_online byte and protocol version bytes
         assert!(!buf.is_empty());
-        buf.truncate(buf.len() - 1);
+        buf.truncate(buf.len() - 5);
 
         let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
         assert!(
@@ -816,10 +819,14 @@ mod tests {
             "expected no remainder after decoding without is_online byte"
         );
 
+        println!("{:?}", decoded);
+
         assert_eq!(decoded.reputation_score, item.reputation_score);
         assert_eq!(decoded.response_time, item.response_time);
         assert_eq!(decoded.address, item.address);
         assert_eq!(decoded.last_seen, item.last_seen);
         assert!(!decoded.is_online);
+        assert_ne!(decoded.protocol_version, item.protocol_version);
+        assert_eq!(decoded.protocol_version, ProtocolVersion::default());
     }
 }
