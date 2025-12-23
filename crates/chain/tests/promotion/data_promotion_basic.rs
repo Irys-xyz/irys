@@ -485,7 +485,12 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     assert!(resp.is_ok());
 
     // the ingress proof should be able to promote a tx
+    let height = genesis_node.get_canonical_chain_height().await;
     genesis_node.mine_block().await?;
+    // Wait for BlockConfirmed to be processed by mempool before checking promotion status
+    genesis_node
+        .wait_until_height_confirmed(height + 1, seconds_to_wait)
+        .await?;
     let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
     assert!(is_promoted);
 
