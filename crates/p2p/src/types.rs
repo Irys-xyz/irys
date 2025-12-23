@@ -242,4 +242,5 @@ pub enum RejectionReason {
     InvalidCredentials,
     ProtocolMismatch,
     UnsupportedProtocolVersion(u32),
+    UnsupportedFeature,
 }
