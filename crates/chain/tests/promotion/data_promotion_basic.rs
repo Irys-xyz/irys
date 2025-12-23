@@ -484,15 +484,27 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // TODO proper error typing
     assert!(resp.is_ok());
 
-    // the ingress proof should be able to promote a tx
-    let height = genesis_node.get_canonical_chain_height().await;
-    genesis_node.mine_block().await?;
-    // Wait for BlockConfirmed to be processed by mempool before checking promotion status
+    // Wait for ingress proof to be stored in DB before mining.
+    // BlockConfirmed handler looks up proofs from DB to determine promotability.
+    // If we mine before the proof is persisted, promotion won't happen.
     genesis_node
-        .wait_until_height_confirmed(height + 1, seconds_to_wait)
+        .wait_for_ingress_proofs_no_mining(vec![data_tx.header.id], seconds_to_wait)
         .await?;
-    let is_promoted = genesis_node.get_is_promoted(&data_tx.header.id).await?;
-    assert!(is_promoted);
+
+    // Mine a block - the ingress proof should enable promotion
+    genesis_node.mine_block().await?;
+
+    // Poll for promotion status - mempool processes BlockConfirmed asynchronously
+    // Use 100ms intervals for faster detection (300 checks over 30 seconds)
+    let mut is_promoted = false;
+    for _ in 0..(seconds_to_wait * 10) {
+        if genesis_node.get_is_promoted(&data_tx.header.id).await? {
+            is_promoted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(is_promoted, "Transaction was not promoted within timeout");
 
     // Wind down test
     genesis_node.stop().await;
