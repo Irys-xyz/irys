@@ -11,12 +11,15 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
+use irys_database::db::IrysDatabaseExt;
+use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
     DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, UnixTimestampMs, H256,
     U256,
 };
 use reth::payload::EthBuiltPayload;
+use reth_db::transaction::DbTxMut;
 
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
@@ -154,6 +157,13 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     let mut irys_block = block.as_ref().clone();
     irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
+    // Re signing actually changes the block hash, so we need to manually insert the header to the db
+    //  for this test to work, because fetching the block body from the peer now requires that
+    //  peer to actually have this block header in its database/mempool/cache
+    peer_node.node_ctx.db.update_eyre(|tx| {
+        tx.put::<IrysBlockHeaders>(irys_block.block_hash, irys_block.clone().into())?;
+        Ok(())
+    })?;
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 

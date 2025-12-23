@@ -1099,13 +1099,19 @@ where
                         )
                         .await
                         .map_err(|err| {
+                            error!(
+                                "Error building block body for block {:?}: {:?}",
+                                block_hash, err
+                            );
                             GossipError::Internal(InternalGossipError::Unknown(format!(
                                 "Error building block body for block {}: {}",
                                 block_hash, err
                             )))
                         })?;
+                        debug!("Successfully built block body for block {:?}", block_hash);
                         Some(Arc::new(block_body))
                     } else {
+                        warn!("Didn't find the block header to build the block body for the block {:?}", block_hash);
                         None
                     }
                 };

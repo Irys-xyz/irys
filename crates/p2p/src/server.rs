@@ -839,7 +839,16 @@ where
                     )
                     .route("/get_data", web::post().to(Self::handle_data_request))
                     .route("/pull_data", web::post().to(Self::handle_pull_data))
-                    .route("/version", web::post().to(Self::handle_version)),
+                    .route("/version", web::post().to(Self::handle_version))
+                    .route("/health", web::get().to(Self::handle_health_check))
+                    .route(
+                        "/stake_and_pledge_whitelist",
+                        web::get().to(Self::handle_stake_and_pledge_whitelist),
+                    )
+                    .route("/info", web::get().to(Self::handle_info))
+                    .route("/peer-list", web::get().to(Self::handle_peer_list))
+                    .route("/version", web::post().to(Self::handle_version))
+                    .route("/block-index", web::get().to(Self::handle_block_index)),
             )
             .route("/transaction", web::post().to(Self::handle_transaction))
             .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
