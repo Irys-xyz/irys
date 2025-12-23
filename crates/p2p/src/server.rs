@@ -847,7 +847,6 @@ where
                     )
                     .route("/info", web::get().to(Self::handle_info))
                     .route("/peer-list", web::get().to(Self::handle_peer_list))
-                    .route("/version", web::post().to(Self::handle_version))
                     .route("/block-index", web::get().to(Self::handle_block_index)),
             )
             .route("/transaction", web::post().to(Self::handle_transaction))
