@@ -96,6 +96,12 @@ impl GossipClient {
         let start_time = std::time::Instant::now();
 
         let res = if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
+            if let GossipDataRequestV2::BlockBody(_) = requested_data {
+                return Ok(GossipResponse::Rejected(
+                    RejectionReason::UnsupportedFeature,
+                ));
+            }
+
             let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
             if let Some(req_v1) = requested_data.to_v1() {
                 self.send_data_internal(url, &req_v1).await
