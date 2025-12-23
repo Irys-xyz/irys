@@ -2370,6 +2370,10 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.config.node_config.peer_address().api
     }
 
+    pub fn get_gossip_addr(&self) -> SocketAddr {
+        self.node_ctx.config.node_config.peer_address().gossip
+    }
+
     // Build a signed VersionRequest describing this node
     pub fn build_version_request(&self) -> HandshakeRequest {
         let mut vr = HandshakeRequest {
@@ -2390,7 +2394,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
         let vr = self.build_version_request();
         self.get_gossip_client()
-            .post_version(dst.get_peer_addr(), vr)
+            .post_version(dst.get_gossip_addr(), vr)
             .await?;
         Ok(())
     }

@@ -389,6 +389,7 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
         .execution_payload_provider
         .add_payload_to_cache(sealed_block.clone())
         .await;
+    fixture1.add_block_header_to_mempool(block.clone()).await;
 
     let execution_payload_provider2 = fixture2.execution_payload_provider.clone();
     let mut sync_rx = fixture2._sync_rx.take().expect("expect to have a sync rx");
