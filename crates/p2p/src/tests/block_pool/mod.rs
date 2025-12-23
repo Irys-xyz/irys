@@ -8,16 +8,17 @@ use crate::tests::util::{
 use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::mempool_guard::MempoolReadGuard;
+use irys_actors::mempool_service::{create_state, AtomicMempoolState};
 use irys_actors::services::ServiceSenders;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
 use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    Config, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, NodeConfig, PeerAddress,
-    PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
+    BlockBody, Config, DatabaseProvider, IrysAddress, MempoolConfig, NodeConfig, PeerAddress,
+    PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -86,7 +87,10 @@ impl MockedServices {
             ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mempool_stub = MempoolStub::new(tx);
+        let mempool_config = MempoolConfig::testing();
+        let state = create_state(&mempool_config, &[]);
+        let mempool_state = AtomicMempoolState::new(state);
+        let mempool_stub = MempoolStub::new(tx, mempool_state);
 
         let vdf_state_readonly =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));
@@ -176,7 +180,7 @@ async fn should_process_block() {
     service
         .process_block(
             Arc::clone(&test_header),
-            BlockTransactions::default(),
+            Arc::new(BlockBody::default()),
             false,
         )
         .await
@@ -260,6 +264,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         },
         true,
     );
@@ -303,22 +308,29 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let block_for_server = block2.clone();
     let pool_for_server = block_pool.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
-        GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
-        GossipDataRequest::Block(block_hash) => {
+        GossipDataRequestV2::ExecutionPayload(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::BlockHeader(block_hash) => {
             let block = block_for_server.clone();
             let block_for_response = block.clone();
             let pool = pool_for_server.clone();
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                pool.process_block(Arc::new(block.clone()), BlockTransactions::default(), false)
-                    .await
-                    .expect("to process block");
+                pool.process_block(
+                    Arc::new(block.clone()),
+                    Arc::new(BlockBody::default()),
+                    false,
+                )
+                .await
+                .expect("to process block");
             });
-            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(block_for_response))))
+            GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
+                block_for_response,
+            ))))
         }
-        GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
-        GossipDataRequest::Transaction(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -329,7 +341,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
 
     // Process block3
     block_pool
-        .process_block(Arc::clone(&block3), BlockTransactions::default(), false)
+        .process_block(Arc::clone(&block3), Arc::new(BlockBody::default()), false)
         .await
         .expect("can't process block");
 
@@ -428,6 +440,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         },
         true,
     );
@@ -476,18 +489,19 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     let block_for_server = Arc::new(RwLock::new(None));
     let block_for_server_clone = block_for_server.clone();
     gossip_server.set_on_pull_data_request(move |data_request| match data_request {
-        GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
-        GossipDataRequest::Block(block_hash) => {
+        GossipDataRequestV2::ExecutionPayload(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::BlockHeader(block_hash) => {
             debug!("Received a request to pull the block: {:?}", block_hash);
             let block_for_server = block_for_server_clone
                 .read()
                 .unwrap()
                 .clone()
-                .map(|b| GossipData::Block(Arc::new(b)));
+                .map(|b| GossipDataV2::BlockHeader(Arc::new(b)));
             GossipResponse::Accepted(block_for_server)
         }
-        GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
-        GossipDataRequest::Transaction(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
     });
 
     let block2 = Arc::new(block2.clone());
@@ -500,7 +514,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
 
     // Process block3
     block_pool
-        .process_block(Arc::clone(&block3), BlockTransactions::default(), false)
+        .process_block(Arc::clone(&block3), Arc::new(BlockBody::default()), false)
         .await
         .expect("can't process block");
 
@@ -520,7 +534,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
     // Process block4 to trigger reprocessing of block2 and then block3
     block_pool
-        .process_block(Arc::clone(&block4), BlockTransactions::default(), false)
+        .process_block(Arc::clone(&block4), Arc::new(BlockBody::default()), false)
         .await
         .expect("can't process block");
 
@@ -615,7 +629,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     let res = block_pool
         .process_block(
             Arc::new(header_building_on_very_old_block.clone()),
-            BlockTransactions::default(),
+            Arc::new(BlockBody::default()),
             false,
         )
         .await;
@@ -670,6 +684,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         },
         true,
     );
@@ -763,7 +778,11 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
                 let res = pool
-                    .process_block(Arc::new(block.clone()), BlockTransactions::default(), false)
+                    .process_block(
+                        Arc::new(block.clone()),
+                        Arc::new(BlockBody::default()),
+                        false,
+                    )
                     .await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
@@ -788,7 +807,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
     let res = block_pool
-        .process_block(Arc::new(bogus_block), BlockTransactions::default(), false)
+        .process_block(Arc::new(bogus_block), Arc::new(BlockBody::default()), false)
         .await;
 
     sync_service_handle.shutdown_signal.fire();
@@ -848,7 +867,7 @@ async fn should_not_fast_track_block_already_in_index() {
     let err = service
         .process_block(
             Arc::new(test_header.clone()),
-            BlockTransactions::default(),
+            Arc::new(BlockBody::default()),
             true,
         )
         .await

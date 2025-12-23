@@ -16,7 +16,8 @@ use crate::{
 };
 use core::ops::Deref;
 use irys_domain::PeerEvent;
-use irys_types::{GossipBroadcastMessage, PeerNetworkSender, PeerNetworkServiceMessage};
+use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::{PeerNetworkSender, PeerNetworkServiceMessage};
 use irys_vdf::VdfStep;
 use std::sync::Arc;
 use tokio::sync::{
@@ -99,7 +100,7 @@ pub struct ServiceReceivers {
     pub vdf_fast_forward: UnboundedReceiver<VdfStep>,
     pub storage_modules: UnboundedReceiver<StorageModuleServiceMessage>,
     pub data_sync: UnboundedReceiver<DataSyncServiceMessage>,
-    pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessage>,
+    pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
@@ -122,7 +123,7 @@ pub struct ServiceSendersInner {
     pub vdf_fast_forward: UnboundedSender<VdfStep>,
     pub storage_modules: UnboundedSender<StorageModuleServiceMessage>,
     pub data_sync: UnboundedSender<DataSyncServiceMessage>,
-    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessage>,
+    pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub block_index: UnboundedSender<BlockIndexServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
@@ -149,7 +150,7 @@ impl ServiceSendersInner {
         let (sm_sender, sm_receiver) = unbounded_channel::<StorageModuleServiceMessage>();
         let (ds_sender, ds_receiver) = unbounded_channel::<DataSyncServiceMessage>();
         let (gossip_broadcast_sender, gossip_broadcast_receiver) =
-            unbounded_channel::<GossipBroadcastMessage>();
+            unbounded_channel::<GossipBroadcastMessageV2>();
         let (block_tree_sender, block_tree_receiver) =
             unbounded_channel::<BlockTreeServiceMessage>();
         let (block_index_sender, block_index_receiver) =

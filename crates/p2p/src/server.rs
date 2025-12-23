@@ -8,6 +8,7 @@ use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
 };
+use actix_web::dev::HttpServiceFactory;
 use actix_web::{
     dev::Server,
     http::header::ContentType,
@@ -16,10 +17,12 @@ use actix_web::{
 };
 use irys_actors::{block_discovery::BlockDiscoveryFacade, mempool_service::MempoolFacade};
 use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
+use irys_types::v1::GossipDataRequestV1;
+use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    parse_user_agent, AcceptedResponse, BlockIndexQuery, CommitmentTransaction,
-    DataTransactionHeader, GossipDataRequest, GossipRequest, IngressProof, IrysAddress,
-    IrysBlockHeader, PeerListItem, ProtocolVersion, UnpackedChunk, VersionRequest,
+    parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
+    GossipRequest, HandshakeRequest, HandshakeResponse, IngressProof, IrysAddress, IrysBlockHeader,
+    PeerListItem, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
@@ -35,7 +38,7 @@ use tracing_actix_web::TracingLogger;
 const DEFAULT_DUPLICATE_REQUEST_MILLISECONDS: u128 = 10_000; // 10 seconds
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B>
+pub struct GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
@@ -62,7 +65,7 @@ where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
 {
-    pub(crate) const fn new(
+    pub const fn new(
         gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
     ) -> Self {
@@ -149,7 +152,7 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_block(
+    async fn handle_block_header(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
         req: actix_web::HttpRequest,
@@ -173,9 +176,10 @@ where
             ));
         };
 
-        let peer = match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
-            Err(error_response) => return error_response,
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
+        {
+            return error_response;
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
@@ -195,7 +199,7 @@ where
                 let block_hash_string = gossip_request.data.block_hash;
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(gossip_request, peer.address.api, source_socket_addr)
+                    .handle_block_header(gossip_request, source_socket_addr)
                     .in_current_span()
                     .await
                 {
@@ -219,6 +223,71 @@ where
         debug!(
             "Node {:?}: Started handling block {} height {} and returned ok response to the peer",
             this_node_id, block_hash, block_height
+        );
+        HttpResponse::Ok().json(GossipResponse::Accepted(()))
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_block_body(
+        server: Data<Self>,
+        irys_block_header_json: web::Json<GossipRequest<BlockBody>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        if !server.data_handler.sync_state.is_gossip_reception_enabled() {
+            let node_id = server.data_handler.gossip_client.mining_address;
+            let block_hash = irys_block_header_json.0.data.block_hash;
+            warn!(
+                "Node {}: Gossip reception is disabled, ignoring block header {:?}",
+                node_id, block_hash
+            );
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::GossipDisabled,
+            ));
+        }
+        let gossip_request = irys_block_header_json.0;
+        let source_miner_address = gossip_request.miner_address;
+        let Some(source_socket_addr) = req.peer_addr() else {
+            return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                RejectionReason::UnableToVerifyOrigin,
+            ));
+        };
+
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
+        {
+            return error_response;
+        };
+        server.peer_list.set_is_online(&source_miner_address, true);
+
+        let this_node_id = server.data_handler.gossip_client.mining_address;
+        let block_hash = gossip_request.data.block_hash;
+
+        let handler = server.data_handler.clone();
+
+        tokio::spawn(
+            async move {
+                if let Err(e) = handler
+                    .handle_block_body(gossip_request, source_socket_addr)
+                    .await
+                {
+                    Self::handle_invalid_data(&source_miner_address, &e, &server.peer_list);
+                    error!(
+                        "Node {:?}: Failed to process the block body {}: {:?}",
+                        this_node_id, block_hash, e
+                    );
+                } else {
+                    info!(
+                        "Node {:?}: Server handler handled block body {}",
+                        this_node_id, block_hash
+                    );
+                }
+            }
+            .in_current_span(),
+        );
+
+        debug!(
+            "Node {:?}: Started handling block body {} and returned ok response to the peer",
+            this_node_id, block_hash
         );
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
@@ -462,16 +531,16 @@ where
     async fn handle_version(
         server: Data<Self>,
         req: actix_web::HttpRequest,
-        body: web::Json<VersionRequest>,
+        body: web::Json<HandshakeRequest>,
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
@@ -479,19 +548,21 @@ where
         let version_request = body.into_inner();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
 
-        if version_request.protocol_version != ProtocolVersion::V1 {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
-                RejectionReason::ProtocolMismatch,
+        if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
+                RejectionReason::UnsupportedProtocolVersion(
+                    version_request.protocol_version as u32,
+                ),
             ));
         }
 
         if !version_request.verify_signature() {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
@@ -512,6 +583,7 @@ where
         let mining_addr = version_request.mining_address;
         let peer_list_entry = PeerListItem {
             address: peer_address,
+            protocol_version: version_request.protocol_version,
             ..Default::default()
         };
 
@@ -531,9 +603,9 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
-        let response = AcceptedResponse {
+        let response = HandshakeResponse {
             version: Version::new(1, 2, 0),
-            protocol_version: ProtocolVersion::V1,
+            protocol_version: version_request.protocol_version,
             peers,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -612,9 +684,75 @@ where
     }
 
     #[tracing::instrument(skip_all)]
+    async fn handle_data_request_v1(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v1_request = data_request.0;
+        let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+        let v2_request = GossipRequest {
+            miner_address: v1_request.miner_address,
+            data: v2_data_request,
+        };
+
+        Self::handle_data_request(server, web::Json(v2_request), req).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn handle_pull_data_v1(
+        server: Data<Self>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+        req: actix_web::HttpRequest,
+    ) -> HttpResponse {
+        let v1_request = data_request.0;
+        let request_for_logging = v1_request.clone();
+        let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+        let v2_request = GossipRequest {
+            miner_address: v1_request.miner_address,
+            data: v2_data_request,
+        };
+
+        if let Err(error_response) =
+            Self::check_peer(&server.peer_list, &req, v2_request.miner_address)
+        {
+            return error_response;
+        };
+
+        match server
+            .data_handler
+            .handle_get_data_sync(v2_request)
+            .in_current_span()
+            .await
+        {
+            Ok(maybe_data) => match maybe_data {
+                Some(data_v2) => match data_v2.to_v1() {
+                    Some(data_v1) => {
+                        let maybe_data_v1 = Some(data_v1);
+                        HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data_v1))
+                    }
+                    None => {
+                        error!(
+                            "Data handler returned an unexpected data for request {:?}: {:?}",
+                            request_for_logging, data_v2
+                        );
+                        HttpResponse::Ok().json(GossipResponse::Accepted(None::<()>))
+                    }
+                },
+                None => HttpResponse::Ok().json(GossipResponse::Accepted(None::<()>)),
+            },
+            Err(error) => {
+                error!("Failed to handle get data request: {}", error);
+                HttpResponse::Ok()
+                    .json(GossipResponse::<()>::Rejected(RejectionReason::InvalidData))
+            }
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
     async fn handle_data_request(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequest>>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled()
@@ -622,14 +760,17 @@ where
         {
             let node_id = server.data_handler.gossip_client.mining_address;
             let request_id = match &data_request.0.data {
-                GossipDataRequest::Block(hash) => format!("block {:?}", hash),
-                GossipDataRequest::ExecutionPayload(hash) => {
+                GossipDataRequestV2::BlockHeader(hash) => format!("block header {:?}", hash),
+                GossipDataRequestV2::ExecutionPayload(hash) => {
                     format!("execution payload for block {:?}", hash)
                 }
-                GossipDataRequest::Chunk(chunk_path_hash) => {
+                GossipDataRequestV2::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
-                GossipDataRequest::Transaction(hash) => format!("transaction {:?}", hash),
+                GossipDataRequestV2::BlockBody(header) => {
+                    format!("block body {:?}", header.block_hash)
+                }
+                GossipDataRequestV2::Transaction(hash) => format!("transaction {:?}", hash),
             };
             warn!(
                 "Node {}: Gossip reception/broadcast is disabled, ignoring the get data request for {}",
@@ -670,7 +811,7 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_pull_data(
         server: Data<Self>,
-        data_request: web::Json<GossipRequest<GossipDataRequest>>,
+        data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if let Err(error_response) =
@@ -694,6 +835,59 @@ where
         }
     }
 
+    pub fn routes() -> impl HttpServiceFactory {
+        web::scope("/gossip")
+            .service(
+                web::scope("/v2")
+                    .route("/transaction", web::post().to(Self::handle_transaction))
+                    .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
+                    .route("/chunk", web::post().to(Self::handle_chunk))
+                    .route("/block", web::post().to(Self::handle_block_header))
+                    .route("/block_body", web::post().to(Self::handle_block_body))
+                    .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
+                    .route(
+                        "/execution_payload",
+                        web::post().to(Self::handle_execution_payload),
+                    )
+                    .route("/get_data", web::post().to(Self::handle_data_request))
+                    .route("/pull_data", web::post().to(Self::handle_pull_data))
+                    .route("/version", web::post().to(Self::handle_version))
+                    .route("/health", web::get().to(Self::handle_health_check))
+                    .route(
+                        "/stake_and_pledge_whitelist",
+                        web::get().to(Self::handle_stake_and_pledge_whitelist),
+                    )
+                    .route("/info", web::get().to(Self::handle_info))
+                    .route("/peer-list", web::get().to(Self::handle_peer_list))
+                    .route("/block-index", web::get().to(Self::handle_block_index)),
+            )
+            .route("/transaction", web::post().to(Self::handle_transaction))
+            .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
+            .route("/chunk", web::post().to(Self::handle_chunk))
+            .route("/block", web::post().to(Self::handle_block_header))
+            .route("/block_body", web::post().to(Self::handle_block_body))
+            .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
+            .route(
+                "/execution_payload",
+                web::post().to(Self::handle_execution_payload),
+            )
+            .route("/get_data", web::post().to(Self::handle_data_request_v1))
+            .route("/pull_data", web::post().to(Self::handle_pull_data_v1))
+            .route("/health", web::get().to(Self::handle_health_check))
+            .route(
+                "/stake_and_pledge_whitelist",
+                web::get().to(Self::handle_stake_and_pledge_whitelist),
+            )
+            .route("/info", web::get().to(Self::handle_info))
+            .route("/peer-list", web::get().to(Self::handle_peer_list))
+            .route("/version", web::post().to(Self::handle_version))
+            .route("/block-index", web::get().to(Self::handle_block_index))
+            .route(
+                "/protocol_version",
+                web::get().to(Self::handle_protocol_version),
+            )
+    }
+
     /// Start the gossip server
     ///
     /// # Errors
@@ -712,33 +906,7 @@ where
                 .app_data(Data::new(server.clone()))
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
                 .wrap(TracingLogger::default())
-                .service(
-                    web::scope("/gossip")
-                        .route("/transaction", web::post().to(Self::handle_transaction))
-                        .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
-                        .route("/chunk", web::post().to(Self::handle_chunk))
-                        .route("/block", web::post().to(Self::handle_block))
-                        .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
-                        .route(
-                            "/execution_payload",
-                            web::post().to(Self::handle_execution_payload),
-                        )
-                        .route("/get_data", web::post().to(Self::handle_data_request))
-                        .route("/pull_data", web::post().to(Self::handle_pull_data))
-                        .route("/health", web::get().to(Self::handle_health_check))
-                        .route(
-                            "/stake_and_pledge_whitelist",
-                            web::get().to(Self::handle_stake_and_pledge_whitelist),
-                        )
-                        .route("/info", web::get().to(Self::handle_info))
-                        .route("/peer-list", web::get().to(Self::handle_peer_list))
-                        .route("/version", web::post().to(Self::handle_version))
-                        .route("/block-index", web::get().to(Self::handle_block_index))
-                        .route(
-                            "/protocol_version",
-                            web::get().to(Self::handle_protocol_version),
-                        ),
-                )
+                .service(Self::routes())
         })
         .shutdown_timeout(5)
         .keep_alive(actix_web::http::KeepAlive::Disabled)

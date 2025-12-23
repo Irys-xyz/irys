@@ -173,6 +173,8 @@ pub enum InvalidDataError {
     IngressProofSignature,
     #[error("Invalid ingress proof anchor: {0}")]
     IngressProofAnchor(irys_types::BlockHash),
+    #[error("Block body transactions do not match the header")]
+    BlockBodyTransactionsMismatch,
 }
 
 #[derive(Debug, Error, Clone)]
@@ -239,4 +241,6 @@ pub enum RejectionReason {
     UnableToVerifyOrigin,
     InvalidCredentials,
     ProtocolMismatch,
+    UnsupportedProtocolVersion(u32),
+    UnsupportedFeature,
 }
