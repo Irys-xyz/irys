@@ -294,7 +294,7 @@ impl Default for AcceptedResponse {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
-            protocol_version: ProtocolVersion::default(),
+            protocol_version: ProtocolVersion::current(),
             peers: Vec::new(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)

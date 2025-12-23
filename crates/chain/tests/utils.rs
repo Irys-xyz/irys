@@ -20,7 +20,6 @@ use irys_actors::{
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
 };
-use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
@@ -36,6 +35,7 @@ use irys_domain::{
     get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
+use irys_p2p::GossipClient;
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -2341,6 +2341,13 @@ impl IrysNodeTest<IrysNodeCtx> {
         IrysApiClient::new()
     }
 
+    pub fn get_gossip_client(&self) -> GossipClient {
+        GossipClient::new(
+            Duration::from_secs(5),
+            self.node_ctx.config.node_config.miner_address(),
+        )
+    }
+
     pub fn get_peer_addr(&self) -> SocketAddr {
         self.node_ctx.config.node_config.peer_address().api
     }
@@ -2364,7 +2371,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     // Announce this node to another node (HTTP POST /v1/version)
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
         let vr = self.build_version_request();
-        self.get_api_client()
+        self.get_gossip_client()
             .post_version(dst.get_peer_addr(), vr)
             .await?;
         Ok(())

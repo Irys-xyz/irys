@@ -4,58 +4,12 @@ use crate::utils::IrysNodeTest;
 use irys_api_client::ApiClientExt as _;
 use irys_api_client::{ApiClient as _, IrysApiClient};
 use irys_chain::IrysNodeCtx;
-use irys_types::{
-    AcceptedResponse, BlockIndexQuery, Config, HandshakeRequest, IrysTransactionResponse,
-    NodeConfig, PeerResponse, ProtocolVersion,
-};
-use semver::Version;
+use irys_types::{BlockIndexQuery, IrysTransactionResponse, NodeConfig};
 use std::{
     net::{IpAddr, SocketAddr},
     str::FromStr as _,
 };
 use tracing::debug;
-
-async fn check_post_version_endpoint(api_client: &IrysApiClient, api_address: SocketAddr) {
-    let mut version_request = HandshakeRequest::default();
-    let testing_config = NodeConfig::testing();
-    let config = Config::new(testing_config);
-    let signer = config.irys_signer();
-    signer
-        .sign_p2p_handshake(&mut version_request)
-        .expect("signing p2p handshake should succeed");
-
-    let expected_version_response = AcceptedResponse {
-        version: Version {
-            major: 1,
-            minor: 2,
-            patch: 0,
-            pre: Default::default(),
-            build: Default::default(),
-        },
-        protocol_version: ProtocolVersion::V1,
-        peers: vec![],
-        timestamp: 1744920031378,
-        message: Some("Welcome to the network ".to_string()),
-    };
-
-    let post_version_response = api_client
-        .post_version(api_address, version_request)
-        .await
-        .expect("valid post version response");
-
-    let response_data = match post_version_response {
-        PeerResponse::Accepted(response) => response,
-        _ => panic!("Expected Accepted response"),
-    };
-
-    assert_eq!(response_data.version, expected_version_response.version);
-    assert_eq!(
-        response_data.protocol_version,
-        expected_version_response.protocol_version
-    );
-    assert_eq!(response_data.peers, expected_version_response.peers);
-    assert_eq!(response_data.message, expected_version_response.message);
-}
 
 async fn check_get_block_index_endpoint(
     api_client: &IrysApiClient,
@@ -173,7 +127,6 @@ async fn heavy_api_client_all_endpoints_should_work() {
     );
     let api_client = IrysApiClient::new();
 
-    check_post_version_endpoint(&api_client, api_address).await;
     check_transaction_endpoints(&api_client, api_address, &ctx).await;
     check_get_block_endpoint(&api_client, api_address, &ctx).await;
     check_get_block_index_endpoint(&api_client, api_address, &ctx).await;
