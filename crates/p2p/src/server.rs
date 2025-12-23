@@ -706,6 +706,7 @@ where
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         let v1_request = data_request.0;
+        let request_for_logging = v1_request.clone();
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
         let v2_request = GossipRequest {
             miner_address: v1_request.miner_address,
@@ -724,10 +725,22 @@ where
             .in_current_span()
             .await
         {
-            Ok(maybe_data) => {
-                let maybe_data_v1 = maybe_data.and_then(|d| d.to_v1());
-                HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data_v1))
-            }
+            Ok(maybe_data) => match maybe_data {
+                Some(data_v2) => match data_v2.to_v1() {
+                    Some(data_v1) => {
+                        let maybe_data_v1 = Some(data_v1);
+                        HttpResponse::Ok().json(GossipResponse::Accepted(maybe_data_v1))
+                    }
+                    None => {
+                        error!(
+                            "Data handler returned an unexpected data for request {:?}: {:?}",
+                            request_for_logging, data_v2
+                        );
+                        HttpResponse::Ok().json(GossipResponse::Accepted(None::<()>))
+                    }
+                },
+                None => HttpResponse::Ok().json(GossipResponse::Accepted(None::<()>)),
+            },
             Err(error) => {
                 error!("Failed to handle get data request: {}", error);
                 HttpResponse::Ok()
