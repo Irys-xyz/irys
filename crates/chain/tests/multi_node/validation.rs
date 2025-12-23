@@ -9,7 +9,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
-use irys_database::db::IrysDatabaseExt;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
@@ -17,7 +17,7 @@ use irys_types::{
     U256,
 };
 use reth::payload::EthBuiltPayload;
-use reth_db::transaction::DbTxMut;
+use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
 
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.

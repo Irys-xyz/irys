@@ -552,7 +552,7 @@ impl GossipServiceTestFixture {
             .expect("to insert tx");
     }
 
-    pub(crate) async fn add_block_header_to_mempool(&self, block: IrysBlockHeader) {
+    pub(crate) fn add_block_header_to_mempool(&self, block: IrysBlockHeader) {
         self.mempool_stub
             .blocks
             .write()
@@ -902,7 +902,7 @@ async fn handle_pull_data(
 
     match handler.read() {
         Ok(handler) => {
-            let data_request = v2_request.data.clone();
+            let data_request = v2_request.data;
             let response = handler.call_on_pull_data_request(data_request);
             // response is GossipResponse<Option<GossipDataV2>>
 
