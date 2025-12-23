@@ -9,6 +9,7 @@ use crate::types::GossipResponse;
 use crate::BlockStatusProvider;
 use futures::{future, FutureExt as _};
 use irys_actors::mempool_guard::MempoolReadGuard;
+use irys_actors::mempool_service::{create_state, AtomicMempoolState};
 use irys_actors::services::ServiceSenders;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{ExecutionPayloadCache, PeerList, RethBlockProvider};
@@ -16,8 +17,8 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, IrysAddress, NodeConfig, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
+    BlockBody, Config, DatabaseProvider, IrysAddress, MempoolConfig, NodeConfig, PeerAddress,
+    PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -86,7 +87,10 @@ impl MockedServices {
             ExecutionPayloadCache::new(peer_list_data_guard.clone(), RethBlockProvider::new_mock());
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mempool_stub = MempoolStub::new(tx);
+        let mempool_config = MempoolConfig::testing();
+        let state = create_state(&mempool_config, &[]);
+        let mempool_state = AtomicMempoolState::new(state);
+        let mempool_stub = MempoolStub::new(tx, mempool_state);
 
         let vdf_state_readonly =
             VdfStateReadonly::new(Arc::new(RwLock::new(VdfState::new(0, 0, None))));

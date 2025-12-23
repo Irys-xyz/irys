@@ -52,18 +52,23 @@ pub(crate) struct MempoolStub {
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
+    pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub mempool_state: AtomicMempoolState,
 }
 
 impl MempoolStub {
     #[must_use]
     pub(crate) fn new(
         internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+        mempool_state: AtomicMempoolState,
     ) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
             internal_message_bus,
             migrated_blocks: Arc::new(RwLock::new(Vec::new())),
+            blocks: Arc::new(RwLock::new(Vec::new())),
+            mempool_state,
         }
     }
 }
@@ -192,10 +197,11 @@ impl MempoolFacade for MempoolStub {
 
     async fn get_block_header(
         &self,
-        _block_hash: H256,
+        block_hash: H256,
         _include_chunk: bool,
     ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
-        Ok(None)
+        let blocks = self.blocks.read().expect("to unlock blocks");
+        Ok(blocks.iter().find(|b| b.block_hash == block_hash).cloned())
     }
 
     async fn migrate_block(
@@ -225,9 +231,7 @@ impl MempoolFacade for MempoolStub {
     }
 
     async fn get_internal_read_guard(&self) -> MempoolReadGuard {
-        // Stub for testing
-        let config = Config::new(NodeConfig::testing());
-        MempoolReadGuard::new(AtomicMempoolState::new(create_state(&config.mempool, &[])))
+        MempoolReadGuard::new(self.mempool_state.clone())
     }
 }
 
@@ -351,7 +355,14 @@ impl GossipServiceTestFixture {
             tokio_runtime.clone(),
         );
 
-        let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
+        let mempool_config = MempoolConfig::testing();
+        let state = create_state(&mempool_config, &[]);
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let mempool_stub = MempoolStub::new(
+            service_senders.gossip_broadcast.clone(),
+            mempool_state.clone(),
+        );
         let mempool_txs = Arc::clone(&mempool_stub.txs);
         let mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
@@ -406,10 +417,6 @@ impl GossipServiceTestFixture {
 
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
 
-        let mempool_config = MempoolConfig::testing();
-        let state = create_state(&mempool_config, &[]);
-        let mempool_state = AtomicMempoolState::new(state);
-
         Self {
             _temp_dir: temp_dir,
             gossip_port,
@@ -456,11 +463,7 @@ impl GossipServiceTestFixture {
         )
         .expect("To bind");
 
-        let mempool_stub = MempoolStub::new(self.service_senders.gossip_broadcast.clone());
-        self.mempool_txs = Arc::clone(&mempool_stub.txs);
-        self.mempool_chunks = Arc::clone(&mempool_stub.chunks);
-
-        self.mempool_stub = mempool_stub.clone();
+        let mempool_stub = self.mempool_stub.clone();
 
         let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node_config).await;
         let block_discovery_stub = BlockDiscoveryStub {
@@ -547,6 +550,14 @@ impl GossipServiceTestFixture {
             .insert_tx_and_mark_valid(&tx)
             .await
             .expect("to insert tx");
+    }
+
+    pub(crate) async fn add_block_header_to_mempool(&self, block: IrysBlockHeader) {
+        self.mempool_stub
+            .blocks
+            .write()
+            .expect("to unlock mempool blocks")
+            .push(block);
     }
 }
 
@@ -978,7 +989,10 @@ pub(crate) async fn data_handler_stub(
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
-    let mempool_stub = MempoolStub::new(gossip_tx);
+    let mempool_config = MempoolConfig::testing();
+    let state = create_state(&mempool_config, &[]);
+    let mempool_state = AtomicMempoolState::new(state);
+    let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
     let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
     let block_discovery_stub = BlockDiscoveryStub {
@@ -1035,7 +1049,10 @@ pub(crate) async fn data_handler_with_stubbed_pool(
     let (service_senders, _service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
-    let mempool_stub = MempoolStub::new(gossip_tx);
+    let mempool_config = MempoolConfig::testing();
+    let state = create_state(&mempool_config, &[]);
+    let mempool_state = AtomicMempoolState::new(state);
+    let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
