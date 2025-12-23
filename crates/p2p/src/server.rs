@@ -233,7 +233,6 @@ where
         irys_block_header_json: web::Json<GossipRequest<BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        // TODO: this implementation is incomplete!
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = irys_block_header_json.0.data.block_hash;

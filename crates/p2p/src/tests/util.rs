@@ -777,7 +777,7 @@ impl FakeGossipServer {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
                         .content_type("application/json")
-                        .json(false)
+                        .json(GossipResponse::Accepted(false))
                 }))
         })
         .workers(1)
@@ -815,25 +815,25 @@ async fn handle_get_data_v2(
                 warn!("Block body request for hash {:?}", header.block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(GossipResponse::Accepted(false))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(true)
+                    .json(GossipResponse::Accepted(true))
             }
             GossipDataRequestV2::Chunk(chunk_hash) => {
                 warn!("Chunk request for hash {:?}", chunk_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(GossipResponse::Accepted(false))
             }
             GossipDataRequestV2::Transaction(hash) => {
                 warn!("Transaction request for hash {:?}", hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(GossipResponse::Accepted(false))
             }
         },
         Err(e) => {
