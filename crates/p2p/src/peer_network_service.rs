@@ -786,6 +786,14 @@ impl PeerNetworkService {
                                     )),
                                 ));
                             }
+                            RejectionReason::UnsupportedFeature => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} does not support requested feature for {:?}",
+                                        peer.0, data_request
+                                    )),
+                                ));
+                            }
                         }
                     }
                     Err(err) => {

@@ -1202,6 +1202,15 @@ impl GossipClient {
                                 ));
                                 all_failures_were_handshake = false;
                             }
+                            RejectionReason::UnsupportedFeature => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Request {:?}: Peer {:?} doesn't support the requested feature",
+                                        data_request, address
+                                    )),
+                                ));
+                                all_failures_were_handshake = false;
+                            }
                         }
                         // Do not retry the same peer on rejection
                     }
@@ -1439,6 +1448,15 @@ impl GossipClient {
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "{}: Peer {:?} doesn't support protocol version {:?}",
                                         url, peer.0, unsupported_version
+                                    )),
+                                ));
+                                round_failures_were_handshake = false;
+                            }
+                            RejectionReason::UnsupportedFeature => {
+                                last_error = Some(GossipError::from(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "{}: Peer {:?} doesn't support the requested feature",
+                                        url, peer.0
                                     )),
                                 ));
                                 round_failures_were_handshake = false;

@@ -301,13 +301,9 @@ pub mod test_utils {
     use super::*;
     use async_trait::async_trait;
     use eyre::eyre;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
 
     #[derive(Default, Clone)]
-    pub struct CountingMockClient {
-        pub post_version_calls: Arc<Mutex<Vec<std::net::SocketAddr>>>,
-    }
+    pub struct CountingMockClient {}
 
     #[async_trait]
     impl ApiClient for CountingMockClient {
