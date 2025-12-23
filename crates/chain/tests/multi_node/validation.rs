@@ -1,4 +1,3 @@
-use std::sync::{Arc, Mutex};
 use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
@@ -19,6 +18,7 @@ use irys_types::{
 };
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut;
+use std::sync::{Arc, Mutex};
 
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
@@ -88,6 +88,12 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
+    // Since this block would be rejected by the validation of the producer itself, we need to
+    // manually insert it into the db for gossiping block bodies
+    peer_node.node_ctx.db.update_eyre(|tx| {
+        tx.put::<IrysBlockHeaders>(block.block_hash, block.as_ref().clone().into())?;
+        Ok(())
+    })?;
     peer_node.gossip_enable();
 
     peer_node.gossip_block_to_peers(&block)?;
@@ -156,7 +162,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     let mut irys_block = block.as_ref().clone();
     irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
-    // Re signing actually changes the block hash, so we need to manually insert the header to the db
+    // Re-signing actually changes the block hash, so we need to manually insert the header to the db
     //  for this test to work, because fetching the block body from the peer now requires that
     //  peer to actually have this block header in its database/mempool/cache
     peer_node.node_ctx.db.update_eyre(|tx| {
