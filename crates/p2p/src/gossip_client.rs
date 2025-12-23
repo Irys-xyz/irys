@@ -9,8 +9,8 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    AcceptedResponse, BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey,
-    GossipRequest, HandshakeRequest, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
+    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipRequest,
+    HandshakeRequest, HandshakeResponse, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
     NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion,
     DATA_REQUEST_RETRIES, H256,
 };
@@ -315,7 +315,7 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<AcceptedResponse> =
+        let response: GossipResponse<HandshakeResponse> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;

@@ -19,6 +19,7 @@ use irys_actors::{
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
+    MempoolServiceFacadeImpl,
 };
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
@@ -35,7 +36,7 @@ use irys_domain::{
     get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
-use irys_p2p::GossipClient;
+use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -658,6 +659,23 @@ impl IrysNodeTest<IrysNodeCtx> {
                 // Remove the logger middleware
                 .app_data(actix_web::web::Data::new(api_state))
                 .service(routes()),
+        )
+        .await
+    }
+
+    pub async fn start_mock_gossip_server(
+        &self,
+    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+        let gossip_server = self.node_ctx.get_gossip_server();
+
+        actix_web::test::init_service(
+            App::new()
+                // Remove the logger middleware
+                .app_data(actix_web::web::Data::new(gossip_server))
+                .service(GossipServer::<
+                    MempoolServiceFacadeImpl,
+                    BlockDiscoveryFacadeImpl,
+                >::routes()),
         )
         .await
     }

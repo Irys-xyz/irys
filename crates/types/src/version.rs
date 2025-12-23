@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[serde(tag = "status")]
 pub enum PeerResponse {
     #[serde(rename = "accepted")]
-    Accepted(AcceptedResponse),
+    Accepted(HandshakeResponse),
     #[serde(rename = "rejected")]
     Rejected(RejectedResponse),
 }
@@ -281,7 +281,7 @@ impl Compact for PeerAddress {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptedResponse {
+pub struct HandshakeResponse {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
@@ -290,7 +290,7 @@ pub struct AcceptedResponse {
     pub message: Option<String>,
 }
 
-impl Default for AcceptedResponse {
+impl Default for HandshakeResponse {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0

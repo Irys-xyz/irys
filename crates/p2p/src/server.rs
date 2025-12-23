@@ -8,6 +8,7 @@ use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
 };
+use actix_web::dev::HttpServiceFactory;
 use actix_web::{
     dev::Server,
     http::header::ContentType,
@@ -19,9 +20,9 @@ use irys_domain::{get_node_info, PeerList, ScoreDecreaseReason};
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    parse_user_agent, AcceptedResponse, BlockBody, BlockIndexQuery, CommitmentTransaction,
-    DataTransactionHeader, GossipRequest, HandshakeRequest, IngressProof, IrysAddress,
-    IrysBlockHeader, PeerListItem, ProtocolVersion, UnpackedChunk,
+    parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
+    GossipRequest, HandshakeRequest, HandshakeResponse, IngressProof, IrysAddress, IrysBlockHeader,
+    PeerListItem, ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
@@ -37,7 +38,7 @@ use tracing_actix_web::TracingLogger;
 const DEFAULT_DUPLICATE_REQUEST_MILLISECONDS: u128 = 10_000; // 10 seconds
 
 #[derive(Debug)]
-pub(crate) struct GossipServer<M, B>
+pub struct GossipServer<M, B>
 where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
@@ -64,7 +65,7 @@ where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
 {
-    pub(crate) const fn new(
+    pub const fn new(
         gossip_server_data_handler: Arc<GossipDataHandler<M, B>>,
         peer_list: PeerList,
     ) -> Self {
@@ -535,12 +536,12 @@ where
     ) -> HttpResponse {
         let connection_info = req.connection_info();
         let Some(source_addr_str) = connection_info.peer_addr() else {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
         let Ok(source_addr) = source_addr_str.parse::<IpAddr>() else {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         };
@@ -548,13 +549,13 @@ where
         let version_request = body.into_inner();
 
         if source_addr != version_request.address.gossip.ip() {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
 
         if !ProtocolVersion::supported_versions().contains(&version_request.protocol_version) {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::UnsupportedProtocolVersion(
                     version_request.protocol_version as u32,
                 ),
@@ -562,7 +563,7 @@ where
         }
 
         if !version_request.verify_signature() {
-            return HttpResponse::Ok().json(GossipResponse::<AcceptedResponse>::Rejected(
+            return HttpResponse::Ok().json(GossipResponse::<HandshakeResponse>::Rejected(
                 RejectionReason::InvalidCredentials,
             ));
         }
@@ -603,7 +604,7 @@ where
             .map(|(name, _, _, _)| name)
             .unwrap_or_default();
 
-        let response = AcceptedResponse {
+        let response = HandshakeResponse {
             version: Version::new(1, 2, 0),
             protocol_version: version_request.protocol_version,
             peers,
@@ -822,6 +823,51 @@ where
         }
     }
 
+    pub fn routes() -> impl HttpServiceFactory {
+        web::scope("/gossip")
+            .service(
+                web::scope("/v2")
+                    .route("/transaction", web::post().to(Self::handle_transaction))
+                    .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
+                    .route("/chunk", web::post().to(Self::handle_chunk))
+                    .route("/block", web::post().to(Self::handle_block_header))
+                    .route("/block_body", web::post().to(Self::handle_block_body))
+                    .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
+                    .route(
+                        "/execution_payload",
+                        web::post().to(Self::handle_execution_payload),
+                    )
+                    .route("/get_data", web::post().to(Self::handle_data_request))
+                    .route("/pull_data", web::post().to(Self::handle_pull_data))
+                    .route("/version", web::post().to(Self::handle_version)),
+            )
+            .route("/transaction", web::post().to(Self::handle_transaction))
+            .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
+            .route("/chunk", web::post().to(Self::handle_chunk))
+            .route("/block", web::post().to(Self::handle_block_header))
+            .route("/block_body", web::post().to(Self::handle_block_body))
+            .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
+            .route(
+                "/execution_payload",
+                web::post().to(Self::handle_execution_payload),
+            )
+            .route("/get_data", web::post().to(Self::handle_data_request_v1))
+            .route("/pull_data", web::post().to(Self::handle_pull_data_v1))
+            .route("/health", web::get().to(Self::handle_health_check))
+            .route(
+                "/stake_and_pledge_whitelist",
+                web::get().to(Self::handle_stake_and_pledge_whitelist),
+            )
+            .route("/info", web::get().to(Self::handle_info))
+            .route("/peer-list", web::get().to(Self::handle_peer_list))
+            .route("/version", web::post().to(Self::handle_version))
+            .route("/block-index", web::get().to(Self::handle_block_index))
+            .route(
+                "/protocol_version",
+                web::get().to(Self::handle_protocol_version),
+            )
+    }
+
     /// Start the gossip server
     ///
     /// # Errors
@@ -840,50 +886,7 @@ where
                 .app_data(Data::new(server.clone()))
                 .app_data(web::JsonConfig::default().limit(100 * 1024 * 1024))
                 .wrap(TracingLogger::default())
-                .service(
-                    web::scope("/gossip")
-                        .service(
-                            web::scope("/v2")
-                                .route("/transaction", web::post().to(Self::handle_transaction))
-                                .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
-                                .route("/chunk", web::post().to(Self::handle_chunk))
-                                .route("/block", web::post().to(Self::handle_block_header))
-                                .route("/block_body", web::post().to(Self::handle_block_body))
-                                .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
-                                .route(
-                                    "/execution_payload",
-                                    web::post().to(Self::handle_execution_payload),
-                                )
-                                .route("/get_data", web::post().to(Self::handle_data_request))
-                                .route("/pull_data", web::post().to(Self::handle_pull_data))
-                                .route("/version", web::post().to(Self::handle_version)),
-                        )
-                        .route("/transaction", web::post().to(Self::handle_transaction))
-                        .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
-                        .route("/chunk", web::post().to(Self::handle_chunk))
-                        .route("/block", web::post().to(Self::handle_block_header))
-                        .route("/block_body", web::post().to(Self::handle_block_body))
-                        .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
-                        .route(
-                            "/execution_payload",
-                            web::post().to(Self::handle_execution_payload),
-                        )
-                        .route("/get_data", web::post().to(Self::handle_data_request_v1))
-                        .route("/pull_data", web::post().to(Self::handle_pull_data_v1))
-                        .route("/health", web::get().to(Self::handle_health_check))
-                        .route(
-                            "/stake_and_pledge_whitelist",
-                            web::get().to(Self::handle_stake_and_pledge_whitelist),
-                        )
-                        .route("/info", web::get().to(Self::handle_info))
-                        .route("/peer-list", web::get().to(Self::handle_peer_list))
-                        .route("/version", web::post().to(Self::handle_version))
-                        .route("/block-index", web::get().to(Self::handle_block_index))
-                        .route(
-                            "/protocol_version",
-                            web::get().to(Self::handle_protocol_version),
-                        ),
-                )
+                .service(Self::routes())
         })
         .shutdown_timeout(5)
         .keep_alive(actix_web::http::KeepAlive::Disabled)
