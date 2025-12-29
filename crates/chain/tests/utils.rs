@@ -116,8 +116,8 @@ pub async fn craft_data_poa_solution_from_tx(
     let chunks_per_partition = node.node_ctx.config.consensus.num_chunks_in_partition;
 
     // Determine the ledger offset for the tx's first chunk:
-    let chunk_ledger_offset = tx_ledger_offset
-        .unwrap_or_else(|| block.data_ledgers[DataLedger::Submit].total_chunks);
+    let chunk_ledger_offset =
+        tx_ledger_offset.unwrap_or_else(|| block.data_ledgers[DataLedger::Submit].total_chunks);
 
     // Compute partition_chunk_offset from ledger_chunk_offset:
     //   ledger_chunk_offset = slot_start + partition_chunk_offset
