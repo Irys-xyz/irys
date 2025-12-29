@@ -931,30 +931,8 @@ where
                     "Node {}: handling block body request for block {:?}",
                     self.gossip_client.mining_address, block_hash
                 );
-                let block_body = if let Some(block_body) =
-                    self.block_pool.get_cached_block_body(&block_hash).await
-                {
-                    Some(block_body)
-                } else {
-                    let maybe_block_header = self.block_pool.get_block_header(&block_hash).await?;
-                    if let Some(block_header) = &maybe_block_header {
-                        let block_body = build_block_body_for_processed_block_header(
-                            block_header,
-                            &self.mempool.get_internal_read_guard().await,
-                            &self.block_pool.db,
-                        )
-                        .await
-                        .map_err(|err| {
-                            GossipError::Internal(InternalGossipError::Unknown(format!(
-                                "Error building block body for block {}: {}",
-                                block_hash, err
-                            )))
-                        })?;
-                        Some(Arc::new(block_body))
-                    } else {
-                        None
-                    }
-                };
+                let block_body =
+                    get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
 
                 if let Some(block_body) = block_body {
                     let data = Arc::new(GossipDataV2::BlockBody(block_body));
@@ -1085,36 +1063,8 @@ where
             }
             GossipDataRequestV2::BlockBody(header) => {
                 let block_hash = header.block_hash;
-                let maybe_block_body = if let Some(block_body) =
-                    self.block_pool.get_cached_block_body(&block_hash).await
-                {
-                    Some(block_body)
-                } else {
-                    let maybe_block_header = self.block_pool.get_block_header(&block_hash).await?;
-                    if let Some(block_header) = &maybe_block_header {
-                        let block_body = build_block_body_for_processed_block_header(
-                            block_header,
-                            &self.mempool.get_internal_read_guard().await,
-                            &self.block_pool.db,
-                        )
-                        .await
-                        .map_err(|err| {
-                            error!(
-                                "Error building block body for block {:?}: {:?}",
-                                block_hash, err
-                            );
-                            GossipError::Internal(InternalGossipError::Unknown(format!(
-                                "Error building block body for block {}: {}",
-                                block_hash, err
-                            )))
-                        })?;
-                        debug!("Successfully built block body for block {:?}", block_hash);
-                        Some(Arc::new(block_body))
-                    } else {
-                        warn!("Didn't find the block header to build the block body for the block {:?}", block_hash);
-                        None
-                    }
-                };
+                let maybe_block_body =
+                    get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
                 Ok(maybe_block_body.map(GossipDataV2::BlockBody))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
@@ -1210,4 +1160,45 @@ where
 
         Ok(irys_block_body)
     }
+}
+
+async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
+    block_hash: &BlockHash,
+    block_pool: &BlockPool<B, M>,
+    mempool: &M,
+) -> GossipResult<Option<Arc<BlockBody>>> {
+    let maybe_block_body =
+        if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
+            Some(block_body)
+        } else {
+            let maybe_block_header = block_pool.get_block_header(block_hash).await?;
+            if let Some(block_header) = &maybe_block_header {
+                let block_body = build_block_body_for_processed_block_header(
+                    block_header,
+                    &mempool.get_internal_read_guard().await,
+                    &block_pool.db,
+                )
+                .await
+                .map_err(|err| {
+                    error!(
+                        "Error building block body for block {:?}: {:?}",
+                        block_hash, err
+                    );
+                    GossipError::Internal(InternalGossipError::Unknown(format!(
+                        "Error building block body for block {}: {}",
+                        block_hash, err
+                    )))
+                })?;
+                debug!("Successfully built block body for block {:?}", block_hash);
+                Some(Arc::new(block_body))
+            } else {
+                warn!(
+                    "Didn't find the block header to build the block body for the block {:?}",
+                    block_hash
+                );
+                None
+            }
+        };
+
+    Ok(maybe_block_body)
 }
