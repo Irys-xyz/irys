@@ -7,8 +7,8 @@ use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
-    irys::IrysSigner, Address, Base64, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    H256List, IrysBlockHeader, NodeConfig, Signature, H256, U256,
+    irys::IrysSigner, Base64, DataLedger, DataTransactionHeader, DataTransactionLedger, H256List,
+    IrysAddress, IrysBlockHeader, NodeConfig, Signature, H256, U256,
 };
 use std::sync::{Arc, RwLock};
 use tracing::info;
@@ -28,13 +28,10 @@ use tracing::info;
 /// a minimal, self-contained scenario to validate the invariant deterministically.
 #[test_log::test(actix_web::test)]
 async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
-    // 1) Minimal test config
     const CHUNK_SIZE: u64 = 32;
+    // Synthetic timestamp for test blocks (Nov 2023, in milliseconds)
+    const TEST_TIMESTAMP_MS: u128 = 1_700_000_000_000;
 
-    // Make the test stable and light.
-    // - small chunk size
-    // - small partition size
-    // - tiny epoch so boundary behavior is easy to reason about
     let mut node_config = NodeConfig::testing();
     node_config.consensus.get_mut().block_migration_depth = 1;
     node_config.consensus.get_mut().chunk_size = CHUNK_SIZE;
@@ -42,7 +39,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     node_config.consensus.get_mut().num_partitions_per_slot = 1;
     node_config.consensus.get_mut().epoch.num_blocks_in_epoch = 3;
 
-    // 2) Build a minimal genesis context with BlockIndex and EpochSnapshot
     let (
         tmp_dir,
         block_index,
@@ -54,7 +50,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         _block_index_handle,
     ) = init_min_context(&node_config).await;
 
-    // Choose a partition_hash deterministically: first submit ledger slot's first partition
     let partition_hash = parent_epoch_snapshot
         .ledgers
         .get_slots(DataLedger::Submit)
@@ -62,10 +57,8 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         .and_then(|slot| slot.partitions.first().copied())
         .expect("submit ledger slot 0 should exist with a partition");
 
-    // 3) Craft a synthetic transaction and merkle proofs to populate a single Submit ledger
-    //    using a 1-tx block. We'll place the tx at chunk offset 0 in the block bounds.
     let signer = IrysSigner::random_signer(&consensus);
-    let data = vec![0xAB; CHUNK_SIZE as usize]; // single 32-byte chunk
+    let data = vec![0xAB; CHUNK_SIZE as usize];
     let tx = {
         let tx_unsigned = signer
             .create_transaction(data.clone(), H256::zero())
@@ -79,37 +72,17 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         "1-chunk tx should have exactly one data proof"
     );
 
-    // Merklize a single transaction header to get tx_root and proofs
     let tx_headers = vec![tx_header.clone()];
     let (tx_root, tx_paths) = DataTransactionLedger::merklize_tx_root(&tx_headers);
-
-    // Take the proof for the single tx (index 0)
     let tx_path = tx_paths[0].proof.clone();
-
-    // The tx has one chunk of 32 bytes; build a fake "chunk proof" for that chunk
-    // For deterministic test we reuse the tx's data proof if available; otherwise,
-    // emulate a leaf proof of appropriate length for the single chunk.
     let data_path = if let Some(p) = tx.proofs.first() {
         p.proof.clone()
     } else {
-        // Fallback: emulate a leaf proof structure for a single-chunk tx.
-        // The exact encoding doesn't matter as long as validate_path() on the leaf works
-        // consistently with our chunk size and left/right bounds. Here we simply copy
-        // the tx_path bytes (since it's also a Merkle proof to a leaf) to demonstrate intent.
         tx_path.clone()
     };
 
-    // PoA chunk will be computed after the prelude migration once Submit.total_chunks == slot_start.
-    // We do not query get_block_bounds(); the prelude ensures the next block starts at slot_start
-    // so the PoA lands at block-relative offset 0 deterministically.
     let mut partition_chunk_offset: u32 = 0;
 
-    // 5) Build two synthetic blocks:
-    //    - Prelude block at height=1 adds exactly `slot_start` chunks so that the next
-    //      block's PoA chunk is at block-relative offset 0 (ensuring tx_path alignment).
-    //    - Boundary-like block at height=2 contains our crafted PoA chunk targeting partition_chunk_offset=0.
-    //
-    // Compute ledger_chunk_offset using parent slot assignment
     let parent_slot_index = parent_epoch_snapshot
         .partition_assignments
         .get_assignment(partition_hash)
@@ -120,7 +93,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         parent_slot_index * consensus.num_partitions_per_slot * consensus.num_chunks_in_partition
             + partition_chunk_offset as u64;
 
-    // Prelude tx: size = ledger_chunk_offset * CHUNK_SIZE (0 if offset is 0)
     let prelude_size_bytes = (ledger_chunk_offset as usize) * (CHUNK_SIZE as usize);
     let prelude_tx_header = if prelude_size_bytes > 0 {
         let prelude_data = vec![0xCD; prelude_size_bytes];
@@ -133,13 +105,11 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         None
     };
 
-    // Merklize prelude tx headers (0 or 1)
     let prelude_headers: Vec<DataTransactionHeader> =
         prelude_tx_header.clone().into_iter().collect();
     let (prelude_tx_root, _prelude_paths) =
         DataTransactionLedger::merklize_tx_root(&prelude_headers);
 
-    // Prelude block (height=1), previous is genesis
     let prelude_publish_ledger = DataTransactionLedger {
         ledger_id: DataLedger::Publish.into(),
         tx_root: H256::zero(),
@@ -153,7 +123,7 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         ledger_id: DataLedger::Submit.into(),
         tx_root: prelude_tx_root,
         tx_ids: H256List(prelude_tx_header.into_iter().map(|h| h.id).collect()),
-        total_chunks: ledger_chunk_offset, // previous total becomes this
+        total_chunks: ledger_chunk_offset,
         expires: Some(41_000_000),
         proofs: None,
         required_proof_count: None,
@@ -177,12 +147,11 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         inner.previous_cumulative_diff = U256::from(4000);
         inner.miner_address = miner_address;
         inner.signature = Signature::test_signature().into();
-        inner.timestamp = 1_700_000_000_000_u128.saturating_sub(1);
+        inner.timestamp = TEST_TIMESTAMP_MS.saturating_sub(1).into();
         inner.data_ledgers = vec![prelude_publish_ledger, prelude_submit_ledger];
     }
     let prelude_block = Arc::new(prelude_block_v);
 
-    // Migrate the prelude block
     {
         let block_height_pre_migration = {
             let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
@@ -203,7 +172,8 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
             .expect("receive migration result (prelude)")
             .expect("migrate prelude block");
 
-        // ensure the migration has occurred
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
         loop {
             let current_height = {
                 let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
@@ -213,11 +183,16 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
             if current_height != block_height_pre_migration {
                 break;
             }
+            if start.elapsed() > timeout {
+                panic!(
+                    "Timed out waiting for prelude block migration after {:?}",
+                    timeout
+                );
+            }
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         }
     }
 
-    // Derive actual previous total chunks from the latest BlockIndexItem to avoid zero-max edge cases
     let prev_total = {
         let prelude_block_index_guard = BlockIndexReadGuard::new(block_index.clone());
         let prelude_index = prelude_block_index_guard.read();
@@ -228,11 +203,8 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         latest_item.ledgers[DataLedger::Submit as usize].total_chunks
     };
 
-    // Align partition_chunk_offset with slot start so that ledger_chunk_offset falls in the next block
     let slot_start =
         parent_slot_index * consensus.num_partitions_per_slot * consensus.num_chunks_in_partition;
-
-    // Enforce deterministic prelude effect: it must advance Submit.total_chunks to exactly slot_start
     assert!(
         prev_total == slot_start,
         "prelude did not add expected chunks: prev_total={} slot_start={}",
@@ -241,7 +213,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     );
     partition_chunk_offset = 0;
 
-    // Compute PoA chunk using the adjusted partition_chunk_offset
     let mut poa_chunk: Vec<u8> = data.clone();
     {
         let mut entropy_chunk = Vec::<u8>::with_capacity(CHUNK_SIZE as usize);
@@ -257,12 +228,10 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         xor_vec_u8_arrays_in_place(&mut poa_chunk, &entropy_chunk);
     }
 
-    // Boundary-like block (height=2), previous is prelude
     let submit_ledger = DataTransactionLedger {
         ledger_id: DataLedger::Submit.into(),
         tx_root,
         tx_ids: H256List(vec![tx_header.id]),
-        // Use slot_start + 1 to make this block's bounds [slot_start..slot_start+1)
         total_chunks: slot_start + 1,
         expires: Some(42_000_000),
         proofs: None,
@@ -295,12 +264,11 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         inner.previous_cumulative_diff = U256::from(4000);
         inner.miner_address = miner_address;
         inner.signature = Signature::test_signature().into();
-        inner.timestamp = 1_700_000_000_000;
+        inner.timestamp = TEST_TIMESTAMP_MS.into();
         inner.data_ledgers = vec![publish_ledger, submit_ledger];
     }
     let synthetic_block = Arc::new(synthetic_block_v);
 
-    // Migrate the boundary-like block into the BlockIndex so get_block_bounds() works
     let txs = Arc::new(vec![tx_header.clone()]);
     let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
     block_index_tx
@@ -315,10 +283,8 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         .expect("receive migration result")
         .expect("migrate synthetic block");
 
-    // Obtain a read guard for PoA validation
     let block_index_guard = BlockIndexReadGuard::new(block_index.clone());
 
-    // 6) Parent epoch snapshot PoA validation MUST pass
     poa_is_valid(
         &synthetic_block.poa,
         &block_index_guard,
@@ -328,23 +294,19 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
     )
     .expect("Parent epoch snapshot PoA should be valid for crafted block");
 
-    // 7) Build a CHILD-like snapshot by cloning parent and changing the slot index for the
-    //    target partition_hash. This simulates an epoch-boundary slot movement.
+    // Build child-like snapshot with different slot index to simulate epoch-boundary slot movement
     let mut child_epoch_snapshot = parent_epoch_snapshot.clone();
-    // Fetch existing assignment and re-insert with a different slot_index.
     let mut pa = child_epoch_snapshot
         .partition_assignments
         .get_assignment(partition_hash)
         .expect("partition assignment should exist for partition_hash");
-    // Choose a different slot index deterministically (advance by +1 from the parent assignment)
     pa.slot_index = Some(pa.slot_index.unwrap_or(0).wrapping_add(1));
-    // Replace the assignment in the cloned snapshot
     child_epoch_snapshot
         .partition_assignments
         .data_partitions
         .insert(partition_hash, pa);
 
-    // 8) Child-like epoch snapshot PoA validation MUST fail (Merkle mismatch or out-of-bounds)
+    // Child-like snapshot PoA validation MUST fail
     match poa_is_valid(
         &synthetic_block.poa,
         &block_index_guard,
@@ -352,8 +314,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         &consensus,
         &miner_address,
     ) {
-        // The child snapshot must reject; depending on slot movement it may fail due to merkle mismatch
-        // or because the computed ledger offset is out of the synthetic block's bounds.
         Err(
             PreValidationError::MerkleProofInvalid(_)
             | PreValidationError::PoAChunkOffsetOutOfBlockBounds
@@ -365,7 +325,6 @@ async fn deterministic_boundary_poa_crafted_snapshot() -> eyre::Result<()> {
         Err(e) => panic!("Unexpected child-like PoA error: {:?}", e),
     }
 
-    // Keep tmp alive for the duration of the test
     drop(block_index);
     drop(tmp_dir);
     Ok(())
@@ -386,12 +345,11 @@ async fn init_min_context(
     Arc<RwLock<BlockIndex>>,
     tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
     EpochSnapshot,
-    Address,
+    IrysAddress,
     irys_types::ConsensusConfig,
     H256,
     irys_types::TokioServiceHandle,
 ) {
-    // Dedicated tmp dir per test
     let tmp = temporary_directory(Some("deterministic_boundary_poa"), false);
     let mut node_config = base_node_config.clone();
     node_config.base_directory = tmp.path().to_path_buf();
@@ -399,7 +357,6 @@ async fn init_min_context(
 
     let consensus = node_config.consensus_config();
 
-    // 1) Build a genesis block and populate commitments
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
     let config = irys_types::Config::new(node_config.clone());
@@ -408,7 +365,6 @@ async fn init_min_context(
         add_genesis_commitments(&mut genesis_block, &config).await;
     genesis_block.treasury = initial_treasury;
 
-    // 2) Setup BlockIndex and its service
     let block_index = Arc::new(RwLock::new(
         BlockIndex::new(&node_config)
             .await
@@ -422,7 +378,6 @@ async fn init_min_context(
         tokio::runtime::Handle::current(),
     );
 
-    // 3) Create parent EpochSnapshot from genesis + commitments
     let storage_submodules_config =
         StorageSubmodulesConfig::load(config.node_config.base_directory.clone())
             .expect("load storage submodules config");
@@ -433,7 +388,6 @@ async fn init_min_context(
         &config,
     );
 
-    // 4) Migrate genesis into BlockIndex
     let arc_genesis = Arc::new(genesis_block.clone());
     let (tx_migrate, rx_migrate) = tokio::sync::oneshot::channel();
     block_index_tx

@@ -46,9 +46,9 @@ use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, Address, BlockHash, DataLedger, DataTransactionLedger,
-    EvmBlockHash, GossipBroadcastMessage, H256List, IrysAddress, NetworkConfigWithDefaults as _,
-    SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockHash, DataLedger, DataTransactionLedger, EvmBlockHash,
+    GossipBroadcastMessage, H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256,
+    U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -80,21 +80,26 @@ use tokio::sync::oneshot;
 use tokio::{sync::oneshot::error::RecvError, time::sleep};
 use tracing::{debug, error, error_span, info, instrument};
 
-/// Helper: craft a data PoA SolutionContext from a real mempool tx (first chunk)
+/// Helper: craft a data PoA SolutionContext from a tx (first chunk)
+///
+/// `tx_ledger_offset`: The ledger chunk offset where the tx's first chunk is located.
+/// For a mempool tx that will be included at prev_total_chunks, pass None.
+/// For a tx already in the ledger, pass Some(offset) where offset is the known position.
 pub async fn craft_data_poa_solution_from_tx(
     node: &IrysNodeTest<IrysNodeCtx>,
     tx: &DataTransaction,
     partition_hash: H256,
-    miner_addr: Address,
+    miner_addr: IrysAddress,
+    tx_ledger_offset: Option<u64>,
 ) -> eyre::Result<SolutionContext> {
     // Compute slot_index from parent epoch snapshot (prev block)
     let head_height = node.get_canonical_chain_height().await;
-    let prev_block = node.get_block_by_height(head_height).await?;
+    let block = node.get_block_by_height(head_height).await?;
     let parent_epoch_snapshot = node
         .node_ctx
         .block_tree_guard
         .read()
-        .get_epoch_snapshot(&prev_block.block_hash)
+        .get_epoch_snapshot(&block.block_hash)
         .ok_or_else(|| eyre!("parent epoch snapshot not found"))?;
     let pa = parent_epoch_snapshot
         .partition_assignments
@@ -108,53 +113,38 @@ pub async fn craft_data_poa_solution_from_tx(
         * node.node_ctx.config.consensus.num_partitions_per_slot
         * node.node_ctx.config.consensus.num_chunks_in_partition;
 
-    let prev_total_chunks = prev_block.data_ledgers[DataLedger::Submit].total_chunks;
-
     let chunks_per_partition = node.node_ctx.config.consensus.num_chunks_in_partition;
+
+    // Determine the ledger offset for the tx's first chunk:
+    let chunk_ledger_offset = tx_ledger_offset
+        .unwrap_or_else(|| block.data_ledgers[DataLedger::Submit].total_chunks);
+
+    // Compute partition_chunk_offset from ledger_chunk_offset:
+    //   ledger_chunk_offset = slot_start + partition_chunk_offset
+    //   partition_chunk_offset = ledger_chunk_offset - slot_start
+    //
+    // IMPORTANT: The tx's position must be within this partition's slot range.
+    let slot_end = slot_start + chunks_per_partition;
     eyre::ensure!(
-        prev_total_chunks > slot_start,
-        "prev_total_chunks {} is not greater than slot_start {} for partition {}",
-        prev_total_chunks,
+        chunk_ledger_offset >= slot_start && chunk_ledger_offset < slot_end,
+        "chunk ledger offset {} is outside partition slot range [{}, {}) for partition {} (slot_index={})",
+        chunk_ledger_offset,
         slot_start,
-        partition_hash
-    );
-
-    // Use last existing chunk to ensure strict bound (< prev_total_chunks), then wrap within the partition.
-    let last_existing = prev_total_chunks - 1;
-    let relative = last_existing.saturating_sub(slot_start);
-    let partition_chunk_offset_u64 = relative % chunks_per_partition;
-    let mut partition_chunk_offset: u32 =
-        u32::try_from(partition_chunk_offset_u64).map_err(|_| {
-            eyre!(
-                "partition_chunk_offset {} doesn't fit u32",
-                partition_chunk_offset_u64
-            )
-        })?;
-
-    // Validate per-partition and ledger bounds before building the solution.
-    let chunks_per_partition = node.node_ctx.config.consensus.num_chunks_in_partition;
-    eyre::ensure!(
-        u64::from(partition_chunk_offset) < chunks_per_partition,
-        "partition_chunk_offset {} out of range [0, {}) for partition {} (slot_index={}, slot_start={}, prev_total_chunks={})",
-        partition_chunk_offset,
-        chunks_per_partition,
+        slot_end,
         partition_hash,
-        slot_index,
-        slot_start,
-        prev_total_chunks
+        slot_index
     );
-    let ledger_chunk_offset = slot_start + u64::from(partition_chunk_offset);
-    eyre::ensure!(
-        ledger_chunk_offset < prev_total_chunks,
-        "ledger_chunk_offset {} must be < prev_total_chunks {} (slot_start={}, partition_chunk_offset={})",
-        ledger_chunk_offset,
-        prev_total_chunks,
-        slot_start,
-        partition_chunk_offset
-    );
+    let partition_chunk_offset_u64 = chunk_ledger_offset - slot_start;
+    let partition_chunk_offset: u32 = u32::try_from(partition_chunk_offset_u64).map_err(|_| {
+        eyre!(
+            "partition_chunk_offset {} doesn't fit u32",
+            partition_chunk_offset_u64
+        )
+    })?;
 
-    // tx_path for a single-tx block (we'll ensure block_chunk_offset=0)
-    let (_tx_root, tx_paths) = DataTransactionLedger::merklize_tx_root(&[tx.header.clone()]);
+    // tx_path for a single-tx block
+    let (_tx_root, tx_paths) =
+        DataTransactionLedger::merklize_tx_root(std::slice::from_ref(&tx.header));
     let tx_path_bytes = tx_paths[0].proof.clone();
 
     // Use first chunk of the tx
@@ -230,67 +220,21 @@ pub async fn craft_data_poa_solution_from_tx(
         num_chunks_in_partition
     );
 
-    // Reconstruct expected recall range using the same approach as efficient-sampling:
-    // - maintain a ranges bag [0..num_recall_ranges_in_partition-1]
-    // - for each step, choose a position based on sha256(seed || partition_hash)
-    // - swap with the tail and shrink the bag
-    let mut ranges: Vec<usize> = (0..num_recall_ranges_in_partition).collect();
-    let mut last_pos = num_recall_ranges_in_partition.saturating_sub(1);
-    let mut expected_recall_index = 0_usize;
-    for seed in recall_steps.0.iter() {
-        // derive position from hash(seed, partition_hash)
-        let mut hasher = Sha256::new();
-        hasher.update(seed.as_bytes());
-        hasher.update(partition_hash.0);
-        let digest = hasher.finalize();
-        // guard bound to avoid panic on modulo by zero
-        let bound = if last_pos == 0 { 1 } else { last_pos };
-        let pos_u32 = u32::from_be_bytes(digest[28..32].try_into().unwrap());
-        let pos = (pos_u32 as usize) % bound;
-        let chosen = ranges[pos];
-        // swap-with-tail and shrink
-        ranges[pos] = ranges[last_pos];
-        expected_recall_index = chosen;
-        if last_pos == 0 {
-            // reinitialize after exhausting bag
-            ranges = (0..num_recall_ranges_in_partition).collect();
-            last_pos = num_recall_ranges_in_partition.saturating_sub(1);
-        } else {
-            last_pos -= 1;
-        }
-    }
-
-    // Snap partition_chunk_offset to the expected recall range
-    let expected_offset_u64 = (expected_recall_index as u64) * num_chunks_in_recall_range;
-    eyre::ensure!(
-        expected_offset_u64 < num_chunks_in_partition,
-        "expected recall offset {} out of partition bounds [0, {}) (recall_index={}, ranges={}, chunks_per_range={})",
-        expected_offset_u64,
-        num_chunks_in_partition,
-        expected_recall_index,
+    // Use the efficient-sampling library to compute the expected recall range
+    let expected_recall_index = irys_efficient_sampling::get_recall_range(
         num_recall_ranges_in_partition,
-        num_chunks_in_recall_range
-    );
-    partition_chunk_offset = expected_offset_u64 as u32;
+        &recall_steps,
+        &partition_hash,
+    )?;
 
-    // Re-ensure per-partition and ledger bounds after snapping
+    // Verify our chunk is in the expected recall range (can't snap - that would change which chunk we're proving)
     eyre::ensure!(
-        u64::from(partition_chunk_offset) < num_chunks_in_partition,
-        "partition_chunk_offset {} out of range [0, {}) after snapping (partition={}, recall_index={}, chunks_per_range={})",
-        partition_chunk_offset,
-        num_chunks_in_partition,
-        partition_hash,
+        recall_index == expected_recall_index,
+        "recall range mismatch: chunk at recall_index {} but VDF expects {} (partition_chunk_offset={}, vdf_step={})",
+        recall_index,
         expected_recall_index,
-        num_chunks_in_recall_range
-    );
-    let ledger_chunk_offset = slot_start + u64::from(partition_chunk_offset);
-    eyre::ensure!(
-        ledger_chunk_offset < prev_total_chunks,
-        "ledger_chunk_offset {} must be < prev_total_chunks {} after snapping (slot_start={}, partition_chunk_offset={})",
-        ledger_chunk_offset,
-        prev_total_chunks,
-        slot_start,
-        partition_chunk_offset
+        partition_chunk_offset,
+        current_step
     );
 
     // Compute checkpoints for (current_step - 1)
@@ -340,6 +284,20 @@ pub async fn craft_data_poa_solution_from_tx(
     })
 }
 
+/// Helper: get the current epoch snapshot for the canonical chain head
+pub async fn get_epoch_snapshot(
+    node: &IrysNodeTest<IrysNodeCtx>,
+) -> eyre::Result<Arc<EpochSnapshot>> {
+    let parent_block = node
+        .get_block_by_height(node.get_canonical_chain_height().await)
+        .await?;
+    node.node_ctx
+        .block_tree_guard
+        .read()
+        .get_epoch_snapshot(&parent_block.block_hash)
+        .ok_or_else(|| eyre!("epoch snapshot must exist for canonical head"))
+}
+
 /// Helper: submit a mining solution to the block producer and return the built block
 pub async fn submit_solution_to_block_producer(
     node: &IrysNodeTest<IrysNodeCtx>,
@@ -354,7 +312,7 @@ pub async fn submit_solution_to_block_producer(
             response: tx,
         })?;
     match rx.await?? {
-        Some((block, _payload)) => Ok(block),
+        Some((block, _payload, _txs)) => Ok(block),
         None => Err(eyre!("block producer returned None")),
     }
 }
