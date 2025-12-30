@@ -123,6 +123,7 @@ pub struct IrysNodeCtx {
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
+    pub pd_pricing: Arc<irys_actors::pd_pricing::PdPricing>,
     pub sync_service_facade: SyncChainServiceFacade,
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
@@ -143,6 +144,7 @@ impl IrysNodeCtx {
             block_index: self.block_index_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
+            pd_pricing: self.pd_pricing.clone(),
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
         }
@@ -291,6 +293,7 @@ async fn start_reth_node(
     config: Config,
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
+    chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -299,6 +302,7 @@ async fn start_reth_node(
         config.node_config.clone(),
         latest_block,
         random_ports,
+        chunk_provider,
     )
     .in_current_span()
     .await?;
@@ -966,6 +970,7 @@ impl IrysNode {
                             .instrument(tracing::Span::current())
                             .await
                             .expect("initializing services should not fail");
+
                             service_set_sender
                                 .send(service_set)
                                 .expect("ServiceSet must be sent");
@@ -1040,13 +1045,17 @@ impl IrysNode {
             .spawn(move || {
                 let exec = task_manager.executor();
                 let _span = span.enter();
-                let run_reth_until_ctrl_c_or_signal = async || {
+                let run_reth_until_ctrl_c_or_signal = async move {
+                    // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
+                    let mock_provider = irys_types::chunk_provider::MockChunkProvider::new();
+
                     let node_handle = start_reth_node(
                         exec,
                         reth_chainspec,
                         config,
                         reth_handle_sender,
                         latest_block_height,
+                        Arc::new(mock_provider),
                     )
                     .in_current_span()
                     .await
@@ -1102,7 +1111,7 @@ impl IrysNode {
                 };
 
                 let (reth_node, shutdown_reason) =
-                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal().in_current_span());
+                    tokio_runtime.block_on(run_reth_until_ctrl_c_or_signal.in_current_span());
 
                 reth_node.provider.database.db.close();
                 reth_provider::cleanup_provider(&irys_provider);
@@ -1144,16 +1153,28 @@ impl IrysNode {
         let reth_node_adapter = IrysRethNodeAdapter::new(reth_node.clone().into()).await?;
 
         // initialize packing service early
-        let packing_service =
+        let mut packing_service =
             irys_actors::packing_service::PackingService::new(Arc::new(config.clone()));
         // start service senders/receivers with packing sender
-        let (service_senders, receivers) = ServiceSenders::new();
+        // channel-first: create sender/receiver before attaching the service loop
+        //
+        let (packing_tx, packing_rx) =
+            irys_actors::packing_service::services::packing::InternalPackingService::channel(5_000);
+        let (unpacking_tx, unpacking_rx) =
+            irys_actors::packing_service::services::unpacking::InternalUnpackingService::channel(
+                5_000,
+            );
+        // start service senders/receivers with packing and unpacking senders
+        let (service_senders, receivers) =
+            ServiceSenders::new_with_packing_sender(packing_tx.clone(), unpacking_tx.clone());
         // attach the receiver loop and obtain a handle for waiters/tests
-        let packing_handle = packing_service.attach_receiver_loop(
-            runtime_handle.clone(),
-            receivers.packing,
-            service_senders.packing_sender.clone(),
-        );
+        let packing_handle = packing_service
+            .internal_packing_service
+            .attach_receiver_loop(runtime_handle.clone(), packing_rx, packing_tx);
+
+        let _unpacking_handle = packing_service
+            .internal_unpacking_service
+            .attach_receiver_loop(runtime_handle.clone(), unpacking_rx, unpacking_tx);
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
@@ -1313,6 +1334,13 @@ impl IrysNode {
             block_tree_guard.clone(),
         ));
 
+        // Initialize PD pricing service
+        let pd_pricing = Arc::new(irys_actors::pd_pricing::PdPricing::new(
+            block_tree_guard.clone(),
+            reth_node.clone(),
+            Arc::new(config.clone()),
+        ));
+
         // spawn the chunk migration service
         let chunk_migration_handle = ChunkMigrationService::spawn_service(
             receivers.chunk_migration,
@@ -1435,8 +1463,12 @@ impl IrysNode {
 
         // spawn packing controllers and set global step number
         let atomic_global_step_number = Arc::new(AtomicU64::new(global_step_number));
-        let packing_controller_handles =
-            packing_service.spawn_packing_controllers(runtime_handle.clone());
+        let packing_controller_handles = packing_service
+            .internal_packing_service
+            .spawn_packing_controllers(runtime_handle.clone());
+        let unpacking_controller_handles = packing_service
+            .internal_unpacking_service
+            .spawn_unpacking_controllers(runtime_handle.clone());
 
         // set up partition mining services (tokio)
         let (partition_controllers, partition_handles) = Self::init_partition_mining_services(
@@ -1542,6 +1574,7 @@ impl IrysNode {
             validation_enabled,
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),
+            pd_pricing: pd_pricing.clone(),
             sync_service_facade,
             is_vdf_mining_enabled,
             started_at: Instant::now(),
@@ -1587,6 +1620,8 @@ impl IrysNode {
             services.extend(partition_handles.into_iter());
             // Add packing controllers to services
             services.extend(packing_controller_handles.into_iter());
+            // Add unpacking controllers to services
+            services.extend(unpacking_controller_handles.into_iter());
 
             // 2. Block production flow
             services.push(block_producer_handle);
@@ -1633,6 +1668,7 @@ impl IrysNode {
                     .expect("Missing reth rpc url!"),
                 sync_state,
                 mempool_pledge_provider,
+                pd_pricing: irys_node_ctx.pd_pricing.clone(),
                 started_at: irys_node_ctx.started_at,
                 mining_address: irys_node_ctx.config.node_config.miner_address(),
             },

@@ -1672,7 +1672,10 @@ mod tests {
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait for spawned tasks to complete their retries.
+            // pull_data_from_network sleeps 100ms between retry attempts, so we need
+            // to wait longer to ensure the retry for the first block completes.
+            tokio::time::sleep(Duration::from_millis(500)).await;
 
             let block_requests = block_requests_clone.lock().unwrap();
             assert_eq!(block_requests.len(), 3);
