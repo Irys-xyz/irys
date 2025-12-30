@@ -12,6 +12,10 @@ pub struct IrysHardforkConfig {
     /// NextNameTBD hardfork - None means disabled
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_name_tbd: Option<NextNameTBD>,
+
+    /// Aurora hardfork - enables canonical RLP encoding on Commitment tx. None means disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aurora: Option<Aurora>,
 }
 
 /// Parameters for Frontier hardfork (genesis defaults).
@@ -39,6 +43,18 @@ pub struct NextNameTBD {
 
     /// Number of ingress proofs from assignees
     pub number_of_ingress_proofs_from_assignees: u64,
+}
+
+/// The Aurora hardfork deprecates V1 Commitment Transactions due to
+/// nonstandard RLP encoding that caused signature errors with other language implementations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Aurora {
+    /// Timestamp (seconds since epoch) at which this hardfork activates
+    pub activation_timestamp: UnixTimestamp,
+
+    /// When this hardfork is activated this will be the minimum valid
+    /// commitment transaction version
+    pub minimum_commitment_tx_version: u8,
 }
 
 impl IrysHardforkConfig {
@@ -73,6 +89,22 @@ impl IrysHardforkConfig {
         }
         self.frontier.number_of_ingress_proofs_from_assignees
     }
+
+    /// Get a reference to the Aurora config if active at the given timestamp.
+    pub fn aurora_at(&self, timestamp: UnixTimestamp) -> Option<&Aurora> {
+        self.aurora
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Get the max PD chunks per block at a specific timestamp.
+    /// Returns None if Sprite is not active.
+    pub fn minimum_commitment_tx_version_at(&self, timestamp: UnixTimestamp) -> Option<u8> {
+        self.aurora
+            .as_ref()
+            .filter(|f| timestamp >= f.activation_timestamp)
+            .map(|f| f.minimum_commitment_tx_version)
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +119,7 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 2,
             },
             next_name_tbd: None,
+            aurora: None,
         };
 
         assert_eq!(
@@ -117,6 +150,7 @@ mod tests {
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
+            aurora: None,
         };
 
         // Before activation timestamp
@@ -164,6 +198,7 @@ mod tests {
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
+            aurora: None,
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
