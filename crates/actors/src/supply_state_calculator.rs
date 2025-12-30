@@ -78,8 +78,10 @@ async fn do_recalculation(
             match index.get_item(height) {
                 Some(item) => item.block_hash,
                 None => {
-                    warn!("Block at height {} not found in index", height);
-                    continue;
+                    return Err(eyre::eyre!(
+                        "Block at height {} not found in index - cannot proceed with missing blocks",
+                        height
+                    ));
                 }
             }
         };

@@ -19,38 +19,53 @@ pub struct SupplyQuery {
     pub exact: bool,
 }
 
+/// Response from the supply endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupplyResponse {
+    /// Total supply (genesis + emitted) as a decimal string.
     pub total_supply: String,
+    /// Genesis allocation from chain config as a decimal string.
     pub genesis_supply: String,
+    /// Cumulative block rewards emitted as a decimal string.
+    /// When `calculation_method` is `actual_recalculating`, this value may be stale.
     pub emitted_supply: String,
+    /// Current block height used for the calculation.
     #[serde(with = "string_u64")]
     pub block_height: u64,
+    /// Maximum emission cap as a decimal string.
     pub inflation_cap: String,
+    /// Percentage of inflation cap emitted (e.g., "12.34").
     pub inflation_progress_percent: String,
+    /// How `emitted_supply` was calculated: "estimated", "actual", or "actual_recalculating".
+    /// When "actual_recalculating", the value may be stale or incomplete.
     pub calculation_method: String,
 }
 
 /// GET /supply
 ///
-/// Returns the current total token supply including genesis allocation and emissions
+/// Returns the current total token supply including genesis allocation and emissions.
 ///
-/// Query parameters:
-/// - `exact`: boolean (optional) - If true, returns actual summed block rewards. Default: false (uses height-based formula)
+/// # Query Parameters
 ///
-/// Default behavior uses height-based formula calculation, simulating elapsed time as
-/// `block_height * target_block_time` and applying the reward curve formula, matching how
-/// individual block rewards are calculated.
+/// - `exact`: boolean (optional, default: false)
+///   - `false`: Returns estimated supply using height-based formula
+///   - `true`: Returns actual summed block rewards from pre-calculated state
 ///
-/// Use `?exact=true` to get the actual sum of all block rewards. This uses a pre-calculated
-/// cumulative supply that is recalculated on node startup and updated incrementally as new
-/// blocks are confirmed.
+/// # Calculation Methods
 ///
-/// Calculation methods returned:
-/// - `estimated`: Uses height-based formula calculation
-/// - `actual`: Uses pre-calculated cumulative supply (fully synced)
-/// - `actual_recalculating`: Uses pre-calculated cumulative supply (recalculation in progress)
+/// The `calculationMethod` field indicates how `emittedSupply` was computed:
+///
+/// - `estimated`: Uses height-based formula (`block_height * target_block_time` applied to
+///   reward curve). Fast and always available.
+///
+/// - `actual`: Uses pre-calculated cumulative supply. Recalculation is complete and the
+///   value reflects all blocks in the chain.
+///
+/// - `actual_recalculating`: Recalculation is in progress. The returned `emittedSupply`
+///   is the best available value but may be stale or incomplete. It will reflect either
+///   the previously persisted state or a partial sum. Consumers should treat this as
+///   approximate until `calculationMethod` becomes `actual`.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
