@@ -1220,15 +1220,31 @@ impl IrysNode {
             let supply_state_for_recalc = supply_state.clone();
             let block_index_for_recalc = block_index_guard.clone();
             let db_for_recalc = irys_db.clone();
-            runtime_handle.spawn(async move {
-                if let Err(e) = irys_actors::supply_state_calculator::recalculate_supply_state(
+            let recalc_handle = runtime_handle.spawn(async move {
+                irys_actors::supply_state_calculator::recalculate_supply_state(
                     supply_state_for_recalc,
                     block_index_for_recalc,
                     db_for_recalc,
                 )
                 .await
-                {
-                    tracing::error!("Supply state recalculation failed: {}", e);
+            });
+
+            // Monitor the critical recalculation task and propagate failures
+            runtime_handle.spawn(async move {
+                match recalc_handle.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        panic!(
+                            "Supply state recalculation must succeed - data integrity issue: {}",
+                            e
+                        );
+                    }
+                    Err(join_error) => {
+                        panic!(
+                            "Supply state recalculation task panicked - data integrity issue: {}",
+                            join_error
+                        );
+                    }
                 }
             });
         }

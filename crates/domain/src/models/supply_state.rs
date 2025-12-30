@@ -16,9 +16,9 @@ use std::sync::{
 };
 
 const FILE_NAME: &str = "supply_state.dat";
-const STATE_SIZE: usize = 8 + 32; // height (u64) + cumulative_emitted (U256)
+const STATE_SIZE: usize = std::mem::size_of::<u64>() + std::mem::size_of::<U256>();
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SupplyStateData {
     pub height: u64,
     pub cumulative_emitted: U256,
@@ -83,10 +83,7 @@ impl SupplyState {
     }
 
     pub fn get(&self) -> SupplyStateData {
-        self.data
-            .read()
-            .expect("supply state read lock poisoned")
-            .clone()
+        *self.data.read().expect("supply state read lock poisoned")
     }
 
     pub fn height(&self) -> u64 {
@@ -103,7 +100,8 @@ impl SupplyState {
             .cumulative_emitted
     }
 
-    /// Updates the supply state with a new block's reward and persists to disk.
+    /// Adds a block's reward if height is sequential. Persists to disk.
+    /// Callers should NOT gate on `is_ready()` - sequencing is handled internally.
     pub fn add_block_reward(&self, height: u64, reward_amount: U256) -> Result<()> {
         let data_to_write = {
             let mut data = self.data.write().expect("supply state write lock poisoned");
@@ -112,7 +110,6 @@ impl SupplyState {
             let is_sequential = height == data.height.saturating_add(1);
 
             if is_genesis {
-                // Prevent duplicate genesis processing
                 if self.genesis_processed.swap(true, Ordering::AcqRel) {
                     eyre::bail!("Genesis block reward already processed");
                 }
@@ -126,33 +123,15 @@ impl SupplyState {
 
             data.height = height;
             data.cumulative_emitted = data.cumulative_emitted.saturating_add(reward_amount);
-            data.clone()
+            *data
         };
-
-        save_to_file(&self.state_file, &data_to_write)
-    }
-
-    /// Replaces the entire supply state (used during recalculation).
-    pub fn set(&self, height: u64, cumulative_emitted: U256) -> Result<()> {
-        let data_to_write = {
-            let mut data = self.data.write().expect("supply state write lock poisoned");
-
-            data.height = height;
-            data.cumulative_emitted = cumulative_emitted;
-            data.clone()
-        };
-
-        // Mark genesis as processed if we're setting height >= 0 with non-zero emitted
-        if height > 0 || cumulative_emitted > U256::zero() {
-            self.genesis_processed.store(true, Ordering::Release);
-        }
 
         save_to_file(&self.state_file, &data_to_write)
     }
 
     /// Atomically sets the supply state and marks it as ready.
-    /// This prevents the race condition where blocks arriving between
-    /// set() and mark_ready() would be skipped.
+    /// This prevents race conditions by updating state and ready flag
+    /// while holding the write lock.
     pub fn set_and_mark_ready(&self, height: u64, cumulative_emitted: U256) -> Result<()> {
         let data_to_write = {
             let mut data = self.data.write().expect("supply state write lock poisoned");
@@ -160,22 +139,17 @@ impl SupplyState {
             data.height = height;
             data.cumulative_emitted = cumulative_emitted;
 
-            // Mark genesis as processed
             if height > 0 || cumulative_emitted > U256::zero() {
                 self.genesis_processed.store(true, Ordering::Release);
             }
 
-            // Mark ready while still holding the write lock
+            // Mark ready while holding write lock to ensure atomicity
             self.ready.store(true, Ordering::Release);
 
-            data.clone()
+            *data
         };
 
         save_to_file(&self.state_file, &data_to_write)
-    }
-
-    pub fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Release);
     }
 
     pub fn mark_not_ready(&self) {
@@ -236,6 +210,23 @@ fn save_to_file(path: &Path, data: &SupplyStateData) -> Result<()> {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use std::sync::atomic::AtomicU64;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn create_test_supply_state() -> SupplyState {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temp_dir = std::env::temp_dir().join(format!("supply_state_test_{}", counter));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let state_file = temp_dir.join(FILE_NAME);
+
+        SupplyState {
+            data: RwLock::new(SupplyStateData::default()),
+            ready: AtomicBool::new(false),
+            genesis_processed: AtomicBool::new(false),
+            state_file,
+        }
+    }
 
     fn arb_u256_bytes() -> impl Strategy<Value = [u8; 32]> {
         any::<[u8; 32]>()
@@ -252,6 +243,21 @@ mod tests {
             let decoded = SupplyStateData::from_bytes(&bytes).unwrap();
             prop_assert_eq!(decoded, data);
         }
+
+        #[test]
+        fn sequential_rewards_accumulate_correctly(rewards in prop::collection::vec(0_u64..1_000_000, 1..50)) {
+            let state = create_test_supply_state();
+
+            let mut expected_cumulative = U256::zero();
+            for (height, &reward) in rewards.iter().enumerate() {
+                let reward_u256 = U256::from(reward);
+                state.add_block_reward(height as u64, reward_u256).unwrap();
+                expected_cumulative = expected_cumulative.saturating_add(reward_u256);
+            }
+
+            prop_assert_eq!(state.cumulative_emitted(), expected_cumulative);
+            prop_assert_eq!(state.height(), (rewards.len() - 1) as u64);
+        }
     }
 
     #[test]
@@ -264,5 +270,25 @@ mod tests {
     fn from_bytes_rejects_long_input() {
         let long = vec![0_u8; STATE_SIZE + 1];
         assert!(SupplyStateData::from_bytes(&long).is_err());
+    }
+
+    #[test]
+    fn add_block_reward_rejects_non_sequential() {
+        let state = create_test_supply_state();
+        state.add_block_reward(0, U256::from(100)).unwrap();
+
+        // Height 2 should fail (expected 1)
+        let result = state.add_block_reward(2, U256::from(100));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_block_reward_rejects_duplicate_genesis() {
+        let state = create_test_supply_state();
+        state.add_block_reward(0, U256::from(100)).unwrap();
+
+        // Second genesis should fail
+        let result = state.add_block_reward(0, U256::from(100));
+        assert!(result.is_err());
     }
 }

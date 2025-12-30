@@ -186,12 +186,10 @@ impl BlockIndexServiceInner {
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
-        // Update supply state with the block's reward amount
+        // Update supply state with the block's reward amount.
         if let Some(supply_state) = &self.supply_state {
-            // Only update if the supply state is ready (recalculation complete)
-            // During recalculation, updates are handled by the recalculator
-            if supply_state.is_ready() {
-                if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
+            if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
+                if supply_state.is_ready() {
                     warn!(
                         block.height = block.height,
                         block.hash = ?block.block_hash,

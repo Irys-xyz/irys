@@ -28,7 +28,6 @@ pub struct SupplyResponse {
     /// Genesis allocation from chain config as a decimal string.
     pub genesis_supply: String,
     /// Cumulative block rewards emitted as a decimal string.
-    /// When `calculation_method` is `actual_recalculating`, this value may be stale.
     pub emitted_supply: String,
     /// Current block height used for the calculation.
     #[serde(with = "string_u64")]
@@ -37,8 +36,7 @@ pub struct SupplyResponse {
     pub inflation_cap: String,
     /// Percentage of inflation cap emitted (e.g., "12.34").
     pub inflation_progress_percent: String,
-    /// How `emitted_supply` was calculated: "estimated", "actual", or "actual_recalculating".
-    /// When "actual_recalculating", the value may be stale or incomplete.
+    /// How `emitted_supply` was calculated: "estimated" or "actual".
     pub calculation_method: String,
 }
 
@@ -62,10 +60,8 @@ pub struct SupplyResponse {
 /// - `actual`: Uses pre-calculated cumulative supply. Recalculation is complete and the
 ///   value reflects all blocks in the chain.
 ///
-/// - `actual_recalculating`: Recalculation is in progress. The returned `emittedSupply`
-///   is the best available value but may be stale or incomplete. It will reflect either
-///   the previously persisted state or a partial sum. Consumers should treat this as
-///   approximate until `calculationMethod` becomes `actual`.
+/// If `exact=true` is requested while the supply state is recalculating, an error is
+/// returned. Retry later or use `exact=false` for estimated supply.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
@@ -111,18 +107,20 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         });
 
     let (emitted_amount, calculation_method) = if use_exact {
-        // Use the pre-calculated supply state
+        // Use the pre-calculated supply state (only if fully ready)
         if let Some(supply_state) = &state.supply_state {
-            let state_data = supply_state.get();
-            let method = if supply_state.is_ready() {
-                "actual"
-            } else {
-                "actual_recalculating"
-            };
-            (state_data.cumulative_emitted, method)
+            if !supply_state.is_ready() {
+                return Err(eyre!(
+                    "Supply state is recalculating. \
+                    Retry later or use exact=false for estimated supply."
+                ));
+            }
+            (supply_state.get().cumulative_emitted, "actual")
         } else {
-            // No supply state available, return error
-            return Err(eyre!("Supply state not available"));
+            return Err(eyre!(
+                "Supply state not available for exact calculation. \
+                Retry later or use exact=false for estimated supply."
+            ));
         }
     } else {
         calculate_estimated_emission(config, block_height)?
