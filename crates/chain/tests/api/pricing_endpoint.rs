@@ -406,6 +406,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
             number_of_ingress_proofs_total: HARDFORK_PROOFS,
             number_of_ingress_proofs_from_assignees: 0,
         }),
+        aurora: None,
     };
 
     let ctx = crate::utils::IrysNodeTest::new_genesis(config)
