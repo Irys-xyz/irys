@@ -110,6 +110,7 @@ impl IrysHardforkConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_matches::assert_matches;
 
     #[test]
     fn test_frontier_params() {
@@ -136,6 +137,33 @@ mod tests {
             config.number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(1_000_000)),
             5
         );
+    }
+
+    #[test]
+    fn test_aurora_params() {
+        let config = IrysHardforkConfig {
+            frontier: FrontierParams {
+                number_of_ingress_proofs_total: 5,
+                number_of_ingress_proofs_from_assignees: 2,
+            },
+            next_name_tbd: None,
+            aurora: Some(Aurora {
+                activation_timestamp: UnixTimestamp::from_secs(1500),
+                minimum_commitment_tx_version: 2,
+            }),
+        };
+
+        // Before activation timestamp
+        let aurora = config.aurora_at(UnixTimestamp::from_secs(1499));
+        assert_matches!(aurora, None);
+
+        // At activation timestamp
+        let aurora = config.aurora_at(UnixTimestamp::from_secs(1500));
+        assert_eq!(aurora, config.aurora.as_ref());
+
+        // After activation timestamp
+        let aurora = config.aurora_at(UnixTimestamp::from_secs(1501));
+        assert_eq!(aurora, config.aurora.as_ref());
     }
 
     #[test]
