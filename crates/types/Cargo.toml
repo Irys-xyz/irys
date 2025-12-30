@@ -41,6 +41,7 @@ rust_decimal_macros.workspace = true
 bytemuck.workspace = true
 hex.workspace = true
 toml.workspace = true
+assert_matches.workspace = true
 alloy-primitives.workspace = true
 reth-codecs.workspace = true
 reth-primitives.workspace = true
