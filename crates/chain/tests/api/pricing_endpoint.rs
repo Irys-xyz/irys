@@ -402,7 +402,7 @@ async fn heavy_pricing_endpoint_hardfork_changes_ingress_proofs() -> eyre::Resul
             number_of_ingress_proofs_from_assignees: 0,
         },
         next_name_tbd: Some(NextNameTBD {
-            activation_timestamp: hardfork_activation,
+            activation_timestamp: UnixTimestamp::from_secs(hardfork_activation),
             number_of_ingress_proofs_total: HARDFORK_PROOFS,
             number_of_ingress_proofs_from_assignees: 0,
         }),
