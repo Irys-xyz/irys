@@ -44,6 +44,7 @@ pub const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
 pub fn tmp_base_dir() -> PathBuf {
     if let Ok(custom_tmp) = &std::env::var("IRYS_CUSTOM_TMP_DIR") {
+        eprintln!("CUSTOM_TMP SET TO  {}", &custom_tmp);
         // try to parse the value as a path
         let path = PathBuf::from(custom_tmp);
         if path.is_absolute()
@@ -76,6 +77,8 @@ pub fn tmp_base_dir() -> PathBuf {
 /// Creates a temporary directory
 pub fn temporary_directory(name: Option<&str>, keep: bool) -> TempDir {
     let tmp_path = tmp_base_dir();
+
+    eprintln!("USING TEMP DIR: {:?}", &tmp_path.canonicalize());
 
     create_dir_all(&tmp_path).unwrap();
 
