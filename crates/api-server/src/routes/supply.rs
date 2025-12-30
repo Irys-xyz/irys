@@ -37,12 +37,20 @@ pub struct SupplyResponse {
 /// Returns the current total token supply including genesis allocation and emissions
 ///
 /// Query parameters:
-/// - `exact`: boolean (optional) - If true, sums actual block rewards. Default: false (uses height-based formula)
+/// - `exact`: boolean (optional) - If true, returns actual summed block rewards. Default: false (uses height-based formula)
 ///
 /// Default behavior uses height-based formula calculation, simulating elapsed time as
 /// `block_height * target_block_time` and applying the reward curve formula, matching how
-/// individual block rewards are calculated. Use `?exact=true` to sum the actual `reward_amount`
-/// from all blocks in the canonical chain for absolute accuracy.
+/// individual block rewards are calculated.
+///
+/// Use `?exact=true` to get the actual sum of all block rewards. This uses a pre-calculated
+/// cumulative supply that is recalculated on node startup and updated incrementally as new
+/// blocks are confirmed.
+///
+/// Calculation methods returned:
+/// - `estimated`: Uses height-based formula calculation
+/// - `actual`: Uses pre-calculated cumulative supply (fully synced)
+/// - `actual_recalculating`: Uses pre-calculated cumulative supply (recalculation in progress)
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
@@ -88,37 +96,21 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         });
 
     let (emitted_amount, calculation_method) = if use_exact {
-        let tree = state.block_tree.read();
-        let (canonical, _) = tree.get_canonical_chain();
-
-        let mut sum = U256::zero();
-
-        for entry in canonical.iter() {
-            let block = tree.get_block(&entry.block_hash).cloned().or_else(|| {
-                state
-                    .db
-                    .view_eyre(|tx| block_header_by_hash(tx, &entry.block_hash, false))
-                    .ok()
-                    .flatten()
-            });
-
-            if let Some(block) = block {
-                sum += block.reward_amount;
-            }
+        // Use the pre-calculated supply state
+        if let Some(supply_state) = &state.supply_state {
+            let state_data = supply_state.get();
+            let method = if supply_state.is_ready() {
+                "actual"
+            } else {
+                "actual_recalculating"
+            };
+            (state_data.cumulative_emitted, method)
+        } else {
+            // No supply state available, return error
+            return Err(eyre!("Supply state not available"));
         }
-
-        (sum, "actual")
     } else {
-        let curve = HalvingCurve {
-            inflation_cap: config.block_reward_config.inflation_cap,
-            half_life_secs: config.block_reward_config.half_life_secs as u128,
-        };
-
-        let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
-        let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
-
-        let emitted = curve.reward_between(0, simulated_time_seconds)?;
-        (emitted.amount, "estimated")
+        calculate_estimated_emission(config, block_height)?
     };
 
     let total_supply = genesis_supply + emitted_amount;
@@ -135,6 +127,22 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         ),
         calculation_method: calculation_method.to_string(),
     })
+}
+
+fn calculate_estimated_emission(
+    config: &irys_types::ConsensusConfig,
+    block_height: u64,
+) -> Result<(U256, &'static str)> {
+    let curve = HalvingCurve {
+        inflation_cap: config.block_reward_config.inflation_cap,
+        half_life_secs: config.block_reward_config.half_life_secs as u128,
+    };
+
+    let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
+    let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
+
+    let emitted = curve.reward_between(0, simulated_time_seconds)?;
+    Ok((emitted.amount, "estimated"))
 }
 
 fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {

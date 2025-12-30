@@ -5371,6 +5371,7 @@ dependencies = [
  "lru 0.14.0",
  "nodit",
  "openssl",
+ "proptest",
  "rand 0.8.5",
  "reth",
  "reth-db",

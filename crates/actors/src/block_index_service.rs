@@ -1,5 +1,5 @@
 use eyre::eyre;
-use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
+use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, SupplyState};
 use irys_types::{
     BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
     TokioServiceHandle, UnixTimestampMs, H256, U256,
@@ -53,6 +53,7 @@ struct BlockLogEntry {
 #[derive(Debug)]
 pub struct BlockIndexServiceInner {
     block_index: Arc<RwLock<BlockIndex>>,
+    supply_state: Option<Arc<SupplyState>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
     chunk_size: u64,
@@ -60,9 +61,14 @@ pub struct BlockIndexServiceInner {
 }
 
 impl BlockIndexServiceInner {
-    pub fn new(block_index: Arc<RwLock<BlockIndex>>, consensus_config: &ConsensusConfig) -> Self {
+    pub fn new(
+        block_index: Arc<RwLock<BlockIndex>>,
+        supply_state: Option<Arc<SupplyState>>,
+        consensus_config: &ConsensusConfig,
+    ) -> Self {
         Self {
             block_index,
+            supply_state,
             block_log: Vec::new(),
             num_blocks: 0,
             chunk_size: consensus_config.chunk_size,
@@ -180,6 +186,22 @@ impl BlockIndexServiceInner {
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
+        // Update supply state with the block's reward amount
+        if let Some(supply_state) = &self.supply_state {
+            // Only update if the supply state is ready (recalculation complete)
+            // During recalculation, updates are handled by the recalculator
+            if supply_state.is_ready() {
+                if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
+                    warn!(
+                        block.height = block.height,
+                        block.hash = ?block.block_hash,
+                        error = %e,
+                        "Failed to update supply state during block migration"
+                    );
+                }
+            }
+        }
+
         self.last_received_block = Some((block.height, block.block_hash));
 
         // Track a small window of recent blocks for debugging
@@ -209,13 +231,14 @@ impl BlockIndexService {
     pub fn spawn_service(
         rx: UnboundedReceiver<BlockIndexServiceMessage>,
         block_index: Arc<RwLock<BlockIndex>>,
+        supply_state: Option<Arc<SupplyState>>,
         consensus_config: &ConsensusConfig,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning BlockIndex service");
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let inner = BlockIndexServiceInner::new(block_index, consensus_config);
+        let inner = BlockIndexServiceInner::new(block_index, supply_state, consensus_config);
 
         let handle = runtime_handle.spawn(
             async move {

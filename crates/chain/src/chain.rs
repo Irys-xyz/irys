@@ -38,7 +38,7 @@ use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
     EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
-    StorageModule, StorageModuleInfo, StorageModulesReadGuard,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
 };
 use irys_p2p::{
     spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
@@ -126,6 +126,7 @@ pub struct IrysNodeCtx {
     pub sync_service_facade: SyncChainServiceFacade,
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
+    pub supply_state_guard: Option<SupplyStateReadGuard>,
 }
 
 impl IrysNodeCtx {
@@ -141,6 +142,7 @@ impl IrysNodeCtx {
             reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
+            supply_state: self.supply_state_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
             started_at: self.started_at,
@@ -1155,10 +1157,17 @@ impl IrysNode {
             service_senders.packing_sender.clone(),
         );
 
+        // Initialize supply state for tracking cumulative emissions
+        let supply_state = Arc::new(
+            SupplyState::new(&config.node_config).expect("Failed to initialize supply state"),
+        );
+        let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
+
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
             receivers.block_index,
             block_index.clone(),
+            Some(supply_state.clone()),
             &config.consensus,
             runtime_handle.clone(),
         );
@@ -1205,6 +1214,24 @@ impl IrysNode {
         let block_index_guard = block_index_rx
             .await
             .expect("to receive BlockIndexReadGuard from BlockIndex service");
+
+        // Spawn async task to recalculate supply state from block index
+        {
+            let supply_state_for_recalc = supply_state.clone();
+            let block_index_for_recalc = block_index_guard.clone();
+            let db_for_recalc = irys_db.clone();
+            runtime_handle.spawn(async move {
+                if let Err(e) = irys_actors::supply_state_calculator::recalculate_supply_state(
+                    supply_state_for_recalc,
+                    block_index_for_recalc,
+                    db_for_recalc,
+                )
+                .await
+                {
+                    tracing::error!("Supply state recalculation failed: {}", e);
+                }
+            });
+        }
 
         // use the Tokio-native mining bus from ServiceSenders
         let mining_bus = service_senders.mining_bus();
@@ -1545,6 +1572,7 @@ impl IrysNode {
             sync_service_facade,
             is_vdf_mining_enabled,
             started_at: Instant::now(),
+            supply_state_guard: Some(supply_state_guard.clone()),
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1626,6 +1654,7 @@ impl IrysNode {
                 reth_provider: reth_node.clone(),
                 block_tree: block_tree_guard.clone(),
                 block_index: block_index_guard.clone(),
+                supply_state: Some(supply_state_guard),
                 config: config.clone(),
                 reth_http_url: reth_node
                     .rpc_server_handle()
