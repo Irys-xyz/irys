@@ -32,7 +32,7 @@ pub struct FrontierParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NextNameTBD {
     /// Timestamp (seconds since epoch) at which this hardfork activates
-    pub activation_timestamp: u64,
+    pub activation_timestamp: UnixTimestamp,
 
     /// Number of total ingress proofs required
     pub number_of_ingress_proofs_total: u64,
@@ -46,18 +46,18 @@ impl IrysHardforkConfig {
     pub fn is_next_name_tbd_active(&self, timestamp: UnixTimestamp) -> bool {
         self.next_name_tbd
             .as_ref()
-            .is_some_and(|f| timestamp.as_secs() >= f.activation_timestamp)
+            .is_some_and(|f| timestamp >= f.activation_timestamp)
     }
 
     /// Get the activation timestamp for NextNameTBD hardfork, if configured.
-    pub fn next_name_tbd_activation_timestamp(&self) -> Option<u64> {
+    pub fn next_name_tbd_activation_timestamp(&self) -> Option<UnixTimestamp> {
         self.next_name_tbd.as_ref().map(|f| f.activation_timestamp)
     }
 
     /// Get the number of ingress proofs required at a specific timestamp (in seconds).
     pub fn number_of_ingress_proofs_total_at(&self, timestamp: UnixTimestamp) -> u64 {
         if let Some(ref fork) = self.next_name_tbd {
-            if timestamp.as_secs() >= fork.activation_timestamp {
+            if timestamp >= fork.activation_timestamp {
                 return fork.number_of_ingress_proofs_total;
             }
         }
@@ -67,7 +67,7 @@ impl IrysHardforkConfig {
     /// Get the number of ingress proofs from assignees required at a specific timestamp (in seconds).
     pub fn number_of_ingress_proofs_from_assignees_at(&self, timestamp: UnixTimestamp) -> u64 {
         if let Some(ref fork) = self.next_name_tbd {
-            if timestamp.as_secs() >= fork.activation_timestamp {
+            if timestamp >= fork.activation_timestamp {
                 return fork.number_of_ingress_proofs_from_assignees;
             }
         }
@@ -113,7 +113,7 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 0,
             },
             next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: 1000,
+                activation_timestamp: UnixTimestamp::from_secs(1000),
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
@@ -160,7 +160,7 @@ mod tests {
                 number_of_ingress_proofs_from_assignees: 0,
             },
             next_name_tbd: Some(NextNameTBD {
-                activation_timestamp: 5000,
+                activation_timestamp: UnixTimestamp::from_secs(5000),
                 number_of_ingress_proofs_total: 4,
                 number_of_ingress_proofs_from_assignees: 2,
             }),
