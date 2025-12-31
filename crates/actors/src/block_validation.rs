@@ -2927,6 +2927,7 @@ mod tests {
             block_index_rx,
             block_index.clone(),
             None, // No supply state needed for tests
+            None, // No db needed for tests
             &consensus_config,
             tokio::runtime::Handle::current(),
         );

@@ -763,6 +763,7 @@ async fn epoch_blocks_reinitialization_test() {
             BlockIndex::new(&config.node_config).await.unwrap(),
         )),
         None, // No supply state needed for tests
+        None, // No db needed for tests
         &config.consensus,
         tokio::runtime::Handle::current(),
     );

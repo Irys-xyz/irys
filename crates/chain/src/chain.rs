@@ -1158,9 +1158,7 @@ impl IrysNode {
         );
 
         // Initialize supply state for tracking cumulative emissions
-        let supply_state = Arc::new(
-            SupplyState::new(&config.node_config).expect("Failed to initialize supply state"),
-        );
+        let supply_state = Arc::new(SupplyState::new());
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
         // start block index service (tokio)
@@ -1168,6 +1166,7 @@ impl IrysNode {
             receivers.block_index,
             block_index.clone(),
             Some(supply_state.clone()),
+            Some(irys_db.clone()),
             &config.consensus,
             runtime_handle.clone(),
         );
@@ -1220,31 +1219,21 @@ impl IrysNode {
             let supply_state_for_recalc = supply_state.clone();
             let block_index_for_recalc = block_index_guard.clone();
             let db_for_recalc = irys_db.clone();
-            let recalc_handle = runtime_handle.spawn(async move {
-                irys_actors::supply_state_calculator::recalculate_supply_state(
-                    supply_state_for_recalc,
+
+            runtime_handle.spawn(async move {
+                let result = irys_actors::supply_state_calculator::recalculate_supply_state(
+                    supply_state_for_recalc.clone(),
                     block_index_for_recalc,
                     db_for_recalc,
                 )
-                .await
-            });
+                .await;
 
-            // Monitor the critical recalculation task and propagate failures
-            runtime_handle.spawn(async move {
-                match recalc_handle.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
-                        panic!(
-                            "Supply state recalculation must succeed - data integrity issue: {}",
-                            e
-                        );
-                    }
-                    Err(join_error) => {
-                        panic!(
-                            "Supply state recalculation task panicked - data integrity issue: {}",
-                            join_error
-                        );
-                    }
+                if let Err(e) = result {
+                    tracing::error!(
+                        error = %e,
+                        "Supply state recalculation failed - exact supply queries unavailable"
+                    );
+                    supply_state_for_recalc.mark_failed();
                 }
             });
         }

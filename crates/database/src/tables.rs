@@ -6,7 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Base64, IrysAddress, PeerListItem};
+use irys_types::{Base64, IrysAddress, PeerListItem, U256};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
 use reth_codecs::Compact;
@@ -80,6 +80,7 @@ add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
 
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
+add_wrapper_struct!((U256, CompactU256));
 
 impl_compression_for_compact!(
     CompactIrysBlockHeader,
@@ -94,7 +95,8 @@ impl_compression_for_compact!(
     DataRootInfos,
     GlobalChunkOffset,
     CompactBase64,
-    CompactCachedIngressProof
+    CompactCachedIngressProof,
+    CompactU256
 );
 
 use paste::paste;
@@ -166,5 +168,10 @@ table PeerListItems {
 table Metadata {
     type Key = MetadataKey;
     type Value = Vec<u8>;
+}
+
+table BlockRewards {
+    type Key = u64;
+    type Value = CompactU256;
 }
 }

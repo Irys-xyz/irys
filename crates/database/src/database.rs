@@ -4,8 +4,9 @@ use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
-    IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, PeerListItems,
+    BlockRewards, CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
+    CompactU256, IngressProofs, IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders,
+    IrysPoAChunks, Metadata, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -15,7 +16,7 @@ use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
     DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, PeerListItem,
-    TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
+    TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE, U256,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -495,6 +496,81 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     } else {
         Ok(None)
     }
+}
+
+pub fn insert_block_reward<T: DbTxMut>(tx: &T, height: u64, reward: U256) -> eyre::Result<()> {
+    Ok(tx.put::<BlockRewards>(height, CompactU256(reward))?)
+}
+
+pub fn has_block_reward<T: DbTx>(tx: &T, height: u64) -> eyre::Result<bool> {
+    Ok(tx.get::<BlockRewards>(height)?.is_some())
+}
+
+pub fn highest_block_reward_height<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
+    let mut cursor = tx.cursor_read::<BlockRewards>()?;
+    Ok(cursor.last()?.map(|(height, _)| height))
+}
+
+pub fn sum_all_block_rewards<T: DbTx>(tx: &T) -> eyre::Result<U256> {
+    let mut cursor = tx.cursor_read::<BlockRewards>()?;
+    let mut total = U256::zero();
+
+    let walker = cursor.walk(None)?;
+    for result in walker {
+        let (_, reward) = result?;
+        total = total.saturating_add(reward.0);
+    }
+
+    Ok(total)
+}
+
+/// Returns heights in [from_height, to_height] that are missing from BlockRewards table.
+/// Uses cursor-based iteration for efficiency.
+pub fn find_missing_block_reward_heights<T: DbTx>(
+    tx: &T,
+    from_height: u64,
+    to_height: u64,
+) -> eyre::Result<Vec<u64>> {
+    let mut cursor = tx.cursor_read::<BlockRewards>()?;
+    let mut missing = Vec::new();
+    let mut expected = from_height;
+
+    // Seek to from_height or first entry after it
+    let walker = cursor.walk(Some(from_height))?;
+
+    for result in walker {
+        let (height, _) = result?;
+        if height > to_height {
+            break;
+        }
+
+        // All heights between expected and current height are missing
+        while expected < height && expected <= to_height {
+            missing.push(expected);
+            expected += 1;
+        }
+
+        // Move past this height
+        if expected == height {
+            expected += 1;
+        }
+    }
+
+    // Any remaining heights up to to_height are missing
+    while expected <= to_height {
+        missing.push(expected);
+        expected += 1;
+    }
+
+    Ok(missing)
+}
+
+/// Batch insert multiple block rewards in a single transaction
+pub fn insert_block_rewards_batch<T: DbTxMut>(tx: &T, rewards: &[(u64, U256)]) -> eyre::Result<()> {
+    for &(height, reward) in rewards {
+        tx.put::<BlockRewards>(height, CompactU256(reward))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

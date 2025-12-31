@@ -1,5 +1,3 @@
-//! Supply endpoint integration tests
-
 use crate::utils::IrysNodeTest;
 use irys_api_server::routes::supply::SupplyResponse;
 use irys_chain::IrysNodeCtx;
@@ -88,16 +86,7 @@ fn validate_supply_invariants(
         "Total supply should equal genesis + emitted"
     );
 
-    let expected_genesis: U256 = ctx
-        .node_ctx
-        .config
-        .consensus
-        .reth
-        .alloc
-        .values()
-        .fold(U256::zero(), |acc, account| {
-            acc + U256::from_le_bytes(account.balance.to_le_bytes())
-        });
+    let expected_genesis = ctx.node_ctx.config.consensus.genesis_supply();
     eyre::ensure!(
         amounts.genesis == expected_genesis,
         "Genesis supply should match config"
@@ -124,7 +113,6 @@ fn validate_supply_invariants(
     Ok(())
 }
 
-/// Tests the supply endpoint with default (estimated) calculation
 #[test_log::test(tokio::test)]
 async fn test_supply_endpoint_estimated() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node().await;
@@ -138,31 +126,38 @@ async fn test_supply_endpoint_estimated() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Tests the supply endpoint with exact calculation for a chain past the
-/// block tree depth (migration/pruning threshold).
-///
-/// This test configures a small block_tree_depth (5) and block_migration_depth (2),
-/// then mines 30 blocks (6x the tree depth) to ensure 25 blocks have been migrated
-/// from the in-memory block tree to the block index. This verifies the exact supply
-/// calculation correctly sums rewards from all blocks including those that have been
-/// pruned from memory.
 #[test_log::test(tokio::test)]
-async fn test_supply_endpoint_exact() -> eyre::Result<()> {
+async fn test_supply_endpoint_exact_after_block_migration() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node_with_small_tree().await;
 
-    // Mine blocks (6x block_tree_depth) - with block_tree_depth=5, this ensures
-    // blocks have been migrated to the block index and pruned from the in-memory block tree
     let num_blocks_to_mine = BLOCKS_FOR_MIGRATION_TEST;
     setup_with_migrated_blocks(&ctx, num_blocks_to_mine).await?;
 
-    let supply = fetch_supply(&client, &format!("{}/v1/supply?exact=true", address)).await?;
+    // Try exact=true with retries - supply state may still be initializing
+    let mut supply: Option<SupplyResponse> = None;
+    for _ in 0..30 {
+        let response = client
+            .get(format!("{}/v1/supply?exact=true", address))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await?;
 
-    // May still be recalculating, but should be "actual" or "actual_recalculating"
-    assert!(
-        supply.calculation_method == "actual"
-            || supply.calculation_method == "actual_recalculating",
-        "Should use actual calculation method, got: {}",
-        supply.calculation_method
+        if response.status() == reqwest::StatusCode::OK {
+            let parsed: SupplyResponse = response.json().await?;
+            if parsed.calculation_method == "actual" {
+                supply = Some(parsed);
+                break;
+            }
+        }
+        sleep(Duration::from_secs(1)).await;
+    }
+
+    let supply =
+        supply.ok_or_else(|| eyre::eyre!("Supply state did not become ready within 30 seconds"))?;
+
+    assert_eq!(
+        supply.calculation_method, "actual",
+        "Should use actual calculation method"
     );
     assert!(
         supply.block_height >= num_blocks_to_mine as u64,
@@ -184,7 +179,6 @@ async fn test_supply_endpoint_exact() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Tests supply endpoint handles invalid query parameters gracefully
 #[test_log::test(tokio::test)]
 async fn test_supply_endpoint_invalid_params() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node().await;

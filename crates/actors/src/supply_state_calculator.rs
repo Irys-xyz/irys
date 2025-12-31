@@ -1,148 +1,132 @@
-//! Async supply state recalculation on node startup.
-//!
-//! This module recalculates the cumulative emitted supply
-//! by iterating through all blocks in the block index. This runs asynchronously
-//! on node startup to ensure the supply state is always accurate.
-
 use eyre::Result;
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
+use irys_database::{
+    block_header_by_hash, db::IrysDatabaseExt as _, find_missing_block_reward_heights,
+    insert_block_rewards_batch,
+};
 use irys_domain::{BlockIndexReadGuard, SupplyState};
 use irys_types::{DatabaseProvider, U256};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// Recalculates the cumulative emitted supply by iterating through all blocks
-/// in the block index.
-///
-/// This function:
-/// 1. Marks the supply state as not ready
-/// 2. Iterates through all blocks from genesis to latest
-/// 3. Sums up all reward_amount values
-/// 4. Updates the supply state with the final total
-/// 5. Marks the supply state as ready
-///
-/// This should be spawned as a background task during node startup.
+const BATCH_SIZE: u64 = 1000;
+
 pub async fn recalculate_supply_state(
     supply_state: Arc<SupplyState>,
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
 ) -> Result<()> {
-    info!("Starting supply state recalculation");
+    info!("Starting supply state gap-fill");
     supply_state.mark_not_ready();
 
-    match do_recalculation(&supply_state, &block_index, &db).await {
+    match do_gap_fill(&supply_state, &block_index, &db).await {
         Ok(()) => {
             let state = supply_state.get();
             info!(
-                height = state.height,
+                height = ?state.height,
                 cumulative_emitted = %state.cumulative_emitted,
-                "Supply state recalculation complete"
+                "Supply state initialization complete"
             );
             Ok(())
         }
         Err(e) => {
-            warn!("Supply state recalculation failed: {}", e);
+            warn!("Supply state gap-fill failed: {}", e);
             Err(e)
         }
     }
 }
 
-async fn do_recalculation(
+async fn do_gap_fill(
     supply_state: &SupplyState,
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
 ) -> Result<()> {
-    let initial_height = {
+    let latest_height = {
         let index = block_index.read();
         if index.num_blocks() == 0 {
-            info!("Block index is empty, nothing to recalculate");
-            supply_state.set_and_mark_ready(0, U256::zero())?;
+            info!("Block index is empty, nothing to initialize");
+            supply_state.recalculate_and_mark_ready(db)?;
             return Ok(());
         }
         index.latest_height()
     };
 
     info!(
-        "Recalculating supply state from genesis to height {}",
-        initial_height
+        "Checking for gaps in BlockRewards table (heights 0..={})",
+        latest_height
     );
 
-    let mut cumulative_emitted = U256::zero();
-    let mut processed_height = 0_u64;
-    let mut last_log_height = 0_u64;
-    const LOG_INTERVAL: u64 = 10000;
-    const YIELD_INTERVAL: u64 = 1000;
-
-    for height in 0..=initial_height {
-        cumulative_emitted = process_block_reward(block_index, db, height, cumulative_emitted)?;
-        processed_height = height;
-
-        if height >= last_log_height.saturating_add(LOG_INTERVAL) {
-            debug!(
-                "Supply recalculation progress: height {}/{}, cumulative: {}",
-                height, initial_height, cumulative_emitted
-            );
-            last_log_height = height;
-        }
-
-        if height % YIELD_INTERVAL == 0 {
-            tokio::task::yield_now().await;
-        }
-    }
+    let mut processed_height = fill_gaps_up_to(block_index, db, 0, latest_height).await?;
 
     loop {
         let current_height = block_index.read().latest_height();
-
         if current_height <= processed_height {
             break;
         }
 
         info!(
-            "Catching up blocks {} to {} that arrived during recalculation",
+            "Catching up blocks {} to {} that arrived during gap-fill",
             processed_height + 1,
             current_height
         );
 
-        for height in (processed_height + 1)..=current_height {
-            cumulative_emitted = process_block_reward(block_index, db, height, cumulative_emitted)?;
-            processed_height = height;
-
-            if height % YIELD_INTERVAL == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
+        processed_height =
+            fill_gaps_up_to(block_index, db, processed_height + 1, current_height).await?;
     }
 
-    supply_state.set_and_mark_ready(processed_height, cumulative_emitted)?;
-
-    // Final catch-up: process any blocks that arrived after the last check but before
-    // set_and_mark_ready.
-    let final_height = block_index.read().latest_height();
-    if final_height > processed_height {
-        info!(
-            "Processing {} blocks that arrived during final state update",
-            final_height - processed_height
-        );
-        for height in (processed_height + 1)..=final_height {
-            let reward = get_block_reward(block_index, db, height)?;
-            supply_state.add_block_reward(height, reward)?;
-        }
-    }
+    supply_state.recalculate_and_mark_ready(db)?;
 
     Ok(())
 }
 
-fn process_block_reward(
+async fn fill_gaps_up_to(
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
-    height: u64,
-    cumulative: U256,
-) -> Result<U256> {
-    let reward = get_block_reward(block_index, db, height)?;
-    Ok(cumulative.saturating_add(reward))
+    from_height: u64,
+    to_height: u64,
+) -> Result<u64> {
+    let mut total_gaps_filled = 0_u64;
+    let mut current_from = from_height;
+
+    while current_from <= to_height {
+        let current_to = (current_from + BATCH_SIZE - 1).min(to_height);
+
+        // Find missing heights in this batch with a single cursor scan
+        let missing_heights =
+            db.view_eyre(|tx| find_missing_block_reward_heights(tx, current_from, current_to))?;
+
+        if !missing_heights.is_empty() {
+            // Collect rewards for all missing heights
+            let mut rewards_to_insert = Vec::with_capacity(missing_heights.len());
+            for &height in &missing_heights {
+                let reward = get_block_reward_from_header(block_index, db, height)?;
+                rewards_to_insert.push((height, reward));
+            }
+
+            // Batch insert all rewards in a single transaction
+            db.update_eyre(|tx| insert_block_rewards_batch(tx, &rewards_to_insert))?;
+            total_gaps_filled += missing_heights.len() as u64;
+        }
+
+        debug!(
+            "Gap-fill progress: heights {}..={}/{}, gaps filled: {}",
+            current_from, current_to, to_height, total_gaps_filled
+        );
+
+        current_from = current_to + 1;
+        tokio::task::yield_now().await;
+    }
+
+    if total_gaps_filled > 0 {
+        info!(
+            "Filled {} gaps in BlockRewards table (heights {}..={})",
+            total_gaps_filled, from_height, to_height
+        );
+    }
+
+    Ok(to_height)
 }
 
-fn get_block_reward(
+fn get_block_reward_from_header(
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
     height: u64,

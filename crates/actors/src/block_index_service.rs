@@ -1,8 +1,9 @@
 use eyre::eyre;
+use irys_database::{db::IrysDatabaseExt as _, insert_block_reward};
 use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, SupplyState};
 use irys_types::{
-    BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
-    TokioServiceHandle, UnixTimestampMs, H256, U256,
+    BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, DatabaseProvider,
+    IrysBlockHeader, TokioServiceHandle,
 };
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
@@ -37,25 +38,12 @@ pub struct BlockIndexService {
     inner: BlockIndexServiceInner,
 }
 
-#[derive(Debug, Default)]
-struct BlockLogEntry {
-    #[expect(dead_code)]
-    pub block_hash: H256,
-    #[expect(dead_code)]
-    pub height: u64,
-    #[expect(dead_code)]
-    pub timestamp: UnixTimestampMs,
-    #[expect(dead_code)]
-    pub difficulty: U256,
-}
-
 /// Core logic of the BlockIndex service
 #[derive(Debug)]
 pub struct BlockIndexServiceInner {
     block_index: Arc<RwLock<BlockIndex>>,
     supply_state: Option<Arc<SupplyState>>,
-    block_log: Vec<BlockLogEntry>,
-    num_blocks: u64,
+    db: Option<DatabaseProvider>,
     chunk_size: u64,
     last_received_block: Option<(u64, BlockHash)>,
 }
@@ -64,13 +52,13 @@ impl BlockIndexServiceInner {
     pub fn new(
         block_index: Arc<RwLock<BlockIndex>>,
         supply_state: Option<Arc<SupplyState>>,
+        db: Option<DatabaseProvider>,
         consensus_config: &ConsensusConfig,
     ) -> Self {
         Self {
             block_index,
             supply_state,
-            block_log: Vec::new(),
-            num_blocks: 0,
+            db,
             chunk_size: consensus_config.chunk_size,
             last_received_block: None,
         }
@@ -186,36 +174,39 @@ impl BlockIndexServiceInner {
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
-        // Update supply state with the block's reward amount.
+        // Write reward to BlockRewards table. Errors are logged but not propagated because:
+        // 1. Block migration must not fail due to reward tracking issues
+        // 2. Missing rewards are detected and backfilled by supply_state_calculator gap-fill
+        // 3. The reward data exists in block headers and can always be reconstructed
+        if let Some(db) = &self.db {
+            if let Err(e) =
+                db.update_eyre(|tx| insert_block_reward(tx, block.height, block.reward_amount))
+            {
+                error!(
+                    block.height = block.height,
+                    block.hash = ?block.block_hash,
+                    error = %e,
+                    "Failed to write block reward to database - will be backfilled by gap-fill"
+                );
+            }
+        }
+
+        // Update in-memory supply state if initialized. Errors are logged but not propagated
+        // because the in-memory state can be reconstructed from the database on restart.
         if let Some(supply_state) = &self.supply_state {
-            if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
-                if supply_state.is_ready() {
-                    warn!(
+            if supply_state.is_ready() {
+                if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
+                    error!(
                         block.height = block.height,
                         block.hash = ?block.block_hash,
                         error = %e,
-                        "Failed to update supply state during block migration"
+                        "Failed to update supply state - exact supply queries may be incorrect until restart"
                     );
                 }
             }
         }
 
         self.last_received_block = Some((block.height, block.block_hash));
-
-        // Track a small window of recent blocks for debugging
-        self.block_log.push(BlockLogEntry {
-            block_hash: block.block_hash,
-            height: block.height,
-            timestamp: block.timestamp,
-            difficulty: block.diff,
-        });
-
-        if self.block_log.len() > 20 {
-            // keep only the last 20 entries
-            self.block_log.drain(0..self.block_log.len() - 20);
-        }
-
-        self.num_blocks += 1;
 
         Ok(())
     }
@@ -230,13 +221,14 @@ impl BlockIndexService {
         rx: UnboundedReceiver<BlockIndexServiceMessage>,
         block_index: Arc<RwLock<BlockIndex>>,
         supply_state: Option<Arc<SupplyState>>,
+        db: Option<DatabaseProvider>,
         consensus_config: &ConsensusConfig,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning BlockIndex service");
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let inner = BlockIndexServiceInner::new(block_index, supply_state, consensus_config);
+        let inner = BlockIndexServiceInner::new(block_index, supply_state, db, consensus_config);
 
         let handle = runtime_handle.spawn(
             async move {

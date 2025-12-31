@@ -19,49 +19,20 @@ pub struct SupplyQuery {
     pub exact: bool,
 }
 
-/// Response from the supply endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SupplyResponse {
-    /// Total supply (genesis + emitted) as a decimal string.
     pub total_supply: String,
-    /// Genesis allocation from chain config as a decimal string.
     pub genesis_supply: String,
-    /// Cumulative block rewards emitted as a decimal string.
     pub emitted_supply: String,
-    /// Current block height used for the calculation.
     #[serde(with = "string_u64")]
     pub block_height: u64,
-    /// Maximum emission cap as a decimal string.
     pub inflation_cap: String,
-    /// Percentage of inflation cap emitted (e.g., "12.34").
     pub inflation_progress_percent: String,
-    /// How `emitted_supply` was calculated: "estimated" or "actual".
     pub calculation_method: String,
 }
 
-/// GET /supply
-///
-/// Returns the current total token supply including genesis allocation and emissions.
-///
-/// # Query Parameters
-///
-/// - `exact`: boolean (optional, default: false)
-///   - `false`: Returns estimated supply using height-based formula
-///   - `true`: Returns actual summed block rewards from pre-calculated state
-///
-/// # Calculation Methods
-///
-/// The `calculationMethod` field indicates how `emittedSupply` was computed:
-///
-/// - `estimated`: Uses height-based formula (`block_height * target_block_time` applied to
-///   reward curve). Fast and always available.
-///
-/// - `actual`: Uses pre-calculated cumulative supply. Recalculation is complete and the
-///   value reflects all blocks in the chain.
-///
-/// If `exact=true` is requested while the supply state is recalculating, an error is
-/// returned. Retry later or use `exact=false` for estimated supply.
+/// Returns current total token supply including genesis allocation and emissions.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
@@ -73,8 +44,6 @@ pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) 
     }
 }
 
-/// Gets the latest block header from the canonical chain.
-/// Tries the block tree first, falls back to database if not found.
 fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
     let tree = state.block_tree.read();
     let (canonical, _) = tree.get_canonical_chain();
@@ -97,31 +66,31 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
     let block_height = get_latest_block(state)?.height;
 
     let config = &state.config.consensus;
-
-    let genesis_supply: U256 = config
-        .reth
-        .alloc
-        .values()
-        .fold(U256::zero(), |acc, account| {
-            acc + U256::from_le_bytes(account.balance.to_le_bytes())
-        });
+    let genesis_supply = config.genesis_supply();
 
     let (emitted_amount, calculation_method) = if use_exact {
-        // Use the pre-calculated supply state (only if fully ready)
-        if let Some(supply_state) = &state.supply_state {
-            if !supply_state.is_ready() {
-                return Err(eyre!(
-                    "Supply state is recalculating. \
-                    Retry later or use exact=false for estimated supply."
-                ));
-            }
-            (supply_state.get().cumulative_emitted, "actual")
-        } else {
-            return Err(eyre!(
+        let supply_state = state.supply_state.as_ref().ok_or_else(|| {
+            eyre!(
                 "Supply state not available for exact calculation. \
-                Retry later or use exact=false for estimated supply."
+                Use exact=false for estimated supply."
+            )
+        })?;
+
+        if supply_state.is_failed() {
+            return Err(eyre!(
+                "Supply state initialization failed. \
+                Use exact=false for estimated supply."
             ));
         }
+
+        if !supply_state.is_ready() {
+            return Err(eyre!(
+                "Supply state still initializing. \
+                Use exact=false for estimated supply, or retry later."
+            ));
+        }
+
+        (supply_state.get().cumulative_emitted, "actual")
     } else {
         calculate_estimated_emission(config, block_height)?
     };

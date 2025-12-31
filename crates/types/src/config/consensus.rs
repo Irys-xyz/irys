@@ -439,6 +439,15 @@ impl ConsensusConfig {
         Amount::token(cost_per_chunk_per_epoch)
     }
 
+    pub fn genesis_supply(&self) -> crate::U256 {
+        self.reth
+            .alloc
+            .values()
+            .fold(crate::U256::zero(), |acc, account| {
+                acc + crate::U256::from_le_bytes(account.balance.to_le_bytes())
+            })
+    }
+
     pub fn mainnet() -> Self {
         const IRYS_MAINNET_CHAIN_ID: u64 = 3282;
         const IRYS_BLOCK_TIME: u64 = 12;
