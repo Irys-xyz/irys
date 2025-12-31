@@ -164,11 +164,6 @@ mod cpu_monitor {
 
             cpu_threads
         }
-
-        // /// Check if the process is still running
-        // pub fn is_running(&self) -> bool {
-        //     std::path::Path::new(&format!("/proc/{}", self.pid)).exists()
-        // }
     }
 }
 
@@ -206,15 +201,6 @@ mod cpu_monitor {
             }
             0.0
         }
-
-        /// Check if the process is still running
-        pub fn is_running(&self) -> bool {
-            Command::new("kill")
-                .args(["-0", &self.pid.to_string()])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false)
-        }
     }
 }
 
@@ -231,10 +217,6 @@ mod cpu_monitor {
 
         pub fn sample(&mut self) -> f64 {
             0.0
-        }
-
-        pub fn is_running(&self) -> bool {
-            true
         }
     }
 }

@@ -962,6 +962,7 @@ fn cmd_analyze(
                     let (time_above_ms, threshold) = match r.current.effective_threads {
                         1 => (r.stats.avg_time_above_1t_ms, 1),
                         2 => (r.stats.avg_time_above_2t_ms, 2),
+                        3 => (r.stats.avg_time_above_3t_ms, 3),
                         4 => (r.stats.avg_time_above_4t_ms, 4),
                         _ => (r.stats.avg_time_above_1t_ms, 1),
                     };
