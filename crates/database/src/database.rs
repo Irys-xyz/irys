@@ -524,6 +524,8 @@ pub fn sum_all_block_rewards<T: DbTx>(tx: &T) -> eyre::Result<U256> {
     Ok(total)
 }
 
+const MAX_MISSING_HEIGHTS_PER_QUERY: usize = 100_000;
+
 /// Returns heights in [from_height, to_height] that are missing from BlockRewards table.
 /// Uses cursor-based iteration for efficiency.
 pub fn find_missing_block_reward_heights<T: DbTx>(
@@ -535,7 +537,6 @@ pub fn find_missing_block_reward_heights<T: DbTx>(
     let mut missing = Vec::new();
     let mut expected = from_height;
 
-    // Seek to from_height or first entry after it
     let walker = cursor.walk(Some(from_height))?;
 
     for result in walker {
@@ -544,22 +545,35 @@ pub fn find_missing_block_reward_heights<T: DbTx>(
             break;
         }
 
-        // All heights between expected and current height are missing
         while expected < height && expected <= to_height {
+            if missing.len() >= MAX_MISSING_HEIGHTS_PER_QUERY {
+                eyre::bail!(
+                    "Too many missing heights ({}) in range {}..={} - database may be corrupted",
+                    MAX_MISSING_HEIGHTS_PER_QUERY,
+                    from_height,
+                    to_height
+                );
+            }
             missing.push(expected);
-            expected += 1;
+            expected = expected.saturating_add(1);
         }
 
-        // Move past this height
         if expected == height {
-            expected += 1;
+            expected = expected.saturating_add(1);
         }
     }
 
-    // Any remaining heights up to to_height are missing
     while expected <= to_height {
+        if missing.len() >= MAX_MISSING_HEIGHTS_PER_QUERY {
+            eyre::bail!(
+                "Too many missing heights ({}) in range {}..={} - database may be corrupted",
+                MAX_MISSING_HEIGHTS_PER_QUERY,
+                from_height,
+                to_height
+            );
+        }
         missing.push(expected);
-        expected += 1;
+        expected = expected.saturating_add(1);
     }
 
     Ok(missing)
@@ -575,7 +589,7 @@ pub fn insert_block_rewards_batch<T: DbTxMut>(tx: &T, rewards: &[(u64, U256)]) -
 
 #[cfg(test)]
 mod tests {
-    use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+    use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256, U256};
     use reth_db::Database as _;
     use tempfile::tempdir;
 
@@ -584,7 +598,11 @@ mod tests {
         insert_commitment_tx, tables::IrysTables,
     };
 
-    use super::{insert_block_header, insert_tx_header, open_or_create_db, tx_header_by_txid};
+    use super::{
+        find_missing_block_reward_heights, has_block_reward, highest_block_reward_height,
+        insert_block_header, insert_block_reward, insert_block_rewards_batch, insert_tx_header,
+        open_or_create_db, sum_all_block_rewards, tx_header_by_txid,
+    };
 
     #[test]
     fn insert_and_get_tests() -> eyre::Result<()> {
@@ -630,6 +648,101 @@ mod tests {
         // check block is retrieved without its chunk
         block_header.poa.chunk = None;
         assert_eq!(result2, block_header);
+        Ok(())
+    }
+
+    #[test]
+    fn block_rewards_insert_and_query() -> eyre::Result<()> {
+        let path = tempdir()?;
+        let db = open_or_create_db(&path, IrysTables::ALL, None)?;
+
+        db.update_eyre(|tx| insert_block_reward(tx, 0, U256::from(100)))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 1, U256::from(200)))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 2, U256::from(300)))?;
+
+        assert!(db.view_eyre(|tx| has_block_reward(tx, 0))?);
+        assert!(db.view_eyre(|tx| has_block_reward(tx, 1))?);
+        assert!(db.view_eyre(|tx| has_block_reward(tx, 2))?);
+        assert!(!db.view_eyre(|tx| has_block_reward(tx, 3))?);
+
+        assert_eq!(db.view_eyre(highest_block_reward_height)?, Some(2));
+
+        assert_eq!(db.view_eyre(sum_all_block_rewards)?, U256::from(600));
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_missing_heights_empty_table() -> eyre::Result<()> {
+        let path = tempdir()?;
+        let db = open_or_create_db(&path, IrysTables::ALL, None)?;
+
+        let missing = db.view_eyre(|tx| find_missing_block_reward_heights(tx, 0, 5))?;
+        assert_eq!(missing, vec![0, 1, 2, 3, 4, 5]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_missing_heights_no_gaps() -> eyre::Result<()> {
+        let path = tempdir()?;
+        let db = open_or_create_db(&path, IrysTables::ALL, None)?;
+
+        db.update_eyre(|tx| insert_block_reward(tx, 0, U256::from(100)))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 1, U256::from(100)))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 2, U256::from(100)))?;
+
+        let missing = db.view_eyre(|tx| find_missing_block_reward_heights(tx, 0, 2))?;
+        assert!(missing.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn find_missing_heights_with_gaps() -> eyre::Result<()> {
+        let path = tempdir()?;
+        let db = open_or_create_db(&path, IrysTables::ALL, None)?;
+
+        db.update_eyre(|tx| insert_block_reward(tx, 0, U256::from(100)))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 3, U256::from(100)))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 5, U256::from(100)))?;
+
+        let missing = db.view_eyre(|tx| find_missing_block_reward_heights(tx, 0, 6))?;
+        assert_eq!(missing, vec![1, 2, 4, 6]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn batch_insert_block_rewards() -> eyre::Result<()> {
+        let path = tempdir()?;
+        let db = open_or_create_db(&path, IrysTables::ALL, None)?;
+
+        let rewards = vec![
+            (0, U256::from(100)),
+            (1, U256::from(200)),
+            (2, U256::from(300)),
+        ];
+
+        db.update_eyre(|tx| insert_block_rewards_batch(tx, &rewards))?;
+
+        assert_eq!(db.view_eyre(sum_all_block_rewards)?, U256::from(600));
+        assert_eq!(db.view_eyre(highest_block_reward_height)?, Some(2));
+
+        Ok(())
+    }
+
+    #[test]
+    fn sum_block_rewards_uses_saturating_add() -> eyre::Result<()> {
+        let path = tempdir()?;
+        let db = open_or_create_db(&path, IrysTables::ALL, None)?;
+
+        db.update_eyre(|tx| insert_block_reward(tx, 0, U256::MAX))?;
+        db.update_eyre(|tx| insert_block_reward(tx, 1, U256::from(1)))?;
+
+        let sum = db.view_eyre(sum_all_block_rewards)?;
+        assert_eq!(sum, U256::MAX);
+
         Ok(())
     }
 }

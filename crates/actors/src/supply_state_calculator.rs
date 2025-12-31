@@ -90,19 +90,16 @@ async fn fill_gaps_up_to(
     while current_from <= to_height {
         let current_to = current_from.saturating_add(BATCH_SIZE - 1).min(to_height);
 
-        // Find missing heights in this batch with a single cursor scan
         let missing_heights =
             db.view_eyre(|tx| find_missing_block_reward_heights(tx, current_from, current_to))?;
 
         if !missing_heights.is_empty() {
-            // Collect rewards for all missing heights
             let mut rewards_to_insert = Vec::with_capacity(missing_heights.len());
             for &height in &missing_heights {
                 let reward = get_block_reward_from_header(block_index, db, height)?;
                 rewards_to_insert.push((height, reward));
             }
 
-            // Batch insert all rewards in a single transaction
             db.update_eyre(|tx| insert_block_rewards_batch(tx, &rewards_to_insert))?;
             total_gaps_filled += missing_heights.len() as u64;
         }
@@ -112,7 +109,7 @@ async fn fill_gaps_up_to(
             current_from, current_to, to_height, total_gaps_filled
         );
 
-        current_from = current_to + 1;
+        current_from = current_to.saturating_add(1);
         tokio::task::yield_now().await;
     }
 

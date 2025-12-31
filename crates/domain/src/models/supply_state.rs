@@ -20,6 +20,15 @@ impl Default for SupplyStateData {
     }
 }
 
+impl SupplyStateData {
+    fn expected_next_height(&self) -> u64 {
+        match self.height {
+            None => 0,
+            Some(h) => h.saturating_add(1),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SupplyState {
     data: RwLock<SupplyStateData>,
@@ -74,11 +83,7 @@ impl SupplyState {
 
     pub fn add_block_reward(&self, height: u64, reward_amount: U256) -> eyre::Result<()> {
         let mut data = self.data.write().expect("supply state write lock poisoned");
-
-        let expected_height = match data.height {
-            None => 0,
-            Some(h) => h.saturating_add(1),
-        };
+        let expected_height = data.expected_next_height();
 
         if height != expected_height {
             eyre::bail!(
@@ -93,6 +98,22 @@ impl SupplyState {
         Ok(())
     }
 
+    /// Attempts to add a block reward, returning Ok(false) if height doesn't match.
+    /// This handles the race condition during initialization where the supply state
+    /// becomes ready but may not be at the expected height for incoming blocks.
+    pub fn try_add_block_reward(&self, height: u64, reward_amount: U256) -> eyre::Result<bool> {
+        let mut data = self.data.write().expect("supply state write lock poisoned");
+        let expected_height = data.expected_next_height();
+
+        if height != expected_height {
+            return Ok(false);
+        }
+
+        data.height = Some(height);
+        data.cumulative_emitted = data.cumulative_emitted.saturating_add(reward_amount);
+        Ok(true)
+    }
+
     pub fn recalculate_and_mark_ready(&self, db: &DatabaseProvider) -> eyre::Result<()> {
         let (cumulative_emitted, height) = db.view_eyre(|tx| {
             let sum = sum_all_block_rewards(tx)?;
@@ -100,9 +121,11 @@ impl SupplyState {
             Ok((sum, h))
         })?;
 
-        let mut data = self.data.write().expect("supply state write lock poisoned");
-        data.height = height;
-        data.cumulative_emitted = cumulative_emitted;
+        {
+            let mut data = self.data.write().expect("supply state write lock poisoned");
+            data.height = height;
+            data.cumulative_emitted = cumulative_emitted;
+        }
         self.failed.store(false, Ordering::Release);
         self.ready.store(true, Ordering::Release);
         Ok(())
@@ -110,6 +133,7 @@ impl SupplyState {
 
     pub fn mark_not_ready(&self) {
         self.ready.store(false, Ordering::Release);
+        self.failed.store(false, Ordering::Release);
     }
 }
 
@@ -172,5 +196,39 @@ mod tests {
 
         let result = state.add_block_reward(0, U256::from(100));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_add_block_reward_returns_false_on_mismatch() {
+        let state = SupplyState::new();
+        state.add_block_reward(0, U256::from(100)).unwrap();
+
+        let result = state.try_add_block_reward(5, U256::from(100)).unwrap();
+        assert!(!result);
+
+        assert_eq!(state.height(), Some(0));
+        assert_eq!(state.cumulative_emitted(), U256::from(100));
+    }
+
+    #[test]
+    fn try_add_block_reward_succeeds_on_sequential() {
+        let state = SupplyState::new();
+
+        assert!(state.try_add_block_reward(0, U256::from(100)).unwrap());
+        assert!(state.try_add_block_reward(1, U256::from(200)).unwrap());
+
+        assert_eq!(state.height(), Some(1));
+        assert_eq!(state.cumulative_emitted(), U256::from(300));
+    }
+
+    #[test]
+    fn mark_not_ready_clears_failed_flag() {
+        let state = SupplyState::new();
+        state.mark_failed();
+        assert!(state.is_failed());
+
+        state.mark_not_ready();
+        assert!(!state.is_failed());
+        assert!(!state.is_ready());
     }
 }

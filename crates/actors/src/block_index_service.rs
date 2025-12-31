@@ -174,10 +174,6 @@ impl BlockIndexServiceInner {
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
-        // Write reward to BlockRewards table. Errors are logged but not propagated because:
-        // 1. Block migration must not fail due to reward tracking issues
-        // 2. Missing rewards are detected and backfilled by supply_state_calculator gap-fill
-        // 3. The reward data exists in block headers and can always be reconstructed
         if let Some(db) = &self.db {
             if let Err(e) =
                 db.update_eyre(|tx| insert_block_reward(tx, block.height, block.reward_amount))
@@ -191,11 +187,10 @@ impl BlockIndexServiceInner {
             }
         }
 
-        // Update in-memory supply state if initialized. Errors are logged but not propagated
-        // because the in-memory state can be reconstructed from the database on restart.
         if let Some(supply_state) = &self.supply_state {
             if supply_state.is_ready() {
-                if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
+                if let Err(e) = supply_state.try_add_block_reward(block.height, block.reward_amount)
+                {
                     error!(
                         block.height = block.height,
                         block.hash = ?block.block_hash,
