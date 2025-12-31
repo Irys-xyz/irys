@@ -285,8 +285,8 @@ fn get_output_path() -> PathBuf {
 }
 
 /// Walk up the directory tree to find the workspace root (contains Cargo.lock)
-fn find_workspace_root(start: &PathBuf) -> Option<PathBuf> {
-    let mut current = start.clone();
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
 
     loop {
         // Check for Cargo.lock (indicates workspace root)

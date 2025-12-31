@@ -290,10 +290,9 @@ impl ClassificationConfig {
                 .timeout_ms
                 .map(|t| t == suggested_timeout)
                 .unwrap_or(false);
-            if (matches_threads || matches_timeout)
-                && !suggested_rules.contains(&rule.name) {
-                    suggested_rules.push(rule.name.clone());
-                }
+            if (matches_threads || matches_timeout) && !suggested_rules.contains(&rule.name) {
+                suggested_rules.push(rule.name.clone());
+            }
         }
 
         SuggestedClassification {
@@ -359,8 +358,8 @@ fn extract_test_pattern(filter: &str) -> Option<String> {
         if let Some(end) = rest.rfind(')') {
             let inner = &rest[..end];
             let pattern = inner.trim_matches('/');
-            if pattern.starts_with('~') {
-                return Some(format!(".*{}.*", &pattern[1..]));
+            if let Some(stripped) = pattern.strip_prefix('~') {
+                return Some(format!(".*{}.*", stripped));
             }
             return Some(pattern.to_string());
         }
