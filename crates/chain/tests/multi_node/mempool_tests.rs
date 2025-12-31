@@ -495,7 +495,7 @@ async fn mempool_persistence_test() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn heavy_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
+async fn heavy3_mempool_submit_tx_fork_recovery_test() -> eyre::Result<()> {
     // Turn on tracing even before the nodes start
     std::env::set_var(
         "RUST_LOG",
