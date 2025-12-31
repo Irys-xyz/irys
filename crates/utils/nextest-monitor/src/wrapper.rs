@@ -165,10 +165,10 @@ mod cpu_monitor {
             cpu_threads
         }
 
-        /// Check if the process is still running
-        pub fn is_running(&self) -> bool {
-            std::path::Path::new(&format!("/proc/{}", self.pid)).exists()
-        }
+        // /// Check if the process is still running
+        // pub fn is_running(&self) -> bool {
+        //     std::path::Path::new(&format!("/proc/{}", self.pid)).exists()
+        // }
     }
 }
 
