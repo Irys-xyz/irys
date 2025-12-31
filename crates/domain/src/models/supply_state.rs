@@ -103,6 +103,7 @@ impl SupplyState {
         let mut data = self.data.write().expect("supply state write lock poisoned");
         data.height = height;
         data.cumulative_emitted = cumulative_emitted;
+        self.failed.store(false, Ordering::Release);
         self.ready.store(true, Ordering::Release);
         Ok(())
     }

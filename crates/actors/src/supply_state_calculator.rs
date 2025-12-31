@@ -88,7 +88,7 @@ async fn fill_gaps_up_to(
     let mut current_from = from_height;
 
     while current_from <= to_height {
-        let current_to = (current_from + BATCH_SIZE - 1).min(to_height);
+        let current_to = current_from.saturating_add(BATCH_SIZE - 1).min(to_height);
 
         // Find missing heights in this batch with a single cursor scan
         let missing_heights =
