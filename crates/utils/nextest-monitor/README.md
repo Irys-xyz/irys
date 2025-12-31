@@ -291,7 +291,3 @@ The **≥P90** metric shows how much time is spent at or above the P90 level, he
 - **Linux**: Full support using `/proc` filesystem
 - **macOS**: Support using `ps` command
 - **Windows**: Not currently supported
-
-## License
-
-MIT

@@ -290,11 +290,10 @@ impl ClassificationConfig {
                 .timeout_ms
                 .map(|t| t == suggested_timeout)
                 .unwrap_or(false);
-            if matches_threads || matches_timeout {
-                if !suggested_rules.contains(&rule.name) {
+            if (matches_threads || matches_timeout)
+                && !suggested_rules.contains(&rule.name) {
                     suggested_rules.push(rule.name.clone());
                 }
-            }
         }
 
         SuggestedClassification {
@@ -772,8 +771,8 @@ fn cmd_config(config: &ClassificationConfig) {
     println!();
     println!("Classification Rules (by priority):");
     println!(
-        "{:<15} {:>10} {:>12} {:>8}  {}",
-        "Name", "Threads", "Timeout", "Priority", "Pattern"
+        "{:<15} {:>10} {:>12} {:>8}  Pattern",
+        "Name", "Threads", "Timeout", "Priority"
     );
     println!("{}", "-".repeat(80));
 
@@ -1211,7 +1210,7 @@ fn print_cpu_chart(samples: &[CpuSample], allocation_threshold: f64) {
     let chart_height = 10;
     let chart_width = 60.min(samples.len());
 
-    let step = (samples.len() + chart_width - 1) / chart_width;
+    let step = samples.len().div_ceil(chart_width);
     let downsampled: Vec<f64> = samples
         .chunks(step)
         .map(|chunk| chunk.iter().map(|s| s.cpu_threads).fold(0.0f64, f64::max))
