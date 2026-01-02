@@ -80,7 +80,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/version")
+        .uri("/gossip/v2/handshake")
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .set_json(&version_request)
         .to_request();
@@ -99,7 +99,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     // Test that we get rejected if the source IP doesn't match the gossip IP
     let req = TestRequest::post()
-        .uri("/gossip/v2/version")
+        .uri("/gossip/v2/handshake")
         .peer_addr("127.0.0.5:12345".parse().unwrap())
         .set_json(&version_request)
         .to_request();
@@ -144,7 +144,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     });
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/version")
+        .uri("/gossip/v2/handshake")
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
@@ -198,7 +198,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     });
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/version")
+        .uri("/gossip/v2/handshake")
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
@@ -238,7 +238,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/version")
+        .uri("/gossip/v2/handshake")
         .peer_addr("127.0.0.3:12345".parse().unwrap())
         .set_json(version_request)
         .to_request();

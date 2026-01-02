@@ -528,7 +528,7 @@ where
         clippy::unused_async,
         reason = "Actix-web handler signature requires handlers to be async"
     )]
-    async fn handle_version(
+    async fn handle_handshake(
         server: Data<Self>,
         req: actix_web::HttpRequest,
         body: web::Json<HandshakeRequest>,
@@ -851,7 +851,7 @@ where
                     )
                     .route("/get_data", web::post().to(Self::handle_data_request))
                     .route("/pull_data", web::post().to(Self::handle_pull_data))
-                    .route("/version", web::post().to(Self::handle_version))
+                    .route("/handshake", web::post().to(Self::handle_handshake))
                     .route("/health", web::get().to(Self::handle_health_check))
                     .route(
                         "/stake_and_pledge_whitelist",
@@ -880,7 +880,7 @@ where
             )
             .route("/info", web::get().to(Self::handle_info))
             .route("/peer-list", web::get().to(Self::handle_peer_list))
-            .route("/version", web::post().to(Self::handle_version))
+            .route("/version", web::post().to(Self::handle_handshake))
             .route("/block-index", web::get().to(Self::handle_block_index))
             .route(
                 "/protocol_version",

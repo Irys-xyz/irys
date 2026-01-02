@@ -942,7 +942,7 @@ impl PeerNetworkService {
         }
 
         let peer_response_result = gossip_client
-            .post_version(gossip_address, handshake_request.clone())
+            .post_handshake(gossip_address, handshake_request.clone())
             .await
             .map_err(|e| {
                 warn!(

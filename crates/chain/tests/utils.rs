@@ -2394,7 +2394,7 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
         let vr = self.build_version_request();
         self.get_gossip_client()
-            .post_version(dst.get_gossip_addr(), vr)
+            .post_handshake(dst.get_gossip_addr(), vr)
             .await?;
         Ok(())
     }

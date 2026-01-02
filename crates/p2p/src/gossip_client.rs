@@ -295,7 +295,7 @@ impl GossipClient {
         }
     }
 
-    pub async fn post_version(
+    pub async fn post_handshake(
         &self,
         peer: SocketAddr,
         version: HandshakeRequest,
@@ -303,7 +303,7 @@ impl GossipClient {
         let path = if version.protocol_version == ProtocolVersion::V1 {
             "gossip/version"
         } else {
-            "gossip/v2/version"
+            "gossip/v2/handshake"
         };
         let url = format!("http://{}/{}", peer, path);
         let response = self
