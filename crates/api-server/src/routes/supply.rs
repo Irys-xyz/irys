@@ -149,6 +149,7 @@ fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
 mod tests {
     use super::*;
     use irys_types::ConsensusConfig;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     #[rstest]
@@ -156,17 +157,11 @@ mod tests {
     #[case(650_000_000_u128, "50.00")]
     #[case(1_300_000_000_u128, "100.00")]
     #[case(325_000_000_u128, "25.00")]
+    #[case(160_420_000_u128, "12.34")]
     fn test_calculate_inflation_progress(#[case] emitted: u128, #[case] expected: &str) {
         let cap = U256::from(1_300_000_000_u128) * U256::from(10_u128.pow(18));
         let emitted_amount = U256::from(emitted) * U256::from(10_u128.pow(18));
         assert_eq!(calculate_inflation_progress(emitted_amount, cap), expected);
-    }
-
-    #[test]
-    fn test_calculate_inflation_progress_with_decimals() {
-        let cap = U256::from(1_300_000_000_u128) * U256::from(10_u128.pow(18));
-        let amount = (cap * U256::from(1234_u128)) / U256::from(10000_u128);
-        assert_eq!(calculate_inflation_progress(amount, cap), "12.34");
     }
 
     #[test]
@@ -177,31 +172,37 @@ mod tests {
         assert_eq!(method, "estimated");
     }
 
-    #[test]
-    fn test_estimated_emission_returns_estimated_method() {
-        let config = ConsensusConfig::testing();
-        let (_, method) = calculate_estimated_emission(&config, 100).unwrap();
-        assert_eq!(method, "estimated");
-    }
+    proptest! {
+        #[test]
+        fn emission_monotonically_increases(
+            h1 in 0_u64..10_000_000_u64,
+            h2 in 0_u64..10_000_000_u64
+        ) {
+            let config = ConsensusConfig::testing();
+            let min_h = h1.min(h2);
+            let max_h = h1.max(h2);
+            let (e1, _) = calculate_estimated_emission(&config, min_h).unwrap();
+            let (e2, _) = calculate_estimated_emission(&config, max_h).unwrap();
+            prop_assert!(e2 >= e1, "Higher height {} should produce >= emissions than {}", max_h, min_h);
+        }
 
-    #[test]
-    fn test_estimated_emission_increases_with_height() {
-        let config = ConsensusConfig::testing();
-        let (emitted_low, _) = calculate_estimated_emission(&config, 100).unwrap();
-        let (emitted_high, _) = calculate_estimated_emission(&config, 1000).unwrap();
-        assert!(
-            emitted_high > emitted_low,
-            "Higher block height should produce more emissions"
-        );
-    }
+        #[test]
+        fn emission_bounded_by_cap(height in 0_u64..u64::MAX / 1000) {
+            let config = ConsensusConfig::testing();
+            let (emitted, _) = calculate_estimated_emission(&config, height).unwrap();
+            prop_assert!(
+                emitted <= config.block_reward_config.inflation_cap.amount,
+                "Emissions {} should not exceed cap {}",
+                emitted,
+                config.block_reward_config.inflation_cap.amount
+            );
+        }
 
-    #[test]
-    fn test_estimated_emission_bounded_by_cap() {
-        let config = ConsensusConfig::testing();
-        let (emitted, _) = calculate_estimated_emission(&config, u64::MAX / 1000).unwrap();
-        assert!(
-            emitted <= config.block_reward_config.inflation_cap.amount,
-            "Emissions should never exceed inflation cap"
-        );
+        #[test]
+        fn emission_method_always_estimated(height in 0_u64..1_000_000_u64) {
+            let config = ConsensusConfig::testing();
+            let (_, method) = calculate_estimated_emission(&config, height).unwrap();
+            prop_assert_eq!(method, "estimated");
+        }
     }
 }

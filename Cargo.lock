@@ -5180,6 +5180,7 @@ dependencies = [
  "irys-reward-curve",
  "irys-testing-utils",
  "irys-types",
+ "proptest",
  "reth",
  "rstest",
  "semver 1.0.27",
