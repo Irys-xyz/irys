@@ -104,7 +104,6 @@ impl BlockIndexServiceInner {
                             block_header.height,
                             block_header.block_hash
                         );
-                        // notify caller, then exit service by returning Err
                         if let Err(send_err) = response.send(Err(eyre!(err.to_string()))) {
                             tracing::warn!(
                                 custom.migration_error = %err,
@@ -121,7 +120,6 @@ impl BlockIndexServiceInner {
                     );
                 }
 
-                // Perform the migration; if it fails, notify caller and exit service
                 match self.migrate_block(&block_header, &all_txs) {
                     Ok(()) => {
                         if let Err(send_err) = response.send(Ok(())) {
@@ -135,7 +133,6 @@ impl BlockIndexServiceInner {
                         Ok(())
                     }
                     Err(e) => {
-                        // notify caller, then exit service by returning Err
                         if let Err(send_err) = response.send(Err(eyre!(e.to_string()))) {
                             tracing::warn!(
                                 block.height = block_header.height,
@@ -186,18 +183,10 @@ impl BlockIndexServiceInner {
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
-        // Update supply state with the block's reward amount.
         if let Some(supply_state) = &self.supply_state {
-            if let Err(e) = supply_state.add_block_reward(block.height, block.reward_amount) {
-                if supply_state.is_ready() {
-                    warn!(
-                        block.height = block.height,
-                        block.hash = ?block.block_hash,
-                        error = %e,
-                        "Failed to update supply state during block migration"
-                    );
-                }
-            }
+            supply_state
+                .add_block_reward(block.height, block.reward_amount)
+                .map_err(|e| eyre!("Supply state update failed during migration: {}", e))?;
         }
 
         self.last_received_block = Some((block.height, block.block_hash));
@@ -211,7 +200,6 @@ impl BlockIndexServiceInner {
         });
 
         if self.block_log.len() > 20 {
-            // keep only the last 20 entries
             self.block_log.drain(0..self.block_log.len() - 20);
         }
 

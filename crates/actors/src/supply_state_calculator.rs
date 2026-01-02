@@ -1,168 +1,154 @@
-//! Async supply state recalculation on node startup.
-//!
-//! This module recalculates the cumulative emitted supply
-//! by iterating through all blocks in the block index. This runs asynchronously
-//! on node startup to ensure the supply state is always accurate.
-
 use eyre::Result;
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndexReadGuard, SupplyState};
 use irys_types::{DatabaseProvider, U256};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-/// Recalculates the cumulative emitted supply by iterating through all blocks
-/// in the block index.
-///
-/// This function:
-/// 1. Marks the supply state as not ready
-/// 2. Iterates through all blocks from genesis to latest
-/// 3. Sums up all reward_amount values
-/// 4. Updates the supply state with the final total
-/// 5. Marks the supply state as ready
-///
-/// This should be spawned as a background task during node startup.
-pub async fn recalculate_supply_state(
+const WAIT_POLL_INTERVAL_MS: u64 = 100;
+
+async fn wait_for_first_migration(
+    supply_state: &SupplyState,
+    cancel: &CancellationToken,
+) -> Option<u64> {
+    loop {
+        if let Some(height) = supply_state.first_migration_height() {
+            info!(
+                "First migration detected at height {}, starting backfill",
+                height
+            );
+            return Some(height);
+        }
+
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("Backfill cancelled while waiting for first migration");
+                return None;
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(WAIT_POLL_INTERVAL_MS)) => {}
+        }
+    }
+}
+
+pub async fn backfill_supply_state(
     supply_state: Arc<SupplyState>,
     block_index: BlockIndexReadGuard,
     db: DatabaseProvider,
+    cancel: CancellationToken,
 ) -> Result<()> {
-    info!("Starting supply state recalculation");
-    supply_state.mark_not_ready();
+    info!("Starting supply state backfill");
 
-    match do_recalculation(&supply_state, &block_index, &db).await {
-        Ok(()) => {
+    match do_backfill(&supply_state, &block_index, &db, &cancel).await {
+        Ok(true) => {
             let state = supply_state.get();
             info!(
                 height = state.height,
                 cumulative_emitted = %state.cumulative_emitted,
-                "Supply state recalculation complete"
+                "Supply state backfill complete"
             );
             Ok(())
         }
+        Ok(false) => {
+            info!("Supply state backfill cancelled");
+            Ok(())
+        }
         Err(e) => {
-            warn!("Supply state recalculation failed: {}", e);
+            warn!("Supply state backfill failed: {}", e);
             Err(e)
         }
     }
 }
 
-async fn do_recalculation(
+async fn do_backfill(
     supply_state: &SupplyState,
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
-) -> Result<()> {
-    let initial_height = {
-        let index = block_index.read();
-        if index.num_blocks() == 0 {
-            info!("Block index is empty, nothing to recalculate");
-            supply_state.set_and_mark_ready(0, U256::zero())?;
-            return Ok(());
-        }
-        index.latest_height()
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    let Some(first_migration_height) = wait_for_first_migration(supply_state, cancel).await else {
+        return Ok(false);
     };
 
+    if first_migration_height == 0 {
+        info!("First migration at genesis, no historical blocks to backfill");
+        supply_state.add_historical_sum_and_mark_ready(U256::zero())?;
+        return Ok(true);
+    }
+
+    let backfill_end = first_migration_height - 1;
     info!(
-        "Recalculating supply state from genesis to height {}",
-        initial_height
+        "Backfilling supply state from genesis to height {}",
+        backfill_end
     );
 
-    let mut cumulative_emitted = U256::zero();
-    let mut processed_height = 0_u64;
+    let mut historical_sum = U256::zero();
     let mut last_log_height = 0_u64;
     const LOG_INTERVAL: u64 = 10000;
-    const YIELD_INTERVAL: u64 = 1000;
+    const BATCH_SIZE: u64 = 100;
 
-    for height in 0..=initial_height {
-        cumulative_emitted = process_block_reward(block_index, db, height, cumulative_emitted)?;
-        processed_height = height;
+    let mut height = 0_u64;
+    while height <= backfill_end {
+        if cancel.is_cancelled() {
+            info!("Backfill cancelled at height {}/{}", height, backfill_end);
+            return Ok(false);
+        }
 
-        if height >= last_log_height.saturating_add(LOG_INTERVAL) {
+        let batch_end = height.saturating_add(BATCH_SIZE - 1).min(backfill_end);
+        let batch_rewards = get_block_rewards_batch(block_index, db, height, batch_end)?;
+
+        for reward in batch_rewards {
+            historical_sum = historical_sum.saturating_add(reward);
+        }
+
+        if batch_end >= last_log_height.saturating_add(LOG_INTERVAL) {
             debug!(
-                "Supply recalculation progress: height {}/{}, cumulative: {}",
-                height, initial_height, cumulative_emitted
+                "Backfill progress: height {}/{}, sum: {}",
+                batch_end, backfill_end, historical_sum
             );
-            last_log_height = height;
+            last_log_height = batch_end;
         }
 
-        if height % YIELD_INTERVAL == 0 {
-            tokio::task::yield_now().await;
-        }
+        height = batch_end.saturating_add(1);
+        tokio::task::yield_now().await;
     }
 
-    loop {
-        let current_height = block_index.read().latest_height();
+    supply_state.add_historical_sum_and_mark_ready(historical_sum)?;
 
-        if current_height <= processed_height {
-            break;
-        }
-
-        info!(
-            "Catching up blocks {} to {} that arrived during recalculation",
-            processed_height + 1,
-            current_height
-        );
-
-        for height in (processed_height + 1)..=current_height {
-            cumulative_emitted = process_block_reward(block_index, db, height, cumulative_emitted)?;
-            processed_height = height;
-
-            if height % YIELD_INTERVAL == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-    }
-
-    supply_state.set_and_mark_ready(processed_height, cumulative_emitted)?;
-
-    // Final catch-up: process any blocks that arrived after the last check but before
-    // set_and_mark_ready.
-    let final_height = block_index.read().latest_height();
-    if final_height > processed_height {
-        info!(
-            "Processing {} blocks that arrived during final state update",
-            final_height - processed_height
-        );
-        for height in (processed_height + 1)..=final_height {
-            let reward = get_block_reward(block_index, db, height)?;
-            supply_state.add_block_reward(height, reward)?;
-        }
-    }
-
-    Ok(())
+    Ok(true)
 }
 
-fn process_block_reward(
+fn get_block_rewards_batch(
     block_index: &BlockIndexReadGuard,
     db: &DatabaseProvider,
-    height: u64,
-    cumulative: U256,
-) -> Result<U256> {
-    let reward = get_block_reward(block_index, db, height)?;
-    Ok(cumulative.saturating_add(reward))
-}
-
-fn get_block_reward(
-    block_index: &BlockIndexReadGuard,
-    db: &DatabaseProvider,
-    height: u64,
-) -> Result<U256> {
-    let block_hash = {
+    start_height: u64,
+    end_height: u64,
+) -> Result<Vec<U256>> {
+    let block_hashes: Vec<_> = {
         let index = block_index.read();
-        match index.get_item(height) {
-            Some(item) => item.block_hash,
-            None => {
-                return Err(eyre::eyre!(
-                    "Block at height {} not found in index - cannot proceed with missing blocks",
-                    height
-                ));
-            }
-        }
+        (start_height..=end_height)
+            .map(|height| {
+                index
+                    .get_item(height)
+                    .map(|item| item.block_hash)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Block at height {} not found in index - cannot proceed with missing blocks",
+                            height
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?
     };
 
-    let block_header = db
-        .view_eyre(|tx| block_header_by_hash(tx, &block_hash, false))?
-        .ok_or_else(|| eyre::eyre!("Block header not found for hash {}", block_hash))?;
-
-    Ok(block_header.reward_amount)
+    db.view_eyre(|tx| {
+        block_hashes
+            .iter()
+            .map(|hash| {
+                block_header_by_hash(tx, hash, false)?
+                    .ok_or_else(|| eyre::eyre!("Block header not found for hash {}", hash))
+                    .map(|h| h.reward_amount)
+            })
+            .collect()
+    })
 }

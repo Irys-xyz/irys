@@ -2,7 +2,7 @@ use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
-use eyre::{ensure, Context as _};
+use eyre::{ensure, eyre, Context as _};
 use futures::FutureExt as _;
 use irys_actors::{
     block_discovery::{
@@ -32,7 +32,10 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
+use irys_database::{
+    add_genesis_commitments, block_header_by_hash, database, db::IrysDatabaseExt as _,
+    get_genesis_commitments, SystemLedger,
+};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -90,6 +93,7 @@ use tokio::{
     },
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 #[derive(Debug, Clone)]
@@ -127,6 +131,7 @@ pub struct IrysNodeCtx {
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
+    backfill_cancel: CancellationToken,
 }
 
 impl IrysNodeCtx {
@@ -153,6 +158,10 @@ impl IrysNodeCtx {
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self, reason: ShutdownReason) {
         info!("stop function called, shutting down due to: {}", reason);
+
+        // Cancel the backfill task for graceful shutdown
+        self.backfill_cancel.cancel();
+
         if let Err(e) = self.stop_mining() {
             error!("Failed to stop mining during shutdown: {:#}", e);
         }
@@ -1163,6 +1172,45 @@ impl IrysNode {
         );
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
+        // Detect and fill any gap between supply_state and block_index
+        // (can happen if node crashed between block_index write and supply_state write)
+        if supply_state.first_migration_height().is_some() {
+            let bi = block_index.read().expect("block_index read lock");
+            let num_indexed_blocks = bi.num_blocks();
+            if num_indexed_blocks > 0 {
+                let latest_indexed_height = num_indexed_blocks - 1;
+                let supply_height = supply_state.height();
+
+                if latest_indexed_height > supply_height {
+                    info!(
+                        "Detected gap: supply_state at height {}, block_index at height {}. Filling gap.",
+                        supply_height, latest_indexed_height
+                    );
+
+                    for height in supply_height.saturating_add(1)..=latest_indexed_height {
+                        let item = bi.get_item(height).ok_or_else(|| {
+                            eyre!("Missing block at height {} during gap fill", height)
+                        })?;
+
+                        let header = irys_db
+                            .view_eyre(|tx| block_header_by_hash(tx, &item.block_hash, false))?
+                            .ok_or_else(|| {
+                                eyre!("Missing header for {} during gap fill", item.block_hash)
+                            })?;
+
+                        supply_state
+                            .add_block_reward(height, header.reward_amount)
+                            .wrap_err_with(|| format!("Gap fill failed at height {}", height))?;
+                    }
+
+                    info!(
+                        "Gap filled successfully, supply_state now at height {}",
+                        supply_state.height()
+                    );
+                }
+            }
+        }
+
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
             receivers.block_index,
@@ -1215,34 +1263,42 @@ impl IrysNode {
             .await
             .expect("to receive BlockIndexReadGuard from BlockIndex service");
 
-        // Spawn async task to recalculate supply state from block index
+        // Create cancellation token for graceful shutdown of backfill task
+        let backfill_cancel = CancellationToken::new();
+
+        // Spawn async task to backfill historical supply state
         {
-            let supply_state_for_recalc = supply_state.clone();
-            let block_index_for_recalc = block_index_guard.clone();
-            let db_for_recalc = irys_db.clone();
-            let recalc_handle = runtime_handle.spawn(async move {
-                irys_actors::supply_state_calculator::recalculate_supply_state(
-                    supply_state_for_recalc,
-                    block_index_for_recalc,
-                    db_for_recalc,
+            let supply_state_for_backfill = supply_state.clone();
+            let block_index_for_backfill = block_index_guard.clone();
+            let db_for_backfill = irys_db.clone();
+            let cancel_for_task = backfill_cancel.clone();
+            let backfill_handle = runtime_handle.spawn(async move {
+                irys_actors::supply_state_calculator::backfill_supply_state(
+                    supply_state_for_backfill,
+                    block_index_for_backfill,
+                    db_for_backfill,
+                    cancel_for_task,
                 )
                 .await
             });
 
-            // Monitor the critical recalculation task and propagate failures
+            // Monitor backfill task - log errors but don't crash the node.
+            // If backfill fails, exact supply queries will return errors until restart.
             runtime_handle.spawn(async move {
-                match recalc_handle.await {
-                    Ok(Ok(())) => {}
+                match backfill_handle.await {
+                    Ok(Ok(())) => {
+                        tracing::info!("Supply state backfill completed successfully");
+                    }
                     Ok(Err(e)) => {
-                        panic!(
-                            "Supply state recalculation must succeed - data integrity issue: {}",
-                            e
+                        tracing::error!(
+                            error = %e,
+                            "Supply state backfill failed - exact supply queries will be unavailable"
                         );
                     }
                     Err(join_error) => {
-                        panic!(
-                            "Supply state recalculation task panicked - data integrity issue: {}",
-                            join_error
+                        tracing::error!(
+                            error = %join_error,
+                            "Supply state backfill task panicked - exact supply queries will be unavailable"
                         );
                     }
                 }
@@ -1589,6 +1645,7 @@ impl IrysNode {
             is_vdf_mining_enabled,
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
+            backfill_cancel,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules

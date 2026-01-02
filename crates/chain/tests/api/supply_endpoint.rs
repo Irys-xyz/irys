@@ -138,14 +138,7 @@ async fn test_supply_endpoint_estimated() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Tests the supply endpoint with exact calculation for a chain past the
-/// block tree depth (migration/pruning threshold).
-///
-/// This test configures a small block_tree_depth (5) and block_migration_depth (2),
-/// then mines 30 blocks (6x the tree depth) to ensure 25 blocks have been migrated
-/// from the in-memory block tree to the block index. This verifies the exact supply
-/// calculation correctly sums rewards from all blocks including those that have been
-/// pruned from memory.
+/// Verifies exact supply calculation after block migration/pruning.
 #[test_log::test(tokio::test)]
 async fn test_supply_endpoint_exact() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node_with_small_tree().await;
@@ -157,12 +150,9 @@ async fn test_supply_endpoint_exact() -> eyre::Result<()> {
 
     let supply = fetch_supply(&client, &format!("{}/v1/supply?exact=true", address)).await?;
 
-    // May still be recalculating, but should be "actual" or "actual_recalculating"
-    assert!(
-        supply.calculation_method == "actual"
-            || supply.calculation_method == "actual_recalculating",
-        "Should use actual calculation method, got: {}",
-        supply.calculation_method
+    assert_eq!(
+        supply.calculation_method, "actual",
+        "Should use actual calculation method"
     );
     assert!(
         supply.block_height >= num_blocks_to_mine as u64,
