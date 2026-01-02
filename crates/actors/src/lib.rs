@@ -17,6 +17,7 @@ pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
 pub mod storage_module_service;
+pub mod supply_state_calculator;
 pub mod test_helpers;
 pub mod validation_service;
 

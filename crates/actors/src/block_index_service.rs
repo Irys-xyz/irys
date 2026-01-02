@@ -1,5 +1,5 @@
 use eyre::eyre;
-use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex};
+use irys_domain::{block_index_guard::BlockIndexReadGuard, BlockIndex, SupplyState};
 use irys_types::{
     BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
     TokioServiceHandle, UnixTimestampMs, H256, U256,
@@ -53,6 +53,7 @@ struct BlockLogEntry {
 #[derive(Debug)]
 pub struct BlockIndexServiceInner {
     block_index: Arc<RwLock<BlockIndex>>,
+    supply_state: Option<Arc<SupplyState>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
     chunk_size: u64,
@@ -60,9 +61,14 @@ pub struct BlockIndexServiceInner {
 }
 
 impl BlockIndexServiceInner {
-    pub fn new(block_index: Arc<RwLock<BlockIndex>>, consensus_config: &ConsensusConfig) -> Self {
+    pub fn new(
+        block_index: Arc<RwLock<BlockIndex>>,
+        supply_state: Option<Arc<SupplyState>>,
+        consensus_config: &ConsensusConfig,
+    ) -> Self {
         Self {
             block_index,
+            supply_state,
             block_log: Vec::new(),
             num_blocks: 0,
             chunk_size: consensus_config.chunk_size,
@@ -98,7 +104,6 @@ impl BlockIndexServiceInner {
                             block_header.height,
                             block_header.block_hash
                         );
-                        // notify caller, then exit service by returning Err
                         if let Err(send_err) = response.send(Err(eyre!(err.to_string()))) {
                             tracing::warn!(
                                 custom.migration_error = %err,
@@ -115,7 +120,6 @@ impl BlockIndexServiceInner {
                     );
                 }
 
-                // Perform the migration; if it fails, notify caller and exit service
                 match self.migrate_block(&block_header, &all_txs) {
                     Ok(()) => {
                         if let Err(send_err) = response.send(Ok(())) {
@@ -129,7 +133,6 @@ impl BlockIndexServiceInner {
                         Ok(())
                     }
                     Err(e) => {
-                        // notify caller, then exit service by returning Err
                         if let Err(send_err) = response.send(Err(eyre!(e.to_string()))) {
                             tracing::warn!(
                                 block.height = block_header.height,
@@ -180,6 +183,12 @@ impl BlockIndexServiceInner {
             .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
+        if let Some(supply_state) = &self.supply_state {
+            supply_state
+                .add_block_reward(block.height, block.reward_amount)
+                .map_err(|e| eyre!("Supply state update failed during migration: {}", e))?;
+        }
+
         self.last_received_block = Some((block.height, block.block_hash));
 
         // Track a small window of recent blocks for debugging
@@ -191,7 +200,6 @@ impl BlockIndexServiceInner {
         });
 
         if self.block_log.len() > 20 {
-            // keep only the last 20 entries
             self.block_log.drain(0..self.block_log.len() - 20);
         }
 
@@ -209,13 +217,14 @@ impl BlockIndexService {
     pub fn spawn_service(
         rx: UnboundedReceiver<BlockIndexServiceMessage>,
         block_index: Arc<RwLock<BlockIndex>>,
+        supply_state: Option<Arc<SupplyState>>,
         consensus_config: &ConsensusConfig,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning BlockIndex service");
         let (shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
 
-        let inner = BlockIndexServiceInner::new(block_index, consensus_config);
+        let inner = BlockIndexServiceInner::new(block_index, supply_state, consensus_config);
 
         let handle = runtime_handle.spawn(
             async move {

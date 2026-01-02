@@ -32,17 +32,9 @@ pub struct SupplyResponse {
     pub calculation_method: String,
 }
 
-/// GET /supply
-///
-/// Returns the current total token supply including genesis allocation and emissions
-///
-/// Query parameters:
-/// - `exact`: boolean (optional) - If true, sums actual block rewards. Default: false (uses height-based formula)
-///
-/// Default behavior uses height-based formula calculation, simulating elapsed time as
-/// `block_height * target_block_time` and applying the reward curve formula, matching how
-/// individual block rewards are calculated. Use `?exact=true` to sum the actual `reward_amount`
-/// from all blocks in the canonical chain for absolute accuracy.
+/// GET /supply - Returns total token supply.
+/// Query `?exact=true` to use actual cumulative emissions (errors if unavailable or recalculating).
+/// Defaults to estimated emissions based on block height and halving curve.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
@@ -54,8 +46,6 @@ pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) 
     }
 }
 
-/// Gets the latest block header from the canonical chain.
-/// Tries the block tree first, falls back to database if not found.
 fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
     let tree = state.block_tree.read();
     let (canonical, _) = tree.get_canonical_chain();
@@ -88,37 +78,22 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         });
 
     let (emitted_amount, calculation_method) = if use_exact {
-        let tree = state.block_tree.read();
-        let (canonical, _) = tree.get_canonical_chain();
-
-        let mut sum = U256::zero();
-
-        for entry in canonical.iter() {
-            let block = tree.get_block(&entry.block_hash).cloned().or_else(|| {
-                state
-                    .db
-                    .view_eyre(|tx| block_header_by_hash(tx, &entry.block_hash, false))
-                    .ok()
-                    .flatten()
-            });
-
-            if let Some(block) = block {
-                sum += block.reward_amount;
+        if let Some(supply_state) = &state.supply_state {
+            if !supply_state.is_ready() {
+                return Err(eyre!(
+                    "Supply state is recalculating (backfill in progress during node startup). \
+                    Retry later or use exact=false for estimated supply."
+                ));
             }
+            (supply_state.get().cumulative_emitted, "actual")
+        } else {
+            return Err(eyre!(
+                "Supply state not available (node may still be initializing). \
+                Retry later or use exact=false for estimated supply."
+            ));
         }
-
-        (sum, "actual")
     } else {
-        let curve = HalvingCurve {
-            inflation_cap: config.block_reward_config.inflation_cap,
-            half_life_secs: config.block_reward_config.half_life_secs as u128,
-        };
-
-        let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
-        let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
-
-        let emitted = curve.reward_between(0, simulated_time_seconds)?;
-        (emitted.amount, "estimated")
+        calculate_estimated_emission(config, block_height)?
     };
 
     let total_supply = genesis_supply + emitted_amount;
@@ -135,6 +110,24 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         ),
         calculation_method: calculation_method.to_string(),
     })
+}
+
+fn calculate_estimated_emission(
+    config: &irys_types::ConsensusConfig,
+    block_height: u64,
+) -> Result<(U256, &'static str)> {
+    let curve = HalvingCurve {
+        inflation_cap: config.block_reward_config.inflation_cap,
+        half_life_secs: config.block_reward_config.half_life_secs as u128,
+    };
+
+    let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
+    let simulated_time_seconds = (block_height as u128)
+        .checked_mul(target_block_time_seconds)
+        .ok_or_else(|| eyre!("Block height overflow in time calculation"))?;
+
+    let emitted = curve.reward_between(0, simulated_time_seconds)?;
+    Ok((emitted.amount, "estimated"))
 }
 
 fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
@@ -155,6 +148,8 @@ fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::ConsensusConfig;
+    use proptest::prelude::*;
     use rstest::rstest;
 
     #[rstest]
@@ -162,6 +157,7 @@ mod tests {
     #[case(650_000_000_u128, "50.00")]
     #[case(1_300_000_000_u128, "100.00")]
     #[case(325_000_000_u128, "25.00")]
+    #[case(160_420_000_u128, "12.34")]
     fn test_calculate_inflation_progress(#[case] emitted: u128, #[case] expected: &str) {
         let cap = U256::from(1_300_000_000_u128) * U256::from(10_u128.pow(18));
         let emitted_amount = U256::from(emitted) * U256::from(10_u128.pow(18));
@@ -169,9 +165,44 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_inflation_progress_with_decimals() {
-        let cap = U256::from(1_300_000_000_u128) * U256::from(10_u128.pow(18));
-        let amount = (cap * U256::from(1234_u128)) / U256::from(10000_u128);
-        assert_eq!(calculate_inflation_progress(amount, cap), "12.34");
+    fn test_estimated_emission_zero_height() {
+        let config = ConsensusConfig::testing();
+        let (emitted, method) = calculate_estimated_emission(&config, 0).unwrap();
+        assert_eq!(emitted, U256::zero());
+        assert_eq!(method, "estimated");
+    }
+
+    proptest! {
+        #[test]
+        fn emission_monotonically_increases(
+            h1 in 0_u64..10_000_000_u64,
+            h2 in 0_u64..10_000_000_u64
+        ) {
+            let config = ConsensusConfig::testing();
+            let min_h = h1.min(h2);
+            let max_h = h1.max(h2);
+            let (e1, _) = calculate_estimated_emission(&config, min_h).unwrap();
+            let (e2, _) = calculate_estimated_emission(&config, max_h).unwrap();
+            prop_assert!(e2 >= e1, "Higher height {} should produce >= emissions than {}", max_h, min_h);
+        }
+
+        #[test]
+        fn emission_bounded_by_cap(height in 0_u64..u64::MAX / 1000) {
+            let config = ConsensusConfig::testing();
+            let (emitted, _) = calculate_estimated_emission(&config, height).unwrap();
+            prop_assert!(
+                emitted <= config.block_reward_config.inflation_cap.amount,
+                "Emissions {} should not exceed cap {}",
+                emitted,
+                config.block_reward_config.inflation_cap.amount
+            );
+        }
+
+        #[test]
+        fn emission_method_always_estimated(height in 0_u64..1_000_000_u64) {
+            let config = ConsensusConfig::testing();
+            let (_, method) = calculate_estimated_emission(&config, height).unwrap();
+            prop_assert_eq!(method, "estimated");
+        }
     }
 }

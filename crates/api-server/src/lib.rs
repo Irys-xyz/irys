@@ -13,7 +13,9 @@ use irys_actors::{
     pledge_provider::MempoolPledgeProvider,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList};
+use irys_domain::{
+    BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, PeerList, SupplyStateReadGuard,
+};
 use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress};
 use routes::{
@@ -47,6 +49,7 @@ pub struct ApiState {
     pub reth_http_url: String,
     pub block_tree: BlockTreeReadGuard,
     pub block_index: BlockIndexReadGuard,
+    pub supply_state: Option<SupplyStateReadGuard>,
     pub sync_state: ChainSyncState,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub started_at: Instant,

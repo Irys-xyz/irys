@@ -33,6 +33,7 @@ thiserror.workspace = true
 irys-testing-utils.workspace = true
 test-log.workspace = true
 rstest.workspace = true
+proptest.workspace = true
 actix-web = { workspace = true, features = ["macros"] }
 
 [lints]
