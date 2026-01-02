@@ -10,33 +10,34 @@ use std::sync::{
 };
 
 const FILE_NAME: &str = "supply_state.dat";
-// Layout: height(8) + cumulative_emitted(32) + backfill_complete(1) + has_first_migration(1) + first_migration_height(8) = 50 bytes
 const STATE_SIZE: usize = 50;
 
+fn write_optional_u64(bytes: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(h) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&h.to_le_bytes());
+        }
+        None => {
+            bytes.push(0);
+            bytes.extend_from_slice(&0_u64.to_le_bytes());
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SupplyStateData {
-    pub height: u64,
-    pub cumulative_emitted: U256,
-    pub backfill_complete: bool,
+pub struct PersistedSupplyState {
+    pub backfill_height: Option<u64>,
+    pub backfill_value: U256,
     pub first_migration_height: Option<u64>,
 }
 
-impl SupplyStateData {
+impl PersistedSupplyState {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(STATE_SIZE);
-        bytes.extend_from_slice(&self.height.to_le_bytes());
-        bytes.extend_from_slice(&self.cumulative_emitted.to_le_bytes());
-        bytes.push(if self.backfill_complete { 1 } else { 0 });
-        match self.first_migration_height {
-            Some(h) => {
-                bytes.push(1);
-                bytes.extend_from_slice(&h.to_le_bytes());
-            }
-            None => {
-                bytes.push(0);
-                bytes.extend_from_slice(&0_u64.to_le_bytes());
-            }
-        }
+        write_optional_u64(&mut bytes, self.backfill_height);
+        bytes.extend_from_slice(&self.backfill_value.to_le_bytes());
+        write_optional_u64(&mut bytes, self.first_migration_height);
         bytes
     }
 
@@ -49,10 +50,16 @@ impl SupplyStateData {
             );
         }
 
-        let height = u64::from_le_bytes(bytes[0..8].try_into().expect("slice is exactly 8 bytes"));
-        let cumulative_emitted =
-            U256::from_le_bytes(bytes[8..40].try_into().expect("slice is exactly 32 bytes"));
-        let backfill_complete = bytes[40] != 0;
+        let has_backfill = bytes[0] != 0;
+        let backfill_height = if has_backfill {
+            Some(u64::from_le_bytes(
+                bytes[1..9].try_into().expect("slice is exactly 8 bytes"),
+            ))
+        } else {
+            None
+        };
+        let backfill_value =
+            U256::from_le_bytes(bytes[9..41].try_into().expect("slice is exactly 32 bytes"));
         let has_first_migration = bytes[41] != 0;
         let first_migration_height = if has_first_migration {
             Some(u64::from_le_bytes(
@@ -63,18 +70,26 @@ impl SupplyStateData {
         };
 
         Ok(Self {
-            height,
-            cumulative_emitted,
-            backfill_complete,
+            backfill_height,
+            backfill_value,
             first_migration_height,
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SupplyStateData {
+    pub height: u64,
+    pub cumulative_emitted: U256,
+    pub first_migration_height: Option<u64>,
 }
 
 #[derive(Debug)]
 pub struct SupplyState {
     inner: RwLock<SupplyStateData>,
     ready: AtomicBool,
+    persisted_backfill_height: Option<u64>,
+    persisted_backfill_value: U256,
     state_file: PathBuf,
 }
 
@@ -84,13 +99,25 @@ impl SupplyState {
         std::fs::create_dir_all(&state_dir)?;
         let state_file = state_dir.join(FILE_NAME);
 
-        let data = load_from_file(&state_file).unwrap_or_default();
+        // Load persisted backfill point (if any)
+        let persisted = load_from_file(&state_file).unwrap_or_default();
 
+        // Runtime state starts fresh - will be reconstructed
         Ok(Self {
-            inner: RwLock::new(data),
-            ready: AtomicBool::new(data.backfill_complete),
+            inner: RwLock::new(SupplyStateData::default()),
+            ready: AtomicBool::new(false),
+            persisted_backfill_height: persisted.backfill_height,
+            persisted_backfill_value: persisted.backfill_value,
             state_file,
         })
+    }
+
+    pub fn persisted_backfill_height(&self) -> Option<u64> {
+        self.persisted_backfill_height
+    }
+
+    pub fn persisted_backfill_value(&self) -> U256 {
+        self.persisted_backfill_value
     }
 
     pub fn is_ready(&self) -> bool {
@@ -133,38 +160,48 @@ impl SupplyState {
             data.first_migration_height
         };
 
-        let new_data = SupplyStateData {
+        // Update runtime state only - no persistence needed here
+        *data = SupplyStateData {
             height,
             cumulative_emitted: data.cumulative_emitted.saturating_add(reward_amount),
-            backfill_complete: data.backfill_complete,
             first_migration_height: first_migration,
         };
-
-        save_to_file(&self.state_file, &new_data)?;
-        *data = new_data;
         Ok(())
     }
 
     pub fn add_historical_sum_and_mark_ready(&self, historical_sum: U256) -> Result<()> {
-        let mut data = self
-            .inner
-            .write()
-            .expect("supply state write lock poisoned");
-
-        if data.backfill_complete {
+        if self.ready.load(Ordering::Acquire) {
             return Ok(());
         }
 
-        let new_data = SupplyStateData {
-            height: data.height,
-            cumulative_emitted: data.cumulative_emitted.saturating_add(historical_sum),
-            backfill_complete: true,
-            first_migration_height: data.first_migration_height,
+        // Calculate values under read lock, then release before file I/O
+        let (persisted, new_backfill_value) = {
+            let data = self.inner.read().expect("supply state read lock poisoned");
+            let new_backfill_value = self.persisted_backfill_value.saturating_add(historical_sum);
+            let new_backfill_height = data.first_migration_height.and_then(|h| h.checked_sub(1));
+
+            let persisted = PersistedSupplyState {
+                backfill_height: new_backfill_height,
+                backfill_value: new_backfill_value,
+                first_migration_height: data.first_migration_height,
+            };
+            (persisted, new_backfill_value)
         };
 
-        save_to_file(&self.state_file, &new_data)?;
-        *data = new_data;
-        self.ready.store(true, Ordering::Release);
+        save_to_file(&self.state_file, &persisted)?;
+
+        {
+            let mut data = self
+                .inner
+                .write()
+                .expect("supply state write lock poisoned");
+            // Double-check: another thread may have called this concurrently
+            if !self.ready.load(Ordering::Acquire) {
+                data.cumulative_emitted =
+                    data.cumulative_emitted.saturating_add(new_backfill_value);
+                self.ready.store(true, Ordering::Release);
+            }
+        }
         Ok(())
     }
 }
@@ -190,7 +227,7 @@ impl SupplyStateReadGuard {
     }
 }
 
-fn load_from_file(path: &Path) -> Result<SupplyStateData> {
+fn load_from_file(path: &Path) -> Result<PersistedSupplyState> {
     let mut file = OpenOptions::new()
         .read(true)
         .open(path)
@@ -200,13 +237,13 @@ fn load_from_file(path: &Path) -> Result<SupplyStateData> {
         .context("Failed to read supply state file")?;
 
     if bytes.is_empty() {
-        return Ok(SupplyStateData::default());
+        return Ok(PersistedSupplyState::default());
     }
 
-    SupplyStateData::from_bytes(&bytes).context("Failed to parse supply state data")
+    PersistedSupplyState::from_bytes(&bytes).context("Failed to parse supply state data")
 }
 
-fn save_to_file(path: &Path, data: &SupplyStateData) -> Result<()> {
+fn save_to_file(path: &Path, data: &PersistedSupplyState) -> Result<()> {
     let bytes = data.to_bytes();
     let mut file = AtomicWriteFile::open(path).with_context(|| {
         format!(
@@ -215,9 +252,9 @@ fn save_to_file(path: &Path, data: &SupplyStateData) -> Result<()> {
         )
     })?;
     file.write_all(&bytes)
-        .context("Failed to write supply state data")?;
+        .with_context(|| format!("Failed to write supply state to {}", path.display()))?;
     file.commit()
-        .context("Failed to commit supply state file")?;
+        .with_context(|| format!("Failed to commit supply state to {}", path.display()))?;
     Ok(())
 }
 
@@ -230,6 +267,13 @@ mod tests {
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn create_test_supply_state() -> SupplyState {
+        create_test_supply_state_with_backfill(None, U256::zero())
+    }
+
+    fn create_test_supply_state_with_backfill(
+        backfill_height: Option<u64>,
+        backfill_value: U256,
+    ) -> SupplyState {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_dir = std::env::temp_dir().join(format!("supply_state_test_{}", counter));
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -238,6 +282,8 @@ mod tests {
         SupplyState {
             inner: RwLock::new(SupplyStateData::default()),
             ready: AtomicBool::new(false),
+            persisted_backfill_height: backfill_height,
+            persisted_backfill_value: backfill_value,
             state_file,
         }
     }
@@ -248,15 +294,18 @@ mod tests {
 
     proptest! {
         #[test]
-        fn roundtrip_property(height: u64, emitted_bytes in arb_u256_bytes(), backfill_complete: bool, first_migration in proptest::option::of(any::<u64>())) {
-            let data = SupplyStateData {
-                height,
-                cumulative_emitted: U256::from_le_bytes(emitted_bytes),
-                backfill_complete,
+        fn persisted_state_roundtrip(
+            backfill_height in proptest::option::of(any::<u64>()),
+            value_bytes in arb_u256_bytes(),
+            first_migration in proptest::option::of(any::<u64>())
+        ) {
+            let data = PersistedSupplyState {
+                backfill_height,
+                backfill_value: U256::from_le_bytes(value_bytes),
                 first_migration_height: first_migration,
             };
             let bytes = data.to_bytes();
-            let decoded = SupplyStateData::from_bytes(&bytes).unwrap();
+            let decoded = PersistedSupplyState::from_bytes(&bytes).unwrap();
             prop_assert_eq!(decoded, data);
         }
 
@@ -279,10 +328,10 @@ mod tests {
     #[test]
     fn from_bytes_rejects_wrong_size() {
         let short = vec![0_u8; STATE_SIZE - 1];
-        assert!(SupplyStateData::from_bytes(&short).is_err());
+        assert!(PersistedSupplyState::from_bytes(&short).is_err());
 
         let long = vec![0_u8; STATE_SIZE + 1];
-        assert!(SupplyStateData::from_bytes(&long).is_err());
+        assert!(PersistedSupplyState::from_bytes(&long).is_err());
     }
 
     #[test]
@@ -328,6 +377,8 @@ mod tests {
         assert_eq!(state.cumulative_emitted(), U256::from(300));
         assert!(!state.is_ready());
 
+        // historical_sum is 1000, persisted_backfill_value is 0
+        // Total added = 0 + 1000 = 1000
         state
             .add_historical_sum_and_mark_ready(U256::from(1000))
             .unwrap();
@@ -356,16 +407,19 @@ mod tests {
     }
 
     #[test]
-    fn restart_with_persisted_state_continues_sequentially() {
+    fn restart_resets_runtime_state_but_loads_backfill_point() {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp_dir = std::env::temp_dir().join(format!("supply_state_restart_test_{}", counter));
         std::fs::create_dir_all(&temp_dir).unwrap();
         let state_file = temp_dir.join(FILE_NAME);
 
+        // First run: complete backfill
         {
             let state = SupplyState {
                 inner: RwLock::new(SupplyStateData::default()),
                 ready: AtomicBool::new(false),
+                persisted_backfill_height: None,
+                persisted_backfill_value: U256::zero(),
                 state_file: state_file.clone(),
             };
 
@@ -374,26 +428,35 @@ mod tests {
             state
                 .add_historical_sum_and_mark_ready(U256::from(500))
                 .unwrap();
+
+            assert!(state.is_ready());
+            assert_eq!(state.cumulative_emitted(), U256::from(800)); // 100 + 200 + 500
         }
 
-        let data = load_from_file(&state_file).unwrap();
-        assert_eq!(data.height, 11);
-        assert_eq!(data.cumulative_emitted, U256::from(800));
-        assert!(data.backfill_complete);
-        assert_eq!(data.first_migration_height, Some(10));
+        // Verify persisted state
+        let persisted = load_from_file(&state_file).unwrap();
+        assert_eq!(persisted.backfill_height, Some(9)); // first_migration(10) - 1
+        assert_eq!(persisted.backfill_value, U256::from(500));
+        assert_eq!(persisted.first_migration_height, Some(10));
 
+        // Second run: simulate restart - runtime resets but backfill point loaded
         let state = SupplyState {
-            inner: RwLock::new(data),
-            ready: AtomicBool::new(data.backfill_complete),
+            inner: RwLock::new(SupplyStateData::default()), // Reset runtime
+            ready: AtomicBool::new(false),                  // Reset ready
+            persisted_backfill_height: persisted.backfill_height,
+            persisted_backfill_value: persisted.backfill_value,
             state_file,
         };
 
-        state.add_block_reward(12, U256::from(300)).unwrap();
-        assert_eq!(state.height(), 12);
-        assert_eq!(state.cumulative_emitted(), U256::from(1100));
+        // Runtime state is reset
+        assert!(!state.is_ready());
+        assert_eq!(state.height(), 0);
+        assert_eq!(state.cumulative_emitted(), U256::zero());
+        assert_eq!(state.first_migration_height(), None);
 
-        let result = state.add_block_reward(14, U256::from(100));
-        assert!(result.is_err());
+        // But backfill point is loaded
+        assert_eq!(state.persisted_backfill_height(), Some(9));
+        assert_eq!(state.persisted_backfill_value(), U256::from(500));
     }
 
     #[test]
@@ -423,81 +486,31 @@ mod tests {
         assert_eq!(state.cumulative_emitted(), U256::from(600));
         assert!(state.is_ready());
 
+        // Second call should be a no-op
         state
-            .add_historical_sum_and_mark_ready(U256::from(500))
+            .add_historical_sum_and_mark_ready(U256::from(999))
             .unwrap();
 
         assert_eq!(state.cumulative_emitted(), U256::from(600));
     }
 
     #[test]
-    fn restart_sets_ready_from_backfill_complete_flag() {
-        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir =
-            std::env::temp_dir().join(format!("supply_state_ready_restart_test_{}", counter));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let state_file = temp_dir.join(FILE_NAME);
+    fn backfill_with_previous_persisted_value() {
+        // Simulate restart where we already have some backfill completed
+        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
 
-        {
-            let state = SupplyState {
-                inner: RwLock::new(SupplyStateData::default()),
-                ready: AtomicBool::new(false),
-                state_file: state_file.clone(),
-            };
+        // New migration comes in at height 100
+        state.add_block_reward(100, U256::from(100)).unwrap();
 
-            state.add_block_reward(5, U256::from(100)).unwrap();
-            state
-                .add_historical_sum_and_mark_ready(U256::from(200))
-                .unwrap();
-            assert!(state.is_ready());
-        }
+        // Backfill adds sum for heights 50-99 (new historical_sum)
+        let new_backfill_sum = U256::from(5000); // heights 50-99
+        state
+            .add_historical_sum_and_mark_ready(new_backfill_sum)
+            .unwrap();
 
-        let data = load_from_file(&state_file).unwrap();
-        assert!(data.backfill_complete);
-        assert_eq!(data.first_migration_height, Some(5));
-
-        let state = SupplyState {
-            inner: RwLock::new(data),
-            ready: AtomicBool::new(data.backfill_complete),
-            state_file,
-        };
-
+        // Total = migration(100) + persisted_backfill(5000) + new_backfill(5000) = 10100
+        assert_eq!(state.cumulative_emitted(), U256::from(10100));
         assert!(state.is_ready());
-        assert_eq!(state.cumulative_emitted(), U256::from(300));
-    }
-
-    #[test]
-    fn restart_not_ready_if_backfill_incomplete() {
-        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let temp_dir =
-            std::env::temp_dir().join(format!("supply_state_incomplete_test_{}", counter));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let state_file = temp_dir.join(FILE_NAME);
-
-        {
-            let state = SupplyState {
-                inner: RwLock::new(SupplyStateData::default()),
-                ready: AtomicBool::new(false),
-                state_file: state_file.clone(),
-            };
-
-            state.add_block_reward(5, U256::from(100)).unwrap();
-            state.add_block_reward(6, U256::from(200)).unwrap();
-            // Simulate crash: backfill never completed
-        }
-
-        let data = load_from_file(&state_file).unwrap();
-        assert!(!data.backfill_complete);
-        assert_eq!(data.cumulative_emitted, U256::from(300));
-        assert_eq!(data.first_migration_height, Some(5));
-
-        let state = SupplyState {
-            inner: RwLock::new(data),
-            ready: AtomicBool::new(data.backfill_complete),
-            state_file,
-        };
-
-        assert!(!state.is_ready());
     }
 
     #[test]

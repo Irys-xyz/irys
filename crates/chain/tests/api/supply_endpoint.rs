@@ -57,7 +57,23 @@ async fn setup_with_migrated_blocks(
     count: usize,
 ) -> eyre::Result<()> {
     ctx.mine_blocks(count).await?;
-    sleep(Duration::from_secs(3)).await;
+
+    let timeout = Duration::from_secs(30);
+    let poll_interval = Duration::from_millis(100);
+    let start = std::time::Instant::now();
+
+    while !ctx
+        .node_ctx
+        .supply_state_guard
+        .as_ref()
+        .map(irys_domain::SupplyStateReadGuard::is_ready)
+        .unwrap_or(true)
+    {
+        if start.elapsed() > timeout {
+            eyre::bail!("Supply state not ready after {:?}", timeout);
+        }
+        sleep(poll_interval).await;
+    }
     Ok(())
 }
 

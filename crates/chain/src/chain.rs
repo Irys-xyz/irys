@@ -2,7 +2,7 @@ use crate::genesis_utilities::save_genesis_block_to_disk;
 use crate::peer_utilities::{fetch_genesis_block, fetch_genesis_commitments};
 use actix_web::dev::Server;
 use base58::ToBase58 as _;
-use eyre::{ensure, eyre, Context as _};
+use eyre::{ensure, Context as _};
 use futures::FutureExt as _;
 use irys_actors::{
     block_discovery::{
@@ -32,10 +32,7 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::{
-    add_genesis_commitments, block_header_by_hash, database, db::IrysDatabaseExt as _,
-    get_genesis_commitments, SystemLedger,
-};
+use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -1169,45 +1166,6 @@ impl IrysNode {
         // Initialize supply state for tracking cumulative emissions
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
-
-        // Detect and fill any gap between supply_state and block_index
-        // (can happen if node crashed between block_index write and supply_state write)
-        if supply_state.first_migration_height().is_some() {
-            let bi = block_index.read().expect("block_index read lock");
-            let num_indexed_blocks = bi.num_blocks();
-            if num_indexed_blocks > 0 {
-                let latest_indexed_height = num_indexed_blocks - 1;
-                let supply_height = supply_state.height();
-
-                if latest_indexed_height > supply_height {
-                    info!(
-                        "Detected gap: supply_state at height {}, block_index at height {}. Filling gap.",
-                        supply_height, latest_indexed_height
-                    );
-
-                    for height in supply_height.saturating_add(1)..=latest_indexed_height {
-                        let item = bi.get_item(height).ok_or_else(|| {
-                            eyre!("Missing block at height {} during gap fill", height)
-                        })?;
-
-                        let header = irys_db
-                            .view_eyre(|tx| block_header_by_hash(tx, &item.block_hash, false))?
-                            .ok_or_else(|| {
-                                eyre!("Missing header for {} during gap fill", item.block_hash)
-                            })?;
-
-                        supply_state
-                            .add_block_reward(height, header.reward_amount)
-                            .wrap_err_with(|| format!("Gap fill failed at height {}", height))?;
-                    }
-
-                    info!(
-                        "Gap filled successfully, supply_state now at height {}",
-                        supply_state.height()
-                    );
-                }
-            }
-        }
 
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(

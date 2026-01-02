@@ -70,31 +70,46 @@ async fn do_backfill(
         return Ok(false);
     };
 
-    if first_migration_height == 0 {
-        info!("First migration at genesis, no historical blocks to backfill");
+    // Start from persisted backfill height + 1, or 0 if no previous backfill
+    let backfill_start = supply_state
+        .persisted_backfill_height()
+        .map(|h| h.saturating_add(1))
+        .unwrap_or(0);
+
+    // End at first_migration_height - 1 (blocks before first migration)
+    let backfill_end = first_migration_height.saturating_sub(1);
+
+    // No backfill needed if start > end (already caught up or first migration at genesis)
+    if backfill_start > backfill_end || first_migration_height == 0 {
+        info!(
+            persisted_height = ?supply_state.persisted_backfill_height(),
+            first_migration_height,
+            "No additional backfill needed"
+        );
         supply_state.add_historical_sum_and_mark_ready(U256::zero())?;
         return Ok(true);
     }
 
-    let backfill_end = first_migration_height - 1;
     info!(
-        "Backfilling supply state from genesis to height {}",
-        backfill_end
+        "Backfilling supply state from height {} to {}",
+        backfill_start, backfill_end
     );
 
     let mut historical_sum = U256::zero();
-    let mut last_log_height = 0_u64;
+    let mut last_log_height = backfill_start;
     const LOG_INTERVAL: u64 = 10000;
-    const BATCH_SIZE: u64 = 100;
+    const BATCH_SIZE: u64 = 1000;
 
-    let mut height = 0_u64;
+    let mut height = backfill_start;
     while height <= backfill_end {
         if cancel.is_cancelled() {
             info!("Backfill cancelled at height {}/{}", height, backfill_end);
             return Ok(false);
         }
 
-        let batch_end = height.saturating_add(BATCH_SIZE - 1).min(backfill_end);
+        let batch_end = height
+            .saturating_add(BATCH_SIZE.saturating_sub(1))
+            .min(backfill_end);
         let batch_rewards = get_block_rewards_batch(block_index, db, height, batch_end)?;
 
         for reward in batch_rewards {
