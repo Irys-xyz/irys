@@ -5238,6 +5238,7 @@ dependencies = [
  "irys-config",
  "irys-database",
  "irys-domain",
+ "irys-efficient-sampling",
  "irys-p2p",
  "irys-packing",
  "irys-packing-worker",
