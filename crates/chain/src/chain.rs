@@ -1167,9 +1167,7 @@ impl IrysNode {
         );
 
         // Initialize supply state for tracking cumulative emissions
-        let supply_state = Arc::new(
-            SupplyState::new(&config.node_config).expect("Failed to initialize supply state"),
-        );
+        let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
         // Detect and fill any gap between supply_state and block_index
