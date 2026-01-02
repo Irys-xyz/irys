@@ -1,6 +1,11 @@
+# Data sync test cluster
+#
+# Uses debug image with shell (required for test scripts).
+# For release image: IMAGE_NAME=irys:release (limited - no shell)
+
 services:
   test-irys-1:
-    image: ${IMAGE_NAME:-localhost/irys-test:latest}
+    image: ${IMAGE_NAME:-irys:debug}
     pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
@@ -18,7 +23,7 @@ services:
       - NET_ADMIN
 
   test-irys-2:
-    image: ${IMAGE_NAME:-localhost/irys-test:latest}
+    image: ${IMAGE_NAME:-irys:debug}
     pull_policy: never
     container_name: test-irys-2
     restart: unless-stopped
@@ -41,7 +46,7 @@ services:
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
 
   test-irys-3:
-    image: ${IMAGE_NAME:-localhost/irys-test:latest}
+    image: ${IMAGE_NAME:-irys:debug}
     pull_policy: never
     container_name: test-irys-3
     restart: unless-stopped
