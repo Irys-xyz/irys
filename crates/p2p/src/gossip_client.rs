@@ -2,7 +2,7 @@
     clippy::module_name_repetitions,
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
-use crate::types::{GossipError, GossipResponse, GossipResult, RejectionReason};
+use crate::types::{GossipError, GossipResponse, GossipResult, GossipRoutes, RejectionReason};
 use crate::GossipCache;
 use core::time::Duration;
 use futures::StreamExt as _;
@@ -102,14 +102,22 @@ impl GossipClient {
                 ));
             }
 
-            let url = format!("http://{}/gossip/get_data", peer.1.address.gossip);
+            let url = format!(
+                "http://{}/gossip{}",
+                peer.1.address.gossip,
+                GossipRoutes::GetData
+            );
             if let Some(req_v1) = requested_data.to_v1() {
                 self.send_data_internal(url, &req_v1).await
             } else {
                 self.send_data_internal(url, &requested_data).await
             }
         } else {
-            let url = format!("http://{}/gossip/v2/get_data", peer.1.address.gossip);
+            let url = format!(
+                "http://{}/gossip/v2{}",
+                peer.1.address.gossip,
+                GossipRoutes::GetData
+            );
             self.send_data_internal(url, &requested_data).await
         };
 
@@ -184,7 +192,11 @@ impl GossipClient {
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
             if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
-                let url = format!("http://{}/gossip/pull_data", peer.1.address.gossip);
+                let url = format!(
+                    "http://{}/gossip{}",
+                    peer.1.address.gossip,
+                    GossipRoutes::PullData
+                );
                 if let Some(req_v1) = requested_data.to_v1() {
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
                         self.send_data_internal(url, &req_v1).await;
@@ -199,7 +211,11 @@ impl GossipClient {
                     self.send_data_internal(url, &requested_data).await
                 }
             } else {
-                let url = format!("http://{}/gossip/v2/pull_data", peer.1.address.gossip);
+                let url = format!(
+                    "http://{}/gossip/v2{}",
+                    peer.1.address.gossip,
+                    GossipRoutes::PullData
+                );
                 self.send_data_internal(url, &requested_data).await
             };
 
@@ -229,7 +245,7 @@ impl GossipClient {
     }
 
     pub async fn get_info(&self, peer: PeerAddress) -> Result<NodeInfo, GossipClientError> {
-        let url = format!("http://{}/gossip/info", peer.gossip);
+        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Info);
         let response = self.internal_client().get(&url).send().await;
 
         let gossip_result = match response {
@@ -266,7 +282,7 @@ impl GossipClient {
         &self,
         peer: SocketAddr,
     ) -> Result<Vec<PeerAddress>, GossipClientError> {
-        let url = format!("http://{}/gossip/peer-list", peer);
+        let url = format!("http://{}/gossip{}", peer, GossipRoutes::PeerList);
         let response = self
             .internal_client()
             .get(&url)
@@ -301,9 +317,9 @@ impl GossipClient {
         version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
         let path = if version.protocol_version == ProtocolVersion::V1 {
-            "gossip/version"
+            format!("gossip{}", GossipRoutes::Version)
         } else {
-            "gossip/v2/handshake"
+            format!("gossip/v2{}", GossipRoutes::Handshake)
         };
         let url = format!("http://{}/{}", peer, path);
         let response = self
@@ -358,7 +374,7 @@ impl GossipClient {
         peer: PeerAddress,
         query: BlockIndexQuery,
     ) -> Result<Vec<BlockIndexItem>, GossipClientError> {
-        let url = format!("http://{}/gossip/block-index", peer.gossip);
+        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::BlockIndex);
         let response = self.internal_client().get(&url).query(&query).send().await;
 
         let gossip_result = match response {
@@ -392,7 +408,11 @@ impl GossipClient {
     }
 
     pub async fn get_protocol_version(&self, peer: PeerAddress) -> Result<u32, GossipClientError> {
-        let url = format!("http://{}/gossip/protocol_version", peer.gossip);
+        let url = format!(
+            "http://{}/gossip{}",
+            peer.gossip,
+            GossipRoutes::ProtocolVersion
+        );
         let response = self
             .internal_client()
             .get(&url)
@@ -419,7 +439,7 @@ impl GossipClient {
         peer: PeerAddress,
         peer_list: &PeerList,
     ) -> Result<bool, GossipClientError> {
-        let url = format!("http://{}/gossip/health", peer.gossip);
+        let url = format!("http://{}/gossip{}", peer.gossip, GossipRoutes::Health);
         let peer_addr = peer.gossip.to_string();
 
         let response = self
@@ -483,21 +503,33 @@ impl GossipClient {
         match data {
             GossipDataV2::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/chunk", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::Chunk
+                    ),
                     unpacked_chunk,
                 )
                 .await
             }
             GossipDataV2::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/transaction", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::Transaction
+                    ),
                     irys_transaction_header,
                 )
                 .await
             }
             GossipDataV2::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/commitment_tx", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::CommitmentTx
+                    ),
                     commitment_tx,
                 )
                 .await
@@ -511,28 +543,44 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/block", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::Block
+                    ),
                     &irys_block_header,
                 )
                 .await
             }
             GossipDataV2::BlockBody(block_body) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/block_body", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::BlockBody
+                    ),
                     &block_body,
                 )
                 .await
             }
             GossipDataV2::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/execution_payload", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::ExecutionPayload
+                    ),
                     &execution_payload,
                 )
                 .await
             }
             GossipDataV2::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/v2/ingress_proof", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip/v2{}",
+                        peer.address.gossip,
+                        GossipRoutes::IngressProof
+                    ),
                     ingress_proof,
                 )
                 .await
@@ -549,21 +597,33 @@ impl GossipClient {
         match data {
             GossipDataV1::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/chunk", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip{}",
+                        peer.address.gossip,
+                        GossipRoutes::Chunk
+                    ),
                     unpacked_chunk,
                 )
                 .await
             }
             GossipDataV1::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/transaction", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip{}",
+                        peer.address.gossip,
+                        GossipRoutes::Transaction
+                    ),
                     irys_transaction_header,
                 )
                 .await
             }
             GossipDataV1::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/commitment_tx", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip{}",
+                        peer.address.gossip,
+                        GossipRoutes::CommitmentTx
+                    ),
                     commitment_tx,
                 )
                 .await
@@ -577,21 +637,33 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!("http://{}/gossip/block", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip{}",
+                        peer.address.gossip,
+                        GossipRoutes::Block
+                    ),
                     irys_block_header,
                 )
                 .await
             }
             GossipDataV1::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/execution_payload", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip{}",
+                        peer.address.gossip,
+                        GossipRoutes::ExecutionPayload
+                    ),
                     execution_payload,
                 )
                 .await
             }
             GossipDataV1::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!("http://{}/gossip/ingress_proof", peer.address.gossip),
+                    format!(
+                        "http://{}/gossip{}",
+                        peer.address.gossip,
+                        GossipRoutes::IngressProof
+                    ),
                     ingress_proof,
                 )
                 .await
@@ -1327,8 +1399,9 @@ impl GossipClient {
                     peer.0, attempt
                 );
                 let url = format!(
-                    "http://{}/gossip/stake_and_pledge_whitelist",
-                    peer.1.address.gossip
+                    "http://{}/gossip{}",
+                    peer.1.address.gossip,
+                    GossipRoutes::StakeAndPledgeWhitelist
                 );
 
                 let response = self

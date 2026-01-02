@@ -3,7 +3,7 @@
     reason = "I have no idea how to name this module to satisfy this lint"
 )]
 use crate::block_pool::CriticalBlockPoolError;
-use crate::types::{GossipResponse, HandshakeRequirementReason, RejectionReason};
+use crate::types::{GossipResponse, GossipRoutes, HandshakeRequirementReason, RejectionReason};
 use crate::{
     gossip_data_handler::GossipDataHandler,
     types::{GossipError, GossipResult, InternalGossipError},
@@ -839,51 +839,129 @@ where
         web::scope("/gossip")
             .service(
                 web::scope("/v2")
-                    .route("/transaction", web::post().to(Self::handle_transaction))
-                    .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
-                    .route("/chunk", web::post().to(Self::handle_chunk))
-                    .route("/block", web::post().to(Self::handle_block_header))
-                    .route("/block_body", web::post().to(Self::handle_block_body))
-                    .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
                     .route(
-                        "/execution_payload",
+                        GossipRoutes::Transaction.as_str(),
+                        web::post().to(Self::handle_transaction),
+                    )
+                    .route(
+                        GossipRoutes::CommitmentTx.as_str(),
+                        web::post().to(Self::handle_commitment_tx),
+                    )
+                    .route(
+                        GossipRoutes::Chunk.as_str(),
+                        web::post().to(Self::handle_chunk),
+                    )
+                    .route(
+                        GossipRoutes::Block.as_str(),
+                        web::post().to(Self::handle_block_header),
+                    )
+                    .route(
+                        GossipRoutes::BlockBody.as_str(),
+                        web::post().to(Self::handle_block_body),
+                    )
+                    .route(
+                        GossipRoutes::IngressProof.as_str(),
+                        web::post().to(Self::handle_ingress_proof),
+                    )
+                    .route(
+                        GossipRoutes::ExecutionPayload.as_str(),
                         web::post().to(Self::handle_execution_payload),
                     )
-                    .route("/get_data", web::post().to(Self::handle_data_request))
-                    .route("/pull_data", web::post().to(Self::handle_pull_data))
-                    .route("/handshake", web::post().to(Self::handle_handshake))
-                    .route("/health", web::get().to(Self::handle_health_check))
                     .route(
-                        "/stake_and_pledge_whitelist",
+                        GossipRoutes::GetData.as_str(),
+                        web::post().to(Self::handle_data_request),
+                    )
+                    .route(
+                        GossipRoutes::PullData.as_str(),
+                        web::post().to(Self::handle_pull_data),
+                    )
+                    .route(
+                        GossipRoutes::Handshake.as_str(),
+                        web::post().to(Self::handle_handshake),
+                    )
+                    .route(
+                        GossipRoutes::Health.as_str(),
+                        web::get().to(Self::handle_health_check),
+                    )
+                    .route(
+                        GossipRoutes::StakeAndPledgeWhitelist.as_str(),
                         web::get().to(Self::handle_stake_and_pledge_whitelist),
                     )
-                    .route("/info", web::get().to(Self::handle_info))
-                    .route("/peer-list", web::get().to(Self::handle_peer_list))
-                    .route("/block-index", web::get().to(Self::handle_block_index)),
+                    .route(
+                        GossipRoutes::Info.as_str(),
+                        web::get().to(Self::handle_info),
+                    )
+                    .route(
+                        GossipRoutes::PeerList.as_str(),
+                        web::get().to(Self::handle_peer_list),
+                    )
+                    .route(
+                        GossipRoutes::BlockIndex.as_str(),
+                        web::get().to(Self::handle_block_index),
+                    ),
             )
-            .route("/transaction", web::post().to(Self::handle_transaction))
-            .route("/commitment_tx", web::post().to(Self::handle_commitment_tx))
-            .route("/chunk", web::post().to(Self::handle_chunk))
-            .route("/block", web::post().to(Self::handle_block_header))
-            .route("/block_body", web::post().to(Self::handle_block_body))
-            .route("/ingress_proof", web::post().to(Self::handle_ingress_proof))
             .route(
-                "/execution_payload",
+                GossipRoutes::Transaction.as_str(),
+                web::post().to(Self::handle_transaction),
+            )
+            .route(
+                GossipRoutes::CommitmentTx.as_str(),
+                web::post().to(Self::handle_commitment_tx),
+            )
+            .route(
+                GossipRoutes::Chunk.as_str(),
+                web::post().to(Self::handle_chunk),
+            )
+            .route(
+                GossipRoutes::Block.as_str(),
+                web::post().to(Self::handle_block_header),
+            )
+            .route(
+                GossipRoutes::BlockBody.as_str(),
+                web::post().to(Self::handle_block_body),
+            )
+            .route(
+                GossipRoutes::IngressProof.as_str(),
+                web::post().to(Self::handle_ingress_proof),
+            )
+            .route(
+                GossipRoutes::ExecutionPayload.as_str(),
                 web::post().to(Self::handle_execution_payload),
             )
-            .route("/get_data", web::post().to(Self::handle_data_request_v1))
-            .route("/pull_data", web::post().to(Self::handle_pull_data_v1))
-            .route("/health", web::get().to(Self::handle_health_check))
             .route(
-                "/stake_and_pledge_whitelist",
+                GossipRoutes::GetData.as_str(),
+                web::post().to(Self::handle_data_request_v1),
+            )
+            .route(
+                GossipRoutes::PullData.as_str(),
+                web::post().to(Self::handle_pull_data_v1),
+            )
+            .route(
+                GossipRoutes::Health.as_str(),
+                web::get().to(Self::handle_health_check),
+            )
+            .route(
+                GossipRoutes::StakeAndPledgeWhitelist.as_str(),
                 web::get().to(Self::handle_stake_and_pledge_whitelist),
             )
-            .route("/info", web::get().to(Self::handle_info))
-            .route("/peer-list", web::get().to(Self::handle_peer_list))
-            .route("/version", web::post().to(Self::handle_handshake))
-            .route("/block-index", web::get().to(Self::handle_block_index))
             .route(
-                "/protocol_version",
+                GossipRoutes::Info.as_str(),
+                web::get().to(Self::handle_info),
+            )
+            .route(
+                GossipRoutes::PeerList.as_str(),
+                web::get().to(Self::handle_peer_list),
+            )
+            .route(
+                GossipRoutes::Version.as_str(),
+                web::post().to(Self::handle_handshake),
+            )
+            .route(
+                GossipRoutes::BlockIndex.as_str(),
+                web::get().to(Self::handle_block_index),
+            )
+            .route(
+                GossipRoutes::ProtocolVersion.as_str(),
                 web::get().to(Self::handle_protocol_version),
             )
     }
