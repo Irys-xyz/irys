@@ -81,14 +81,14 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
         if let Some(supply_state) = &state.supply_state {
             if !supply_state.is_ready() {
                 return Err(eyre!(
-                    "Supply state is recalculating. \
+                    "Supply state is recalculating (backfill in progress during node startup). \
                     Retry later or use exact=false for estimated supply."
                 ));
             }
             (supply_state.get().cumulative_emitted, "actual")
         } else {
             return Err(eyre!(
-                "Supply state not available for exact calculation. \
+                "Supply state not available (node may still be initializing). \
                 Retry later or use exact=false for estimated supply."
             ));
         }
@@ -122,7 +122,9 @@ fn calculate_estimated_emission(
     };
 
     let target_block_time_seconds = config.difficulty_adjustment.block_time as u128;
-    let simulated_time_seconds = block_height as u128 * target_block_time_seconds;
+    let simulated_time_seconds = (block_height as u128)
+        .checked_mul(target_block_time_seconds)
+        .ok_or_else(|| eyre!("Block height overflow in time calculation"))?;
 
     let emitted = curve.reward_between(0, simulated_time_seconds)?;
     Ok((emitted.amount, "estimated"))
@@ -146,6 +148,7 @@ fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_types::ConsensusConfig;
     use rstest::rstest;
 
     #[rstest]
@@ -164,5 +167,41 @@ mod tests {
         let cap = U256::from(1_300_000_000_u128) * U256::from(10_u128.pow(18));
         let amount = (cap * U256::from(1234_u128)) / U256::from(10000_u128);
         assert_eq!(calculate_inflation_progress(amount, cap), "12.34");
+    }
+
+    #[test]
+    fn test_estimated_emission_zero_height() {
+        let config = ConsensusConfig::testing();
+        let (emitted, method) = calculate_estimated_emission(&config, 0).unwrap();
+        assert_eq!(emitted, U256::zero());
+        assert_eq!(method, "estimated");
+    }
+
+    #[test]
+    fn test_estimated_emission_returns_estimated_method() {
+        let config = ConsensusConfig::testing();
+        let (_, method) = calculate_estimated_emission(&config, 100).unwrap();
+        assert_eq!(method, "estimated");
+    }
+
+    #[test]
+    fn test_estimated_emission_increases_with_height() {
+        let config = ConsensusConfig::testing();
+        let (emitted_low, _) = calculate_estimated_emission(&config, 100).unwrap();
+        let (emitted_high, _) = calculate_estimated_emission(&config, 1000).unwrap();
+        assert!(
+            emitted_high > emitted_low,
+            "Higher block height should produce more emissions"
+        );
+    }
+
+    #[test]
+    fn test_estimated_emission_bounded_by_cap() {
+        let config = ConsensusConfig::testing();
+        let (emitted, _) = calculate_estimated_emission(&config, u64::MAX / 1000).unwrap();
+        assert!(
+            emitted <= config.block_reward_config.inflation_cap.amount,
+            "Emissions should never exceed inflation cap"
+        );
     }
 }
