@@ -1,14 +1,13 @@
 use crate::utils::{solution_context, IrysNodeTest};
 use eyre::Result;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::{prevalidate_block, PreValidationError};
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_database::SystemLedger;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
-    CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
-    UnixTimestampMs, H256, U256,
+    BlockTransactions, CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader,
+    NodeConfig, UnixTimestampMs, H256, U256,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

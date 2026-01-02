@@ -3,11 +3,11 @@ use alloy_core::primitives::B256;
 use irys_database::reth_db::Database as _;
 use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
-use irys_types::IrysAddress;
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
     PeerNetworkSender,
 };
+use irys_types::{IrysAddress, ProtocolVersion};
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
 use std::iter::Chain;
@@ -814,7 +814,7 @@ impl PeerListDataInner {
         peer: PeerListItem,
         peer_address: PeerAddress,
         cache_getter: F,
-        address_updater: fn(&mut Self, IrysAddress, PeerAddress),
+        address_updater: fn(&mut Self, IrysAddress, PeerAddress, ProtocolVersion),
         cache_name: &str,
     ) -> bool
     where
@@ -830,7 +830,7 @@ impl PeerListDataInner {
                     "Peer address mismatch, updating from {:?} to {:?}",
                     existing_peer.address, peer_address
                 );
-                address_updater(self, mining_addr, peer_address);
+                address_updater(self, mining_addr, peer_address, peer.protocol_version);
                 if let Some(updated_peer) = self
                     .persistent_peers_cache
                     .get(&mining_addr)
@@ -848,7 +848,7 @@ impl PeerListDataInner {
                     "Peer address {} is the same, but the handshake cooldown has expired, so we need to re-handshake",
                     peer_address.gossip.ip()
                 );
-                address_updater(self, mining_addr, peer_address);
+                address_updater(self, mining_addr, peer_address, peer.protocol_version);
                 if let Some(updated_peer) = self
                     .persistent_peers_cache
                     .get(&mining_addr)
@@ -1056,18 +1056,26 @@ impl PeerListDataInner {
         &mut self,
         mining_addr: IrysAddress,
         new_address: PeerAddress,
+        new_protocol_version: ProtocolVersion,
     ) {
         if let Some(peer) = self.unstaked_peer_purgatory.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
+            peer.protocol_version = new_protocol_version;
             self.update_address_mappings(mining_addr, old_address, new_address);
         }
     }
 
-    fn update_peer_address(&mut self, mining_addr: IrysAddress, new_address: PeerAddress) {
+    fn update_peer_address(
+        &mut self,
+        mining_addr: IrysAddress,
+        new_address: PeerAddress,
+        new_protocol_version: ProtocolVersion,
+    ) {
         if let Some(peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
+            peer.protocol_version = new_protocol_version;
             self.update_address_mappings(mining_addr, old_address, new_address);
         }
     }
@@ -1097,6 +1105,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            protocol_version: irys_types::ProtocolVersion::default(),
         };
         (mining_addr, peer)
     }

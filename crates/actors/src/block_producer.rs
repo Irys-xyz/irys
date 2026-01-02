@@ -1,7 +1,5 @@
 use crate::{
-    block_discovery::{
-        BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl, BlockTransactions,
-    },
+    block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
@@ -32,8 +30,8 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, CommitmentTransaction,
-    Config, DataLedger, DataTransactionHeader, DataTransactionLedger, GossipBroadcastMessage,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockTransactions,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
     H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
     SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo,
     H256, U256,
@@ -95,6 +93,7 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
 mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
+use irys_types::v2::GossipBroadcastMessageV2;
 
 /// Result of checking parent validity and solution compatibility
 #[derive(Debug)]
@@ -1248,7 +1247,7 @@ pub trait BlockProdStrategy {
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =
-            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+            GossipBroadcastMessageV2::from(eth_built_payload.block().clone());
         if let Err(payload_broadcast_error) = self
             .inner()
             .service_senders

@@ -25,7 +25,6 @@ actix-web.workspace = true
 actix-cors = "0.7"
 tracing.workspace = true
 tracing-actix-web = "0.7"
-semver.workspace = true
 eyre.workspace = true
 thiserror.workspace = true
 

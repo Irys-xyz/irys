@@ -1,9 +1,8 @@
 use irys_actors::block_tree_service::ValidationResult;
-use irys_types::NodeConfig;
+use irys_types::{BlockTransactions, NodeConfig};
 use rust_decimal_macros::dec;
 
 use crate::{utils::IrysNodeTest, validation::send_block_to_block_tree};
-use irys_actors::block_discovery::BlockTransactions;
 
 /// Ensures that the node adjusts its mining difficulty after the configured
 /// number of blocks and that the `last_diff_timestamp` metadata is updated to

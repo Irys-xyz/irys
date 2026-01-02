@@ -5,7 +5,6 @@ use crate::utils::{
 };
 use irys_actors::{
     async_trait,
-    block_discovery::BlockTransactions,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
@@ -17,7 +16,7 @@ use irys_domain::ChainState;
 use irys_types::storage_pricing::{
     calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
 };
-use irys_types::IngressProofsList;
+use irys_types::{BlockTransactions, IngressProofsList};
 use irys_types::{
     Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
     UnixTimestamp, U256,

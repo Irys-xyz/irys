@@ -1,5 +1,4 @@
 use crate::{
-    block_discovery::BlockTransactions,
     block_index_service::BlockIndexServiceMessage,
     block_validation::PreValidationError,
     chunk_migration_service::ChunkMigrationServiceMessage,
@@ -19,8 +18,8 @@ use irys_domain::{
     BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    BlockHash, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysAddress,
-    IrysBlockHeader, TokioServiceHandle, H256,
+    BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
+    H256List, IrysAddress, IrysBlockHeader, TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{

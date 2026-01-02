@@ -1,5 +1,6 @@
-use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress, ProtocolVersion};
 
+use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
@@ -82,6 +83,7 @@ pub struct PeerListItem {
     pub address: PeerAddress,
     pub last_seen: u64,
     pub is_online: bool,
+    pub protocol_version: ProtocolVersion,
 }
 
 impl Default for PeerListItem {
@@ -99,6 +101,7 @@ impl Default for PeerListItem {
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         }
     }
 }
@@ -259,6 +262,9 @@ impl Compact for PeerListItem {
         buf.put_u8(if self.is_online { 1 } else { 0 });
         size += 1;
 
+        buf.put_u32(self.protocol_version as u32);
+        size += 4;
+
         size
     }
 
@@ -304,6 +310,7 @@ impl Compact for PeerListItem {
                     },
                     last_seen: 0,
                     is_online: false,
+                    protocol_version: ProtocolVersion::default(),
                 },
                 &[],
             );
@@ -340,6 +347,15 @@ impl Compact for PeerListItem {
             total_consumed += 1;
         }
 
+        let mut protocol_version = ProtocolVersion::default();
+        if buf.len() > total_consumed {
+            let (version_u32, remaining_slice) =
+                u32::from_compact(&buf[total_consumed..], buf.len() - total_consumed);
+            protocol_version = ProtocolVersion::from(version_u32);
+            let consumed_bytes = (buf.len() - total_consumed) - remaining_slice.len();
+            total_consumed += consumed_bytes;
+        }
+
         (
             Self {
                 reputation_score,
@@ -347,6 +363,7 @@ impl Compact for PeerListItem {
                 address,
                 last_seen,
                 is_online,
+                protocol_version,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
@@ -380,7 +397,7 @@ pub enum PeerNetworkServiceMessage {
     AnnounceYourselfToPeer(PeerListItem),
     AnnouncementFinished(AnnouncementFinishedMessage),
     RequestDataFromNetwork {
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
         retries: u8,
@@ -474,7 +491,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Block(block_hash),
+            data_request: GossipDataRequestV2::BlockHeader(block_hash),
             use_trusted_peers_only,
             response: sender,
             retries,
@@ -495,7 +512,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
+            data_request: GossipDataRequestV2::ExecutionPayload(evm_payload_hash),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,
@@ -516,7 +533,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Chunk(chunk_path_hash),
+            data_request: GossipDataRequestV2::Chunk(chunk_path_hash),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,
@@ -785,13 +802,16 @@ mod tests {
     }
 
     #[test]
-    fn peer_list_item_from_compact_missing_is_online() {
-        let item = PeerListItem::default();
+    fn peer_list_item_from_compact_missing_is_online_and_protocol_version() {
+        let item = PeerListItem {
+            protocol_version: ProtocolVersion::V2,
+            ..PeerListItem::default()
+        };
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
-        // Remove the optional is_online byte
+        // Remove the optional is_online byte and protocol version bytes
         assert!(!buf.is_empty());
-        buf.truncate(buf.len() - 1);
+        buf.truncate(buf.len() - 5);
 
         let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
         assert!(
@@ -799,10 +819,14 @@ mod tests {
             "expected no remainder after decoding without is_online byte"
         );
 
+        println!("{:?}", decoded);
+
         assert_eq!(decoded.reputation_score, item.reputation_score);
         assert_eq!(decoded.response_time, item.response_time);
         assert_eq!(decoded.address, item.address);
         assert_eq!(decoded.last_seen, item.last_seen);
         assert!(!decoded.is_online);
+        assert_ne!(decoded.protocol_version, item.protocol_version);
+        assert_eq!(decoded.protocol_version, ProtocolVersion::default());
     }
 }
