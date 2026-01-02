@@ -81,6 +81,8 @@ impl PartialOrd for BlockPriorityMeta {
 #[derive(Debug)]
 pub(super) struct ConcurrentValidationResult {
     pub block_hash: BlockHash,
+    pub block: Arc<IrysBlockHeader>,
+    pub transactions: Arc<crate::block_discovery::BlockTransactions>,
     pub validation_result: ValidationResult,
 }
 
@@ -341,14 +343,17 @@ impl ValidationCoordinator {
             match &result {
                 VdfValidationResult::Valid => {
                     let block_hash = task.block.block_hash;
+                    let block = Arc::clone(&task.block);
+                    let transactions = Arc::clone(&task.transactions);
 
                     self.concurrent_tasks.spawn(
                         async move {
-                            // Execute the validation and return the result
                             let validation_result = task.execute_concurrent().await;
 
                             ConcurrentValidationResult {
                                 block_hash,
+                                block,
+                                transactions,
                                 validation_result,
                             }
                         }
