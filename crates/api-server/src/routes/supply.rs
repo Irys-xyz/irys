@@ -32,7 +32,9 @@ pub struct SupplyResponse {
     pub calculation_method: String,
 }
 
-/// GET /supply - Returns total token supply. Query `?exact=true` for actual vs estimated.
+/// GET /supply - Returns total token supply.
+/// Query `?exact=true` to use actual cumulative emissions (errors if unavailable or recalculating).
+/// Defaults to estimated emissions based on block height and halving curve.
 pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
     match calculate_supply(&state, query.exact) {
         Ok(response) => HttpResponse::Ok().json(response),
