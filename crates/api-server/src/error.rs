@@ -33,6 +33,8 @@ pub enum ApiError {
     BalanceUnavailable { reason: String },
     #[error("Invalid block parameter: {parameter}")]
     InvalidBlockParameter { parameter: String },
+    #[error("Invalid transactions version: {version} minimum version: {minimum}")]
+    InvalidTransactionVersion { version: u8, minimum: u8 },
     #[error("{0}")]
     Custom(String),
     #[error("{0}")]
@@ -61,6 +63,7 @@ impl ResponseError for ApiError {
             Self::InvalidAddressFormat { .. } => StatusCode::BAD_REQUEST,
             Self::BalanceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::InvalidBlockParameter { .. } => StatusCode::BAD_REQUEST,
+            Self::InvalidTransactionVersion { .. } => StatusCode::BAD_REQUEST,
             Self::Custom(_) => StatusCode::BAD_REQUEST,
             Self::CustomWithStatus(_, sc) => *sc,
         }
