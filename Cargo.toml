@@ -21,6 +21,7 @@ members = [
   "crates/utils/utils",
   "crates/utils/debug-utils",
   "crates/utils/testing-utils",
+  "crates/utils/nextest-monitor",
   "crates/packing-worker",
   "crates/tui",
   "crates/macros/integer-tagged",
