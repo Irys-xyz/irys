@@ -51,6 +51,14 @@ impl IrysChainHardforks {
             ));
         }
 
+        // Conditionally add Aurora hardfork if configured
+        if let Some(ref fork) = config.aurora {
+            forks.push((
+                IrysHardfork::Aurora,
+                ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
+            ));
+        }
+
         for (fork, condition) in forks {
             hardforks.insert(fork, condition);
             for (corresponding_eth_hf, fork_condition) in fork.ethereum_hardfork_mapping() {
@@ -108,9 +116,7 @@ impl IrysHardfork {
                 (EthereumHardfork::Cancun, ForkCondition::ZERO_TIMESTAMP),
                 (EthereumHardfork::Prague, ForkCondition::ZERO_TIMESTAMP),
             ],
-            // NextNameTBD doesn't add any new Ethereum hardforks
             Self::NextNameTBD => &[],
-            // NextNameTBD doesn't add any new Ethereum hardforks
             Self::Aurora => &[],
         }
     }

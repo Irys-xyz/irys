@@ -1,5 +1,3 @@
-use std::time::SystemTime;
-
 use crate::{error::ApiError, ApiState};
 use actix_web::{
     web::{self, Json},
@@ -20,55 +18,25 @@ pub async fn post_commitment_tx(
 ) -> Result<HttpResponse, ApiError> {
     let tx = body.into_inner();
 
-    // Check for Aurora hardfork
-    let now_in_seconds = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let aurora = state
-        .config
-        .consensus
-        .hardforks
-        .aurora_at(UnixTimestamp::from_secs(now_in_seconds));
+    let now = UnixTimestamp::now().expect("system time should be after unix epoch");
 
-    // Enforce minimum version if Aurora hardfork activated
-    let version = tx.version();
-    if let Some(aurora) = aurora {
-        let min_supported_version = aurora.minimum_commitment_tx_version;
-        if version < min_supported_version {
+    if let Some(aurora) = state.config.consensus.hardforks.aurora_at(now) {
+        let version = tx.version();
+        if version < aurora.minimum_commitment_tx_version {
             return Err(ApiError::InvalidTransactionVersion {
                 version,
-                minimum: min_supported_version,
+                minimum: aurora.minimum_commitment_tx_version,
             });
         }
     }
 
-    // Process the transaction based on version
-    match tx {
-        CommitmentTransaction::V1(tx_v1) => {
-            // Do V1-specific validation/processing here if needed
-            // ...
-
-            // Convert back to CommitmentTransaction for mempool
-            let tx = CommitmentTransaction::V1(tx_v1);
-            process_commitment_transaction(tx, state).await
-        }
-        CommitmentTransaction::V2(tx_v2) => {
-            // Do V2-specific validation/processing here if needed
-            // ...
-
-            // Convert back to CommitmentTransaction for mempool
-            let tx = CommitmentTransaction::V2(tx_v2);
-            process_commitment_transaction(tx, state).await
-        }
-    }
+    process_commitment_transaction(tx, state).await
 }
 
 async fn process_commitment_transaction(
     tx: CommitmentTransaction,
     state: web::Data<ApiState>,
 ) -> Result<HttpResponse, ApiError> {
-    // Validate transaction is valid. Check balances etc etc.
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
     let tx_ingress_msg = MempoolServiceMessage::IngestCommitmentTxFromApi(tx, oneshot_tx);
 
@@ -78,13 +46,14 @@ async fn process_commitment_transaction(
             err
         );
 
-        return Ok(HttpResponse::build(StatusCode::INTERNAL_SERVER_ERROR)
-            .body("Failed to deliver transaction"));
+        return Err(ApiError::from((
+            "Failed to deliver transaction",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )));
     }
 
     let msg_result = oneshot_rx.await;
 
-    // Handle failure to deliver the message (e.g., actor unresponsive or unavailable)
     if let Err(err) = msg_result {
         tracing::error!("API: {}", err);
         return Err(ApiError::from((
@@ -93,7 +62,6 @@ async fn process_commitment_transaction(
         )));
     }
 
-    // If message delivery succeeded, check for validation errors within the response
     let inner_result = msg_result.unwrap();
     if let Err(err) = inner_result {
         tracing::warn!("API: {}", err);
@@ -106,11 +74,9 @@ async fn process_commitment_transaction(
                 err.to_string(),
                 StatusCode::PAYMENT_REQUIRED,
             ))),
-            TxIngressError::Skipped => Ok(
-                // TODO: we should just print the error's existing to_string representation here
-                HttpResponse::Ok()
-                    .body("Already processed: the transaction was previously handled"),
-            ),
+            // TODO: use err.to_string() instead of hardcoded message
+            TxIngressError::Skipped => Ok(HttpResponse::Ok()
+                .body("Already processed: the transaction was previously handled")),
             TxIngressError::Other(err) => {
                 tracing::error!("API: {}", err);
                 // we explicitly don't forward these to the user

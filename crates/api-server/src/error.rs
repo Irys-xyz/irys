@@ -33,7 +33,7 @@ pub enum ApiError {
     BalanceUnavailable { reason: String },
     #[error("Invalid block parameter: {parameter}")]
     InvalidBlockParameter { parameter: String },
-    #[error("Invalid transactions version: {version} minimum version: {minimum}")]
+    #[error("Invalid transaction version: {version}, minimum required version: {minimum}")]
     InvalidTransactionVersion { version: u8, minimum: u8 },
     #[error("{0}")]
     Custom(String),
