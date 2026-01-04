@@ -1,6 +1,6 @@
-use dashmap::{DashMap, DashSet};
+use dashmap::DashSet;
 use irys_database::cache_chunk_verified;
-use irys_types::{ChunkPathHash, DataRoot, DatabaseProvider, UnpackedChunk};
+use irys_types::{ChunkPathHash, DatabaseProvider, UnpackedChunk};
 use reth_db::Database as _;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
@@ -14,44 +14,27 @@ enum WriterCommand {
 }
 
 /// Async write-behind buffer for chunk MDBX writes.
-///
-/// Chunks are queued via [`queue_write`] and written in batches on a background
-/// task, reducing per-chunk MDBX transaction overhead on the hot ingress path.
-/// A [`DashSet`] tracks pending chunk hashes so callers can check for
-/// in-flight duplicates, and a [`DashMap`] maintains per-data-root chunk counts
-/// for ingress proof threshold checks without hitting the database.
 #[derive(Debug)]
 pub struct ChunkDataWriter {
     tx: mpsc::Sender<WriterCommand>,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
-    pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
 }
 
 impl ChunkDataWriter {
-    /// Spawn the background writer task and return the writer handle.
     pub fn spawn(db: DatabaseProvider, buffer_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size.max(1));
         let pending_hashes = Arc::new(DashSet::new());
-        let pending_chunk_counts = Arc::new(DashMap::new());
 
         let writer = BackgroundWriter {
             rx,
             db,
             pending_hashes: Arc::clone(&pending_hashes),
-            pending_chunk_counts: Arc::clone(&pending_chunk_counts),
         };
         tokio::spawn(writer.run());
 
-        Self {
-            tx,
-            pending_hashes,
-            pending_chunk_counts,
-        }
+        Self { tx, pending_hashes }
     }
 
-    /// Queue a chunk for asynchronous write to the cache DB.
-    ///
-    /// Returns `true` if the chunk hash is already pending (duplicate).
     pub async fn queue_write(&self, chunk: Arc<UnpackedChunk>) -> Result<bool, QueueError> {
         let hash = chunk.chunk_path_hash();
         if !self.pending_hashes.insert(hash) {
@@ -69,25 +52,7 @@ impl ChunkDataWriter {
         Ok(false)
     }
 
-    /// Returns `true` if the chunk hash is currently pending a write.
-    pub fn is_pending(&self, hash: &ChunkPathHash) -> bool {
-        self.pending_hashes.contains(hash)
-    }
-
-    /// Returns the number of chunks pending or already written for a data root.
-    pub fn pending_chunk_count(&self, data_root: &DataRoot) -> u64 {
-        self.pending_chunk_counts
-            .get(data_root)
-            .map(|v| *v)
-            .unwrap_or(0)
-    }
-
     /// Drain all pending writes before returning.
-    ///
-    /// Sends a flush sentinel through the channel and waits for the
-    /// background writer to acknowledge it. Because the channel is FIFO,
-    /// all chunks queued before the flush are guaranteed to be committed
-    /// to MDBX by the time this returns.
     pub async fn flush(&self) -> Result<(), QueueError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.tx
@@ -110,7 +75,6 @@ struct BackgroundWriter {
     rx: mpsc::Receiver<WriterCommand>,
     db: DatabaseProvider,
     pending_hashes: Arc<DashSet<ChunkPathHash>>,
-    pending_chunk_counts: Arc<DashMap<DataRoot, u64>>,
 }
 
 impl BackgroundWriter {
@@ -118,7 +82,6 @@ impl BackgroundWriter {
         let mut batch: Vec<Arc<UnpackedChunk>> = Vec::with_capacity(MAX_BATCH_SIZE);
 
         loop {
-            // Block until at least one command arrives.
             let cmd = match self.rx.recv().await {
                 Some(cmd) => cmd,
                 None => {
@@ -142,7 +105,6 @@ impl BackgroundWriter {
                 }
             }
 
-            // Drain up to MAX_BATCH_SIZE without blocking.
             while batch.len() < MAX_BATCH_SIZE {
                 match self.rx.try_recv() {
                     Ok(WriterCommand::WriteChunk(chunk)) => batch.push(chunk),
@@ -162,7 +124,6 @@ impl BackgroundWriter {
             }
         }
 
-        // Flush any remaining chunks.
         if !batch.is_empty() {
             let _ = self.write_batch(&batch);
         }
@@ -173,8 +134,6 @@ impl BackgroundWriter {
             return Ok(());
         }
 
-        // Precompute SHA-256 hashes once — avoids redundant hashing inside the
-        // MDBX closure (log lines) and during post-transaction cleanup.
         let hashes: Vec<ChunkPathHash> = batch.iter().map(|c| c.chunk_path_hash()).collect();
 
         let result = self.db.update(|tx| {
@@ -187,10 +146,8 @@ impl BackgroundWriter {
                                 "Duplicate chunk {} of {} in write-behind batch",
                                 hash, chunk.data_root
                             );
-                            newly_written.push(false);
-                        } else {
-                            newly_written.push(true);
                         }
+                        newly_written.push(!is_duplicate);
                     }
                     Err(e) => {
                         error!(
@@ -212,16 +169,8 @@ impl BackgroundWriter {
                     batch.len(),
                     written
                 );
-                for ((chunk, hash), was_new) in
-                    batch.iter().zip(hashes.iter()).zip(newly_written.iter())
-                {
+                for hash in &hashes {
                     self.pending_hashes.remove(hash);
-                    if *was_new {
-                        *self
-                            .pending_chunk_counts
-                            .entry(chunk.data_root)
-                            .or_insert(0) += 1;
-                    }
                 }
                 Ok(())
             }

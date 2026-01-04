@@ -5,7 +5,7 @@ pub mod data_txs;
 pub mod facade;
 pub mod ingress_proofs;
 pub mod lifecycle;
-mod metrics;
+pub mod metrics;
 mod pending_chunks;
 pub mod pledge_provider;
 pub mod types;

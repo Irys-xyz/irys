@@ -401,9 +401,7 @@ impl Inner {
 
         drop(_proof_span);
 
-        // Queue the chunk for async batched write to CachedChunks via the
-        // write-behind writer, avoiding a synchronous MDBX transaction on the
-        // hot ingress path.
+        // Write-behind: defers MDBX write for throughput
         let storage_start = Instant::now();
         match self
             .chunk_data_writer

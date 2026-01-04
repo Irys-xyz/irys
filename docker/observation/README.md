@@ -48,14 +48,18 @@ cp .env.example .env
 | `OTEL_GRPC_PORT` | 4317 | OTEL Collector gRPC port |
 | `OTEL_HTTP_PORT` | 4318 | OTEL Collector HTTP port |
 | `LOG_RETENTION_DAYS` | 7 | Elasticsearch log retention (days) |
-| `ES_JAVA_OPTS` | -Xms512m -Xmx512m | Elasticsearch JVM options (increase for production) |
+| `ES_JAVA_OPTS` | -Xms2g -Xmx2g | Elasticsearch JVM options |
 | `ES_CLUSTER_NAME` | observation-cluster | Elasticsearch cluster name |
 
 ## Integration
 
 ### Including in Other Compose Files
 
+<<<<<<< HEAD
 Use Docker Compose's `include` directive to add the observability stack to your project (requires Docker Compose **v2.20+** / Docker Desktop **4.22+**):
+=======
+Use Docker Compose's `include` directive to add the observability stack to your project:
+>>>>>>> 3c13b3fb (fix(logging): use a self hosted stack for monitoring instead of Axiom)
 
 ```yaml
 # docker/tests/your-test/docker-compose.yaml
@@ -83,7 +87,7 @@ Configure Irys nodes to send telemetry to the OTEL Collector:
 
 ```yaml
 environment:
-  - RUST_LOG=info           # Use 'debug' for detailed troubleshooting
+  - RUST_LOG=debug
   - ENABLE_TELEMETRY=true
   - OTEL_SERVICE_NAME=irys-node-1    # Unique name per node
   - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
