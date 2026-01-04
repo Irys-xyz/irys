@@ -43,8 +43,8 @@ services:
       elasticsearch:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
-      interval: 10s
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 30s
       timeout: 5s
       retries: 3
       start_period: 15s
@@ -110,7 +110,7 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.enrollment.enabled=false
-      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}"
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms2g -Xmx2g}"
       - cluster.name=${ES_CLUSTER_NAME:-observation-cluster}
       - bootstrap.memory_lock=true
     ulimits:

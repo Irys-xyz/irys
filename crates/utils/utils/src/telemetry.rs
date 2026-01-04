@@ -4,7 +4,7 @@
 //! enabling Reth's internal metrics to be exported via OTLP alongside Irys metrics.
 
 use eyre::Result;
-use opentelemetry::{trace::TracerProvider as _, KeyValue};
+use opentelemetry::{metrics::MeterProvider as _, trace::TracerProvider as _, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::WithExportConfig as _;
 use opentelemetry_sdk::{
@@ -285,7 +285,6 @@ pub fn init_telemetry() -> Result<()> {
         "OpenTelemetry telemetry initialized - logs, traces, metrics, and Reth metrics will be exported"
     );
 
-    opentelemetry::global::set_meter_provider(meter_provider);
     let _ = INIT_GUARD.set(());
 
     Ok(())
