@@ -1,4 +1,5 @@
 pub mod error;
+pub mod metrics;
 pub mod routes;
 
 use actix_cors::Cors;

@@ -1,4 +1,8 @@
 use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
+use crate::mempool_service::metrics::{
+    record_chunk_duplicate, record_chunk_ingested, record_storage_duration,
+    record_validation_duration,
+};
 use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
@@ -17,6 +21,7 @@ use irys_types::{
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
+use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -94,6 +99,7 @@ impl Inner {
                 "Chunk {} already processed recently, skipping re-gossip",
                 &chunk_path_hash
             );
+            record_chunk_duplicate();
             return Ok(());
         }
 
@@ -305,6 +311,7 @@ impl Inner {
             chunk.tx_offset, chunk.data_size, target_offset
         );
 
+        let validation_start = Instant::now();
         let path_result = match validate_path(root_hash, path_buff, target_offset)
             .map_err(|_| CriticalChunkIngressError::InvalidProof)
         {
@@ -379,7 +386,11 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
+        // Record validation duration
+        record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
+
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
+        let storage_start = Instant::now();
         if let Err(e) = self
             .irys_db
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
@@ -393,11 +404,14 @@ impl Inner {
         {
             return Err(e.into());
         }
+        record_storage_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
 
         // Add to recent valid chunks cache to prevent re-processing
         mempool_state
             .record_recent_valid_chunk(chunk_path_hash)
             .await;
+
+        record_chunk_ingested(chunk_len);
 
         // Write chunk to storage modules that have writeable offsets for this chunk.
         // Note: get_writeable_offsets() only returns offsets within the data_size
@@ -620,7 +634,6 @@ pub enum ChunkIngressError {
 }
 
 impl ChunkIngressError {
-    /// Returns an other error with the given message.
     pub fn other(err: impl Into<String>, critical: bool) -> Self {
         if critical {
             Self::Critical(CriticalChunkIngressError::Other(err.into()))
@@ -628,12 +641,23 @@ impl ChunkIngressError {
             Self::Advisory(AdvisoryChunkIngressError::Other(err.into()))
         }
     }
-    /// Allows converting an error that implements Display into an Other error
+
     pub fn other_display(err: impl Display, critical: bool) -> Self {
         if critical {
             Self::Critical(CriticalChunkIngressError::Other(err.to_string()))
         } else {
             Self::Advisory(AdvisoryChunkIngressError::Other(err.to_string()))
+        }
+    }
+
+    pub fn is_advisory(&self) -> bool {
+        matches!(self, Self::Advisory(_))
+    }
+
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::Critical(e) => e.error_type(),
+            Self::Advisory(e) => e.error_type(),
         }
     }
 }
@@ -650,40 +674,52 @@ impl From<AdvisoryChunkIngressError> for ChunkIngressError {
     }
 }
 
-/// Reasons why Chunk Ingress might fail
 #[derive(Debug, Clone)]
 pub enum CriticalChunkIngressError {
-    /// The `data_path/proof` provided with the chunk data is invalid
     InvalidProof,
-    /// The data hash does not match the chunk data
     InvalidDataHash,
-    /// Only the last chunk in a `data_root` tree can be less than `CHUNK_SIZE`
     InvalidChunkSize,
-    /// Chunks should have the same data_size field as their parent tx
     InvalidDataSize,
-    /// The tx_offset exceeds valid bounds for the data_size
     InvalidOffset(String),
-    /// Some database error occurred when reading or writing the chunk
     DatabaseError,
-    /// The service is uninitialized
     ServiceUninitialized,
-    /// Catch-all variant for other errors.
     Other(String),
 }
 
-// non-critical reasons why chunk ingress might fail
+impl CriticalChunkIngressError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::InvalidProof => "invalid_proof",
+            Self::InvalidDataHash => "invalid_data_hash",
+            Self::InvalidChunkSize => "invalid_chunk_size",
+            Self::InvalidDataSize => "invalid_data_size",
+            Self::InvalidOffset(_) => "invalid_offset",
+            Self::DatabaseError => "database_error",
+            Self::ServiceUninitialized => "service_uninitialized",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum AdvisoryChunkIngressError {
-    /// Oversized chunk bytes submitted before header arrival
     PreHeaderOversizedBytes,
-    /// Oversized data_path submitted before header arrival
     PreHeaderOversizedDataPath,
-    /// tx_offset exceeds pre-header capacity bound
     PreHeaderOffsetExceedsCap,
-    /// tx_offset exceeds valid bounds for claimed data_size (pre-header)
     PreHeaderInvalidOffset(String),
-    /// Catch-all variant for other errors.
     Other(String),
+}
+
+impl AdvisoryChunkIngressError {
+    pub fn error_type(&self) -> &'static str {
+        match self {
+            Self::PreHeaderOversizedBytes => "pre_header_oversized_bytes",
+            Self::PreHeaderOversizedDataPath => "pre_header_oversized_data_path",
+            Self::PreHeaderOffsetExceedsCap => "pre_header_offset_exceeds_cap",
+            Self::PreHeaderInvalidOffset(_) => "pre_header_invalid_offset",
+            Self::Other(_) => "other",
+        }
+    }
 }
 
 /// Generates an ingress proof for a specific `data_root`

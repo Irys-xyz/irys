@@ -4,6 +4,7 @@ pub mod data_txs;
 pub mod facade;
 pub mod ingress_proofs;
 pub mod lifecycle;
+pub mod metrics;
 mod pending_chunks;
 pub mod pledge_provider;
 pub mod types;
@@ -341,6 +342,9 @@ impl Inner {
             MempoolServiceMessage::IngestChunk(chunk, response) => {
                 let response_value: Result<(), ChunkIngressError> =
                     self.handle_chunk_ingress_message(chunk).await;
+                if let Err(ref e) = response_value {
+                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
+                }
                 if let Err(e) = response.send(response_value) {
                     tracing::error!(
                         "handle_chunk_ingress_message response.send() error: {:?}",
@@ -351,6 +355,7 @@ impl Inner {
             MempoolServiceMessage::IngestChunkFireAndForget(chunk) => {
                 let result = self.handle_chunk_ingress_message(chunk).await;
                 if let Err(e) = result {
+                    metrics::record_chunk_error(e.error_type(), e.is_advisory());
                     tracing::error!("handle_chunk_ingress_message error: {:?}", e);
                 }
             }

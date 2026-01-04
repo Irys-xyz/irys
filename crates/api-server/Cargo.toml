@@ -24,6 +24,7 @@ serde.workspace = true
 actix-web.workspace = true
 actix-cors = "0.7"
 tracing.workspace = true
+opentelemetry.workspace = true
 tracing-actix-web = "0.7"
 eyre.workspace = true
 thiserror.workspace = true

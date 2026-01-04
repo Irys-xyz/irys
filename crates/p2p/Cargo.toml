@@ -16,6 +16,7 @@ actix-web = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+opentelemetry.workspace = true
 tracing-actix-web = "0.7"
 eyre.workspace = true
 rand = "0.8"

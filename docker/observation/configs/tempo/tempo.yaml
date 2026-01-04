@@ -1,0 +1,59 @@
+# Tempo Configuration
+# Distributed tracing backend with OTLP support
+# Data retention: 7 days (1 week)
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m
+
+querier:
+  trace_by_id:
+    query_timeout: 10s
+
+query_frontend:
+  search:
+    concurrent_jobs: 1000
+    target_bytes_per_job: 104857600
+
+compactor:
+  compaction:
+    block_retention: 168h  # 7 days (1 week)
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+    pool:
+      max_workers: 100
+      queue_depth: 10000
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: [service-graphs, span-metrics, local-blocks]

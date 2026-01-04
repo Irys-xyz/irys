@@ -1,27 +1,35 @@
-# Data sync test cluster
+# Data Sync Test Environment
 #
 # Uses debug image with shell (required for test scripts).
 # Release image (irys:release) is incompatible here because peers use bash entrypoints.
-# Use docker/docker-compose.release.yaml for release clusters.
+# Sends telemetry to remote observability stack
 
 services:
+  # ==========================================================================
+  # Irys Test Nodes
+  # ==========================================================================
   test-irys-1:
     image: ${IMAGE_NAME:-irys:debug}
     pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
-    networks:
-      test_network:
-        ipv4_address: 172.21.0.2
     ports:
       - "19080:8080"
+      - "19001:9001"  # Reth metrics
     environment:
       - RUST_LOG=debug
+      - ENABLE_TELEMETRY=true
+      - OTEL_SERVICE_NAME=irys-node-1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
     cap_add:
       - NET_ADMIN
+    networks:
+      irys-test:
+        ipv4_address: 172.24.0.2
 
   test-irys-2:
     image: ${IMAGE_NAME:-irys:debug}
@@ -29,15 +37,19 @@ services:
     container_name: test-irys-2
     restart: unless-stopped
     depends_on:
-      - test-irys-1
-    networks:
-      test_network:
-        ipv4_address: 172.21.0.3
+      test-irys-1:
+        condition: service_started
     ports:
       - "19081:8080"
+      - "19002:9001"  # Reth metrics
     environment:
       - RUST_LOG=debug
       - MIN_HEIGHT=${MIN_HEIGHT:-40}
+      - GENESIS_URL=http://test-irys-1:8080
+      - ENABLE_TELEMETRY=true
+      - OTEL_SERVICE_NAME=irys-node-2
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -45,6 +57,9 @@ services:
     cap_add:
       - NET_ADMIN
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
+    networks:
+      irys-test:
+        ipv4_address: 172.24.0.3
 
   test-irys-3:
     image: ${IMAGE_NAME:-irys:debug}
@@ -52,15 +67,19 @@ services:
     container_name: test-irys-3
     restart: unless-stopped
     depends_on:
-      - test-irys-1
-    networks:
-      test_network:
-        ipv4_address: 172.21.0.4
+      test-irys-1:
+        condition: service_started
     ports:
       - "19082:8080"
+      - "19003:9001"  # Reth metrics
     environment:
       - RUST_LOG=debug
       - MIN_HEIGHT=${MIN_HEIGHT:-50}
+      - GENESIS_URL=http://test-irys-1:8080
+      - ENABLE_TELEMETRY=true
+      - OTEL_SERVICE_NAME=irys-node-3
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -68,11 +87,69 @@ services:
     cap_add:
       - NET_ADMIN
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
+    networks:
+      irys-test:
+        ipv4_address: 172.24.0.4
+
+  # ==========================================================================
+  # OTEL Collector Sidecars (for Reth metrics)
+  # Each sidecar scrapes its local Irys node's Reth Prometheus endpoint
+  # and forwards metrics to the central OTEL collector
+  # ==========================================================================
+  otel-sidecar-1:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: otel-sidecar-1
+    restart: unless-stopped
+    depends_on:
+      test-irys-1:
+        condition: service_started
+    environment:
+      - OTEL_SERVICE_NAME=irys-node-1
+      - RETH_METRICS_HOST=172.24.0.2
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+    volumes:
+      - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      irys-test:
+        ipv4_address: 172.24.0.12
+
+  otel-sidecar-2:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: otel-sidecar-2
+    restart: unless-stopped
+    depends_on:
+      test-irys-2:
+        condition: service_started
+    environment:
+      - OTEL_SERVICE_NAME=irys-node-2
+      - RETH_METRICS_HOST=172.24.0.3
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+    volumes:
+      - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      irys-test:
+        ipv4_address: 172.24.0.13
+
+  otel-sidecar-3:
+    image: otel/opentelemetry-collector-contrib:0.96.0
+    container_name: otel-sidecar-3
+    restart: unless-stopped
+    depends_on:
+      test-irys-3:
+        condition: service_started
+    environment:
+      - OTEL_SERVICE_NAME=irys-node-3
+      - RETH_METRICS_HOST=172.24.0.4
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4317
+    volumes:
+      - ./configs/otel-sidecar.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      irys-test:
+        ipv4_address: 172.24.0.14
 
 networks:
-  test_network:
+  irys-test:
     driver: bridge
     ipam:
-      driver: default
       config:
-        - subnet: 172.21.0.0/16
+        - subnet: 172.24.0.0/24
