@@ -1,16 +1,32 @@
+# Data Sync Test Environment
+# Uses the shared observability stack from docker/observation
+
+include:
+  - path: ../../observation/docker-compose.yaml
+
 services:
+  # ==========================================================================
+  # Irys Test Nodes
+  # ==========================================================================
   test-irys-1:
     image: ${IMAGE_NAME:-localhost/irys-test:latest}
     pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
+    depends_on:
+      otel-collector:
+        condition: service_started
     networks:
-      test_network:
-        ipv4_address: 172.21.0.2
+      observation_network:
+        ipv4_address: 172.23.0.2
     ports:
       - "19080:8080"
     environment:
       - RUST_LOG=debug
+      - ENABLE_TELEMETRY=true
+      - OTEL_SERVICE_NAME=irys-node-1
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -23,15 +39,22 @@ services:
     container_name: test-irys-2
     restart: unless-stopped
     depends_on:
-      - test-irys-1
+      test-irys-1:
+        condition: service_started
+      otel-collector:
+        condition: service_started
     networks:
-      test_network:
-        ipv4_address: 172.21.0.3
+      observation_network:
+        ipv4_address: 172.23.0.3
     ports:
       - "19081:8080"
     environment:
       - RUST_LOG=debug
       - MIN_HEIGHT=${MIN_HEIGHT:-40}
+      - ENABLE_TELEMETRY=true
+      - OTEL_SERVICE_NAME=irys-node-2
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -46,15 +69,22 @@ services:
     container_name: test-irys-3
     restart: unless-stopped
     depends_on:
-      - test-irys-1
+      test-irys-1:
+        condition: service_started
+      otel-collector:
+        condition: service_started
     networks:
-      test_network:
-        ipv4_address: 172.21.0.4
+      observation_network:
+        ipv4_address: 172.23.0.4
     ports:
       - "19082:8080"
     environment:
       - RUST_LOG=debug
       - MIN_HEIGHT=${MIN_HEIGHT:-50}
+      - ENABLE_TELEMETRY=true
+      - OTEL_SERVICE_NAME=irys-node-3
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -62,11 +92,3 @@ services:
     cap_add:
       - NET_ADMIN
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
-
-networks:
-  test_network:
-    driver: bridge
-    ipam:
-      driver: default
-      config:
-        - subnet: 172.21.0.0/16

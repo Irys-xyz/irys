@@ -25,15 +25,18 @@ async fn main() -> eyre::Result<()> {
         unsafe { std::env::set_var("RUST_BACKTRACE", "full") };
     }
 
-    // init logging
     #[cfg(feature = "telemetry")]
     {
-        // Check if Axiom credentials are set
-        if std::env::var("AXIOM_API_TOKEN").is_ok() && std::env::var("AXIOM_DATASET").is_ok() {
-            info!("Axiom credentials detected, initializing OpenTelemetry");
+        let telemetry_enabled = std::env::var("ENABLE_TELEMETRY")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false)
+            || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
+
+        if telemetry_enabled {
+            info!("Telemetry enabled, initializing OpenTelemetry");
             telemetry::init_telemetry()?;
         } else {
-            info!("Axiom credentials not set, using standard tracing");
+            info!("Telemetry not enabled, using standard tracing");
             init_tracing().expect("initializing tracing should work");
         }
     }
