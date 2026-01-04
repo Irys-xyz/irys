@@ -217,7 +217,7 @@ impl IrysNodeCtx {
 
             match tokio::time::timeout(
                 Duration::from_secs(15),
-                tokio::task::spawn_blocking(irys_utils::telemetry::flush_telemetry),
+                tokio::task::spawn_blocking(irys_utils::flush_telemetry),
             )
             .await
             {

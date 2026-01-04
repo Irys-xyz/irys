@@ -1,6 +1,10 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
+    metrics::{
+        record_gossip_chunk_error, record_gossip_chunk_processing_duration,
+        record_gossip_chunk_received,
+    },
     rate_limiting::{DataRequestTracker, RequestCheckResult},
     types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
@@ -11,8 +15,8 @@ use irys_actors::block_discovery::{
     get_data_tx_in_parallel,
 };
 use irys_actors::{
-    block_discovery::BlockDiscoveryFacade, AdvisoryChunkIngressError, ChunkIngressError,
-    CriticalChunkIngressError, MempoolFacade,
+    block_discovery::BlockDiscoveryFacade, ChunkIngressError, CriticalChunkIngressError,
+    MempoolFacade,
 };
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{
@@ -90,82 +94,58 @@ where
         &self,
         chunk_request: GossipRequestV2<UnpackedChunk>,
     ) -> GossipResult<()> {
+        let start = Instant::now();
         let source_peer_id = chunk_request.peer_id;
         let chunk = chunk_request.data;
+        let chunk_size = chunk.bytes.0.len() as u64;
         let chunk_path_hash = chunk.chunk_path_hash();
+
+        record_gossip_chunk_received(chunk_size);
+
         match self.mempool.handle_chunk_ingress(chunk).await {
             Ok(()) => {
+                // Record processing duration on success
+                record_gossip_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
+
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
                 self.cache
                     .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
-                match error {
-                    ChunkIngressError::Critical(err) => {
-                        match err {
-                            // ===== External invalid data errors
-                            CriticalChunkIngressError::InvalidProof => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidProof),
-                            ),
-                            CriticalChunkIngressError::InvalidDataHash => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash),
-                            ),
-                            CriticalChunkIngressError::InvalidChunkSize => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize),
-                            ),
-                            CriticalChunkIngressError::InvalidDataSize => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize),
-                            ),
-                            CriticalChunkIngressError::InvalidOffset(msg) => Err(
-                                GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg)),
-                            ),
-                            // ===== Internal errors
-                            CriticalChunkIngressError::DatabaseError => {
-                                Err(GossipError::Internal(InternalGossipError::Database(
-                                    "Chunk ingress database error".to_string(),
-                                )))
-                            }
-                            CriticalChunkIngressError::ServiceUninitialized => Err(
-                                GossipError::Internal(InternalGossipError::ServiceUninitialized),
-                            ),
-                            CriticalChunkIngressError::Other(other) => {
-                                Err(GossipError::Internal(InternalGossipError::Unknown(other)))
-                            }
-                        }
-                    }
+                record_gossip_chunk_error(error.error_type(), error.is_advisory());
 
-                    ChunkIngressError::Advisory(err) => {
-                        match err {
-                            // ===== Interval data 'errors' (peers should not be punished)
-                            AdvisoryChunkIngressError::PreHeaderOversizedBytes => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderOversizedBytes,
-                                )))
-                            }
-                            AdvisoryChunkIngressError::PreHeaderOversizedDataPath => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderOversizedDataPath,
-                                )))
-                            }
-                            AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderOffsetExceedsCap,
-                                )))
-                            }
-                            AdvisoryChunkIngressError::PreHeaderInvalidOffset(msg) => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::PreHeaderInvalidOffset(msg),
-                                )))
-                            }
-                            AdvisoryChunkIngressError::Other(other) => {
-                                Err(GossipError::Advisory(AdvisoryGossipError::ChunkIngress(
-                                    AdvisoryChunkIngressError::Other(other),
-                                )))
-                            }
+                Err(match error {
+                    ChunkIngressError::Critical(err) => match err {
+                        CriticalChunkIngressError::InvalidProof => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidProof)
                         }
+                        CriticalChunkIngressError::InvalidDataHash => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataHash)
+                        }
+                        CriticalChunkIngressError::InvalidChunkSize => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidChunkSize)
+                        }
+                        CriticalChunkIngressError::InvalidDataSize => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidDataSize)
+                        }
+                        CriticalChunkIngressError::InvalidOffset(msg) => {
+                            GossipError::InvalidData(InvalidDataError::ChunkInvalidOffset(msg))
+                        }
+                        CriticalChunkIngressError::DatabaseError => GossipError::Internal(
+                            InternalGossipError::Database("Chunk ingress database error".into()),
+                        ),
+                        CriticalChunkIngressError::ServiceUninitialized => {
+                            GossipError::Internal(InternalGossipError::ServiceUninitialized)
+                        }
+                        CriticalChunkIngressError::Other(other) => {
+                            GossipError::Internal(InternalGossipError::Unknown(other))
+                        }
+                    },
+                    ChunkIngressError::Advisory(err) => {
+                        GossipError::Advisory(AdvisoryGossipError::ChunkIngress(err))
                     }
-                }
+                })
             }
         }
     }

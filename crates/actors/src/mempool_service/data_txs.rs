@@ -1,3 +1,4 @@
+use crate::mempool_service::metrics::record_chunk_error;
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
 use eyre::eyre;
@@ -452,6 +453,7 @@ impl Inner {
                 let msg_result = self.handle_chunk_ingress_message(chunk).await;
 
                 if let Err(err) = msg_result {
+                    record_chunk_error(err.error_type(), err.is_advisory());
                     tracing::error!(
                         "Failed to handle chunk ingress for data_root {:?}: {:?}",
                         data_root,
