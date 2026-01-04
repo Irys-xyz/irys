@@ -1,6 +1,6 @@
 use crate::{
     error::{ApiError, ApiStatusResponse},
-    metrics::{record_chunk_error, record_chunk_received},
+    metrics::{record_chunk_error, record_chunk_processing_duration, record_chunk_received},
     ApiState,
 };
 use actix_web::{
@@ -11,6 +11,7 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::{ChunkIngressError, MempoolServiceMessage};
 use irys_types::UnpackedChunk;
+use std::time::Instant;
 use tracing::{info, warn};
 
 /// Handles the HTTP POST request for adding a chunk to the mempool.
@@ -21,6 +22,8 @@ pub async fn post_chunk(
     state: web::Data<ApiState>,
     body: Json<UnpackedChunk>,
 ) -> Result<HttpResponse, ApiError> {
+    let start = Instant::now();
+
     let chunk = body.into_inner();
     let chunk_size = chunk.bytes.0.len() as u64;
     let data_root = chunk.data_root;
@@ -68,22 +71,25 @@ pub async fn post_chunk(
         return if err.is_advisory() {
             Ok(ApiStatusResponse(format!("{err:?}"), StatusCode::OK).into())
         } else {
-            let ChunkIngressError::Critical(ref e) = err else {
-                unreachable!("advisory errors handled above")
-            };
-            let status = match e {
-                irys_actors::CriticalChunkIngressError::InvalidProof
-                | irys_actors::CriticalChunkIngressError::InvalidDataHash
-                | irys_actors::CriticalChunkIngressError::InvalidChunkSize
-                | irys_actors::CriticalChunkIngressError::InvalidDataSize
-                | irys_actors::CriticalChunkIngressError::InvalidOffset(_) => {
-                    StatusCode::BAD_REQUEST
-                }
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            let status = match err {
+                ChunkIngressError::Critical(ref e) => match e {
+                    irys_actors::CriticalChunkIngressError::InvalidProof
+                    | irys_actors::CriticalChunkIngressError::InvalidDataHash
+                    | irys_actors::CriticalChunkIngressError::InvalidChunkSize
+                    | irys_actors::CriticalChunkIngressError::InvalidDataSize
+                    | irys_actors::CriticalChunkIngressError::InvalidOffset(_) => {
+                        StatusCode::BAD_REQUEST
+                    }
+                    _ => StatusCode::INTERNAL_SERVER_ERROR,
+                },
+                ChunkIngressError::Advisory(_) => StatusCode::OK,
             };
             Err((format!("{err:?}"), status).into())
         };
     }
+
+    // Record processing duration on success
+    record_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
 
     // If everything succeeded, return an HTTP 200 OK response
     Ok(HttpResponse::Ok()
