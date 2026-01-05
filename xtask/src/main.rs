@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use xshell::{cmd, Cmd, Shell};
 
 use xtask::failures::{
-    self, build_failure_filter, generate_nextest_config, get_failures_file_path, FailuresFile,
+    self, generate_nextest_config, get_failures_file_path, FailuresFile,
     RunResults,
 };
 
