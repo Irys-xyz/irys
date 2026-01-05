@@ -4,7 +4,9 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{BlockHash, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1};
+use irys_types::{
+    BlockHash, DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1,
+};
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;
@@ -248,10 +250,10 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     });
     let tx1 = generate_test_tx().header;
     let tx2 = generate_test_tx().header;
-    block_header.data_ledgers[1].tx_ids = H256List(vec![tx1.id, tx2.id]);
+    block_header.data_ledgers[DataLedger::Submit].tx_ids = H256List(vec![tx1.id, tx2.id]);
     debug!(
         "Added transactions to Submit ledger: {:?}",
-        block_header.data_ledgers[1].tx_ids
+        block_header.data_ledgers[DataLedger::Submit].tx_ids
     );
     let signer = IrysSigner::random_signer(&fixture1.config.consensus);
     signer
