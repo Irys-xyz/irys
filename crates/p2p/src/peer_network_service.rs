@@ -923,11 +923,12 @@ impl PeerNetworkService {
         let protocol_version: irys_types::ProtocolVersion = peer_protocol_version.into();
 
         if handshake_request.protocol_version != protocol_version {
+            // Initiator intentionally adopts the peer's protocol version (rather than computing an intersection) as the protocol negotiation strategy
             handshake_request.protocol_version = protocol_version;
             config
                 .irys_signer()
                 .sign_p2p_handshake(&mut handshake_request)
-                .expect("Failed to sign version request");
+                .expect("Failed to sign handshake request");
         }
 
         let peer_response_result = gossip_client
