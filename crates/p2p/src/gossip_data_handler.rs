@@ -1169,6 +1169,18 @@ where
                                 "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
                                 self.gossip_client.mining_address, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES
                             );
+
+                            self.peer_list.decrease_peer_score(
+                                &source_address,
+                                ScoreDecreaseReason::BogusData(
+                                    "Mismatching transactions between header and body".into(),
+                                ),
+                            );
+                            debug!(
+                                "Penalized peer {} for serving bad block body",
+                                source_address
+                            );
+
                             last_error = Some(GossipError::InvalidData(
                                 InvalidDataError::BlockBodyTransactionsMismatch,
                             ));
