@@ -110,7 +110,9 @@ impl GossipClient {
             if let Some(req_v1) = requested_data.to_v1() {
                 self.send_data_internal(url, &req_v1).await
             } else {
-                self.send_data_internal(url, &requested_data).await
+                Ok(GossipResponse::Rejected(
+                    RejectionReason::UnsupportedFeature,
+                ))
             }
         } else {
             let url = format!(
@@ -151,7 +153,10 @@ impl GossipClient {
                 Ok((_, IrysTransactionResponse::Storage(_))) => {
                     return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
                 }
-                Err(err) => return Err(GossipError::PeerNetwork(err)),
+                Err(err) => {
+                    debug!("Failed to pull commitment tx {}: {:?}", tx_id, err);
+                    return Err(GossipError::PeerNetwork(err));
+                }
             }
         }
 
@@ -165,7 +170,10 @@ impl GossipClient {
                 Ok((_, IrysTransactionResponse::Commitment(_))) => {
                     return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
                 }
-                Err(err) => return Err(GossipError::PeerNetwork(err)),
+                Err(err) => {
+                    debug!("Failed to pull data tx {}: {:?}", tx_id, err);
+                    return Err(GossipError::PeerNetwork(err));
+                }
             }
         }
 
@@ -208,7 +216,9 @@ impl GossipClient {
                         GossipResponse::Rejected(reason) => GossipResponse::Rejected(reason),
                     })
                 } else {
-                    self.send_data_internal(url, &requested_data).await
+                    Ok(GossipResponse::Rejected(
+                        RejectionReason::UnsupportedFeature,
+                    ))
                 }
             } else {
                 let url = format!(
@@ -504,6 +514,10 @@ impl GossipClient {
             if let Some(data_v1) = data.to_v1() {
                 return self.send_data_v1(peer, &data_v1).await;
             }
+
+            return Ok(GossipResponse::Rejected(
+                RejectionReason::UnsupportedFeature,
+            ));
         }
 
         match data {
