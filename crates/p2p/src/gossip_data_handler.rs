@@ -1136,7 +1136,6 @@ where
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
     ) -> GossipResult<Arc<BlockBody>> {
-        // TODO: check that transactions in the body match those in the header
         let block_hash = header.block_hash;
 
         debug!(
@@ -1144,21 +1143,58 @@ where
             block_hash, header.height
         );
 
-        let (source_address, irys_block_body) = self
-            .gossip_client
-            .pull_block_body_from_network(
-                Arc::new(header.clone()),
-                use_trusted_peers_only,
-                &self.peer_list,
-            )
-            .await?;
+        let mut last_error = None;
 
-        debug!(
-            "Fetched block body for block {} height {} from peer {:?}",
-            block_hash, header.height, source_address
-        );
+        for attempt in 1..=HEADER_AND_BODY_RETRIES {
+            match self
+                .gossip_client
+                .pull_block_body_from_network(
+                    Arc::new(header.clone()),
+                    use_trusted_peers_only,
+                    &self.peer_list,
+                )
+                .await
+            {
+                Ok((source_address, irys_block_body)) => {
+                    match irys_block_body.tx_ids_match_the_header(header) {
+                        Ok(true) => {
+                            debug!(
+                                "Fetched block body for block {} height {} from peer {:?}",
+                                block_hash, header.height, source_address
+                            );
+                            return Ok(irys_block_body);
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
+                                self.gossip_client.mining_address, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES
+                            );
+                            last_error = Some(GossipError::InvalidData(
+                                InvalidDataError::BlockBodyTransactionsMismatch,
+                            ));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Node {}: Error checking if block body matches header for block {} height {}: {} (attempt {}/{})",
+                                self.gossip_client.mining_address, block_hash, header.height, e, attempt, HEADER_AND_BODY_RETRIES
+                            );
+                            last_error = Some(GossipError::Internal(InternalGossipError::Unknown(
+                                format!("Error checking block body match: {}", e),
+                            )));
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(GossipError::from(e));
+                }
+            }
+        }
 
-        Ok(irys_block_body)
+        Err(last_error.unwrap_or_else(|| {
+            GossipError::Internal(InternalGossipError::Unknown(
+                "Failed to pull block body".to_string(),
+            ))
+        }))
     }
 }
 

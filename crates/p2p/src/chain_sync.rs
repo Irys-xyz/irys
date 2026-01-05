@@ -296,15 +296,11 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                 let header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
                 futures.push(async move {
-                    // Fetch transactions using unified method (cache + mempool + network)
                     let block_transactions = gossip_data_handler
                         .pull_block_body(&header, is_fast_tracking)
                         .await
                         .map_err(|e| {
-                            ChainSyncError::Internal(format!(
-                                "Failed to fetch block transactions: {:?}",
-                                e
-                            ))
+                            ChainSyncError::Internal(format!("Failed to fetch block body: {:?}", e))
                         })?;
 
                     block_pool
