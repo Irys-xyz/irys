@@ -18,17 +18,33 @@ const FAILURES_FILENAME: &str = "failures.json";
 /// Filename where the wrapper writes test results during a run
 const RESULTS_FILENAME: &str = "results.jsonl";
 
-/// Find the workspace root by looking for Cargo.lock
-fn find_workspace_root(start_dir: &Path) -> Option<PathBuf> {
-    let mut current = start_dir.to_path_buf();
+/// Walk up the directory tree to find the workspace root (contains Cargo.lock)
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+
     loop {
+        // Check for Cargo.lock (indicates workspace root)
         if current.join("Cargo.lock").exists() {
             return Some(current);
         }
+
+        // Check for Cargo.toml with [workspace] section
+        let cargo_toml = current.join("Cargo.toml");
+        if cargo_toml.exists() {
+            if let Ok(content) = fs::read_to_string(&cargo_toml) {
+                if content.contains("[workspace]") {
+                    return Some(current);
+                }
+            }
+        }
+
+        // Move up one directory
         if !current.pop() {
-            return None;
+            break;
         }
     }
+
+    None
 }
 
 /// Get the target directory, using various environment variables and heuristics
