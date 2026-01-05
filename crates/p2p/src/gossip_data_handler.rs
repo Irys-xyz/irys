@@ -508,19 +508,14 @@ where
             self.gossip_client.mining_address, block_header.block_hash, block_header.height
         );
 
-        let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
-        let is_in_the_trusted_sync_range = self
-            .sync_state
-            .is_in_trusted_sync_range(block_header.height as usize);
-
         // In trusted sync mode, this flag serves two purposes:
         // 1. Restricts peer selection for fetching block bodies to trusted peers only
         // 2. Disables computational heavy block validation during processing
-        let skip_block_validation = is_syncing_from_a_trusted_peer
-            && is_in_the_trusted_sync_range
-            && self
-                .peer_list
-                .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
+        let skip_block_validation = self.should_skip_block_validation(
+            block_header.height,
+            source_miner_address,
+            data_source_ip.ip(),
+        );
 
         let use_trusted_peers_only = skip_block_validation;
         let skip_validation_for_fast_track = skip_block_validation;
@@ -682,16 +677,11 @@ where
             self.gossip_client.mining_address, block_header.block_hash, block_header.height
         );
 
-        let is_syncing_from_a_trusted_peer = self.sync_state.is_syncing_from_a_trusted_peer();
-        let is_in_the_trusted_sync_range = self
-            .sync_state
-            .is_in_trusted_sync_range(block_header.height as usize);
-
-        let skip_block_validation = is_syncing_from_a_trusted_peer
-            && is_in_the_trusted_sync_range
-            && self
-                .peer_list
-                .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
+        let skip_block_validation = self.should_skip_block_validation(
+            block_header.height,
+            source_miner_address,
+            data_source_ip.ip(),
+        );
 
         self.validate_block_body_transaction_ids(&block_body, &block_header, &source_miner_address)?;
 
@@ -1095,6 +1085,19 @@ where
                     e
                 )))
             })
+    }
+
+    fn should_skip_block_validation(
+        &self,
+        block_height: u64,
+        source_miner_address: IrysAddress,
+        data_source_ip: std::net::IpAddr,
+    ) -> bool {
+        self.sync_state.is_syncing_from_a_trusted_peer()
+            && self.sync_state.is_in_trusted_sync_range(block_height as usize)
+            && self
+                .peer_list
+                .is_a_trusted_peer(source_miner_address, data_source_ip)
     }
 
     fn validate_block_body_transaction_ids(
