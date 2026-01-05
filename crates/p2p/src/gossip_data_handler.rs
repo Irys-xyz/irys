@@ -1,7 +1,7 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
-    rate_limiting::DataRequestTracker,
+    rate_limiting::{DataRequestTracker, RequestCheckResult},
     types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
 };
@@ -573,7 +573,11 @@ where
         };
 
         self.block_pool
-            .process_block(Arc::new(block_header), block_body, skip_validation_for_fast_track)
+            .process_block(
+                Arc::new(block_header),
+                block_body,
+                skip_validation_for_fast_track,
+            )
             .await?;
         Ok(())
     }
@@ -683,7 +687,11 @@ where
             data_source_ip.ip(),
         );
 
-        self.validate_block_body_transaction_ids(&block_body, &block_header, &source_miner_address)?;
+        self.validate_block_body_transaction_ids(
+            &block_body,
+            &block_header,
+            &source_miner_address,
+        )?;
 
         // Record block in cache
         self.cache
@@ -864,18 +872,11 @@ where
                             );
                         }
                         let data = Arc::new(GossipDataV2::BlockHeader(block));
-                        if check_result.should_update_score() {
-                            self.gossip_client.send_data_and_update_score_for_request(
-                                (&request.miner_address, peer_info),
-                                data,
-                                &self.peer_list,
-                            );
-                        } else {
-                            self.gossip_client.send_data_without_score_update(
-                                (&request.miner_address, peer_info),
-                                data,
-                            );
-                        }
+                        self.send_gossip_data(
+                            (&request.miner_address, peer_info),
+                            data,
+                            &check_result,
+                        );
                         Ok(true)
                     }
                     None => Ok(false),
@@ -892,18 +893,7 @@ where
 
                 if let Some(block_body) = block_body {
                     let data = Arc::new(GossipDataV2::BlockBody(block_body));
-                    if check_result.should_update_score() {
-                        self.gossip_client.send_data_and_update_score_for_request(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &self.peer_list,
-                        );
-                    } else {
-                        self.gossip_client.send_data_without_score_update(
-                            (&request.miner_address, peer_info),
-                            data,
-                        );
-                    }
+                    self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -922,18 +912,11 @@ where
                 match maybe_evm_block {
                     Some(evm_block) => {
                         let data = Arc::new(GossipDataV2::ExecutionPayload(evm_block));
-                        if check_result.should_update_score() {
-                            self.gossip_client.send_data_and_update_score_for_request(
-                                (&request.miner_address, peer_info),
-                                data,
-                                &self.peer_list,
-                            );
-                        } else {
-                            self.gossip_client.send_data_without_score_update(
-                                (&request.miner_address, peer_info),
-                                data,
-                            );
-                        }
+                        self.send_gossip_data(
+                            (&request.miner_address, peer_info),
+                            data,
+                            &check_result,
+                        );
                         Ok(true)
                     }
                     None => Ok(false),
@@ -954,18 +937,11 @@ where
                 {
                     if let Some(tx) = result.pop() {
                         let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
-                        if check_result.should_update_score() {
-                            self.gossip_client.send_data_and_update_score_for_request(
-                                (&request.miner_address, peer_info),
-                                data,
-                                &self.peer_list,
-                            );
-                        } else {
-                            self.gossip_client.send_data_without_score_update(
-                                (&request.miner_address, peer_info),
-                                data,
-                            );
-                        }
+                        self.send_gossip_data(
+                            (&request.miner_address, peer_info),
+                            data,
+                            &check_result,
+                        );
                         return Ok(true);
                     }
                 };
@@ -976,18 +952,11 @@ where
                 {
                     if let Some(tx) = result.pop() {
                         let data = Arc::new(GossipDataV2::Transaction(tx));
-                        if check_result.should_update_score() {
-                            self.gossip_client.send_data_and_update_score_for_request(
-                                (&request.miner_address, peer_info),
-                                data,
-                                &self.peer_list,
-                            );
-                        } else {
-                            self.gossip_client.send_data_without_score_update(
-                                (&request.miner_address, peer_info),
-                                data,
-                            );
-                        }
+                        self.send_gossip_data(
+                            (&request.miner_address, peer_info),
+                            data,
+                            &check_result,
+                        );
                         return Ok(true);
                     }
                 };
@@ -1087,6 +1056,21 @@ where
             })
     }
 
+    fn send_gossip_data(
+        &self,
+        peer: (&IrysAddress, &PeerListItem),
+        data: Arc<GossipDataV2>,
+        check_result: &RequestCheckResult,
+    ) {
+        if check_result.should_update_score() {
+            self.gossip_client
+                .send_data_and_update_score_for_request(peer, data, &self.peer_list);
+        } else {
+            self.gossip_client
+                .send_data_without_score_update(peer, data);
+        }
+    }
+
     fn should_skip_block_validation(
         &self,
         block_height: u64,
@@ -1094,7 +1078,9 @@ where
         data_source_ip: std::net::IpAddr,
     ) -> bool {
         self.sync_state.is_syncing_from_a_trusted_peer()
-            && self.sync_state.is_in_trusted_sync_range(block_height as usize)
+            && self
+                .sync_state
+                .is_in_trusted_sync_range(block_height as usize)
             && self
                 .peer_list
                 .is_a_trusted_peer(source_miner_address, data_source_ip)
