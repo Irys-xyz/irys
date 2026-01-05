@@ -21,7 +21,7 @@ use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
 
-async fn insert_block_header_for_gossip_test(
+fn insert_block_header_for_gossip_test(
     node: &IrysNodeTest<IrysNodeCtx>,
     block_hash: H256,
     header: IrysBlockHeader,
