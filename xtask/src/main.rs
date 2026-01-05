@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use xshell::{cmd, Cmd, Shell};
 
 use xtask::failures::{
-    self, generate_nextest_config, get_failures_file_path, FailuresFile,
-    RunResults,
+    self, generate_nextest_config, get_failures_file_path, FailuresFile, RunResults,
 };
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
