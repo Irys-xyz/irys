@@ -140,6 +140,22 @@ fn build_peer_address(config: &Config) -> PeerAddress {
         },
     }
 }
+impl PeerNetworkServiceState {
+    fn create_handshake_request(&self) -> HandshakeRequest {
+        let mut handshake_request = HandshakeRequest {
+            address: self.peer_address,
+            chain_id: self.chain_id,
+            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            ..HandshakeRequest::default()
+        };
+        self.config
+            .irys_signer()
+            .sign_p2p_handshake(&mut handshake_request)
+            .expect("Failed to sign version request");
+        handshake_request
+    }
+}
+
 impl PeerNetworkServiceInner {
     fn new(
         db: DatabaseProvider,
@@ -211,18 +227,7 @@ impl PeerNetworkServiceInner {
 
     async fn create_handshake_request(&self) -> HandshakeRequest {
         let state = self.state.lock().await;
-        let mut handshake_request = HandshakeRequest {
-            address: state.peer_address,
-            chain_id: state.chain_id,
-            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
-            ..HandshakeRequest::default()
-        };
-        state
-            .config
-            .irys_signer()
-            .sign_p2p_handshake(&mut handshake_request)
-            .expect("Failed to sign version request");
-        handshake_request
+        state.create_handshake_request()
     }
 
     fn sender(&self) -> PeerNetworkSender {
@@ -476,17 +481,7 @@ impl PeerNetworkService {
             debug!("Need to announce yourself to peer {:?}", api_address);
             state.currently_running_announcements.insert(api_address);
 
-            let mut handshake_request = HandshakeRequest {
-                address: state.peer_address,
-                chain_id: state.chain_id,
-                user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
-                ..HandshakeRequest::default()
-            };
-            state
-                .config
-                .irys_signer()
-                .sign_p2p_handshake(&mut handshake_request)
-                .expect("Failed to sign version request");
+            let handshake_request = state.create_handshake_request();
 
             let gossip_address = handshake.gossip_address;
 

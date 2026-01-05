@@ -9,6 +9,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
+use irys_chain::IrysNodeCtx;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
@@ -21,7 +22,7 @@ use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
 
 async fn insert_block_header_for_gossip_test(
-    node: &IrysNodeTest,
+    node: &IrysNodeTest<IrysNodeCtx>,
     block_hash: H256,
     header: IrysBlockHeader,
 ) -> eyre::Result<()> {
