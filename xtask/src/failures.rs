@@ -228,7 +228,6 @@ pub fn append_result_to(path: &Path, result: &TestResult) -> std::io::Result<()>
 
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
-                use std::io::Write as _;
                 writeln!(file, "{}", line)?;
 
                 // Release lock
