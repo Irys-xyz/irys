@@ -29,8 +29,9 @@ fn main() -> ExitCode {
 
     let (passed, exit_code) = match status {
         Ok(status) => {
-            let code = status.code().unwrap_or(1);
-            (code == 0, code as u8)
+            let status_code = status.code().unwrap_or(1);
+            // status_code is an i32, exit is a u8
+            (status_code == 0, status_code.try_into().unwrap_or(1))
         }
         Err(e) => {
             eprintln!(
