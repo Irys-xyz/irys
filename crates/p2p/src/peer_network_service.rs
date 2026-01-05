@@ -920,13 +920,7 @@ impl PeerNetworkService {
             )));
         }
 
-        let my_version = irys_types::ProtocolVersion::current() as u32;
-        let protocol_version = if peer_protocol_version != my_version {
-            peer_protocol_version
-        } else {
-            my_version
-        }
-        .into();
+        let protocol_version: irys_types::ProtocolVersion = peer_protocol_version.into();
 
         if handshake_request.protocol_version != protocol_version {
             handshake_request.protocol_version = protocol_version;
