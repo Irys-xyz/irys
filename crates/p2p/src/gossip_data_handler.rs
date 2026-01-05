@@ -513,18 +513,24 @@ where
             .sync_state
             .is_in_trusted_sync_range(block_header.height as usize);
 
+        // In trusted sync mode, this flag serves two purposes:
+        // 1. Restricts peer selection for fetching block bodies to trusted peers only
+        // 2. Disables computational heavy block validation during processing
         let skip_block_validation = is_syncing_from_a_trusted_peer
             && is_in_the_trusted_sync_range
             && self
                 .peer_list
                 .is_a_trusted_peer(source_miner_address, data_source_ip.ip());
 
+        let use_trusted_peers_only = skip_block_validation;
+        let skip_validation_for_fast_track = skip_block_validation;
+
         let mut block_body = None;
         let mut last_error = None;
 
         for _attempt in 1..=HEADER_AND_BODY_RETRIES {
             match self
-                .pull_block_body(&block_header, skip_block_validation)
+                .pull_block_body(&block_header, use_trusted_peers_only)
                 .await
             {
                 Ok(body) => {
@@ -572,7 +578,7 @@ where
         };
 
         self.block_pool
-            .process_block(Arc::new(block_header), block_body, skip_block_validation)
+            .process_block(Arc::new(block_header), block_body, skip_validation_for_fast_track)
             .await?;
         Ok(())
     }
