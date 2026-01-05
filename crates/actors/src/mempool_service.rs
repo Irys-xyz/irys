@@ -264,6 +264,10 @@ pub enum MempoolServiceMessage {
     CloneStakeAndPledgeWhitelist(oneshot::Sender<HashSet<IrysAddress>>),
     /// Get overall mempool status and metrics
     GetMempoolStatus(oneshot::Sender<Result<MempoolStatus, TxReadError>>),
+    /// Obtain a read guard with broad access to mempool state.
+    /// Prefer more targeted queries (e.g. `GetBestMempoolTxs`, `GetCommitmentTxs`,
+    /// `GetDataTxs`) when possible, and avoid holding the guard across long‑running
+    /// operations to prevent reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
 }
 

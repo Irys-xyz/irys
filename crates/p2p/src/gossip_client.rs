@@ -151,7 +151,7 @@ impl GossipClient {
                 Ok((_, IrysTransactionResponse::Storage(_))) => {
                     return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
                 }
-                Err(_) => return Ok(GossipResponse::Accepted(None)),
+                Err(err) => return Err(GossipError::PeerNetwork(err)),
             }
         }
 
@@ -165,7 +165,7 @@ impl GossipClient {
                 Ok((_, IrysTransactionResponse::Commitment(_))) => {
                     return Ok(GossipResponse::Rejected(RejectionReason::InvalidData))
                 }
-                Err(_) => return Ok(GossipResponse::Accepted(None)),
+                Err(err) => return Err(GossipError::PeerNetwork(err)),
             }
         }
 
@@ -495,6 +495,12 @@ impl GossipClient {
         data: &GossipDataV2,
     ) -> GossipResult<GossipResponse<()>> {
         if peer.protocol_version == irys_types::ProtocolVersion::V1 {
+            if let GossipDataV2::BlockBody(_) = data {
+                return Ok(GossipResponse::Rejected(
+                    RejectionReason::UnsupportedFeature,
+                ));
+            }
+
             if let Some(data_v1) = data.to_v1() {
                 return self.send_data_v1(peer, &data_v1).await;
             }

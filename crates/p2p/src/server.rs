@@ -237,7 +237,7 @@ where
             let node_id = server.data_handler.gossip_client.mining_address;
             let block_hash = irys_block_header_json.0.data.block_hash;
             warn!(
-                "Node {}: Gossip reception is disabled, ignoring block header {:?}",
+                "Node {}: Gossip reception is disabled, ignoring block body {:?}",
                 node_id, block_hash
             );
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
