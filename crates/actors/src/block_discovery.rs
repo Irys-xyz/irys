@@ -909,7 +909,7 @@ pub async fn build_block_body_for_processed_block_header(
         .collect::<Vec<_>>();
 
     let (data_txs, commitment_txs) = tokio::join!(
-        get_data_tx_in_parallel(data_transaction_ids.clone(), mempool_read_guard, db),
+        get_data_tx_in_parallel(data_transaction_ids, mempool_read_guard, db),
         get_commitment_tx_in_parallel(&commitment_transaction_ids, mempool_read_guard, db)
     );
     let data_txs = data_txs?;

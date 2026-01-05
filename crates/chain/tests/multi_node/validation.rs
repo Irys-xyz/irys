@@ -20,6 +20,19 @@ use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
 
+async fn insert_block_header_for_gossip_test(
+    node: &IrysNodeTest,
+    block_hash: H256,
+    header: IrysBlockHeader,
+) -> eyre::Result<()> {
+    // Since this block would be rejected by the validation of the producer itself, we need to
+    // manually insert it into the db for gossiping block bodies
+    node.node_ctx.db.update_eyre(move |tx| {
+        tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
+        Ok(())
+    })
+}
+
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
 // block must match.
@@ -88,12 +101,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    // Since this block would be rejected by the validation of the producer itself, we need to
-    // manually insert it into the db for gossiping block bodies
-    peer_node.node_ctx.db.update_eyre(|tx| {
-        tx.put::<IrysBlockHeaders>(block.block_hash, block.as_ref().clone().into())?;
-        Ok(())
-    })?;
+    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone()).await?;
     peer_node.gossip_enable();
 
     peer_node.gossip_block_to_peers(&block)?;
@@ -165,10 +173,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     // Re-signing actually changes the block hash, so we need to manually insert the header to the db
     //  for this test to work, because fetching the block body from the peer now requires that
     //  peer to actually have this block header in its database/mempool/cache
-    peer_node.node_ctx.db.update_eyre(|tx| {
-        tx.put::<IrysBlockHeaders>(irys_block.block_hash, irys_block.clone().into())?;
-        Ok(())
-    })?;
+    insert_block_header_for_gossip_test(&peer_node, irys_block.block_hash, irys_block.clone()).await?;
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 
@@ -263,12 +268,7 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .await?
         .unwrap();
 
-    // Since this block would be rejected by the validation of the producer itself, we need to
-    // manually insert it into the db for gossiping block bodies
-    peer_node.node_ctx.db.update_eyre(|tx| {
-        tx.put::<IrysBlockHeaders>(block.block_hash, block.as_ref().clone().into())?;
-        Ok(())
-    })?;
+    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone()).await?;
 
     peer_node.gossip_enable();
 
@@ -367,12 +367,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
-    // Since this block would be rejected by the validation of the producer itself, we need to
-    // manually insert it into the db for gossiping block bodies
-    peer_node.node_ctx.db.update_eyre(|tx| {
-        tx.put::<IrysBlockHeaders>(block.block_hash, block.as_ref().clone().into())?;
-        Ok(())
-    })?;
+    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone()).await?;
     peer_node.gossip_enable();
 
     peer_node.gossip_block_to_peers(&block)?;
