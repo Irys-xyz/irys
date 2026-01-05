@@ -14552,6 +14552,9 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
+ "serde",
+ "serde_json",
+ "tempfile",
  "xshell",
 ]
 

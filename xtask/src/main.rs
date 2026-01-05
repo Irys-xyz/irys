@@ -2,9 +2,15 @@ use cargo_metadata::{MetadataCommand, Package};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::io::Write as _;
+use std::path::PathBuf;
 use xshell::{cmd, Cmd, Shell};
 
+use xtask::failures::{
+    self, generate_nextest_config, get_failures_file_path, FailuresFile, RunResults,
+};
+
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
+const NEXTEST_VERSION: &str = "0.9.102";
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -15,9 +21,21 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Runs tests via nextest, with failure tracking (& optional failure-only reruns)
     Test {
+        /// Produce coverage files
         #[clap(short, long, default_value_t = false)]
         coverage: bool,
+        /// Only run tests that failed in the previous run
+        #[clap(long, default_value_t = false)]
+        rerun_failures: bool,
+        /// Clear the failures file and run all tests fresh
+        #[clap(long, default_value_t = false)]
+        fresh: bool,
+        /// Don't update the failures file after the run
+        #[clap(long, default_value_t = false)]
+        no_update_failures: bool,
+        /// Arbitrary passthrough args
         #[clap(last = true)]
         args: Vec<String>,
     },
@@ -73,15 +91,48 @@ enum Commands {
     },
 }
 
+/// Build the nextest-failure-tracker binary
+fn build_wrapper(sh: &Shell) -> eyre::Result<PathBuf> {
+    println!("Building nextest-failure-tracker...");
+    cmd!(
+        sh,
+        "cargo build --package xtask --bin nextest-failure-tracker"
+    )
+    .remove_and_run()?;
+
+    // Get the target directory
+    let metadata = MetadataCommand::new().exec()?;
+    let target_dir = metadata.target_directory.as_std_path();
+    let wrapper_path = target_dir.join("debug").join("nextest-failure-tracker");
+
+    if !wrapper_path.exists() {
+        return Err(eyre::eyre!(
+            "Failed to find built wrapper at {}",
+            wrapper_path.display()
+        ));
+    }
+
+    Ok(wrapper_path)
+}
+
 fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
     match command {
-        Commands::Test { args, coverage } => {
+        Commands::Test {
+            args,
+            coverage,
+            rerun_failures,
+            fresh,
+            no_update_failures,
+        } => {
             println!("cargo test");
-            let _ =
-                cmd!(sh, "cargo install --locked --version 0.9.102 cargo-nextest").remove_and_run();
+            let _ = cmd!(
+                sh,
+                "cargo install --locked --version {NEXTEST_VERSION} cargo-nextest"
+            )
+            .remove_and_run();
 
             if coverage {
-                cmd!(sh, "cargo install  --locked --version 0.10.5 grcov").remove_and_run()?;
+                cmd!(sh, "cargo install --locked --version 0.10.5 grcov").remove_and_run()?;
                 for (key, val) in [
                     ("CARGO_INCREMENTAL", "0"),
                     ("RUSTFLAGS", "-Cinstrument-coverage"),
@@ -94,11 +145,127 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
             // this is needed otherwise some tests will fail (that assert panic messages)
             sh.set_var("RUST_BACKTRACE", "1");
 
-            cmd!(
-                sh,
-                "cargo nextest run --workspace --tests --all-targets {args...}"
-            )
-            .remove_and_run()?;
+            // Handle --fresh: clear the failures file
+            if fresh {
+                println!("Clearing failures file...");
+                FailuresFile::clear()?;
+            }
+
+            // Clear the results file from any previous run
+            if !no_update_failures {
+                failures::ensure_dir()?;
+                RunResults::clear()?;
+            }
+
+            // Determine which tests to run
+            let failed_tests_filter: Option<Vec<String>> = if rerun_failures && !fresh {
+                let failures = FailuresFile::load();
+
+                if failures.is_empty() {
+                    println!(
+                        "Warning: No recorded failures found in {}. Running all tests.",
+                        get_failures_file_path().display()
+                    );
+                    None
+                } else {
+                    println!(
+                        "\x1b[1;33mwarning: Rerunning failed tests\x1b[0m: {:?}",
+                        failures.failed_tests
+                    );
+                    Some(failures.failed_tests)
+                }
+            } else {
+                None
+            };
+
+            // Build the wrapper binary and generate config if we're tracking failures
+            let config_file = if !no_update_failures {
+                let wrapper_path = build_wrapper(sh)?;
+                let wrapper_path_str = wrapper_path.to_string_lossy().to_string();
+
+                Some(generate_nextest_config(
+                    &wrapper_path_str,
+                    failed_tests_filter.as_deref(),
+                )?)
+            } else {
+                None
+            };
+
+            // Build the nextest command
+            let mut nextest_args = vec![
+                "nextest".to_string(),
+                "run".to_string(),
+                "--workspace".to_string(),
+                "--tests".to_string(),
+                "--all-targets".to_string(),
+            ];
+
+            // Add config file if we have one
+            if let Some(ref config) = config_file {
+                let config_path = config.path().to_string_lossy().to_string();
+                nextest_args.push("--config-file".to_string());
+                nextest_args.push(config_path);
+
+                // Use the rerun profile if filtering to failed tests
+                if failed_tests_filter.is_some() {
+                    nextest_args.push("--profile".to_string());
+                    nextest_args.push("xtask-rerun-failures".to_string());
+                }
+            }
+
+            // Add user-provided args
+            nextest_args.extend(args);
+
+            // Run nextest
+            let test_result = cmd!(sh, "cargo {nextest_args...}").remove_and_run();
+
+            // Keep config file alive until after the command runs
+            drop(config_file);
+
+            // Process results and update failures file
+            if !no_update_failures {
+                let run_results = RunResults::load();
+                let (passed, new_failed) = run_results.into_sets();
+
+                let mut failures = if rerun_failures && !fresh {
+                    // When rerunning, start with existing failures
+                    FailuresFile::load()
+                } else {
+                    // When running all tests, start fresh
+                    FailuresFile::default()
+                };
+
+                // Remove tests that now pass
+                failures.failed_tests.retain(|t| !passed.contains(t));
+
+                // Add new failures
+                for failed in &new_failed {
+                    if !failures.failed_tests.contains(failed) {
+                        failures.failed_tests.push(failed.clone());
+                    }
+                }
+
+                // Sort for consistent output
+                failures.failed_tests.sort();
+
+                // Save the updated failures
+                failures.save()?;
+
+                if failures.is_empty() {
+                    if !passed.is_empty() {
+                        println!("All tests passed! Failures file cleared.");
+                    }
+                } else {
+                    println!(
+                        "Recorded {} failed test(s) to {}",
+                        failures.failed_tests.len(),
+                        get_failures_file_path().display()
+                    );
+                }
+            }
+
+            // Propagate the test result
+            test_result?;
 
             if coverage {
                 cmd!(sh, "mkdir -p target/coverage").remove_and_run()?;
@@ -208,6 +375,9 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 run_command(
                     Commands::Test {
                         coverage: false,
+                        rerun_failures: false,
+                        fresh: false,
+                        no_update_failures: false,
                         args: vec![],
                     },
                     sh,
