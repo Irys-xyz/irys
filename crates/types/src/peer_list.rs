@@ -349,11 +349,12 @@ impl Compact for PeerListItem {
 
         let mut protocol_version = ProtocolVersion::default();
         if buf.len() >= total_consumed + 4 {
-            let (version_u32, remaining_slice) =
-                u32::from_compact(&buf[total_consumed..], buf.len() - total_consumed);
+            let version_bytes: [u8; 4] = buf[total_consumed..total_consumed + 4]
+                .try_into()
+                .expect("slice with incorrect length");
+            let version_u32 = u32::from_be_bytes(version_bytes);
             protocol_version = ProtocolVersion::from(version_u32);
-            let consumed_bytes = (buf.len() - total_consumed) - remaining_slice.len();
-            total_consumed += consumed_bytes;
+            total_consumed += 4;
         }
 
         (
