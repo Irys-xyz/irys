@@ -654,6 +654,14 @@ impl Inner {
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
 
+        // Filter out commitment transactions with versions below the hardfork minimum
+        // Use current time (not parent block timestamp) because the new block will have
+        // a timestamp of approximately now(), and validators check versions against block timestamp
+        self.config
+            .consensus
+            .hardforks
+            .filter_commitments_by_version(&mut sorted_commitments, UnixTimestamp::now()?);
+
         balances.extend(
             fetch_balances_for_transactions(
                 &self.reth_node_adapter,
@@ -2630,6 +2638,11 @@ pub enum TxIngressError {
     /// The transaction's signature is invalid
     #[error("Transaction signature is invalid for address {0}")]
     InvalidSignature(IrysAddress),
+    /// The commitment transaction version is below minimum required after hardfork activation
+    #[error(
+        "Commitment transaction version {version} is below minimum required version {minimum}"
+    )]
+    InvalidVersion { version: u8, minimum: u8 },
     /// The account does not have enough tokens to fund this transaction
     #[error("Account has insufficient funds for transaction {0}")]
     Unfunded(H256),

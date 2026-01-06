@@ -1,5 +1,3 @@
-//! Integration tests for Aurora hardfork behavior.
-
 use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::initialize_tracing;
@@ -13,11 +11,11 @@ use rstest::rstest;
 use tracing::info;
 
 const ONE_HOUR_SECS: u64 = 3600;
-const BOUNDARY_TEST_DELAY_SECS: u64 = 5;
-const EDGE_CASE_DELAY_SECS: u64 = 3;
+const ACTIVATION_DELAY_SECS: u64 = 10;
 const AURORA_MIN_VERSION: u8 = 2;
 const MAX_ACTIVATION_BLOCKS: u32 = 1000;
 const MAX_BLOCKS_TO_SEARCH: u64 = 5;
+const POLL_INTERVAL_MS: u64 = 100;
 
 fn now_secs() -> u64 {
     UnixTimestamp::now()
@@ -92,16 +90,20 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
     config
 }
 
+fn aurora_config_with_timestamp(activation_secs: u64) -> NodeConfig {
+    create_test_config(Some(Aurora {
+        activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+        minimum_commitment_tx_version: AURORA_MIN_VERSION,
+    }))
+}
+
 fn aurora_config_with_offset(offset_secs: i64) -> NodeConfig {
     let timestamp = if offset_secs >= 0 {
         now_secs().saturating_add(offset_secs as u64)
     } else {
         now_secs().saturating_sub(offset_secs.unsigned_abs())
     };
-    create_test_config(Some(Aurora {
-        activation_timestamp: UnixTimestamp::from_secs(timestamp),
-        minimum_commitment_tx_version: AURORA_MIN_VERSION,
-    }))
+    aurora_config_with_timestamp(timestamp)
 }
 
 fn aurora_config_future() -> NodeConfig {
@@ -144,6 +146,11 @@ async fn find_tx_in_blocks(
             break;
         }
     }
+    tracing::debug!(
+        "Transaction {} not found in blocks 1..={}",
+        tx_id,
+        max_height
+    );
     None
 }
 
@@ -164,16 +171,20 @@ async fn wait_until_activation(node: &IrysNodeTest<IrysNodeCtx>, activation_time
 
 async fn wait_for_wallclock(activation_timestamp: u64) {
     const MAX_WAIT_SECS: u64 = 60;
+    const POST_ACTIVATION_BUFFER_MS: u64 = 500;
     let deadline = now_secs().saturating_add(MAX_WAIT_SECS);
     loop {
-        if now_secs() >= activation_timestamp {
+        let current = now_secs();
+        if current >= activation_timestamp {
             break;
         }
-        if now_secs() >= deadline {
+        if current >= deadline {
             panic!("Timed out waiting for wallclock to reach activation timestamp");
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
+    // Buffer to ensure node's internal state has caught up with wall clock
+    tokio::time::sleep(std::time::Duration::from_millis(POST_ACTIVATION_BUFFER_MS)).await;
 }
 
 #[cfg(test)]
@@ -303,8 +314,8 @@ mod boundary_crossing {
     async fn heavy_test_boundary_crossing_v1_behavior() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(BOUNDARY_TEST_DELAY_SECS);
-        let mut config = aurora_config_with_offset(BOUNDARY_TEST_DELAY_SECS as i64);
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let mut config = aurora_config_with_timestamp(aurora_activation);
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 
@@ -316,6 +327,13 @@ mod boundary_crossing {
         assert!(result_before.is_ok(), "V1 should be accepted before Aurora");
 
         wait_until_activation(&node, aurora_activation).await;
+
+        // Verify the pre-activation V1 tx was actually mined
+        let found_height = find_tx_in_blocks(&node, &v1_before.id(), MAX_BLOCKS_TO_SEARCH).await;
+        assert!(
+            found_height.is_some(),
+            "V1 submitted before activation should be mined in a pre-activation block"
+        );
 
         let v1_after = create_stake_tx(&node, &signer2, TxVersion::V1).await;
         let result_after = node.post_commitment_tx(&v1_after).await;
@@ -373,12 +391,16 @@ mod configuration {
 mod edge_cases {
     use super::*;
 
+    /// V1 transactions in the mempool before Aurora activation must NOT be mined after
+    /// activation. Block producers must filter out invalid versions based on block timestamp,
+    /// and validators must reject blocks containing V1 transactions post-activation.
+    /// This ensures consensus - all nodes agree on block validity.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_v1_in_mempool_before_activation_mined_after() -> eyre::Result<()> {
+    async fn heavy_test_v1_in_mempool_before_activation_filtered_after() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(EDGE_CASE_DELAY_SECS);
-        let mut config = aurora_config_with_offset(EDGE_CASE_DELAY_SECS as i64);
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 
@@ -390,16 +412,20 @@ mod edge_cases {
             result.err()
         );
 
-        wait_until_activation(&node, aurora_activation).await;
+        // Wait for wall clock to reach activation WITHOUT mining blocks
+        // This ensures the V1 tx stays in mempool until after activation
+        wait_for_wallclock(aurora_activation).await;
+
+        // Now mine blocks - these are all post-activation blocks
+        // The V1 tx should be filtered out by the block producer
+        node.mine_blocks(3).await?;
 
         let found_height = find_tx_in_blocks(&node, &v1_tx.id(), MAX_BLOCKS_TO_SEARCH).await;
         assert!(
-            found_height.is_some(),
-            "V1 tx should be mined (was in mempool before activation)"
+            found_height.is_none(),
+            "V1 tx must NOT be mined after activation (consensus requirement)"
         );
-        if let Some(h) = found_height {
-            info!("V1 tx found in block {}", h);
-        }
+        info!("V1 tx correctly filtered out of post-activation blocks");
 
         node.stop().await;
         Ok(())
@@ -409,8 +435,8 @@ mod edge_cases {
     async fn heavy_test_v2_accepted_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(EDGE_CASE_DELAY_SECS);
-        let mut config = aurora_config_with_offset(EDGE_CASE_DELAY_SECS as i64);
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 
@@ -440,8 +466,8 @@ mod edge_cases {
     async fn heavy_test_v1_rejected_at_exact_activation_boundary() -> eyre::Result<()> {
         initialize_tracing();
 
-        let aurora_activation = now_secs().saturating_add(EDGE_CASE_DELAY_SECS);
-        let mut config = aurora_config_with_offset(EDGE_CASE_DELAY_SECS as i64);
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let mut config = aurora_config_with_timestamp(aurora_activation);
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 

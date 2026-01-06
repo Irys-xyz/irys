@@ -7,11 +7,6 @@ use awc::http::StatusCode;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_types::{CommitmentTransaction, UnixTimestamp, VersionDiscriminant as _};
 
-/// Handles the HTTP POST request for adding a transaction to the mempool.
-/// This function takes in a JSON payload of a `CommitmentTransaction` type,
-/// encapsulates it into a `CommitmentTxIngressMessage` for further processing by the
-/// mempool actor, and manages error handling based on the results of message
-/// delivery and transaction validation.
 pub async fn post_commitment_tx(
     state: web::Data<ApiState>,
     body: Json<CommitmentTransaction>,
@@ -21,14 +16,20 @@ pub async fn post_commitment_tx(
     let now = UnixTimestamp::now()
         .map_err(|_| ApiError::from(("System time error", StatusCode::INTERNAL_SERVER_ERROR)))?;
 
-    if let Some(aurora) = state.config.consensus.hardforks.aurora_at(now) {
-        let version = tx.version();
-        if version < aurora.minimum_commitment_tx_version {
-            return Err(ApiError::InvalidTransactionVersion {
-                version,
-                minimum: aurora.minimum_commitment_tx_version,
-            });
-        }
+    let hardforks = &state.config.consensus.hardforks;
+    if !hardforks.is_commitment_version_valid(tx.version(), now) {
+        let minimum = hardforks
+            .minimum_commitment_version_at(now)
+            .ok_or_else(|| {
+                ApiError::from((
+                    "Internal configuration error",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                ))
+            })?;
+        return Err(ApiError::InvalidTransactionVersion {
+            version: tx.version(),
+            minimum,
+        });
     }
 
     process_commitment_transaction(tx, state).await
@@ -132,6 +133,12 @@ async fn process_commitment_transaction(
                     StatusCode::BAD_REQUEST,
                 )))
             }
+            TxIngressError::InvalidVersion { version, minimum } => Err(ApiError::from((
+                format!(
+                    "Transaction version {version} is below minimum required version {minimum}"
+                ),
+                StatusCode::BAD_REQUEST,
+            ))),
         };
     }
 

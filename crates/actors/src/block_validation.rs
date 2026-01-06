@@ -36,7 +36,7 @@ use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
 use irys_types::{BlockHash, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
-use irys_types::{CommitmentType, IrysTransactionCommon};
+use irys_types::{CommitmentType, IrysTransactionCommon, VersionDiscriminant as _};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -249,6 +249,15 @@ pub enum PreValidationError {
     #[error("Invalid signature for transaction {0}")]
     InvalidTransactionSignature(IrysTransactionId),
 
+    /// Commitment transaction version is below minimum required after hardfork activation
+    #[error("Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}")]
+    CommitmentVersionInvalid {
+        tx_id: H256,
+        position: usize,
+        version: u8,
+        minimum: u8,
+    },
+
     /// Commitment transactions provided but no commitment ledger in block header
     #[error("Commitment transactions provided but no commitment ledger in block header")]
     UnexpectedCommitmentTransactions,
@@ -303,6 +312,15 @@ pub enum ValidationError {
         tx_id: H256,
         position: usize,
         reason: String,
+    },
+
+    /// Commitment transaction version is below minimum required after hardfork activation
+    #[error("Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}")]
+    CommitmentVersionInvalid {
+        tx_id: H256,
+        position: usize,
+        version: u8,
+        minimum: u8,
     },
 
     /// Commitment ordering validation failed
@@ -677,12 +695,42 @@ pub async fn prevalidate_block(
             block.height = ?block.height,
             "commitment_transactions_valid",
         );
+
+        // Validate commitment transaction versions against hardfork rules
+        if let Some((tx_id, position, version, minimum)) = find_invalid_commitment_version(
+            &config.consensus,
+            commitment_txs,
+            block.timestamp_secs(),
+        ) {
+            return Err(PreValidationError::CommitmentVersionInvalid {
+                tx_id,
+                position,
+                version,
+                minimum,
+            });
+        }
     } else if !commitment_txs.is_empty() {
         // Commitment transactions provided but no commitment ledger in block header
         return Err(PreValidationError::UnexpectedCommitmentTransactions);
     }
 
     Ok(())
+}
+
+/// Finds the first commitment transaction with an invalid version according to hardfork rules.
+/// Returns `Some((tx_id, position, version, minimum))` if an invalid tx is found, `None` if all are valid.
+fn find_invalid_commitment_version(
+    config: &ConsensusConfig,
+    commitment_txs: &[CommitmentTransaction],
+    timestamp: UnixTimestamp,
+) -> Option<(H256, usize, u8, u8)> {
+    let min_version = config.hardforks.minimum_commitment_version_at(timestamp)?;
+    for (idx, tx) in commitment_txs.iter().enumerate() {
+        if tx.version() < min_version {
+            return Some((tx.id(), idx, tx.version(), min_version));
+        }
+    }
+    None
 }
 
 /// Validate transactions against expected IDs from the block header.
@@ -1665,6 +1713,23 @@ pub async fn commitment_txs_are_valid(
     block_tree_guard: &BlockTreeReadGuard,
     commitment_txs: &[CommitmentTransaction],
 ) -> Result<(), ValidationError> {
+    // Validate commitment transaction versions against hardfork rules
+    let block_timestamp = block.timestamp_secs();
+    if let Some((tx_id, position, version, minimum)) =
+        find_invalid_commitment_version(&config.consensus, commitment_txs, block_timestamp)
+    {
+        error!(
+            "Commitment transaction {} at position {} has version {}, minimum is {}",
+            tx_id, position, version, minimum
+        );
+        return Err(ValidationError::CommitmentVersionInvalid {
+            tx_id,
+            position,
+            version,
+            minimum,
+        });
+    }
+
     // Validate that all commitment transactions have correct values
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
@@ -1707,8 +1772,12 @@ pub async fn commitment_txs_are_valid(
             block.height
         );
 
-        // Get expected commitments from parent's snapshot
-        let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        // Get expected commitments from parent's snapshot, filtering by version if hardfork active
+        let mut expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
+        config
+            .consensus
+            .hardforks
+            .filter_commitments_by_version(&mut expected_commitments, block_timestamp);
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in commitment_txs

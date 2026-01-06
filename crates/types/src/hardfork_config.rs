@@ -1,6 +1,6 @@
 //! Configurable hardfork parameters.
 
-use crate::UnixTimestamp;
+use crate::{UnixTimestamp, VersionDiscriminant};
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
@@ -45,8 +45,6 @@ pub struct NextNameTBD {
     pub number_of_ingress_proofs_from_assignees: u64,
 }
 
-/// Aurora deprecates V1 Commitment Transactions due to nonstandard RLP encoding
-/// that caused signature errors with other language implementations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Aurora {
     pub activation_timestamp: UnixTimestamp,
@@ -91,6 +89,34 @@ impl IrysHardforkConfig {
         self.aurora
             .as_ref()
             .filter(|f| timestamp >= f.activation_timestamp)
+    }
+
+    /// Check if a commitment transaction version is valid at a given timestamp.
+    /// Returns true if no hardfork is active or if version meets minimum requirement.
+    #[must_use]
+    pub fn is_commitment_version_valid(&self, version: u8, timestamp: UnixTimestamp) -> bool {
+        self.aurora_at(timestamp)
+            .is_none_or(|aurora| version >= aurora.minimum_commitment_tx_version)
+    }
+
+    /// Get the minimum required commitment transaction version at a given timestamp.
+    /// Returns None if no version requirement is active.
+    #[must_use]
+    pub fn minimum_commitment_version_at(&self, timestamp: UnixTimestamp) -> Option<u8> {
+        self.aurora_at(timestamp)
+            .map(|aurora| aurora.minimum_commitment_tx_version)
+    }
+
+    /// Filter commitment transactions by version based on hardfork rules.
+    /// Removes transactions that don't meet the minimum version requirement at the given timestamp.
+    pub fn filter_commitments_by_version<T: VersionDiscriminant>(
+        &self,
+        commitments: &mut Vec<T>,
+        timestamp: UnixTimestamp,
+    ) {
+        if let Some(min_version) = self.minimum_commitment_version_at(timestamp) {
+            commitments.retain(|tx| tx.version() >= min_version);
+        }
     }
 }
 
@@ -342,6 +368,88 @@ mod tests {
             } else {
                 prop_assert!(version_accepted);
             }
+        }
+    }
+
+    mod commitment_version_helpers {
+        use super::*;
+        use rstest::rstest;
+
+        fn config_with_aurora(activation_secs: u64, min_version: u8) -> IrysHardforkConfig {
+            IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+                    minimum_commitment_tx_version: min_version,
+                }),
+            }
+        }
+
+        fn config_without_aurora() -> IrysHardforkConfig {
+            IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: None,
+            }
+        }
+
+        #[rstest]
+        #[case::before_activation_v1_valid(999, 1, true)]
+        #[case::before_activation_v2_valid(999, 2, true)]
+        #[case::at_activation_v1_invalid(1000, 1, false)]
+        #[case::at_activation_v2_valid(1000, 2, true)]
+        #[case::after_activation_v1_invalid(1001, 1, false)]
+        #[case::after_activation_v2_valid(1001, 2, true)]
+        #[case::after_activation_v3_valid(1001, 3, true)]
+        fn test_is_commitment_version_valid(
+            #[case] timestamp_secs: u64,
+            #[case] version: u8,
+            #[case] expected_valid: bool,
+        ) {
+            let config = config_with_aurora(1000, 2);
+            assert_eq!(
+                config
+                    .is_commitment_version_valid(version, UnixTimestamp::from_secs(timestamp_secs)),
+                expected_valid
+            );
+        }
+
+        #[rstest]
+        #[case::v1_always_valid_without_aurora(0, 1, true)]
+        #[case::v1_valid_at_max_time(u64::MAX, 1, true)]
+        fn test_is_commitment_version_valid_no_aurora(
+            #[case] timestamp_secs: u64,
+            #[case] version: u8,
+            #[case] expected_valid: bool,
+        ) {
+            let config = config_without_aurora();
+            assert_eq!(
+                config
+                    .is_commitment_version_valid(version, UnixTimestamp::from_secs(timestamp_secs)),
+                expected_valid
+            );
+        }
+
+        #[rstest]
+        #[case::before_activation_no_minimum(999, None)]
+        #[case::at_activation_minimum_2(1000, Some(2))]
+        #[case::after_activation_minimum_2(1001, Some(2))]
+        fn test_minimum_commitment_version_at(
+            #[case] timestamp_secs: u64,
+            #[case] expected: Option<u8>,
+        ) {
+            let config = config_with_aurora(1000, 2);
+            assert_eq!(
+                config.minimum_commitment_version_at(UnixTimestamp::from_secs(timestamp_secs)),
+                expected
+            );
         }
     }
 }

@@ -515,7 +515,9 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
+        let mempool_bundle = self
+            .get_mempool_txs(&prev_block_header, current_timestamp)
+            .await?;
 
         let block_reward = self.block_reward(&prev_block_header)?;
 
@@ -1334,6 +1336,7 @@ pub trait BlockProdStrategy {
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
+        block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxsBundle> {
         // Fetch mempool once
         let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
@@ -1371,9 +1374,17 @@ pub trait BlockProdStrategy {
                 &self.inner().config.consensus,
             )?;
 
+        // Filter epoch commitments by version if hardfork is active. Use the block's timestamp
+        let mut commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
+        self.inner()
+            .config
+            .consensus
+            .hardforks
+            .filter_commitments_by_version(&mut commitment_txs, block_timestamp.to_secs());
+
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user
-            commitment_txs: parent_commitment_snapshot.get_epoch_commitments(),
+            commitment_txs,
             commitment_txs_to_bill: vec![],
             submit_txs: mempool_txs.submit_tx,
             publish_txs: mempool_txs.publish_tx,
