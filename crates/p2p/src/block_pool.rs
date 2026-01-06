@@ -1588,12 +1588,10 @@ mod tests {
         let commitment_tx_id1 = H256::repeat_byte(0x31);
 
         // Create block header with specific transaction ordering
-        let mut header = IrysBlockHeaderV1::default();
-        header.block_hash = BlockHash::repeat_byte(0xAA);
-        header.height = 50;
-
-        // Setup data ledgers with specific order - NOTE: Publish=0, Submit=1
-        header.data_ledgers = vec![
+        let header = IrysBlockHeaderV1 {
+            block_hash: BlockHash::repeat_byte(0xAA),
+            height: 50,
+            data_ledgers: vec![
             irys_types::DataTransactionLedger {
                 ledger_id: DataLedger::Publish as u32, // Index 0
                 tx_root: H256::zero(),
@@ -1612,13 +1610,13 @@ mod tests {
                 proofs: None,
                 required_proof_count: None,
             },
-        ];
-
-        // Setup system ledger with commitment transaction
-        header.system_ledgers = vec![SystemTransactionLedger {
-            ledger_id: 0, // SystemLedger::Commitment
-            tx_ids: irys_types::H256List(vec![commitment_tx_id1]),
-        }];
+        ],
+            system_ledgers: vec![SystemTransactionLedger {
+                ledger_id: 0, // SystemLedger::Commitment
+                tx_ids: irys_types::H256List(vec![commitment_tx_id1]),
+            }],
+            ..Default::default()
+        };
 
         let header = IrysBlockHeader::V1(header);
 
@@ -1638,8 +1636,10 @@ mod tests {
             }),
         ];
 
-        let mut commitment_tx = CommitmentTransactionV1::default();
-        commitment_tx.id = commitment_tx_id1;
+        let commitment_tx = CommitmentTransactionV1 {
+            id: commitment_tx_id1,
+            ..Default::default()
+        };
         let commitment_txs = vec![CommitmentTransaction::V1(commitment_tx)];
 
         // Execute ordering function
@@ -1669,13 +1669,12 @@ mod tests {
         let submit_tx_id2 = H256::repeat_byte(0x12); // This will be missing from body
 
         // Create block header expecting two submit transactions
-        let mut header = IrysBlockHeaderV1::default();
-        header.block_hash = BlockHash::repeat_byte(0xBB);
-        header.height = 51;
-
-        // Only include Submit ledger at correct index (1)
-        // Need to have Publish at index 0 (even if empty) since Submit is at index 1
-        header.data_ledgers = vec![
+        let header = IrysBlockHeaderV1 {
+            block_hash: BlockHash::repeat_byte(0xBB),
+            height: 51,
+            // Only include Submit ledger at correct index (1)
+            // Need to have Publish at index 0 (even if empty) since Submit is at index 1
+            data_ledgers: vec![
             irys_types::DataTransactionLedger {
                 ledger_id: DataLedger::Publish as u32,
                 tx_root: H256::zero(),
@@ -1694,9 +1693,10 @@ mod tests {
                 proofs: None,
                 required_proof_count: None,
             },
-        ];
-
-        header.system_ledgers = vec![];
+        ],
+            system_ledgers: vec![],
+            ..Default::default()
+        };
 
         let header = IrysBlockHeader::V1(header);
 
@@ -1743,12 +1743,11 @@ mod tests {
         let tx_id1 = H256::repeat_byte(0x13);
 
         // Create block header expecting transaction in Submit ledger
-        let mut header = IrysBlockHeaderV1::default();
-        header.block_hash = BlockHash::repeat_byte(0xCC);
-        header.height = 52;
-
-        // Need Publish at index 0 (empty) and Submit at index 1
-        header.data_ledgers = vec![
+        let header = IrysBlockHeaderV1 {
+            block_hash: BlockHash::repeat_byte(0xCC),
+            height: 52,
+            // Need Publish at index 0 (empty) and Submit at index 1
+            data_ledgers: vec![
             irys_types::DataTransactionLedger {
                 ledger_id: DataLedger::Publish as u32,
                 tx_root: H256::zero(),
@@ -1767,9 +1766,10 @@ mod tests {
                 proofs: None,
                 required_proof_count: None,
             },
-        ];
-
-        header.system_ledgers = vec![];
+        ],
+            system_ledgers: vec![],
+            ..Default::default()
+        };
 
         let header = IrysBlockHeader::V1(header);
 
@@ -1816,24 +1816,26 @@ mod tests {
         let commitment_tx_id2 = H256::repeat_byte(0x42); // This will be missing
 
         // Create block header expecting two commitment transactions
-        let mut header = IrysBlockHeaderV1::default();
-        header.block_hash = BlockHash::repeat_byte(0xDD);
-        header.height = 53;
-
-        header.data_ledgers = vec![];
-
-        header.system_ledgers = vec![SystemTransactionLedger {
-            ledger_id: 0, // SystemLedger::Commitment
-            tx_ids: irys_types::H256List(vec![commitment_tx_id1, commitment_tx_id2]),
-        }];
+        let header = IrysBlockHeaderV1 {
+            block_hash: BlockHash::repeat_byte(0xDD),
+            height: 53,
+            data_ledgers: vec![],
+            system_ledgers: vec![SystemTransactionLedger {
+                ledger_id: 0, // SystemLedger::Commitment
+                tx_ids: irys_types::H256List(vec![commitment_tx_id1, commitment_tx_id2]),
+            }],
+            ..Default::default()
+        };
 
         let header = IrysBlockHeader::V1(header);
 
         // Create body with only ONE commitment transaction
         let data_txs = vec![];
 
-        let mut commitment_tx = CommitmentTransactionV1::default();
-        commitment_tx.id = commitment_tx_id1;
+        let commitment_tx = CommitmentTransactionV1 {
+            id: commitment_tx_id1,
+            ..Default::default()
+        };
         let commitment_txs = vec![CommitmentTransaction::V1(commitment_tx)];
 
         // Execute ordering function - should return error
@@ -1871,11 +1873,10 @@ mod tests {
         let dual_tx_id = H256::repeat_byte(0x77);
 
         // Create block header with transaction in BOTH ledgers (Publish at index 0, Submit at index 1)
-        let mut header = IrysBlockHeaderV1::default();
-        header.block_hash = BlockHash::repeat_byte(0xEE);
-        header.height = 54;
-
-        header.data_ledgers = vec![
+        let header = IrysBlockHeaderV1 {
+            block_hash: BlockHash::repeat_byte(0xEE),
+            height: 54,
+            data_ledgers: vec![
             irys_types::DataTransactionLedger {
                 ledger_id: DataLedger::Publish as u32,
                 tx_root: H256::zero(),
@@ -1894,9 +1895,10 @@ mod tests {
                 proofs: None,
                 required_proof_count: None,
             },
-        ];
-
-        header.system_ledgers = vec![];
+        ],
+            system_ledgers: vec![],
+            ..Default::default()
+        };
 
         let header = IrysBlockHeader::V1(header);
 
