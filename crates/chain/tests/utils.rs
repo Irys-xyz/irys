@@ -2374,9 +2374,9 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.config.node_config.peer_address().gossip
     }
 
-    // Build a signed VersionRequest describing this node
-    pub fn build_version_request(&self) -> HandshakeRequest {
-        let mut vr = HandshakeRequest {
+    // Build a signed HandshakeRequest describing this node
+    pub fn build_handshake_request(&self) -> HandshakeRequest {
+        let mut handshake = HandshakeRequest {
             chain_id: self.node_ctx.config.consensus.chain_id,
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
@@ -2385,14 +2385,14 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .config
             .irys_signer()
-            .sign_p2p_handshake(&mut vr)
+            .sign_p2p_handshake(&mut handshake)
             .expect("sign p2p handshake");
-        vr
+        handshake
     }
 
-    // Announce this node to another node (HTTP POST /v1/version)
+    // Announce this node to another node via gossip handshake (POST /gossip/v2/handshake)
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
-        let vr = self.build_version_request();
+        let vr = self.build_handshake_request();
         self.get_gossip_client()
             .post_handshake(dst.get_gossip_addr(), vr)
             .await?;

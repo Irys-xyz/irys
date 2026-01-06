@@ -1275,15 +1275,18 @@ pub(crate) fn order_transactions_for_block(
     use std::collections::HashMap;
 
     // Extract required IDs from block header (preserving order)
+    // Use ledger_id-based lookup to avoid relying on vector ordering
     let submit_ids: Vec<H256> = block_header
         .data_ledgers
-        .get(DataLedger::Submit as usize)
+        .iter()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
         .map(|l| l.tx_ids.0.clone())
         .unwrap_or_default();
 
     let publish_ids: Vec<H256> = block_header
         .data_ledgers
-        .get(DataLedger::Publish as usize)
+        .iter()
+        .find(|l| l.ledger_id == DataLedger::Publish as u32)
         .map(|l| l.tx_ids.0.clone())
         .unwrap_or_default();
 
