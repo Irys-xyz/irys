@@ -566,30 +566,41 @@ where
             header
         } else {
             let mut fetched_header = None;
-            let mut last_error = None;
+            let mut failed_attempts: Vec<(IrysAddress, GossipError)> = Vec::new();
 
-            for _ in 1..=HEADER_AND_BODY_RETRIES {
+            for attempt in 1..=HEADER_AND_BODY_RETRIES {
                 match self.pull_block_header(block_hash, false).await {
                     Ok((source, header)) => {
                         if !header.is_signature_valid() {
                             warn!(
-                                "Node: {}: Block {} fetched from {} has an invalid signature",
-                                self.gossip_client.mining_address, header.block_hash, source
+                                "Node: {}: Block {} fetched from {} has an invalid signature (attempt {}/{})",
+                                self.gossip_client.mining_address, header.block_hash, source, attempt, HEADER_AND_BODY_RETRIES
                             );
+                            let error =
+                                GossipError::InvalidData(InvalidDataError::InvalidBlockSignature);
                             self.peer_list.decrease_peer_score(
                                 &source,
                                 ScoreDecreaseReason::BogusData("Invalid block signature".into()),
                             );
-                            last_error = Some(GossipError::InvalidData(
-                                InvalidDataError::InvalidBlockSignature,
-                            ));
+                            failed_attempts.push((source, error));
                             continue;
                         }
                         fetched_header = Some(header);
                         break;
                     }
                     Err(e) => {
-                        last_error = Some(e);
+                        // Note: pull_block_header doesn't return the source on error,
+                        // but we still record the error for better diagnostics
+                        debug!(
+                            "Node {}: Failed to pull block header for {} (attempt {}/{}): {}",
+                            self.gossip_client.mining_address,
+                            block_hash,
+                            attempt,
+                            HEADER_AND_BODY_RETRIES,
+                            e
+                        );
+                        // Use a sentinel address to indicate the source wasn't determined
+                        failed_attempts.push((IrysAddress::default(), e));
                     }
                 }
             }
@@ -597,11 +608,30 @@ where
             match fetched_header {
                 Some(h) => h,
                 None => {
-                    return Err(last_error.unwrap_or_else(|| {
-                        GossipError::Internal(InternalGossipError::Unknown(
-                            "Failed to pull block header".to_string(),
-                        ))
-                    }))
+                    // Aggregate failure information for detailed error reporting
+                    let failure_summary = if !failed_attempts.is_empty() {
+                        let mut summary = format!(
+                            "Failed to pull block header after {} attempts: ",
+                            failed_attempts.len()
+                        );
+                        for (idx, (source, err)) in failed_attempts.iter().enumerate() {
+                            if source != &IrysAddress::default() {
+                                summary.push_str(&format!("[Peer {}: {}]", source, err));
+                            } else {
+                                summary.push_str(&format!("[Unknown peer: {}]", err));
+                            }
+                            if idx < failed_attempts.len() - 1 {
+                                summary.push_str(", ");
+                            }
+                        }
+                        summary
+                    } else {
+                        "Failed to pull block header".to_string()
+                    };
+
+                    return Err(GossipError::Internal(InternalGossipError::Unknown(
+                        failure_summary,
+                    )));
                 }
             }
         };
@@ -1110,7 +1140,7 @@ where
 
         // Pre-compute Arc once to avoid cloning header on each retry
         let header_arc = Arc::new(header.clone());
-        let mut last_error = None;
+        let mut failed_attempts: Vec<(IrysAddress, GossipError)> = Vec::new();
 
         for attempt in 1..=HEADER_AND_BODY_RETRIES {
             match self
@@ -1137,6 +1167,9 @@ where
                                 self.gossip_client.mining_address, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES
                             );
 
+                            let error = GossipError::InvalidData(
+                                InvalidDataError::BlockBodyTransactionsMismatch,
+                            );
                             self.peer_list.decrease_peer_score(
                                 &source_address,
                                 ScoreDecreaseReason::BogusData(
@@ -1148,32 +1181,62 @@ where
                                 source_address
                             );
 
-                            last_error = Some(GossipError::InvalidData(
-                                InvalidDataError::BlockBodyTransactionsMismatch,
-                            ));
+                            failed_attempts.push((source_address, error));
                         }
                         Err(e) => {
                             warn!(
                                 "Node {}: Error checking if block body matches header for block {} height {}: {} (attempt {}/{})",
                                 self.gossip_client.mining_address, block_hash, header.height, e, attempt, HEADER_AND_BODY_RETRIES
                             );
-                            last_error = Some(GossipError::Internal(InternalGossipError::Unknown(
+                            let error = GossipError::Internal(InternalGossipError::Unknown(
                                 format!("Error checking block body match: {}", e),
-                            )));
+                            ));
+                            // The source_address is available here, so record it
+                            failed_attempts.push((source_address, error));
                         }
                     }
                 }
                 Err(e) => {
-                    last_error = Some(GossipError::from(e));
+                    let error = GossipError::from(e);
+                    debug!(
+                        "Node {}: Failed to pull block body for {} height {} (attempt {}/{}): {}",
+                        self.gossip_client.mining_address,
+                        block_hash,
+                        header.height,
+                        attempt,
+                        HEADER_AND_BODY_RETRIES,
+                        error
+                    );
+                    // Use a sentinel address to indicate the source wasn't determined
+                    failed_attempts.push((IrysAddress::default(), error));
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            GossipError::Internal(InternalGossipError::Unknown(
-                "Failed to pull block body".to_string(),
-            ))
-        }))
+        // Aggregate failure information for detailed error reporting
+        let failure_summary = if !failed_attempts.is_empty() {
+            let mut summary = format!(
+                "Failed to pull block body after {} attempts: ",
+                failed_attempts.len()
+            );
+            for (idx, (source, err)) in failed_attempts.iter().enumerate() {
+                if source != &IrysAddress::default() {
+                    summary.push_str(&format!("[Peer {}: {}]", source, err));
+                } else {
+                    summary.push_str(&format!("[Unknown peer: {}]", err));
+                }
+                if idx < failed_attempts.len() - 1 {
+                    summary.push_str(", ");
+                }
+            }
+            summary
+        } else {
+            "Failed to pull block body".to_string()
+        };
+
+        Err(GossipError::Internal(InternalGossipError::Unknown(
+            failure_summary,
+        )))
     }
 }
 

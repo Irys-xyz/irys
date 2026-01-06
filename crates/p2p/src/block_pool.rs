@@ -699,9 +699,12 @@ where
                 block_body.commitment_transactions.clone(),
             ) {
                 Ok(txs) => txs,
-                Err(e @ BlockPoolError::Critical(
-                    CriticalBlockPoolError::HeaderBodyMismatch { block_hash, .. },
-                )) => {
+                Err(
+                    e @ BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
+                        block_hash,
+                        ..
+                    }),
+                ) => {
                     error!(
                         "Block pool: Header/body mismatch for orphan block {:?}. Removing from cache.",
                         block_hash
@@ -862,9 +865,12 @@ where
             block_body.commitment_transactions.clone(),
         ) {
             Ok(txs) => txs,
-            Err(e @ BlockPoolError::Critical(
-                CriticalBlockPoolError::HeaderBodyMismatch { block_hash, .. },
-            )) => {
+            Err(
+                e @ BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
+                    block_hash,
+                    ..
+                }),
+            ) => {
                 error!(
                     "Block pool: Header/body mismatch for block {:?}. Removing from cache.",
                     block_hash
