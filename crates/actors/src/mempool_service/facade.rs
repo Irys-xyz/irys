@@ -61,6 +61,14 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         new_whitelist: HashSet<IrysAddress>,
     ) -> eyre::Result<()>;
 
+    /// Returns a read guard to the internal mempool state for multi-query flows.
+    ///
+    /// This method mirrors the facade pattern used by `handle_ingest_ingress_proof` and
+    /// `MempoolServiceMessage::GetReadGuard`. It is intended for internal/multi-query
+    /// flows where multiple sequential reads are required.
+    ///
+    /// **Important**: Callers must not hold the guard across long-running work.
+    /// Use only for short synchronous reads to avoid blocking other operations.
     async fn get_internal_read_guard(&self) -> MempoolReadGuard;
 }
 

@@ -819,8 +819,6 @@ mod tests {
             "expected no remainder after decoding without is_online byte"
         );
 
-        println!("{:?}", decoded);
-
         assert_eq!(decoded.reputation_score, item.reputation_score);
         assert_eq!(decoded.response_time, item.response_time);
         assert_eq!(decoded.address, item.address);

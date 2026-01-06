@@ -151,7 +151,7 @@ impl PeerNetworkServiceState {
         self.config
             .irys_signer()
             .sign_p2p_handshake(&mut handshake_request)
-            .expect("Failed to sign version request");
+            .expect("Failed to sign handshake request");
         handshake_request
     }
 }

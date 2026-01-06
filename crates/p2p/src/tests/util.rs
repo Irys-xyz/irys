@@ -811,8 +811,8 @@ async fn handle_get_data_v2(
                     .content_type("application/json")
                     .json(res)
             }
-            GossipDataRequestV2::BlockBody(header) => {
-                warn!("Block body request for hash {:?}", header.block_hash);
+            GossipDataRequestV2::BlockBody(block_hash) => {
+                warn!("Block body request for hash {:?}", block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
                     .json(GossipResponse::Accepted(false))

@@ -767,8 +767,8 @@ where
                 GossipDataRequestV2::Chunk(chunk_path_hash) => {
                     format!("chunk {:?}", chunk_path_hash)
                 }
-                GossipDataRequestV2::BlockBody(header) => {
-                    format!("block body {:?}", header.block_hash)
+                GossipDataRequestV2::BlockBody(block_hash) => {
+                    format!("block body {:?}", block_hash)
                 }
                 GossipDataRequestV2::Transaction(hash) => format!("transaction {:?}", hash),
             };

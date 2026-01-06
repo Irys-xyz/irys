@@ -882,8 +882,7 @@ where
                     None => Ok(false),
                 }
             }
-            GossipDataRequestV2::BlockBody(header) => {
-                let block_hash = header.block_hash;
+            GossipDataRequestV2::BlockBody(block_hash) => {
                 debug!(
                     "Node {}: handling block body request for block {:?}",
                     self.gossip_client.mining_address, block_hash
@@ -986,8 +985,7 @@ where
                 }
                 Ok(maybe_block.map(GossipDataV2::BlockHeader))
             }
-            GossipDataRequestV2::BlockBody(header) => {
-                let block_hash = header.block_hash;
+            GossipDataRequestV2::BlockBody(block_hash) => {
                 let maybe_block_body =
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
                 Ok(maybe_block_body.map(GossipDataV2::BlockBody))

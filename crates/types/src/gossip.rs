@@ -94,16 +94,6 @@ pub mod v1 {
         IngressProof(IngressProof),
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub enum GossipData {
-        Chunk(UnpackedChunk),
-        Transaction(DataTransactionHeader),
-        CommitmentTransaction(CommitmentTransaction),
-        Block(Arc<IrysBlockHeader>),
-        ExecutionPayload(Block),
-        IngressProof(IngressProof),
-    }
-
     impl From<SealedBlock<Block>> for GossipDataV1 {
         fn from(sealed_block: SealedBlock<Block>) -> Self {
             Self::ExecutionPayload(sealed_block.into_block())
@@ -335,7 +325,7 @@ pub mod v2 {
     pub enum GossipDataRequestV2 {
         ExecutionPayload(B256),
         BlockHeader(BlockHash),
-        BlockBody(Arc<IrysBlockHeader>),
+        BlockBody(BlockHash),
         Chunk(ChunkPathHash),
         Transaction(H256),
     }
@@ -379,7 +369,7 @@ pub mod v2 {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             match self {
                 Self::BlockHeader(hash) => write!(f, "block header {hash:?}"),
-                Self::BlockBody(header) => write!(f, "block body {:?}", header.block_hash),
+                Self::BlockBody(block_hash) => write!(f, "block body {:?}", block_hash),
                 Self::ExecutionPayload(block_hash) => {
                     write!(f, "execution payload for block {block_hash:?}")
                 }

@@ -241,10 +241,14 @@ impl GossipClient {
         &self,
         peer: &(IrysAddress, PeerListItem),
         requested_data: GossipDataRequestV2,
+        fallback_header: Option<&IrysBlockHeader>,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
         if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
-            if let GossipDataRequestV2::BlockBody(ref header) = requested_data {
+            if let GossipDataRequestV2::BlockBody(_block_hash) = requested_data {
+                let header = fallback_header.expect(
+                    "BlockBody request must have fallback header for v1 peer compatibility",
+                );
                 return self
                     .pull_block_body_from_v1_peer(peer, header, peer_list)
                     .await;
@@ -905,8 +909,14 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        self.pull_data_from_network(data_request, use_trusted_peers_only, peer_list, Self::block)
-            .await
+        self.pull_data_from_network(
+            data_request,
+            None,
+            use_trusted_peers_only,
+            peer_list,
+            Self::block,
+        )
+        .await
     }
 
     pub async fn pull_block_body_from_network(
@@ -915,9 +925,10 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
     ) -> Result<(IrysAddress, Arc<BlockBody>), PeerNetworkError> {
-        let data_request = GossipDataRequestV2::BlockBody(header);
+        let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
         self.pull_data_from_network(
             data_request,
+            Some(&header),
             use_trusted_peers_only,
             peer_list,
             |gossip_data| match gossip_data {
@@ -940,6 +951,7 @@ impl GossipClient {
         let data_request = GossipDataRequestV2::ExecutionPayload(evm_payload_hash);
         self.pull_data_from_network(
             data_request,
+            None,
             use_trusted_peers_only,
             peer_list,
             Self::execution_payload,
@@ -956,6 +968,7 @@ impl GossipClient {
         let data_request = GossipDataRequestV2::Transaction(tx_id);
         self.pull_data_from_network(
             data_request,
+            None,
             use_trusted_peers_only,
             peer_list,
             Self::transaction,
@@ -973,7 +986,7 @@ impl GossipClient {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
         for attempt in 0..2 {
             match self
-                .pull_data_and_update_the_score(peer, data_request.clone(), peer_list)
+                .pull_data_and_update_the_score(peer, data_request.clone(), None, peer_list)
                 .await
             {
                 Ok(response) => match response {
@@ -1133,6 +1146,7 @@ impl GossipClient {
     pub async fn pull_data_from_network<T>(
         &self,
         data_request: GossipDataRequestV2,
+        fallback_header: Option<&IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
         map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
@@ -1178,9 +1192,10 @@ impl GossipClient {
                 let gc = self.clone();
                 let dr = data_request.clone();
                 let pl = peer_list;
+                let fh = fallback_header;
                 futs.push(async move {
                     let addr = peer.0;
-                    let res = gc.pull_data_and_update_the_score(&peer, dr, pl).await;
+                    let res = gc.pull_data_and_update_the_score(&peer, dr, fh, pl).await;
                     (addr, peer, res)
                 });
             }
@@ -1347,9 +1362,10 @@ impl GossipClient {
                 let gc = self.clone();
                 let dr = data_request.clone();
                 let pl = peer_list;
+                let fh = fallback_header;
                 retry_futs.push(async move {
                     let addr = peer.0;
-                    let res = gc.pull_data_and_update_the_score(peer, dr, pl).await;
+                    let res = gc.pull_data_and_update_the_score(peer, dr, fh, pl).await;
                     (addr, res)
                 });
             }
