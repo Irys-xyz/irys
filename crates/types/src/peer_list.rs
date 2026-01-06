@@ -563,7 +563,10 @@ mod tests {
                 gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 8080)),
                 api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 3000)),
                 execution: RethPeerInfo {
-                    peering_tcp_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(172, 16, 0, 1), 30303)),
+                    peering_tcp_addr: SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(172, 16, 0, 1),
+                        30303,
+                    )),
                     peer_id: reth_transaction_pool::PeerId::random(),
                 },
             },
