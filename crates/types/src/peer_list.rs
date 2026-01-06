@@ -277,6 +277,7 @@ impl Compact for PeerListItem {
         // - RethPeerInfo (variable size; see its Compact impl)
         // - u64 last_seen (8 bytes, BE)
         // - optional u8 is_online (1 byte). Decoder tolerates it being absent and defaults to false.
+        // - optional u32 protocol_version (4 bytes, BE). Decoder tolerates it being absent and defaults to ProtocolVersion::default().
         //
         // Decoding strategy:
         // - For the fixed-size prefix (score, response_time) we advance the buf slice in-place.
