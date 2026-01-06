@@ -895,32 +895,53 @@ impl PeerNetworkService {
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
-        let peer_protocol_version = gossip_client
-            .get_protocol_version(PeerAddress {
+        let peer_protocol_versions = gossip_client
+            .get_protocol_versions(PeerAddress {
                 gossip: gossip_address,
                 ..Default::default()
             })
             .await
             .map_err(|e| {
                 warn!(
-                    "Failed to get protocol version from gossip address {}: {}",
+                    "Failed to get protocol versions from gossip address {}: {}",
                     gossip_address, e
                 );
                 PeerListServiceError::PostVersionError(e.to_string())
             })?;
 
-        if !irys_types::ProtocolVersion::supported_versions_u32().contains(&peer_protocol_version) {
+        let our_supported_versions = irys_types::ProtocolVersion::supported_versions_u32();
+
+        // Find the intersection of supported versions
+        let mut common_versions: Vec<u32> = peer_protocol_versions
+            .iter()
+            .filter(|v| our_supported_versions.contains(v))
+            .copied()
+            .collect();
+
+        if common_versions.is_empty() {
             warn!(
-                "Peer at {} has unsupported protocol version {}",
-                gossip_address, peer_protocol_version
+                "Peer at {} has no compatible protocol versions. Peer supports: {:?}, We support: {:?}",
+                gossip_address, peer_protocol_versions, our_supported_versions
             );
             return Err(PeerListServiceError::PostVersionError(format!(
-                "Peer {} has an unsupported protocol version {}",
-                gossip_address, peer_protocol_version
+                "Peer {} has no compatible protocol versions",
+                gossip_address
             )));
         }
 
-        let protocol_version: irys_types::ProtocolVersion = peer_protocol_version.into();
+        // Use the highest common version
+        common_versions.sort_unstable();
+        let negotiated_protocol_version = *common_versions.last().unwrap();
+
+        debug!(
+            "Negotiated protocol version {} with peer {} (peer supports: {:?}, we support: {:?})",
+            negotiated_protocol_version,
+            gossip_address,
+            peer_protocol_versions,
+            our_supported_versions
+        );
+
+        let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
 
         if handshake_request.protocol_version != protocol_version {
             // Initiator intentionally adopts the peer's protocol version (rather than computing an intersection) as the protocol negotiation strategy

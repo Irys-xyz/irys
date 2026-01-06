@@ -23,6 +23,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
+/// Maximum number of protocol versions a peer can advertise to prevent DDoS attacks
+const MAX_PROTOCOL_VERSIONS: usize = 20;
+
 /// Response time threshold for fast responses (deserving extra reward)
 const FAST_RESPONSE_THRESHOLD: Duration = Duration::from_millis(500);
 
@@ -421,7 +424,10 @@ impl GossipClient {
         gossip_result
     }
 
-    pub async fn get_protocol_version(&self, peer: PeerAddress) -> Result<u32, GossipClientError> {
+    pub async fn get_protocol_versions(
+        &self,
+        peer: PeerAddress,
+    ) -> Result<Vec<u32>, GossipClientError> {
         let url = format!(
             "http://{}/gossip{}",
             peer.gossip,
@@ -443,9 +449,23 @@ impl GossipClient {
             ));
         }
 
-        response.json().await.map_err(|error| {
+        let versions: Vec<u32> = response.json().await.map_err(|error| {
             GossipClientError::GetJsonResponsePayload(peer.gossip.to_string(), error.to_string())
-        })
+        })?;
+
+        // Reject peers advertising too many versions to prevent DDoS attacks
+        if versions.len() > MAX_PROTOCOL_VERSIONS {
+            return Err(GossipClientError::GetRequest(
+                peer.gossip.to_string(),
+                format!(
+                    "Peer returned {} protocol versions, exceeding maximum of {}",
+                    versions.len(),
+                    MAX_PROTOCOL_VERSIONS
+                ),
+            ));
+        }
+
+        Ok(versions)
     }
 
     pub async fn check_health(
@@ -2153,17 +2173,17 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn test_get_protocol_version() {
-            let server = MockHttpServer::new_with_response(200, "1", "application/json");
+        async fn test_get_protocol_versions() {
+            let server = MockHttpServer::new_with_response(200, "[1, 2]", "application/json");
             let fixture = TestFixture::new();
             let peer = create_peer_address("127.0.0.1", server.port());
 
-            let version = fixture
+            let versions = fixture
                 .client
-                .get_protocol_version(peer)
+                .get_protocol_versions(peer)
                 .await
-                .expect("to get version");
-            assert_eq!(version, 1);
+                .expect("to get versions");
+            assert_eq!(versions, vec![1, 2]);
         }
     }
 }

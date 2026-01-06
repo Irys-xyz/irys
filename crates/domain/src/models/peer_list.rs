@@ -825,6 +825,7 @@ impl PeerListDataInner {
                 existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
             existing_peer.last_seen = peer.last_seen;
             existing_peer.reputation_score = peer.reputation_score;
+            existing_peer.protocol_version = peer.protocol_version;
             if existing_peer.address != peer_address {
                 debug!(
                     "Peer address mismatch, updating from {:?} to {:?}",
@@ -1025,6 +1026,7 @@ impl PeerListDataInner {
                     let old_address = updated_peer.address;
                     updated_peer.last_seen = peer.last_seen;
                     updated_peer.reputation_score = peer.reputation_score;
+                    updated_peer.protocol_version = peer.protocol_version;
 
                     if old_address != peer_address {
                         updated_peer.address = peer_address;

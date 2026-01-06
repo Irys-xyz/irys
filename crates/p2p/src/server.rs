@@ -655,7 +655,7 @@ where
         reason = "Actix-web handler signature requires handlers to be async"
     )]
     async fn handle_protocol_version() -> HttpResponse {
-        HttpResponse::Ok().json(crate::gossip_client::GossipClient::CURRENT_PROTOCOL_VERSION)
+        HttpResponse::Ok().json(irys_types::ProtocolVersion::supported_versions_u32())
     }
 
     fn handle_invalid_data(
