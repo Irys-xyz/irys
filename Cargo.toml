@@ -532,4 +532,4 @@ default.extend-ignore-re = [
   "(#|//)\\s*spellchecker:ignore-next-line\\n.*",                      # disable the next line: spellchecker:ignore-next-line
 ]
 default.extend-words = { ratatui = "ratatui" }
-files.extend-exclude = ["ext/*", "fixtures/*", "**/*.json"]
+files.extend-exclude = ["ext/*", "fixtures/*", "**/fixtures/**/*.json"]
