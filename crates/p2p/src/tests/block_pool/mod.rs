@@ -188,7 +188,7 @@ async fn should_process_block() {
         .process_block(
             Arc::clone(&test_header),
             Arc::new(create_test_block_body(test_header.block_hash)),
-            false
+            false,
         )
         .await
         .expect("can't process block");
@@ -326,7 +326,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
                 pool.process_block(
                     Arc::new(block.clone()),
                     Arc::new(create_test_block_body(block.block_hash)),
-                    false
+                    false,
                 )
                 .await
                 .expect("to process block");
@@ -351,7 +351,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         .process_block(
             Arc::clone(&block3),
             Arc::new(create_test_block_body(block3.block_hash)),
-            false
+            false,
         )
         .await
         .expect("can't process block");
@@ -528,7 +528,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         .process_block(
             Arc::clone(&block3),
             Arc::new(create_test_block_body(block3.block_hash)),
-            false
+            false,
         )
         .await
         .expect("can't process block");
@@ -552,7 +552,7 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
         .process_block(
             Arc::clone(&block4),
             Arc::new(create_test_block_body(block4.block_hash)),
-            false
+            false,
         )
         .await
         .expect("can't process block");
@@ -648,7 +648,9 @@ async fn should_warn_about_mismatches_for_very_old_block() {
     let res = block_pool
         .process_block(
             Arc::new(header_building_on_very_old_block.clone()),
-            Arc::new(create_test_block_body(header_building_on_very_old_block.block_hash)),
+            Arc::new(create_test_block_body(
+                header_building_on_very_old_block.block_hash,
+            )),
             false,
         )
         .await;
@@ -800,7 +802,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
                     .process_block(
                         Arc::new(block.clone()),
                         Arc::new(create_test_block_body(block.block_hash)),
-                        false
+                        false,
                     )
                     .await;
                 if let Err(err) = res {
@@ -829,7 +831,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         .process_block(
             Arc::new(bogus_block.clone()),
             Arc::new(create_test_block_body(bogus_block.block_hash)),
-            false
+            false,
         )
         .await;
 
@@ -891,7 +893,7 @@ async fn should_not_fast_track_block_already_in_index() {
         .process_block(
             Arc::new(test_header.clone()),
             Arc::new(create_test_block_body(test_header.block_hash)),
-            true
+            true,
         )
         .await
         .expect_err("to have an error");

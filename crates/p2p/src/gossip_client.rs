@@ -158,7 +158,12 @@ impl GossipClient {
                 }
                 Err(err) => {
                     debug!("Failed to pull commitment tx {}: {:?}", tx_id, err);
-                return Ok(GossipResponse::Accepted(None));
+                    return Ok(GossipResponse::Accepted(None));
+                }
+            }
+        }
+
+        // Pull data transactions
         for tx_id in data_tx_ids {
             match self
                 .pull_transaction_from_peer(tx_id, peer, peer_list)
@@ -170,7 +175,12 @@ impl GossipClient {
                 }
                 Err(err) => {
                     debug!("Failed to pull data tx {}: {:?}", tx_id, err);
-                return Ok(GossipResponse::Accepted(None));
+                    return Ok(GossipResponse::Accepted(None));
+                }
+            }
+        }
+
+        let block_body = BlockBody {
             block_hash: header.block_hash,
             data_transactions,
             commitment_transactions,
