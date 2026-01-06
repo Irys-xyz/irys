@@ -163,7 +163,7 @@ impl CommitmentTransactionV2 {
         partition_hash: H256,
     ) -> Self {
         let count = provider.pledge_count(signer_address).await;
-        let value = Self::calculate_pledge_value_at_count(config, count.checked_sub(1).unwrap());
+        let value = Self::calculate_pledge_value_at_count(config, count.saturating_sub(1));
 
         Self {
             commitment_type: CommitmentTypeV2::Unpledge {
