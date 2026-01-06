@@ -2155,6 +2155,25 @@ impl AtomicMempoolState {
         cleared
     }
 
+    /// Atomically sets the promoted_height on a transaction in the mempool.
+    /// Returns the updated header if the tx was found, None otherwise.
+    /// This method holds the write lock for the entire operation to prevent race conditions.
+    pub async fn set_promoted_height(
+        &self,
+        txid: H256,
+        height: u64,
+    ) -> Option<DataTransactionHeader> {
+        let mut state = self.write().await;
+        let header = state.valid_submit_ledger_tx.get_mut(&txid)?;
+        if header.promoted_height.is_none() {
+            header.promoted_height = Some(height);
+        }
+        let result = header.clone();
+        tracing::debug!(tx.id = %txid, promoted_height = height, "Set promoted_height in mempool");
+        state.recent_valid_tx.put(txid, ());
+        Some(result)
+    }
+
     pub async fn put_recent_invalid(&self, tx_id: H256) {
         self.write().await.recent_invalid_tx.put(tx_id, ());
     }

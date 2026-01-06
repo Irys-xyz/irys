@@ -346,7 +346,7 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
 // The test deliberately proomotes the tx in a future EMA interval, meaning that
 // future price validations will always be invalid
 #[test_log::test(tokio::test)]
-async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn heavy3_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
