@@ -1273,6 +1273,37 @@ pub(crate) fn order_transactions_for_block(
         .filter_map(|id| commitment_txs_map.remove(id))
         .collect();
 
+    // Validate header/body consistency: check that resolved counts match expected counts
+    if submit_txs.len() != submit_ids.len() {
+        error!(
+            "Header/body mismatch in block {:?}: submit ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+            block_header.block_hash,
+            submit_ids.len(),
+            submit_txs.len(),
+            submit_ids.iter().filter(|id| !submit_txs.iter().any(|tx| &tx.id == *id)).collect::<Vec<_>>()
+        );
+    }
+
+    if publish_txs.len() != publish_ids.len() {
+        error!(
+            "Header/body mismatch in block {:?}: publish ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+            block_header.block_hash,
+            publish_ids.len(),
+            publish_txs.len(),
+            publish_ids.iter().filter(|id| !publish_txs.iter().any(|tx| &tx.id == *id)).collect::<Vec<_>>()
+        );
+    }
+
+    if commitment_txs.len() != commitment_ids.len() {
+        error!(
+            "Header/body mismatch in block {:?}: commitment ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+            block_header.block_hash,
+            commitment_ids.len(),
+            commitment_txs.len(),
+            commitment_ids.iter().filter(|id| !commitment_txs.iter().any(|tx| &tx.id() == *id)).collect::<Vec<_>>()
+        );
+    }
+
     BlockTransactions {
         commitment_txs,
         data_txs: HashMap::from([
