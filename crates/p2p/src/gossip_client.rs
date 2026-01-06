@@ -443,6 +443,16 @@ impl GossipClient {
             })?;
 
         if !response.status().is_success() {
+            // Very old V1 peers don't have the protocol versions endpoint.
+            // If we get a non-500 error (e.g., 404 Not Found), assume it's an old V1 peer.
+            if !response.status().is_server_error() {
+                debug!(
+                    "Peer {} doesn't have protocol versions endpoint, assuming V1",
+                    peer.gossip
+                );
+                return Ok(vec![1]);
+            }
+
             return Err(GossipClientError::GetRequest(
                 peer.gossip.to_string(),
                 response.status().to_string(),

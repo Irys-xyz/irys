@@ -893,33 +893,46 @@ where
                 let db = &self.block_pool.db;
 
                 // Try commitment txs first
-                if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
-                {
-                    if let Some(tx) = result.pop() {
-                        let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
-                        return Ok(true);
+                match get_commitment_tx_in_parallel(&vec, mempool_guard, db).await {
+                    Ok(mut result) => {
+                        if let Some(tx) = result.pop() {
+                            let data = Arc::new(GossipDataV2::CommitmentTransaction(tx));
+                            self.send_gossip_data(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &check_result,
+                            );
+                            return Ok(true);
+                        }
                     }
-                };
+                    Err(e) => {
+                        warn!(
+                            "Node {}: Failed to retrieve commitment tx {} for peer {}: {}",
+                            self.gossip_client.mining_address, tx_id, request.miner_address, e
+                        );
+                    }
+                }
 
                 // Try data txs
-                if let Ok(mut result) =
-                    get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
-                {
-                    if let Some(tx) = result.pop() {
-                        let data = Arc::new(GossipDataV2::Transaction(tx));
-                        self.send_gossip_data(
-                            (&request.miner_address, peer_info),
-                            data,
-                            &check_result,
-                        );
-                        return Ok(true);
+                match get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await {
+                    Ok(mut result) => {
+                        if let Some(tx) = result.pop() {
+                            let data = Arc::new(GossipDataV2::Transaction(tx));
+                            self.send_gossip_data(
+                                (&request.miner_address, peer_info),
+                                data,
+                                &check_result,
+                            );
+                            return Ok(true);
+                        }
                     }
-                };
+                    Err(e) => {
+                        warn!(
+                            "Node {}: Failed to retrieve data tx {} for peer {}: {}",
+                            self.gossip_client.mining_address, tx_id, request.miner_address, e
+                        );
+                    }
+                }
 
                 Ok(false)
             }
@@ -964,20 +977,33 @@ where
                 let mempool_guard = &self.block_pool.mempool_guard;
                 let db = &self.block_pool.db;
 
-                if let Ok(mut result) = get_commitment_tx_in_parallel(&vec, mempool_guard, db).await
-                {
-                    if let Some(tx) = result.pop() {
-                        return Ok(Some(GossipDataV2::CommitmentTransaction(tx)));
+                match get_commitment_tx_in_parallel(&vec, mempool_guard, db).await {
+                    Ok(mut result) => {
+                        if let Some(tx) = result.pop() {
+                            return Ok(Some(GossipDataV2::CommitmentTransaction(tx)));
+                        }
                     }
-                };
+                    Err(e) => {
+                        warn!(
+                            "Node {}: Failed to retrieve commitment tx {} for peer {}: {}",
+                            self.gossip_client.mining_address, tx_id, request.miner_address, e
+                        );
+                    }
+                }
 
-                if let Ok(mut result) =
-                    get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await
-                {
-                    if let Some(tx) = result.pop() {
-                        return Ok(Some(GossipDataV2::Transaction(tx)));
+                match get_data_tx_in_parallel(vec.clone(), mempool_guard, db).await {
+                    Ok(mut result) => {
+                        if let Some(tx) = result.pop() {
+                            return Ok(Some(GossipDataV2::Transaction(tx)));
+                        }
                     }
-                };
+                    Err(e) => {
+                        warn!(
+                            "Node {}: Failed to retrieve data tx {} for peer {}: {}",
+                            self.gossip_client.mining_address, tx_id, request.miner_address, e
+                        );
+                    }
+                }
 
                 Ok(None)
             }
@@ -1090,13 +1116,15 @@ where
             block_hash, header.height
         );
 
+        // Pre-compute Arc once to avoid cloning header on each retry
+        let header_arc = Arc::new(header.clone());
         let mut last_error = None;
 
         for attempt in 1..=HEADER_AND_BODY_RETRIES {
             match self
                 .gossip_client
                 .pull_block_body_from_network(
-                    Arc::new(header.clone()),
+                    Arc::clone(&header_arc),
                     use_trusted_peers_only,
                     &self.peer_list,
                 )
