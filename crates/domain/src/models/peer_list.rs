@@ -1580,7 +1580,7 @@ mod tests {
         // Update protocol version for unstaked peer to V2
         unstaked_peer.protocol_version = ProtocolVersion::V2;
         unstaked_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
-        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer, false);
 
         // Verify protocol_version updated in purgatory
         let unstaked_updated = peer_list.peer_by_mining_address(&unstaked_addr).unwrap();
@@ -1601,7 +1601,7 @@ mod tests {
 
         // Promote to persistent (staked)
         promo_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
-        peer_list.add_or_update_peer(promo_addr, promo_peer.clone(), true);
+        peer_list.add_or_update_peer(promo_addr, promo_peer, true);
 
         // Verify protocol_version preserved after promotion
         let promoted = peer_list.peer_by_mining_address(&promo_addr).unwrap();
