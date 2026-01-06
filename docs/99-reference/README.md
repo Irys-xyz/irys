@@ -37,6 +37,12 @@ Comprehensive documentation of all configuration options available for the Irys 
 - Default values and valid ranges
 - Performance tuning recommendations
 
+### [Tracing Guide](./05-tracing-guidelines.md)
+Conventions for adding tracing to functions in the Irys codebase.
+
+### [Authoring Hardforks](./06-authoring-hardforks.md)
+Outlines the steps involved to add a hardfork to the Irys codebase.
+
 ---
 
 ## Related Sections
