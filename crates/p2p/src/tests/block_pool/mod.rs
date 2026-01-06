@@ -36,6 +36,13 @@ fn create_test_config() -> Config {
     Config::new(node_config)
 }
 
+fn create_test_block_body(block_hash: irys_types::BlockHash) -> BlockBody {
+    BlockBody {
+        block_hash,
+        ..Default::default()
+    }
+}
+
 struct MockedServices {
     block_status_provider_mock: BlockStatusProvider,
     block_discovery_stub: BlockDiscoveryStub,
@@ -177,11 +184,12 @@ async fn should_process_block() {
 
     let test_header = Arc::new(test_header.clone());
 
-    let mut test_body = BlockBody::default();
-    test_body.block_hash = test_header.block_hash;
-
     service
-        .process_block(Arc::clone(&test_header), Arc::new(test_body), false)
+        .process_block(
+            Arc::clone(&test_header),
+            Arc::new(create_test_block_body(test_header.block_hash)),
+            false
+        )
         .await
         .expect("can't process block");
 
@@ -315,11 +323,13 @@ async fn should_process_block_with_intermediate_block_in_api() {
             debug!("Receive get block: {:?}", block_hash);
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let mut block_body = BlockBody::default();
-                block_body.block_hash = block.block_hash;
-                pool.process_block(Arc::new(block.clone()), Arc::new(block_body), false)
-                    .await
-                    .expect("to process block");
+                pool.process_block(
+                    Arc::new(block.clone()),
+                    Arc::new(create_test_block_body(block.block_hash)),
+                    false
+                )
+                .await
+                .expect("to process block");
             });
             GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
                 block_for_response,
@@ -337,10 +347,12 @@ async fn should_process_block_with_intermediate_block_in_api() {
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
-    let mut block3_body = BlockBody::default();
-    block3_body.block_hash = block3.block_hash;
     block_pool
-        .process_block(Arc::clone(&block3), Arc::new(block3_body), false)
+        .process_block(
+            Arc::clone(&block3),
+            Arc::new(create_test_block_body(block3.block_hash)),
+            false
+        )
         .await
         .expect("can't process block");
 
@@ -512,10 +524,12 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     block_status_provider_mock.add_block_to_index_and_tree_for_testing(&block1);
 
     // Process block3
-    let mut block3_body = BlockBody::default();
-    block3_body.block_hash = block3.block_hash;
     block_pool
-        .process_block(Arc::clone(&block3), Arc::new(block3_body), false)
+        .process_block(
+            Arc::clone(&block3),
+            Arc::new(create_test_block_body(block3.block_hash)),
+            false
+        )
         .await
         .expect("can't process block");
 
@@ -534,10 +548,12 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
     // Add a previously missing block to the server
     *block_for_server.write().unwrap() = Some(block2.as_ref().clone());
     // Process block4 to trigger reprocessing of block2 and then block3
-    let mut block4_body = BlockBody::default();
-    block4_body.block_hash = block4.block_hash;
     block_pool
-        .process_block(Arc::clone(&block4), Arc::new(block4_body), false)
+        .process_block(
+            Arc::clone(&block4),
+            Arc::new(create_test_block_body(block4.block_hash)),
+            false
+        )
         .await
         .expect("can't process block");
 
@@ -629,12 +645,10 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         header_building_on_very_old_block.block_hash
     );
 
-    let mut header_body = BlockBody::default();
-    header_body.block_hash = header_building_on_very_old_block.block_hash;
     let res = block_pool
         .process_block(
             Arc::new(header_building_on_very_old_block.clone()),
-            Arc::new(header_body),
+            Arc::new(create_test_block_body(header_building_on_very_old_block.block_hash)),
             false,
         )
         .await;
@@ -782,10 +796,12 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         if let Some(block) = block {
             tokio::spawn(async move {
                 debug!("Send block to block pool");
-                let mut block_body = BlockBody::default();
-                block_body.block_hash = block.block_hash;
                 let res = pool
-                    .process_block(Arc::new(block.clone()), Arc::new(block_body), false)
+                    .process_block(
+                        Arc::new(block.clone()),
+                        Arc::new(create_test_block_body(block.block_hash)),
+                        false
+                    )
                     .await;
                 if let Err(err) = res {
                     error!("Error processing block: {:?}", err);
@@ -809,10 +825,12 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     assert!(is_parent_in_index);
 
     debug!("Sending bogus block: {:?}", bogus_block.block_hash);
-    let mut bogus_body = BlockBody::default();
-    bogus_body.block_hash = bogus_block.block_hash;
     let res = block_pool
-        .process_block(Arc::new(bogus_block), Arc::new(bogus_body), false)
+        .process_block(
+            Arc::new(bogus_block.clone()),
+            Arc::new(create_test_block_body(bogus_block.block_hash)),
+            false
+        )
         .await;
 
     sync_service_handle.shutdown_signal.fire();
@@ -869,10 +887,12 @@ async fn should_not_fast_track_block_already_in_index() {
 
     debug!("Previous block hash: {:?}", test_header.previous_block_hash);
 
-    let mut test_body = BlockBody::default();
-    test_body.block_hash = test_header.block_hash;
     let err = service
-        .process_block(Arc::new(test_header.clone()), Arc::new(test_body), true)
+        .process_block(
+            Arc::new(test_header.clone()),
+            Arc::new(create_test_block_body(test_header.block_hash)),
+            true
+        )
         .await
         .expect_err("to have an error");
 

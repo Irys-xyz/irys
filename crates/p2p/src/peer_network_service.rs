@@ -944,7 +944,8 @@ impl PeerNetworkService {
         let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
 
         if handshake_request.protocol_version != protocol_version {
-            // Initiator intentionally adopts the peer's protocol version (rather than computing an intersection) as the protocol negotiation strategy
+            // Initiator intentionally adopts the peer's highest supported protocol version after
+            // negotiation.
             handshake_request.protocol_version = protocol_version;
             config
                 .irys_signer()
