@@ -566,7 +566,7 @@ where
             header
         } else {
             let mut fetched_header = None;
-            let mut failed_attempts: Vec<(IrysAddress, GossipError)> = Vec::new();
+            let mut failed_attempts: Vec<(Option<IrysAddress>, GossipError)> = Vec::new();
 
             for attempt in 1..=HEADER_AND_BODY_RETRIES {
                 match self.pull_block_header(block_hash, false).await {
@@ -582,7 +582,7 @@ where
                                 &source,
                                 ScoreDecreaseReason::BogusData("Invalid block signature".into()),
                             );
-                            failed_attempts.push((source, error));
+                            failed_attempts.push((Some(source), error));
                             continue;
                         }
                         fetched_header = Some(header);
@@ -599,8 +599,8 @@ where
                             HEADER_AND_BODY_RETRIES,
                             e
                         );
-                        // Use a sentinel address to indicate the source wasn't determined
-                        failed_attempts.push((IrysAddress::default(), e));
+                        // Source is not available on error
+                        failed_attempts.push((None, e));
                     }
                 }
             }
@@ -615,8 +615,8 @@ where
                             failed_attempts.len()
                         );
                         for (idx, (source, err)) in failed_attempts.iter().enumerate() {
-                            if source != &IrysAddress::default() {
-                                summary.push_str(&format!("[Peer {}: {}]", source, err));
+                            if let Some(addr) = source {
+                                summary.push_str(&format!("[Peer {}: {}]", addr, err));
                             } else {
                                 summary.push_str(&format!("[Unknown peer: {}]", err));
                             }
@@ -1140,7 +1140,7 @@ where
 
         // Pre-compute Arc once to avoid cloning header on each retry
         let header_arc = Arc::new(header.clone());
-        let mut failed_attempts: Vec<(IrysAddress, GossipError)> = Vec::new();
+        let mut failed_attempts: Vec<(Option<IrysAddress>, GossipError)> = Vec::new();
 
         for attempt in 1..=HEADER_AND_BODY_RETRIES {
             match self
@@ -1181,7 +1181,7 @@ where
                                 source_address
                             );
 
-                            failed_attempts.push((source_address, error));
+                            failed_attempts.push((Some(source_address), error));
                         }
                         Err(e) => {
                             warn!(
@@ -1192,7 +1192,7 @@ where
                                 format!("Error checking block body match: {}", e),
                             ));
                             // The source_address is available here, so record it
-                            failed_attempts.push((source_address, error));
+                            failed_attempts.push((Some(source_address), error));
                         }
                     }
                 }
@@ -1207,8 +1207,8 @@ where
                         HEADER_AND_BODY_RETRIES,
                         error
                     );
-                    // Use a sentinel address to indicate the source wasn't determined
-                    failed_attempts.push((IrysAddress::default(), error));
+                    // Source is not available on error
+                    failed_attempts.push((None, error));
                 }
             }
         }
@@ -1220,8 +1220,8 @@ where
                 failed_attempts.len()
             );
             for (idx, (source, err)) in failed_attempts.iter().enumerate() {
-                if source != &IrysAddress::default() {
-                    summary.push_str(&format!("[Peer {}: {}]", source, err));
+                if let Some(addr) = source {
+                    summary.push_str(&format!("[Peer {}: {}]", addr, err));
                 } else {
                     summary.push_str(&format!("[Unknown peer: {}]", err));
                 }
