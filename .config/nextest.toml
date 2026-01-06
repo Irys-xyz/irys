@@ -1,9 +1,12 @@
 # default config can be viewed at https://nexte.st/docs/configuration/
+experimental = ["wrapper-scripts"]
+
 [test-groups]
 serial = { max-threads = 1 }
 
+
 [profile.default]
-slow-timeout = { period = "30s", terminate-after = 5 }
+slow-timeout = { period = "30s", terminate-after = 2 }
 threads-required = 1
 retries = 1
 
@@ -16,7 +19,6 @@ test-group = 'serial'
 [[profile.default.overrides]]
 filter = 'test(/.*slow_.*/)'
 slow-timeout = { period = "90s", terminate-after = 2 }
-threads-required = 2
 priority = 100
 
 # heavy tests
@@ -24,3 +26,28 @@ priority = 100
 filter = 'test(/.*heavy_.*/)'
 threads-required = 2
 priority = 90
+
+# heavy3 tests
+[[profile.default.overrides]]
+filter = 'test(/.*heavy3_.*/)'
+threads-required = 3
+priority = 80
+
+# heavy4 tests
+[[profile.default.overrides]]
+filter = 'test(/.*heavy4_.*/)'
+threads-required = 4
+priority = 70
+
+# Define the CPU monitoring wrapper script
+[scripts.wrapper.cpu-monitor]
+command = 'nextest-cpu-wrapper'
+
+[profile.cpu-profile]
+# test-threads = 1
+test-threads = 12
+
+# Apply wrapper to all tests in cpu-profile
+[[profile.cpu-profile.scripts]]
+filter = 'all()'
+run-wrapper = 'cpu-monitor'
