@@ -1374,7 +1374,7 @@ mod tests {
         assert!(set.contains(&child1.block_hash));
         assert!(set.contains(&child2.block_hash));
 
-        // Only the first added sibling is stored in blocks cache (current implementation behavior)
+        // Both sibling blocks should be stored in blocks cache
         assert!(cache.blocks.get(&child1.block_hash).is_some());
         assert!(cache.blocks.get(&child2.block_hash).is_some());
 

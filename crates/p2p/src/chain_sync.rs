@@ -292,16 +292,14 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     orphaned_block.header.block_hash
                 );
                 let block_pool = self.block_pool.clone();
-                let gossip_data_handler = self.gossip_data_handler.clone();
                 let block_header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
+                let block_body = orphaned_block.block_body;
                 futures.push(async move {
-                    let block_body = gossip_data_handler
-                        .pull_block_body(&block_header, is_fast_tracking)
-                        .await
-                        .map_err(|e| {
-                            ChainSyncError::Internal(format!("Failed to fetch block body: {:?}", e))
-                        })?;
+                    debug!(
+                        "Using cached block body for orphaned ancestor: {:?}",
+                        block_header.block_hash
+                    );
 
                     block_pool
                         .process_block(block_header, block_body, is_fast_tracking)

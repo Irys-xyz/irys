@@ -520,57 +520,18 @@ where
         let use_trusted_peers_only = skip_block_validation;
         let skip_validation_for_fast_track = skip_block_validation;
 
-        let mut block_body = None;
-        let mut last_error = None;
+        // Pull block body with retries (pull_block_body handles retry logic internally)
+        let block_body = self
+            .pull_block_body(&block_header, use_trusted_peers_only)
+            .await?;
 
-        for _attempt in 1..=HEADER_AND_BODY_RETRIES {
-            match self
-                .pull_block_body(&block_header, use_trusted_peers_only)
-                .await
-            {
-                Ok(body) => {
-                    self.validate_block_body_transaction_ids(
-                        &body,
-                        &block_header,
-                        &source_miner_address,
-                    )?;
-                    debug!("Fetched block body matches header transactions");
-                    block_body = Some(body);
-                    break;
-                }
-                Err(e) => {
-                    last_error = Some(e);
-                }
-            }
-        }
-
-        let block_body = match block_body {
-            Some(body) => body,
-            None => {
-                if let Some(GossipError::InvalidData(
-                    InvalidDataError::BlockBodyTransactionsMismatch,
-                )) = &last_error
-                {
-                    warn!(
-                        "Node {}: Block {} height {} has mismatching transactions between header and body",
-                        self.gossip_client.mining_address, block_header.block_hash, block_header.height
-                    );
-
-                    self.peer_list.decrease_peer_score(
-                        &source_miner_address,
-                        ScoreDecreaseReason::BogusData(
-                            "Mismatching transactions between header and body".into(),
-                        ),
-                    );
-                }
-
-                return Err(last_error.unwrap_or_else(|| {
-                    GossipError::Internal(InternalGossipError::Unknown(
-                        "Failed to pull block body".to_string(),
-                    ))
-                }));
-            }
-        };
+        // Validate block body transaction IDs match the header
+        self.validate_block_body_transaction_ids(
+            &block_body,
+            &block_header,
+            &source_miner_address,
+        )?;
+        debug!("Fetched block body matches header transactions");
 
         self.block_pool
             .process_block(
