@@ -74,9 +74,7 @@ async fn process_commitment_transaction(
                 err.to_string(),
                 StatusCode::PAYMENT_REQUIRED,
             ))),
-            // TODO: use err.to_string() instead of hardcoded message
-            TxIngressError::Skipped => Ok(HttpResponse::Ok()
-                .body("Already processed: the transaction was previously handled")),
+            TxIngressError::Skipped => Ok(HttpResponse::Ok().body(err.to_string())),
             TxIngressError::Other(err) => {
                 tracing::error!("API: {}", err);
                 // we explicitly don't forward these to the user
