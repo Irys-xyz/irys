@@ -7,7 +7,7 @@ use irys_database::{
     db_cache::data_size_to_chunk_count,
     tables::{CachedChunks, CachedChunksIndex},
 };
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     chunk::{max_chunk_offset, UnpackedChunk},
     hash_sha256,
