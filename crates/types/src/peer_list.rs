@@ -556,8 +556,22 @@ mod tests {
 
     #[test]
     fn peer_list_item_compact_roundtrip() {
-        let peer_list_item = PeerListItem::default();
-        let mut buf = bytes::BytesMut::with_capacity(30);
+        let peer_list_item = PeerListItem {
+            reputation_score: PeerScore::new(75),
+            response_time: 150,
+            address: PeerAddress {
+                gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 8080)),
+                api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 3000)),
+                execution: RethPeerInfo {
+                    peering_tcp_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(172, 16, 0, 1), 30303)),
+                    peer_id: reth_transaction_pool::PeerId::random(),
+                },
+            },
+            last_seen: 1704067200000, // Jan 1, 2024 timestamp in milliseconds
+            is_online: true,
+            protocol_version: ProtocolVersion::V2,
+        };
+        let mut buf = bytes::BytesMut::with_capacity(100);
         peer_list_item.to_compact(&mut buf);
         let (decoded, _) = PeerListItem::from_compact(&buf[..], buf.len());
         assert_eq!(peer_list_item, decoded);
