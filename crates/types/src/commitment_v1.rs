@@ -358,7 +358,7 @@ impl From<CommitmentTypeV2> for CommitmentTypeV1 {
 }
 
 /// WARNING: THE BELOW ENCODING/DECODING IS NON-CANONICAL (NOT TO THE RLP SPEC) WHICH IS WHY CommitmentTransaction/CommitmentTypeV2 WERE CREATED
-/// THESE ARE HERE FOR BACKWARDS COMPATABILITY
+/// THESE ARE HERE FOR BACKWARDS COMPATIBILITY
 impl Encodable for CommitmentTypeV1 {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         // note: RLP headers should not be used for single byte values
