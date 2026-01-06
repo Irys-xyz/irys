@@ -45,15 +45,11 @@ pub struct NextNameTBD {
     pub number_of_ingress_proofs_from_assignees: u64,
 }
 
-/// The Aurora hardfork deprecates V1 Commitment Transactions due to
-/// nonstandard RLP encoding that caused signature errors with other language implementations.
+/// Aurora deprecates V1 Commitment Transactions due to nonstandard RLP encoding
+/// that caused signature errors with other language implementations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Aurora {
-    /// Timestamp (seconds since epoch) at which this hardfork activates
     pub activation_timestamp: UnixTimestamp,
-
-    /// When this hardfork is activated this will be the minimum valid
-    /// commitment transaction version
     pub minimum_commitment_tx_version: u8,
 }
 
@@ -90,20 +86,11 @@ impl IrysHardforkConfig {
         self.frontier.number_of_ingress_proofs_from_assignees
     }
 
-    /// Get a reference to the Aurora config if active at the given timestamp.
+    #[must_use]
     pub fn aurora_at(&self, timestamp: UnixTimestamp) -> Option<&Aurora> {
         self.aurora
             .as_ref()
             .filter(|f| timestamp >= f.activation_timestamp)
-    }
-
-    /// Get the max PD chunks per block at a specific timestamp.
-    /// Returns None if Sprite is not active.
-    pub fn minimum_commitment_tx_version_at(&self, timestamp: UnixTimestamp) -> Option<u8> {
-        self.aurora
-            .as_ref()
-            .filter(|f| timestamp >= f.activation_timestamp)
-            .map(|f| f.minimum_commitment_tx_version)
     }
 }
 
@@ -111,6 +98,7 @@ impl IrysHardforkConfig {
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
+    use proptest::prelude::*;
 
     #[test]
     fn test_frontier_params() {
@@ -247,5 +235,113 @@ mod tests {
         assert_eq!(config.frontier.number_of_ingress_proofs_total, 5);
         assert_eq!(config.frontier.number_of_ingress_proofs_from_assignees, 2);
         assert!(config.next_name_tbd.is_none());
+    }
+
+    proptest! {
+        /// Property: aurora_at returns None for timestamps before activation
+        #[test]
+        fn aurora_inactive_before_activation(
+            activation_ts in 1_u64..u64::MAX,
+            query_offset in 1_u64..10000_u64,
+            min_version in 1_u8..=255_u8,
+        ) {
+            let query_ts = activation_ts.saturating_sub(query_offset);
+            // Skip if query_ts >= activation_ts (would be at or after activation)
+            prop_assume!(query_ts < activation_ts);
+
+            let config = IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
+                    minimum_commitment_tx_version: min_version,
+                }),
+            };
+
+            prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
+        }
+
+        /// Property: aurora_at returns Some for timestamps at or after activation
+        #[test]
+        fn aurora_active_at_and_after_activation(
+            activation_ts in 0_u64..u64::MAX / 2,
+            query_offset in 0_u64..10000_u64,
+            min_version in 1_u8..=255_u8,
+        ) {
+            let query_ts = activation_ts.saturating_add(query_offset);
+
+            let config = IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
+                    minimum_commitment_tx_version: min_version,
+                }),
+            };
+
+            let result = config.aurora_at(UnixTimestamp::from_secs(query_ts));
+            prop_assert!(result.is_some());
+            prop_assert_eq!(result.unwrap().minimum_commitment_tx_version, min_version);
+        }
+
+        /// Property: aurora_at always returns None when aurora is not configured
+        #[test]
+        fn aurora_disabled_always_none(query_ts in 0_u64..u64::MAX) {
+            let config = IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: None,
+            };
+
+            prop_assert!(config.aurora_at(UnixTimestamp::from_secs(query_ts)).is_none());
+        }
+
+        /// Property: version validation is correct across boundaries
+        /// V1 (version=1) should be rejected when aurora is active and min_version >= 2
+        #[test]
+        fn version_validation_property(
+            activation_ts in 1000_u64..u64::MAX / 2,
+            time_offset in 0_i64..2000_i64,
+            tx_version in 1_u8..=3_u8,
+            min_version in 1_u8..=3_u8,
+        ) {
+            let query_ts = if time_offset >= 0 {
+                activation_ts.saturating_add(time_offset as u64)
+            } else {
+                activation_ts.saturating_sub(time_offset.unsigned_abs())
+            };
+
+            let config = IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
+                    minimum_commitment_tx_version: min_version,
+                }),
+            };
+
+            let aurora = config.aurora_at(UnixTimestamp::from_secs(query_ts));
+            let is_active = query_ts >= activation_ts;
+            let version_accepted = aurora.is_none_or(|a| tx_version >= a.minimum_commitment_tx_version);
+
+            // If aurora is active, version must meet minimum; otherwise always accepted
+            if is_active {
+                prop_assert_eq!(version_accepted, tx_version >= min_version);
+            } else {
+                prop_assert!(version_accepted);
+            }
+        }
     }
 }
