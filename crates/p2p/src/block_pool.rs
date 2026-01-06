@@ -1592,25 +1592,25 @@ mod tests {
             block_hash: BlockHash::repeat_byte(0xAA),
             height: 50,
             data_ledgers: vec![
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Publish as u32, // Index 0
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![publish_tx_id1]),
-                total_chunks: 1,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Submit as u32, // Index 1
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![submit_tx_id2, submit_tx_id1]), // Note: reversed order
-                total_chunks: 2,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-        ],
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Publish as u32, // Index 0
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![publish_tx_id1]),
+                    total_chunks: 1,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Submit as u32, // Index 1
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![submit_tx_id2, submit_tx_id1]), // Note: reversed order
+                    total_chunks: 2,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+            ],
             system_ledgers: vec![SystemTransactionLedger {
                 ledger_id: 0, // SystemLedger::Commitment
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1]),
@@ -1675,25 +1675,25 @@ mod tests {
             // Only include Submit ledger at correct index (1)
             // Need to have Publish at index 0 (even if empty) since Submit is at index 1
             data_ledgers: vec![
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Publish as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![]),
-                total_chunks: 0,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Submit as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![submit_tx_id1, submit_tx_id2]),
-                total_chunks: 2,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-        ],
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Publish as u32,
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![]),
+                    total_chunks: 0,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Submit as u32,
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![submit_tx_id1, submit_tx_id2]),
+                    total_chunks: 2,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+            ],
             system_ledgers: vec![],
             ..Default::default()
         };
@@ -1748,25 +1748,25 @@ mod tests {
             height: 52,
             // Need Publish at index 0 (empty) and Submit at index 1
             data_ledgers: vec![
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Publish as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![]),
-                total_chunks: 0,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Submit as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![tx_id1]),
-                total_chunks: 1,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-        ],
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Publish as u32,
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![]),
+                    total_chunks: 0,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Submit as u32,
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![tx_id1]),
+                    total_chunks: 1,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+            ],
             system_ledgers: vec![],
             ..Default::default()
         };
@@ -1877,25 +1877,25 @@ mod tests {
             block_hash: BlockHash::repeat_byte(0xEE),
             height: 54,
             data_ledgers: vec![
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Publish as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![dual_tx_id]),
-                total_chunks: 1,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-            irys_types::DataTransactionLedger {
-                ledger_id: DataLedger::Submit as u32,
-                tx_root: H256::zero(),
-                tx_ids: irys_types::H256List(vec![dual_tx_id]),
-                total_chunks: 1,
-                expires: None,
-                proofs: None,
-                required_proof_count: None,
-            },
-        ],
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Publish as u32,
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![dual_tx_id]),
+                    total_chunks: 1,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+                irys_types::DataTransactionLedger {
+                    ledger_id: DataLedger::Submit as u32,
+                    tx_root: H256::zero(),
+                    tx_ids: irys_types::H256List(vec![dual_tx_id]),
+                    total_chunks: 1,
+                    expires: None,
+                    proofs: None,
+                    required_proof_count: None,
+                },
+            ],
             system_ledgers: vec![],
             ..Default::default()
         };
