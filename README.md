@@ -42,6 +42,11 @@ Testing code examples in comments
 cargo test --doc
 ```
 
+re-run only failing tests
+```cli
+cargo xtask test --rereun-failures
+```
+
 ## Debugging
 If you're debugging and noticing any issues (i.e unable to inspect local variables)\
 comment out all instances of the  `debug = "line-tables-only"` and `split-debuginfo = "unpacked"` lines in the root Cargo.toml\

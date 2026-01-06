@@ -2,6 +2,18 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2021"
+default-run = "xtask"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[[bin]]
+name = "nextest-failure-tracker"
+path = "src/bin/nextest-failure-tracker.rs"
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
@@ -10,6 +22,9 @@ eyre = "0.6"
 color-eyre = "0.6"
 cargo_metadata = { version = "0.21.0", default-features = false }
 chrono = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true
