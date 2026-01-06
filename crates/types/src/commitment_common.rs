@@ -62,35 +62,6 @@ impl TryFrom<u8> for CommitmentStatus {
     }
 }
 
-// #[derive(
-//     PartialEq,
-//     Debug,
-//     Default,
-//     Eq,
-//     Clone,
-//     Copy,
-//     Hash,
-//     serde::Serialize,
-//     serde::Deserialize,
-//     arbitrary::Arbitrary,
-// )]
-// #[serde(rename_all = "camelCase", tag = "type")]
-// pub enum CommitmentType {
-//     #[default]
-//     Stake,
-//     Pledge {
-//         #[serde(rename = "pledgeCountBeforeExecuting", with = "string_u64")]
-//         pledge_count_before_executing: u64,
-//     },
-//     Unpledge {
-//         #[serde(rename = "pledgeCountBeforeExecuting", with = "string_u64")]
-//         pledge_count_before_executing: u64,
-//         #[serde(rename = "partitionHash")]
-//         partition_hash: H256,
-//     },
-//     Unstake,
-// }
-
 // Commitment Transaction versioned wrapper
 #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
@@ -428,7 +399,7 @@ impl CommitmentTransaction {
 // Ordering for `CommitmentTransaction` prioritizes transactions as follows:
 /// 1. Stake commitments (fee desc, then id tie-breaker)
 /// 2. Pledge commitments (count asc, then fee desc, then id tie-breaker)
-/// 3. Unpledge commitments (count asc, then fee desc, then id tie-breaker)
+/// 3. Unpledge commitments (count desc, then fee desc, then id tie-breaker)
 /// 4. Unstake commitments (last, fee desc, then id tie-breaker)
 pub fn compare_commitment_transactions(
     self_type: &CommitmentTypeV1,
@@ -466,7 +437,7 @@ pub fn compare_commitment_transactions(
                 CommitmentTypeV1::Pledge {
                     pledge_count_before_executing: count_b,
                 },
-            ) => count_a
+            ) => count_a // lowest pledge_count_before_executing first
                 .cmp(count_b)
                 .then_with(|| other_fee.cmp(&self_fee))
                 .then_with(|| self_id.cmp(&other_id)),
@@ -479,7 +450,7 @@ pub fn compare_commitment_transactions(
                     pledge_count_before_executing: count_b,
                     ..
                 },
-            ) => count_b
+            ) => count_b // highest pledge_count_before_executing first
                 .cmp(count_a)
                 .then_with(|| other_fee.cmp(&self_fee))
                 .then_with(|| self_id.cmp(&other_id)),
@@ -488,5 +459,207 @@ pub fn compare_commitment_transactions(
                 .then_with(|| self_id.cmp(&other_id)),
             _ => Ordering::Equal,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// WRITTEN BY CLAUDE
+    use super::*;
+    use rstest::rstest;
+    use std::cmp::Ordering;
+
+    fn stake() -> CommitmentTypeV1 {
+        CommitmentTypeV1::Stake
+    }
+
+    fn pledge(count: u64) -> CommitmentTypeV1 {
+        CommitmentTypeV1::Pledge {
+            pledge_count_before_executing: count,
+        }
+    }
+
+    fn unpledge(count: u64) -> CommitmentTypeV1 {
+        CommitmentTypeV1::Unpledge {
+            pledge_count_before_executing: count,
+            partition_hash: H256::zero(),
+        }
+    }
+
+    fn unstake() -> CommitmentTypeV1 {
+        CommitmentTypeV1::Unstake
+    }
+
+    // ===================
+    // Cross-type priority: Stake < Pledge < Unpledge < Unstake
+    // ===================
+    #[rstest]
+    #[case(stake(), pledge(0), Ordering::Less)]
+    #[case(stake(), unpledge(0), Ordering::Less)]
+    #[case(stake(), unstake(), Ordering::Less)]
+    #[case(pledge(0), unpledge(0), Ordering::Less)]
+    #[case(pledge(0), unstake(), Ordering::Less)]
+    #[case(unpledge(0), unstake(), Ordering::Less)]
+    #[case(unstake(), stake(), Ordering::Greater)]
+    #[case(unpledge(0), pledge(0), Ordering::Greater)]
+    fn test_cross_type_priority(
+        #[case] self_type: CommitmentTypeV1,
+        #[case] other_type: CommitmentTypeV1,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &self_type,
+            U256::from(100),
+            H256::zero(),
+            &other_type,
+            U256::from(100),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    // ===================
+    // Stake: fee desc, then id asc
+    // ===================
+    #[rstest]
+    #[case(200, 100, Ordering::Less)] // higher fee comes first
+    #[case(100, 200, Ordering::Greater)]
+    #[case(100, 100, Ordering::Equal)]
+    fn test_stake_fee_ordering(
+        #[case] self_fee: u64,
+        #[case] other_fee: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &stake(),
+            U256::from(self_fee),
+            H256::zero(),
+            &stake(),
+            U256::from(other_fee),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_stake_id_tiebreaker() {
+        let id_low = H256::from_low_u64_be(1);
+        let id_high = H256::from_low_u64_be(2);
+
+        let result = compare_commitment_transactions(
+            &stake(),
+            U256::from(100),
+            id_low,
+            &stake(),
+            U256::from(100),
+            id_high,
+        );
+        assert_eq!(result, Ordering::Less);
+    }
+
+    // ===================
+    // Pledge: count asc (lowest first), then fee desc, then id asc
+    // ===================
+    #[rstest]
+    #[case(1, 5, Ordering::Less)] // lower count comes first
+    #[case(5, 1, Ordering::Greater)]
+    #[case(3, 3, Ordering::Equal)]
+    fn test_pledge_count_ordering(
+        #[case] self_count: u64,
+        #[case] other_count: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &pledge(self_count),
+            U256::from(100),
+            H256::zero(),
+            &pledge(other_count),
+            U256::from(100),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case(200, 100, Ordering::Less)] // same count, higher fee comes first
+    #[case(100, 200, Ordering::Greater)]
+    fn test_pledge_fee_after_count(
+        #[case] self_fee: u64,
+        #[case] other_fee: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &pledge(5),
+            U256::from(self_fee),
+            H256::zero(),
+            &pledge(5),
+            U256::from(other_fee),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    // ===================
+    // Unpledge: count desc (highest first), then fee desc, then id asc
+    // ===================
+    #[rstest]
+    #[case(5, 1, Ordering::Less)] // higher count comes first
+    #[case(1, 5, Ordering::Greater)]
+    #[case(3, 3, Ordering::Equal)]
+    fn test_unpledge_count_ordering(
+        #[case] self_count: u64,
+        #[case] other_count: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &unpledge(self_count),
+            U256::from(100),
+            H256::zero(),
+            &unpledge(other_count),
+            U256::from(100),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case(200, 100, Ordering::Less)] // same count, higher fee comes first
+    #[case(100, 200, Ordering::Greater)]
+    fn test_unpledge_fee_after_count(
+        #[case] self_fee: u64,
+        #[case] other_fee: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &unpledge(5),
+            U256::from(self_fee),
+            H256::zero(),
+            &unpledge(5),
+            U256::from(other_fee),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    // ===================
+    // Unstake: fee desc, then id asc
+    // ===================
+    #[rstest]
+    #[case(200, 100, Ordering::Less)]
+    #[case(100, 200, Ordering::Greater)]
+    fn test_unstake_fee_ordering(
+        #[case] self_fee: u64,
+        #[case] other_fee: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &unstake(),
+            U256::from(self_fee),
+            H256::zero(),
+            &unstake(),
+            U256::from(other_fee),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
     }
 }
