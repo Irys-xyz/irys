@@ -699,10 +699,9 @@ where
                 block_body.commitment_transactions.clone(),
             ) {
                 Ok(txs) => txs,
-                Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-                    block_hash,
-                    ..
-                })) => {
+                Err(e @ BlockPoolError::Critical(
+                    CriticalBlockPoolError::HeaderBodyMismatch { block_hash, .. },
+                )) => {
                     error!(
                         "Block pool: Header/body mismatch for orphan block {:?}. Removing from cache.",
                         block_hash
@@ -713,15 +712,7 @@ where
                             BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                         )
                         .await;
-                    return Err(BlockPoolError::Critical(
-                        CriticalBlockPoolError::HeaderBodyMismatch {
-                            block_hash,
-                            ledger: String::new(),
-                            expected: 0,
-                            found: 0,
-                            missing_ids: vec![],
-                        },
-                    ));
+                    return Err(e);
                 }
                 Err(e) => return Err(e),
             };
@@ -871,10 +862,9 @@ where
             block_body.commitment_transactions.clone(),
         ) {
             Ok(txs) => txs,
-            Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-                block_hash,
-                ..
-            })) => {
+            Err(e @ BlockPoolError::Critical(
+                CriticalBlockPoolError::HeaderBodyMismatch { block_hash, .. },
+            )) => {
                 error!(
                     "Block pool: Header/body mismatch for block {:?}. Removing from cache.",
                     block_hash
@@ -885,15 +875,7 @@ where
                         BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                     )
                     .await;
-                return Err(BlockPoolError::Critical(
-                    CriticalBlockPoolError::HeaderBodyMismatch {
-                        block_hash,
-                        ledger: String::new(),
-                        expected: 0,
-                        found: 0,
-                        missing_ids: vec![],
-                    },
-                ));
+                return Err(e);
             }
             Err(e) => return Err(e),
         };
