@@ -9,7 +9,7 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
 use irys_domain::ScoreDecreaseReason;
-use irys_p2p::{GossipResponse, RejectionReason};
+use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
     build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequest, HandshakeResponse, NodeConfig,
     PeerAddress, RethPeerInfo,
@@ -80,7 +80,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/handshake")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .set_json(&version_request)
         .to_request();
@@ -92,14 +92,19 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let peer_response: GossipResponse<HandshakeResponse> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
 
-    // Convert to pretty JSON string
-    let pretty_json =
-        serde_json::to_string_pretty(&peer_response).expect("Failed to serialize to pretty JSON");
-    println!("Pretty JSON:\n{}", pretty_json);
+    // Assert the response is a successful handshake
+    match peer_response {
+        GossipResponse::Accepted(_handshake_response) => {
+            // Test passes
+        }
+        GossipResponse::Rejected(reason) => {
+            panic!("Expected Accepted response, got Rejected: {:?}", reason);
+        }
+    }
 
     // Test that we get rejected if the source IP doesn't match the gossip IP
     let req = TestRequest::post()
-        .uri("/gossip/v2/handshake")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.5:12345".parse().unwrap())
         .set_json(&version_request)
         .to_request();
@@ -144,7 +149,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     });
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/handshake")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
@@ -198,7 +203,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     });
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/handshake")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
@@ -238,7 +243,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
-        .uri("/gossip/v2/handshake")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.3:12345".parse().unwrap())
         .set_json(version_request)
         .to_request();

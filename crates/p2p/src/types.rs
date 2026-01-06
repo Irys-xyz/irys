@@ -246,7 +246,7 @@ pub enum RejectionReason {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum GossipRoutes {
+pub enum GossipRoutes {
     Transaction,
     CommitmentTx,
     Chunk,

@@ -944,8 +944,11 @@ impl PeerNetworkService {
         let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
 
         if handshake_request.protocol_version != protocol_version {
-            // Initiator intentionally adopts the peer's highest supported protocol version after
-            // negotiation.
+            // The initiator adopts the negotiated highest common protocol version after version
+            // negotiation. The negotiated_protocol_version is computed from the intersection of
+            // peer_protocol_versions (advertised by the peer) and our_supported_versions (what
+            // this node supports). The handshake_request is then re-signed via
+            // config.irys_signer().sign_p2p_handshake to authenticate the updated protocol version.
             handshake_request.protocol_version = protocol_version;
             config
                 .irys_signer()

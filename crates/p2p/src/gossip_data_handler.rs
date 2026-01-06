@@ -525,14 +525,6 @@ where
             .pull_block_body(&block_header, use_trusted_peers_only)
             .await?;
 
-        // Validate block body transaction IDs match the header
-        self.validate_block_body_transaction_ids(
-            &block_body,
-            &block_header,
-            &source_miner_address,
-        )?;
-        debug!("Fetched block body matches header transactions");
-
         self.block_pool
             .process_block(
                 Arc::new(block_header),

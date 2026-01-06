@@ -6,7 +6,7 @@ use irys_types::{
     IrysTransactionId, TxKnownStatus, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
-use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use std::collections::HashMap;
 use tracing::{debug, instrument, warn};
 

@@ -182,6 +182,7 @@ pub(crate) enum FailureReason {
     WasNotAbleToFetchRethPayload,
     BlockPrevalidationFailed,
     FailedToPull(GossipError),
+    HeaderBodyMismatch,
 }
 
 impl Display for FailureReason {
@@ -198,6 +199,9 @@ impl Display for FailureReason {
             }
             Self::FailedToPull(err) => {
                 write!(f, "Failed to pull block because: {}", err)
+            }
+            Self::HeaderBodyMismatch => {
+                write!(f, "Header/body transaction count mismatch")
             }
         }
     }
@@ -689,11 +693,38 @@ where
         }
 
         if !previous_block_status.is_processed() {
-            let block_transactions = order_transactions_for_block(
+            let block_transactions = match order_transactions_for_block(
                 &block_header,
                 block_body.data_transactions.clone(),
                 block_body.commitment_transactions.clone(),
-            )?;
+            ) {
+                Ok(txs) => txs,
+                Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
+                    block_hash,
+                    ..
+                })) => {
+                    error!(
+                        "Block pool: Header/body mismatch for orphan block {:?}. Removing from cache.",
+                        block_hash
+                    );
+                    self.blocks_cache
+                        .remove_block(
+                            &block_header.block_hash,
+                            BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
+                        )
+                        .await;
+                    return Err(BlockPoolError::Critical(
+                        CriticalBlockPoolError::HeaderBodyMismatch {
+                            block_hash,
+                            ledger: String::new(),
+                            expected: 0,
+                            found: 0,
+                            missing_ids: vec![],
+                        },
+                    ));
+                }
+                Err(e) => return Err(e),
+            };
             self.blocks_cache
                 .change_block_processing_status(block_header.block_hash, false)
                 .await;
@@ -834,11 +865,38 @@ where
             .wait_for_block_tree_can_process_height(block_header.height)
             .await;
 
-        let block_transactions = order_transactions_for_block(
+        let block_transactions = match order_transactions_for_block(
             &block_header,
             block_body.data_transactions.clone(),
             block_body.commitment_transactions.clone(),
-        )?;
+        ) {
+            Ok(txs) => txs,
+            Err(BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
+                block_hash,
+                ..
+            })) => {
+                error!(
+                    "Block pool: Header/body mismatch for block {:?}. Removing from cache.",
+                    block_hash
+                );
+                self.blocks_cache
+                    .remove_block(
+                        &block_header.block_hash,
+                        BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
+                    )
+                    .await;
+                return Err(BlockPoolError::Critical(
+                    CriticalBlockPoolError::HeaderBodyMismatch {
+                        block_hash,
+                        ledger: String::new(),
+                        expected: 0,
+                        found: 0,
+                        missing_ids: vec![],
+                    },
+                ));
+            }
+            Err(e) => return Err(e),
+        };
 
         debug!(
             "Block pool: Processing block {:?} with {} submit, {} publish, {} commitment txs",
