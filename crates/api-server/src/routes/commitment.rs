@@ -18,7 +18,8 @@ pub async fn post_commitment_tx(
 ) -> Result<HttpResponse, ApiError> {
     let tx = body.into_inner();
 
-    let now = UnixTimestamp::now().expect("system time should be after unix epoch");
+    let now = UnixTimestamp::now()
+        .map_err(|_| ApiError::from(("System time error", StatusCode::INTERNAL_SERVER_ERROR)))?;
 
     if let Some(aurora) = state.config.consensus.hardforks.aurora_at(now) {
         let version = tx.version();
