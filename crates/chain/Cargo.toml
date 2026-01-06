@@ -73,6 +73,7 @@ dotenvy = "0.15"
 assert_matches = "1.5.0"
 actix-http.workspace = true
 irys-actors = { workspace = true, features = ["test-utils"] }
+irys-efficient-sampling.workspace = true
 test-log.workspace = true
 rstest.workspace = true
 rust_decimal.workspace = true

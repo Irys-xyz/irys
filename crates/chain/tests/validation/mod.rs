@@ -1,5 +1,7 @@
 mod blobs_rejected;
 mod data_tx_pricing;
+mod deterministic_boundary_poa_crafted_snapshot;
+mod heavy_poa_parent_snapshot_integration;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
 mod poa_cases;
