@@ -178,8 +178,8 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 None
             };
 
-            // Build the wrapper binary and generate config if we're tracking failures
-            let config_file = if !no_update_failures {
+            // Build the wrapper binary and generate config
+            let config_file = {
                 let wrapper_path = build_wrapper(sh)?;
                 let wrapper_path_str = wrapper_path.to_string_lossy().to_string();
 
@@ -187,8 +187,6 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                     &wrapper_path_str,
                     failed_tests_filter.as_deref(),
                 )?)
-            } else {
-                None
             };
 
             // Build the nextest command
