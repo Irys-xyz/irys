@@ -1,3 +1,4 @@
+use crate::CommitmentTypeV2;
 pub use crate::{
     address_base58_stringify, decode_rlp_version, encode_rlp_version,
     ingress::IngressProof,
@@ -153,6 +154,15 @@ impl CommitmentTransaction {
         }
     }
 
+    /// Get the v2 commitment type
+    #[inline]
+    pub fn commitment_type_v2(&self) -> Option<CommitmentTypeV2> {
+        match self {
+            Self::V1(_v1) => None,
+            Self::V2(v2) => Some(v2.commitment_type),
+        }
+    }
+
     /// Get the ID from any version
     #[inline]
     pub fn id(&self) -> H256 {
@@ -287,16 +297,24 @@ impl Compact for CommitmentTransaction {
         B: bytes::BufMut + AsMut<[u8]>,
     {
         match self {
-            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
-            Self::V2(inner) => compact_with_discriminant(1, inner, buf),
+            Self::V1(inner) => {
+                compact_with_discriminant(CommitmentTransactionV1::VERSION, inner, buf)
+            }
+            Self::V2(inner) => {
+                compact_with_discriminant(CommitmentTransactionV2::VERSION, inner, buf)
+            }
         }
     }
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
         let (disc, rest) = split_discriminant(buf);
         match disc {
-            1 => {
+            CommitmentTransactionV1::VERSION => {
                 let (inner, rest2) = CommitmentTransactionV1::from_compact(rest, rest.len());
                 (Self::V1(inner), rest2)
+            }
+            CommitmentTransactionV2::VERSION => {
+                let (inner, rest2) = CommitmentTransactionV2::from_compact(rest, rest.len());
+                (Self::V2(inner), rest2)
             }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
         }
@@ -326,9 +344,13 @@ impl alloy_rlp::Decodable for CommitmentTransaction {
         let buf = &mut &buf[..];
 
         match version {
-            1 => {
+            CommitmentTransactionV1::VERSION => {
                 let inner = CommitmentTransactionV1::decode(buf)?;
                 Ok(Self::V1(inner))
+            }
+            CommitmentTransactionV2::VERSION => {
+                let inner = CommitmentTransactionV2::decode(buf)?;
+                Ok(Self::V2(inner))
             }
             _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
         }
@@ -338,17 +360,17 @@ impl alloy_rlp::Decodable for CommitmentTransaction {
 impl CommitmentTransaction {
     /// Create a new CommitmentTransaction wrapped in the versioned wrapper
     pub fn new(config: &ConsensusConfig) -> Self {
-        Self::V1(CommitmentTransactionV1::new(config))
+        Self::V2(CommitmentTransactionV2::new(config))
     }
 
     /// Create a new stake transaction with the configured stake fee as value
     pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self::V1(CommitmentTransactionV1::new_stake(config, anchor))
+        Self::V2(CommitmentTransactionV2::new_stake(config, anchor))
     }
 
     /// Create a new unstake transaction with the configured stake fee as value
     pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self::V1(CommitmentTransactionV1::new_unstake(config, anchor))
+        Self::V2(CommitmentTransactionV2::new_unstake(config, anchor))
     }
 
     /// Create a new pledge transaction with decreasing cost per pledge
@@ -358,8 +380,8 @@ impl CommitmentTransaction {
         provider: &impl PledgeDataProvider,
         signer_address: IrysAddress,
     ) -> Self {
-        Self::V1(
-            CommitmentTransactionV1::new_pledge(config, anchor, provider, signer_address).await,
+        Self::V2(
+            CommitmentTransactionV2::new_pledge(config, anchor, provider, signer_address).await,
         )
     }
 
@@ -371,8 +393,8 @@ impl CommitmentTransaction {
         signer_address: IrysAddress,
         partition_hash: H256,
     ) -> Self {
-        Self::V1(
-            CommitmentTransactionV1::new_unpledge(
+        Self::V2(
+            CommitmentTransactionV2::new_unpledge(
                 config,
                 anchor,
                 provider,
@@ -401,10 +423,6 @@ impl CommitmentTransaction {
             Self::V2(v2) => v2.validate_value(config),
         }
     }
-}
-
-impl Versioned for CommitmentTransactionV1 {
-    const VERSION: u8 = 1;
 }
 
 // Ordering for `CommitmentTransaction` prioritizes transactions as follows:

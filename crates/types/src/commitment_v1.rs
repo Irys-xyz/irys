@@ -1,10 +1,10 @@
-use crate::CommitmentTypeV2;
 pub use crate::{
     address_base58_stringify, compare_commitment_transactions, ingress::IngressProof,
     optional_string_u64, string_u64, Arbitrary, Base64, CommitmentValidationError, ConsensusConfig,
     IrysAddress, IrysSignature, IrysTransactionId, Node, PledgeDataProvider, Proof, Signature,
     H256, U256,
 };
+use crate::{CommitmentTypeV2, Versioned};
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use bytes::Buf as _;
@@ -357,51 +357,36 @@ impl From<CommitmentTypeV2> for CommitmentTypeV1 {
     }
 }
 
+/// WARNING: THE BELOW ENCODING/DECODING IS NON-CANONICAL (NOT TO THE RLP SPEC) WHICH IS WHY CommitmentTransaction/CommitmentTypeV2 WERE CREATED
+/// THESE ARE HERE FOR BACKWARDS COMPATABILITY
 impl Encodable for CommitmentTypeV1 {
-    fn encode(&self, acc: &mut dyn bytes::BufMut) {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
         // note: RLP headers should not be used for single byte values
         match self {
-            Self::Stake => COMMITMENT_TYPE_STAKE.encode(acc),
+            Self::Stake => {
+                out.put_u8(COMMITMENT_TYPE_STAKE);
+            }
             Self::Pledge {
                 pledge_count_before_executing,
             } => {
-                alloy_rlp::Header {
-                    list: false,
-                    payload_length: self.alloy_rlp_payload_length(),
-                }
-                .encode(acc);
-                COMMITMENT_TYPE_PLEDGE.encode(acc);
-                pledge_count_before_executing.encode(acc);
+                out.put_u8(COMMITMENT_TYPE_PLEDGE);
+                pledge_count_before_executing.encode(out);
             }
             Self::Unpledge {
                 pledge_count_before_executing,
                 partition_hash,
             } => {
-                alloy_rlp::Header {
-                    list: false,
-                    payload_length: self.alloy_rlp_payload_length(),
-                }
-                .encode(acc);
-                COMMITMENT_TYPE_UNPLEDGE.encode(acc);
-                pledge_count_before_executing.encode(acc);
-                partition_hash.encode(acc)
+                out.put_u8(COMMITMENT_TYPE_UNPLEDGE);
+                pledge_count_before_executing.encode(out);
+                out.put_slice(&partition_hash.0);
             }
-            Self::Unstake => COMMITMENT_TYPE_UNSTAKE.encode(acc),
+            Self::Unstake => {
+                out.put_u8(COMMITMENT_TYPE_UNSTAKE);
+            }
         };
     }
 
     fn length(&self) -> usize {
-        let payload_length = self.alloy_rlp_payload_length();
-        match self {
-            Self::Stake | Self::Unstake => payload_length,
-            _ => payload_length + alloy_rlp::length_of_length(payload_length), // for the header
-        }
-    }
-}
-
-impl CommitmentTypeV1 {
-    // note: this is seperate from the `length` impl in Encodable
-    fn alloy_rlp_payload_length(&self) -> usize {
         match self {
             Self::Stake | Self::Unstake => 1,
             Self::Pledge {
@@ -409,8 +394,8 @@ impl CommitmentTypeV1 {
             } => 1 + pledge_count_before_executing.length(),
             Self::Unpledge {
                 pledge_count_before_executing,
-                partition_hash,
-            } => 1 + pledge_count_before_executing.length() + partition_hash.length(),
+                ..
+            } => 1 + pledge_count_before_executing.length() + PARTITION_HASH_SIZE,
         }
     }
 }
@@ -421,30 +406,11 @@ impl Decodable for CommitmentTypeV1 {
             return Err(RlpError::InputTooShort);
         }
 
-        let first_byte = buf[0];
-
-        // If first byte < 0x80, it's a raw single-byte value (no RLP header)
-        // This handles STAKE and UNSTAKE
-        if first_byte < 0x80 {
-            buf.advance(1);
-            return match first_byte {
-                COMMITMENT_TYPE_STAKE => Ok(Self::Stake),
-                COMMITMENT_TYPE_UNSTAKE => Ok(Self::Unstake),
-                // Reject PLEDGE/UNPLEDGE discriminants without headers
-                _ => Err(RlpError::Custom("unexpected raw commitment type")),
-            };
-        }
-
-        // Otherwise, we have an RLP header - decode it
-        let header = alloy_rlp::Header::decode(buf)?;
-        if !header.list {
-            return Err(RlpError::UnexpectedString);
-        }
-
         let type_id = buf[0];
         buf.advance(1);
 
         match type_id {
+            COMMITMENT_TYPE_STAKE => Ok(Self::Stake),
             COMMITMENT_TYPE_PLEDGE => {
                 let count = u64::decode(buf)?;
                 Ok(Self::Pledge {
@@ -456,18 +422,22 @@ impl Decodable for CommitmentTypeV1 {
                 if buf.len() < PARTITION_HASH_SIZE {
                     return Err(RlpError::InputTooShort);
                 }
-
-                // let mut ph = [0_u8; 32];
-                // ph.copy_from_slice(&buf[..PARTITION_HASH_SIZE]);
-                // buf.advance(PARTITION_HASH_SIZE);
+                let mut ph = [0_u8; 32];
+                ph.copy_from_slice(&buf[..PARTITION_HASH_SIZE]);
+                buf.advance(PARTITION_HASH_SIZE);
                 Ok(Self::Unpledge {
                     pledge_count_before_executing: count,
-                    partition_hash: H256::decode(buf)?,
+                    partition_hash: ph.into(),
                 })
             }
-            _ => Err(RlpError::Custom("unknown commitment type in header")),
+            COMMITMENT_TYPE_UNSTAKE => Ok(Self::Unstake),
+            _ => Err(RlpError::Custom("unknown commitment type")),
         }
     }
+}
+
+impl Versioned for CommitmentTransactionV1 {
+    const VERSION: u8 = 1;
 }
 
 // Manual implementation of Compact for CommitmentType
@@ -660,9 +630,8 @@ mod tests {
 
     #[rstest]
     #[case::stake(CommitmentTypeV1::Stake, 1)]
-    // note: plus ones are for the RLP header length
-    #[case::pledge(CommitmentTypeV1::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length() + 1)]
-    #[case::unpledge(CommitmentTypeV1::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32].into() }, 1 + 5_u64.length() + 32 + 1)]
+    #[case::pledge(CommitmentTypeV1::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length())]
+    #[case::unpledge(CommitmentTypeV1::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32].into() }, 1 + 5_u64.length() + 32)]
     fn test_commitment_type_rlp_length(
         #[case] commitment_type: CommitmentTypeV1,
         #[case] expected_length: usize,
