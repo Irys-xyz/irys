@@ -1104,7 +1104,7 @@ impl BlockBody {
         let expected_data_tx_ids: HashSet<H256> = header
             .data_ledgers
             .iter()
-            .flat_map(|ledger| ledger.tx_ids.0.clone())
+            .flat_map(|ledger| ledger.tx_ids.0.iter().copied())
             .collect();
 
         let actual_commitment_tx_ids: HashSet<H256> = self

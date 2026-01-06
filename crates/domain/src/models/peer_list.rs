@@ -1511,6 +1511,103 @@ mod tests {
         // );
     }
 
+    #[test]
+    fn test_protocol_version_propagation() {
+        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+        
+        // Create a peer with default protocol version (V1)
+        let (mining_addr, mut peer) = create_test_peer(1);
+        assert_eq!(peer.protocol_version, ProtocolVersion::default());
+        assert_eq!(peer.protocol_version, ProtocolVersion::V1);
+        
+        // Add peer to persistent cache (staked)
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        
+        // Verify initial protocol version
+        let retrieved = peer_list.peer_by_mining_address(&mining_addr).unwrap();
+        assert_eq!(retrieved.protocol_version, ProtocolVersion::V1);
+        
+        // Update peer with new protocol version (V2)
+        peer.protocol_version = ProtocolVersion::V2;
+        peer.last_seen += HANDSHAKE_COOLDOWN + 1; // Ensure cooldown expired
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        
+        // Verify protocol_version is updated via peer_by_mining_address
+        let updated = peer_list.peer_by_mining_address(&mining_addr).unwrap();
+        assert_eq!(
+            updated.protocol_version, ProtocolVersion::V2,
+            "protocol_version should be updated in persistent cache"
+        );
+        
+        // Verify protocol_version is visible via peer_by_gossip_address
+        let by_gossip = peer_list.peer_by_gossip_address(peer.address.gossip).unwrap();
+        assert_eq!(
+            by_gossip.protocol_version, ProtocolVersion::V2,
+            "protocol_version should be visible via peer_by_gossip_address"
+        );
+        
+        // Verify protocol_version is visible via peer_by_api_address
+        let by_api = peer_list.peer_by_api_address(peer.address.api).unwrap();
+        assert_eq!(
+            by_api.protocol_version, ProtocolVersion::V2,
+            "protocol_version should be visible via peer_by_api_address"
+        );
+        
+        // Verify protocol_version is visible in all_peers_sorted_by_score
+        let all_peers = peer_list.all_peers_sorted_by_score();
+        let found_peer = all_peers.iter().find(|(addr, _)| addr == &mining_addr).unwrap();
+        assert_eq!(
+            found_peer.1.protocol_version, ProtocolVersion::V2,
+            "protocol_version should be visible in all_peers_sorted_by_score"
+        );
+        
+        // Test protocol_version propagation in purgatory (unstaked)
+        let (unstaked_addr, mut unstaked_peer) = create_test_peer(2);
+        assert_eq!(unstaked_peer.protocol_version, ProtocolVersion::V1);
+        
+        // Add to purgatory
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+        
+        // Update protocol version for unstaked peer to V2
+        unstaked_peer.protocol_version = ProtocolVersion::V2;
+        unstaked_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+        
+        // Verify protocol_version updated in purgatory
+        let unstaked_updated = peer_list.peer_by_mining_address(&unstaked_addr).unwrap();
+        assert_eq!(
+            unstaked_updated.protocol_version, ProtocolVersion::V2,
+            "protocol_version should be updated in purgatory"
+        );
+        
+        // Test promotion flow: move unstaked peer to persistent cache with protocol_version preserved
+        let (promo_addr, mut promo_peer) = create_test_peer(3);
+        promo_peer.protocol_version = ProtocolVersion::V2;
+        
+        // Add to purgatory first
+        peer_list.add_or_update_peer(promo_addr, promo_peer.clone(), false);
+        let in_purgatory = peer_list.peer_by_mining_address(&promo_addr).unwrap();
+        assert_eq!(in_purgatory.protocol_version, ProtocolVersion::V2);
+        
+        // Promote to persistent (staked)
+        promo_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
+        peer_list.add_or_update_peer(promo_addr, promo_peer.clone(), true);
+        
+        // Verify protocol_version preserved after promotion
+        let promoted = peer_list.peer_by_mining_address(&promo_addr).unwrap();
+        assert_eq!(
+            promoted.protocol_version, ProtocolVersion::V2,
+            "protocol_version should be preserved during promotion from purgatory to persistent"
+        );
+        
+        // Verify promoted peer is in persistent cache, not purgatory
+        let persistable = peer_list.persistable_peers();
+        assert!(
+            persistable.contains_key(&promo_addr),
+            "Promoted peer should be in persistent cache"
+        );
+    }
+
     #[tokio::test]
     async fn test_wait_for_active_peers_includes_both_staked_and_unstaked() {
         let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));

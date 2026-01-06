@@ -230,12 +230,12 @@ where
     #[tracing::instrument(skip_all)]
     async fn handle_block_body(
         server: Data<Self>,
-        irys_block_header_json: web::Json<GossipRequest<BlockBody>>,
+        block_body_request_json: web::Json<GossipRequest<BlockBody>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
         if !server.data_handler.sync_state.is_gossip_reception_enabled() {
             let node_id = server.data_handler.gossip_client.mining_address;
-            let block_hash = irys_block_header_json.0.data.block_hash;
+            let block_hash = block_body_request_json.0.data.block_hash;
             warn!(
                 "Node {}: Gossip reception is disabled, ignoring block body {:?}",
                 node_id, block_hash
@@ -244,7 +244,7 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = irys_block_header_json.0;
+        let gossip_request = block_body_request_json.0;
         let source_miner_address = gossip_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
