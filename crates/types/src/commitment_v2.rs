@@ -1,3 +1,4 @@
+use crate::Versioned;
 pub use crate::{
     address_base58_stringify, compare_commitment_transactions, ingress::IngressProof,
     optional_string_u64, string_u64, Arbitrary, Base64, CommitmentTypeV1,
@@ -363,7 +364,7 @@ impl Encodable for CommitmentTypeV2 {
                 pledge_count_before_executing,
             } => {
                 alloy_rlp::Header {
-                    list: false,
+                    list: true,
                     payload_length: self.alloy_rlp_payload_length(),
                 }
                 .encode(acc);
@@ -375,7 +376,7 @@ impl Encodable for CommitmentTypeV2 {
                 partition_hash,
             } => {
                 alloy_rlp::Header {
-                    list: false,
+                    list: true,
                     payload_length: self.alloy_rlp_payload_length(),
                 }
                 .encode(acc);
@@ -397,7 +398,7 @@ impl Encodable for CommitmentTypeV2 {
 }
 
 impl CommitmentTypeV2 {
-    // note: this is seperate from the `length` impl in Encodable
+    // note: this is separate from the `length` impl in Encodable
     fn alloy_rlp_payload_length(&self) -> usize {
         match self {
             Self::Stake | Self::Unstake => 1,
@@ -465,6 +466,10 @@ impl Decodable for CommitmentTypeV2 {
             _ => Err(RlpError::Custom("unknown commitment type in header")),
         }
     }
+}
+
+impl Versioned for CommitmentTransactionV2 {
+    const VERSION: u8 = 2;
 }
 
 // Manual implementation of Compact for CommitmentTypeV2
@@ -659,7 +664,7 @@ mod tests {
     #[case::stake(CommitmentTypeV2::Stake, 1)]
     // note: plus ones are for the RLP header length
     #[case::pledge(CommitmentTypeV2::Pledge { pledge_count_before_executing: 100 }, 1 + 100_u64.length() + 1)]
-    #[case::unpledge(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32].into() }, 1 + 5_u64.length() + 32 + 1)]
+    #[case::unpledge(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 5, partition_hash: [9_u8; 32].into() }, 1 + 1 + 5_u64.length() + 32 + 1)]
     fn test_commitment_type_rlp_length(
         #[case] commitment_type: CommitmentTypeV2,
         #[case] expected_length: usize,

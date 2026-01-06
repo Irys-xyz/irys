@@ -9,7 +9,7 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 //==============================================================================
 // IrysSignature
 //------------------------------------------------------------------------------
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Arbitrary, Hash)]
 /// Wrapper newtype around [`Signature`], with enforced boolean parity
 pub struct IrysSignature(Signature);
 
@@ -40,11 +40,28 @@ impl IrysSignature {
     pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<IrysAddress> {
         Ok(recover_signer(&self.0, prehash.into())?.into())
     }
+
+    pub fn from_base58(str: &str) -> eyre::Result<Self> {
+        // Decode the base58 string into bytes
+        let decoded = str
+            .from_base58()
+            .map_err(|e| eyre::eyre!("Invalid base58 string: {:?}", &e))?;
+        let sig = Signature::from_raw(&decoded)?;
+        Ok(Self(sig))
+    }
 }
 
 impl Default for IrysSignature {
     fn default() -> Self {
         Self::new(Signature::new(RethU256::ZERO, RethU256::ZERO, false))
+    }
+}
+
+impl std::fmt::Debug for IrysSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("IrysSignature")
+            .field(&self.0.as_bytes().to_base58())
+            .finish()
     }
 }
 
@@ -169,8 +186,9 @@ impl alloy_rlp::Decodable for IrysSignature {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use crate::{BoundedFee, CommitmentTransaction, CommitmentTypeV1, IrysAddress, Signable as _};
+    use crate::{BoundedFee, CommitmentTransaction, CommitmentTypeV2, IrysAddress, Signable as _};
 
     use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
@@ -274,9 +292,9 @@ mod tests {
     fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
         // spellchecker:off
         // from the JS Client - `txSigningParity`
-        const SIG_HEX: &str = "0x559103e7798f0523cf37487224ddd6c2189276be86ec85d3b2ae7468b097f616173ba6d3056266f80dbeab90d793e6734dba1d92e81427e716bcd8853cca25fe1b";
+        const SIG_HEX: &str = "0x70b9868fde4a5e6a461a63683dd94da9dc443140fd451063088a17c22c8def1e3d351697a13aa18501cb5887b98524a1b3d060d2af8a1b877cb532f7f52a70f21b";
         // Base58 encoding of the signature (for version=1 signing preimage)
-        const SIG_BS58: &str = "8YxBZcsHQXARCXnhcd5svVYWCYEBZWcWf8pE5TPai39ogdT3WXfWyd6VZ73duogV1t81pwTU1gdKj9nJQ9DiJAL2W";
+        const SIG_BS58: &str = "AwxMVRKDEnExepqnuCuFBXkiEWkg59whzZGnrGTCsYo2TQhVUUWe4ufescKiLxGVTdndCjVixGAXUvVAjEhid3nEe";
         // spellchecker:on
         let testing_config = ConsensusConfig::testing();
         let irys_signer = IrysSigner {
@@ -286,15 +304,18 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let mut transaction = CommitmentTransaction::V1(crate::CommitmentTransactionV1 {
+        let mut transaction = CommitmentTransaction::V2(crate::CommitmentTransactionV2 {
             id: Default::default(),
-            anchor: H256::from([1_u8; 32]),
+            // anchor: H256::from([1_u8; 32]),
+            anchor: H256::from_base58("GqrCZEc5WU4gXj9qveAUDkNRPhsPPjWrD8buKAc5sXdZ"),
+
             signer: IrysAddress::ZERO,
-            commitment_type: CommitmentTypeV1::Unpledge {
-                pledge_count_before_executing: 12,
-                partition_hash: [2_u8; 32].into(),
+            commitment_type: CommitmentTypeV2::Unpledge {
+                pledge_count_before_executing: u64::MAX,
+                // partition_hash: [2_u8; 32].into(),
+                partition_hash: H256::from_base58("12Yjd3YA9xjzkqDfdcXVWgyu6TpAq9WJdh6NJRWzZBKt"),
             },
-            chain_id: testing_config.chain_id,
+            chain_id: 1270,
             signature: Default::default(),
             fee: 1234,
             value: 222.into(),
@@ -314,6 +335,21 @@ mod tests {
         let (signature2, _) = IrysSignature::from_compact(&bytes, bytes.len());
 
         assert_eq!(*transaction.signature(), signature2);
+
+        let mut buf = Vec::new();
+        transaction.encode(&mut buf);
+        assert_eq!(
+            buf,
+            vec![
+                248, 107, 2, 160, 235, 98, 207, 255, 20, 72, 55, 95, 138, 3, 64, 73, 43, 2, 195,
+                255, 161, 69, 141, 190, 217, 103, 225, 140, 51, 128, 116, 217, 123, 237, 192, 176,
+                148, 100, 241, 162, 130, 158, 14, 105, 140, 24, 231, 121, 45, 110, 116, 246, 125,
+                137, 170, 10, 50, 235, 3, 136, 255, 255, 255, 255, 255, 255, 255, 255, 160, 0, 101,
+                118, 169, 82, 205, 224, 235, 245, 44, 177, 1, 87, 152, 203, 219, 186, 168, 206,
+                177, 83, 183, 19, 181, 32, 176, 137, 138, 119, 71, 87, 223, 130, 4, 246, 130, 4,
+                210, 129, 222
+            ]
+        );
 
         // serde-json base58 roundtrip
         let ser = serde_json::to_string(&transaction.signature())?;

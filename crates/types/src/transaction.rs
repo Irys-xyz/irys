@@ -917,7 +917,7 @@ mod tests {
         ));
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded.version(), 1);
+        assert_eq!(decoded.version(), 2);
     }
 
     #[test]
@@ -953,8 +953,8 @@ mod tests {
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in Compact encoding
-        assert_eq!(decoded_tx.version(), 1);
-        assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+        assert_eq!(decoded_tx.version(), 2);
+        assert_eq!(buffer[0], 2); // First byte should be the version discriminant
         assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
 
