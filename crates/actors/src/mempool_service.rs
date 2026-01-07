@@ -201,6 +201,11 @@ pub struct Inner {
 pub enum MempoolServiceMessage {
     /// Block Confirmed, read publish txs from block. Overwrite copies in mempool with proof
     BlockConfirmed(Arc<IrysBlockHeader>),
+    /// Ingest validated block transactions into mempool after successful block validation.
+    BlockTransactionsValidated {
+        block: Arc<IrysBlockHeader>,
+        transactions: Arc<crate::block_discovery::BlockTransactions>,
+    },
     /// Ingress Chunk, Add to CachedChunks, generate_ingress_proof, gossip chunk
     IngestChunk(
         UnpackedChunk,
@@ -270,6 +275,7 @@ impl MempoolServiceMessage {
     pub fn variant_name(&self) -> &'static str {
         match self {
             Self::BlockConfirmed(_) => "BlockConfirmed",
+            Self::BlockTransactionsValidated { .. } => "BlockTransactionsValidated",
             Self::IngestChunk(_, _) => "IngestChunk",
             Self::IngestChunkFireAndForget(_) => "IngestChunkFireAndForget",
             Self::IngestIngressProof(_, _) => "IngestIngressProof",
@@ -309,6 +315,24 @@ impl Inner {
                 if let Err(e) = self.handle_block_confirmed_message(block).await {
                     tracing::error!(
                         "Failed to handle block confirmed message for block {} (height {}): {:#}",
+                        block_hash,
+                        block_height,
+                        e
+                    );
+                }
+            }
+            MempoolServiceMessage::BlockTransactionsValidated {
+                block,
+                transactions,
+            } => {
+                let block_hash = block.block_hash;
+                let block_height = block.height;
+                if let Err(e) = self
+                    .handle_block_transactions_validated(block, transactions)
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to handle BlockTransactionsValidated for block {} (height {}): {:#}",
                         block_hash,
                         block_height,
                         e

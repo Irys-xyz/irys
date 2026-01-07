@@ -160,6 +160,9 @@ impl Inner {
         // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
         let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;
 
+        // DoS protection: reject transactions from accounts with zero balance
+        self.validate_gossip_nonzero_balance(&tx).await?;
+
         // Protocol fee structure checks (Gossip: skip)
         //
         // Rationale:
@@ -167,11 +170,12 @@ impl Inner {
         //   EMA/pricing context. To avoid false rejections, we limit validation for Gossip
         //   sources to signature + anchor checks only (performed above), and skip fee structure
         //   checks here.
-        // - Similarly, we skip balance and EMA pricing validation for gossip, as these are
-        //   canonical-chain-specific and may differ across forks.
+        // - We skip full balance and EMA pricing validation for gossip, as these are
+        //   canonical-chain-specific and may differ across forks. However, we do check for
+        //   non-zero balance above to prevent DoS from completely unfunded accounts.
         match ledger {
             DataLedger::Publish => {
-                // Gossip path: skip API-only checks here
+                // Gossip path: skip API-only fee structure checks here
             }
             DataLedger::Submit => {
                 // Submit ledger - a data transaction cannot target the submit ledger directly
@@ -276,6 +280,34 @@ impl Inner {
             tx.required_balance = %required,
             "Funding validated for data tx"
         );
+
+        Ok(())
+    }
+
+    /// Validates that a gossip transaction signer has non-zero balance.
+    #[tracing::instrument(level = "trace", skip_all, fields(tx.id = %tx.id, tx.signer = %tx.signer))]
+    async fn validate_gossip_nonzero_balance(
+        &self,
+        tx: &DataTransactionHeader,
+    ) -> Result<(), TxIngressError> {
+        let balance: U256 = self
+            .reth_node_adapter
+            .rpc
+            .get_balance_irys_canonical_and_pending(tx.signer, None)
+            .await
+            .map_err(|e| TxIngressError::BalanceFetchError {
+                address: tx.signer.to_string(),
+                reason: e.to_string(),
+            })?;
+
+        if balance.is_zero() {
+            tracing::debug!(
+                tx.id = %tx.id,
+                tx.signer = %tx.signer,
+                "Rejecting gossip tx from zero-balance account"
+            );
+            return Err(TxIngressError::Unfunded(tx.id));
+        }
 
         Ok(())
     }

@@ -2510,7 +2510,7 @@ async fn commitment_tx_valid_higher_fee_test(
 
 #[rstest::rstest]
 #[case::stake_enough_balance(irys_types::U256::from(20000000000000000000100_u128 /* stake cost */), 1, 0)]
-#[case::stake_not_enough_balance(irys_types::U256::from(0), 0, 0)]
+#[case::stake_not_enough_balance(irys_types::U256::from(1), 0, 0)]
 #[case::pledge_15_enough_balance_for_1(
     irys_types::U256::from(20000000000000000000100_u128 /*stake cost*/ + 950000000000000000100_u128 /* pledge 1 */  ),
     2, // stake & 1 pledge
