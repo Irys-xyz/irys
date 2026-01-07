@@ -14,7 +14,7 @@ pkg-config
 ```
 The NVIDIA feature flag/CUDA accelerated matrix packing requires the latest CUDA toolkit (12.6+)\
 and GCC-13 (as well as g++ 13).\
-See .devcontainer/setup.sh for more information.
+See `.devcontainer/setup.sh` for more information.
 
 Local development commands:
 
