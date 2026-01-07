@@ -26,11 +26,15 @@ pub enum PeerResponse {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Arbitrary,
 )]
 #[repr(u32)]
-#[derive(Default)]
 pub enum ProtocolVersion {
-    #[default]
     V1 = 1,
     V2 = 2,
+}
+
+impl Default for ProtocolVersion {
+    fn default() -> Self {
+        Self::current()
+    }
 }
 
 impl From<u32> for ProtocolVersion {
