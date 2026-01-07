@@ -178,6 +178,11 @@ impl BlockIndexServiceInner {
     ) -> eyre::Result<()> {
         let chunk_size = self.chunk_size;
 
+        // IMPORTANT: block_index must be updated BEFORE add_block_reward.
+        // The backfill task reads from block_index to determine which blocks need
+        // historical reward summing. Reversing this order creates a race where
+        // backfill could miss a block's reward (not yet in index) while live
+        // migration already counted it, causing incorrect totals.
         self.block_index
             .write()
             .map_err(|_| eyre!("block_index write lock poisoned"))?
