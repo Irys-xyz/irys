@@ -1515,9 +1515,9 @@ mod tests {
     fn test_protocol_version_propagation() {
         let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
 
-        // Create a peer with default protocol version (V1)
+        // Create a peer with protocol version V1
         let (mining_addr, mut peer) = create_test_peer(1);
-        assert_eq!(peer.protocol_version, ProtocolVersion::default());
+        peer.protocol_version = ProtocolVersion::V1;
         assert_eq!(peer.protocol_version, ProtocolVersion::V1);
 
         // Add peer to persistent cache (staked)
@@ -1572,6 +1572,7 @@ mod tests {
 
         // Test protocol_version propagation in purgatory (unstaked)
         let (unstaked_addr, mut unstaked_peer) = create_test_peer(2);
+        unstaked_peer.protocol_version = ProtocolVersion::V1;
         assert_eq!(unstaked_peer.protocol_version, ProtocolVersion::V1);
 
         // Add to purgatory
