@@ -339,6 +339,7 @@ impl GossipClient {
             format!("gossip/v2{}", GossipRoutes::Handshake)
         };
         let url = format!("http://{}/{}", peer, path);
+        debug!("Posting handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
             .post(&url)

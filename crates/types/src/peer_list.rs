@@ -350,7 +350,9 @@ impl Compact for PeerListItem {
             total_consumed += 1;
         }
 
-        let mut protocol_version = ProtocolVersion::default();
+        // Read protocol_version (4 bytes) if available. If it's not available, it means that it's a
+        //  v1 record, so we default to ProtocolVersion::V1.
+        let mut protocol_version = ProtocolVersion::V1;
         if buf.len() >= total_consumed + 4 {
             let version_bytes: [u8; 4] = buf[total_consumed..total_consumed + 4]
                 .try_into()
@@ -846,6 +848,7 @@ mod tests {
         assert_eq!(decoded.last_seen, item.last_seen);
         assert!(!decoded.is_online);
         assert_ne!(decoded.protocol_version, item.protocol_version);
-        assert_eq!(decoded.protocol_version, ProtocolVersion::default());
+        // For the records that don't have a protocol version, it should default to V1
+        assert_eq!(decoded.protocol_version, ProtocolVersion::V1);
     }
 }

@@ -374,7 +374,8 @@ async fn should_process_block_with_intermediate_block_in_api() {
 }
 
 #[tokio::test]
-async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives() {
+async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when_new_block_arrives()
+{
     let config = create_test_config();
 
     let gossip_server = FakeGossipServer::new();
@@ -511,7 +512,9 @@ async fn should_reprocess_block_again_if_processing_its_parent_failed_when_new_b
             GossipResponse::Accepted(block_for_server)
         }
         GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
-        GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),
+        GossipDataRequestV2::BlockBody(hash) => GossipResponse::Accepted(Some(
+            GossipDataV2::BlockBody(Arc::new(create_test_block_body(hash))),
+        )),
         GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
     });
 
