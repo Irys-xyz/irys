@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use eyre::Result;
 use futures::{future, FutureExt as _};
-use irys_actors::block_discovery::{BlockDiscoveryError, BlockTransactions};
+use irys_actors::block_discovery::BlockDiscoveryError;
 use irys_actors::mempool_guard::MempoolReadGuard;
 use irys_actors::mempool_service::{create_state, AtomicMempoolState, TxIngressError, TxReadError};
 use irys_actors::services::ServiceSenders;
@@ -25,14 +25,16 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::tempfile::TempDir;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
-use irys_types::IrysAddress;
+use irys_types::v1::GossipDataRequestV1;
+use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, GossipData,
-    GossipDataRequest, GossipRequest, IngressProof, IrysBlockHeader, MempoolConfig, NodeConfig,
-    NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, RethPeerInfo,
-    TokioServiceHandle, TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
+    IrysBlockHeader, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
+    TxKnownStatus, UnpackedChunk, H256,
 };
+use irys_types::{BlockTransactions, IrysAddress};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::{HashMap, HashSet};
@@ -48,18 +50,25 @@ use tracing::{debug, info, warn};
 pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
-    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>,
+    pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
+    pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
+    pub mempool_state: AtomicMempoolState,
 }
 
 impl MempoolStub {
     #[must_use]
-    pub(crate) fn new(internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessage>) -> Self {
+    pub(crate) fn new(
+        internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
+        mempool_state: AtomicMempoolState,
+    ) -> Self {
         Self {
             txs: Arc::default(),
             chunks: Arc::default(),
             internal_message_bus,
             migrated_blocks: Arc::new(RwLock::new(Vec::new())),
+            blocks: Arc::new(RwLock::new(Vec::new())),
+            mempool_state,
         }
     }
 }
@@ -89,7 +98,7 @@ impl MempoolFacade for MempoolStub {
         let message_bus = self.internal_message_bus.clone();
         tokio::runtime::Handle::current().spawn(async move {
             message_bus
-                .send(GossipBroadcastMessage::from(tx_header))
+                .send(GossipBroadcastMessageV2::from(tx_header))
                 .expect("to send transaction");
         });
 
@@ -137,7 +146,7 @@ impl MempoolFacade for MempoolStub {
             let message_bus = self.internal_message_bus.clone();
             tokio::runtime::Handle::current().spawn(async move {
                 message_bus
-                    .send(GossipBroadcastMessage::from(chunk))
+                    .send(GossipBroadcastMessageV2::from(chunk))
                     .expect("to send chunk");
             });
         }
@@ -188,10 +197,11 @@ impl MempoolFacade for MempoolStub {
 
     async fn get_block_header(
         &self,
-        _block_hash: H256,
+        block_hash: H256,
         _include_chunk: bool,
     ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
-        Ok(None)
+        let blocks = self.blocks.read().expect("to unlock blocks");
+        Ok(blocks.iter().find(|b| b.block_hash == block_hash).cloned())
     }
 
     async fn migrate_block(
@@ -219,12 +229,16 @@ impl MempoolFacade for MempoolStub {
     ) -> Result<()> {
         Ok(())
     }
+
+    async fn get_internal_read_guard(&self) -> MempoolReadGuard {
+        MempoolReadGuard::new(self.mempool_state.clone())
+    }
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BlockDiscoveryStub {
     pub blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
-    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessage>>,
+    pub internal_message_bus: Option<mpsc::UnboundedSender<GossipBroadcastMessageV2>>,
     pub block_status_provider: BlockStatusProvider,
 }
 
@@ -255,7 +269,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessage::from(block))
+                    .send(GossipBroadcastMessageV2::from(block))
                     .expect("to send block");
             });
         }
@@ -286,7 +300,7 @@ pub(crate) struct GossipServiceTestFixture {
     pub execution_payload_provider: ExecutionPayloadCache,
     pub config: Config,
     pub service_senders: ServiceSenders,
-    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessage>>,
+    pub gossip_receiver: Option<mpsc::UnboundedReceiver<GossipBroadcastMessageV2>>,
     pub _sync_rx: Option<UnboundedReceiver<SyncChainServiceMessage>>,
     pub sync_tx: UnboundedSender<SyncChainServiceMessage>,
     // needs to be held so the directory is removed correctly
@@ -341,7 +355,14 @@ impl GossipServiceTestFixture {
             tokio_runtime.clone(),
         );
 
-        let mempool_stub = MempoolStub::new(service_senders.gossip_broadcast.clone());
+        let mempool_config = MempoolConfig::testing();
+        let state = create_state(&mempool_config, &[]);
+        let mempool_state = AtomicMempoolState::new(state);
+
+        let mempool_stub = MempoolStub::new(
+            service_senders.gossip_broadcast.clone(),
+            mempool_state.clone(),
+        );
         let mempool_txs = Arc::clone(&mempool_stub.txs);
         let mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
@@ -396,10 +417,6 @@ impl GossipServiceTestFixture {
 
         let (sync_tx, sync_rx) = mpsc::unbounded_channel::<SyncChainServiceMessage>();
 
-        let mempool_config = MempoolConfig::testing();
-        let state = create_state(&mempool_config, &[]);
-        let mempool_state = AtomicMempoolState::new(state);
-
         Self {
             _temp_dir: temp_dir,
             gossip_port,
@@ -432,7 +449,7 @@ impl GossipServiceTestFixture {
         &mut self,
     ) -> (
         ServiceHandleWithShutdownSignal,
-        mpsc::UnboundedSender<GossipBroadcastMessage>,
+        mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
@@ -446,11 +463,7 @@ impl GossipServiceTestFixture {
         )
         .expect("To bind");
 
-        let mempool_stub = MempoolStub::new(self.service_senders.gossip_broadcast.clone());
-        self.mempool_txs = Arc::clone(&mempool_stub.txs);
-        self.mempool_chunks = Arc::clone(&mempool_stub.chunks);
-
-        self.mempool_stub = mempool_stub.clone();
+        let mempool_stub = self.mempool_stub.clone();
 
         let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node_config).await;
         let block_discovery_stub = BlockDiscoveryStub {
@@ -515,6 +528,7 @@ impl GossipServiceTestFixture {
             },
             last_seen: 0,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         }
     }
 
@@ -536,6 +550,14 @@ impl GossipServiceTestFixture {
             .insert_tx_and_mark_valid(&tx)
             .await
             .expect("to insert tx");
+    }
+
+    pub(crate) fn add_block_header_to_mempool(&self, block: IrysBlockHeader) {
+        self.mempool_stub
+            .blocks
+            .write()
+            .expect("to unlock mempool blocks")
+            .push(block);
     }
 }
 
@@ -588,7 +610,7 @@ pub(crate) fn create_test_chunks(tx: &DataTransaction) -> Vec<UnpackedChunk> {
 struct FakeGossipDataHandler {
     on_block_data_request: Box<dyn Fn(BlockHash) -> GossipResponse<bool> + Send + Sync>,
     on_pull_data_request:
-        Box<dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync>,
+        Box<dyn Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>> + Send + Sync>,
     on_info_request: Box<dyn Fn() -> GossipResponse<NodeInfo> + Send + Sync>,
     on_block_index_request:
         Box<dyn Fn(BlockIndexQuery) -> GossipResponse<Vec<BlockIndexItem>> + Send + Sync>,
@@ -610,8 +632,8 @@ impl FakeGossipDataHandler {
 
     fn call_on_pull_data_request(
         &self,
-        data_request: GossipDataRequest,
-    ) -> GossipResponse<Option<GossipData>> {
+        data_request: GossipDataRequestV2,
+    ) -> GossipResponse<Option<GossipDataV2>> {
         (self.on_pull_data_request)(data_request)
     }
 
@@ -636,7 +658,7 @@ impl FakeGossipDataHandler {
     fn set_on_pull_data_request(
         &mut self,
         on_pull_data_request: Box<
-            dyn Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>> + Send + Sync,
+            dyn Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>> + Send + Sync,
         >,
     ) {
         self.on_pull_data_request = on_pull_data_request;
@@ -695,7 +717,7 @@ impl FakeGossipServer {
 
     pub(crate) fn set_on_pull_data_request(
         &self,
-        on_pull_data_request: impl Fn(GossipDataRequest) -> GossipResponse<Option<GossipData>>
+        on_pull_data_request: impl Fn(GossipDataRequestV2) -> GossipResponse<Option<GossipDataV2>>
             + Send
             + Sync
             + 'static,
@@ -740,6 +762,13 @@ impl FakeGossipServer {
                 .wrap(middleware::Logger::new("%r %s %D ms"))
                 .service(web::resource("/gossip/get_data").route(web::post().to(handle_get_data)))
                 .service(web::resource("/gossip/pull_data").route(web::post().to(handle_pull_data)))
+                .service(
+                    web::resource("/gossip/v2/get_data").route(web::post().to(handle_get_data_v2)),
+                )
+                .service(
+                    web::resource("/gossip/v2/pull_data")
+                        .route(web::post().to(handle_pull_data_v2)),
+                )
                 .service(web::resource("/gossip/info").route(web::get().to(handle_info)))
                 .service(
                     web::resource("/gossip/block-index").route(web::get().to(handle_block_index)),
@@ -748,7 +777,7 @@ impl FakeGossipServer {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
                         .content_type("application/json")
-                        .json(false)
+                        .json(GossipResponse::Accepted(false))
                 }))
         })
         .workers(1)
@@ -763,17 +792,17 @@ impl FakeGossipServer {
     }
 }
 
-async fn handle_get_data(
+async fn handle_get_data_v2(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
     warn!("Fake server got request: {:?}", data_request.data);
 
     match handler.read() {
-        Ok(handler) => match data_request.data {
-            GossipDataRequest::Block(block_hash) => {
-                let res = handler.call_on_block_data_request(block_hash);
+        Ok(handler) => match &data_request.data {
+            GossipDataRequestV2::BlockHeader(block_hash) => {
+                let res = handler.call_on_block_data_request(*block_hash);
                 warn!(
                     "Block data request for hash {:?}, response: {:?}",
                     block_hash, res
@@ -782,23 +811,29 @@ async fn handle_get_data(
                     .content_type("application/json")
                     .json(res)
             }
-            GossipDataRequest::ExecutionPayload(evm_block_hash) => {
+            GossipDataRequestV2::BlockBody(block_hash) => {
+                warn!("Block body request for hash {:?}", block_hash);
+                HttpResponse::Ok()
+                    .content_type("application/json")
+                    .json(GossipResponse::Accepted(false))
+            }
+            GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 warn!("Execution payload request for hash {:?}", evm_block_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(true)
+                    .json(GossipResponse::Accepted(true))
             }
-            GossipDataRequest::Chunk(chunk_hash) => {
+            GossipDataRequestV2::Chunk(chunk_hash) => {
                 warn!("Chunk request for hash {:?}", chunk_hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(GossipResponse::Accepted(false))
             }
-            GossipDataRequest::Transaction(hash) => {
+            GossipDataRequestV2::Transaction(hash) => {
                 warn!("Transaction request for hash {:?}", hash);
                 HttpResponse::Ok()
                     .content_type("application/json")
-                    .json(false)
+                    .json(GossipResponse::Accepted(false))
             }
         },
         Err(e) => {
@@ -810,9 +845,23 @@ async fn handle_get_data(
     }
 }
 
-async fn handle_pull_data(
+async fn handle_get_data(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
-    data_request: web::Json<GossipRequest<GossipDataRequest>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+    req: actix_web::HttpRequest,
+) -> HttpResponse {
+    let v1_request = data_request.0;
+    let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+    let v2_request = GossipRequest {
+        miner_address: v1_request.miner_address,
+        data: v2_data_request,
+    };
+    handle_get_data_v2(handler, web::Json(v2_request), req).await
+}
+
+async fn handle_pull_data_v2(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
     _req: actix_web::HttpRequest,
 ) -> HttpResponse {
     warn!("Fake server got pull data request: {:?}", data_request.data);
@@ -824,6 +873,49 @@ async fn handle_pull_data(
             HttpResponse::Ok()
                 .content_type("application/json")
                 .json(response)
+        }
+        Err(e) => {
+            warn!("Failed to acquire read lock on handler: {}", e);
+            HttpResponse::InternalServerError()
+                .content_type("application/json")
+                .json("Failed to process a request")
+        }
+    }
+}
+
+async fn handle_pull_data(
+    handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
+    data_request: web::Json<GossipRequest<GossipDataRequestV1>>,
+    _req: actix_web::HttpRequest,
+) -> HttpResponse {
+    let v1_request = data_request.0;
+    let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
+    let v2_request = GossipRequest {
+        miner_address: v1_request.miner_address,
+        data: v2_data_request,
+    };
+
+    warn!(
+        "Fake server got pull data v1 request: {:?}",
+        v2_request.data
+    );
+
+    match handler.read() {
+        Ok(handler) => {
+            let data_request = v2_request.data;
+            let response = handler.call_on_pull_data_request(data_request);
+            // response is GossipResponse<Option<GossipDataV2>>
+
+            let response_v1 = match response {
+                GossipResponse::Accepted(maybe_data) => {
+                    GossipResponse::Accepted(maybe_data.and_then(|d| d.to_v1()))
+                }
+                GossipResponse::Rejected(r) => GossipResponse::Rejected(r),
+            };
+
+            HttpResponse::Ok()
+                .content_type("application/json")
+                .json(response_v1)
         }
         Err(e) => {
             warn!("Failed to acquire read lock on handler: {}", e);
@@ -897,7 +989,10 @@ pub(crate) async fn data_handler_stub(
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
     let (sync_tx, _sync_rx) = mpsc::unbounded_channel();
-    let mempool_stub = MempoolStub::new(gossip_tx);
+    let mempool_config = MempoolConfig::testing();
+    let state = create_state(&mempool_config, &[]);
+    let mempool_state = AtomicMempoolState::new(state);
+    let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
     let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
     let block_discovery_stub = BlockDiscoveryStub {
@@ -954,7 +1049,10 @@ pub(crate) async fn data_handler_with_stubbed_pool(
     let (service_senders, _service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
     let gossip_tx = service_senders.gossip_broadcast.clone();
-    let mempool_stub = MempoolStub::new(gossip_tx);
+    let mempool_config = MempoolConfig::testing();
+    let state = create_state(&mempool_config, &[]);
+    let mempool_state = AtomicMempoolState::new(state);
+    let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);

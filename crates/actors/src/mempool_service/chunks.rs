@@ -7,12 +7,12 @@ use irys_database::{
     db_cache::data_size_to_chunk_count,
     tables::{CachedChunks, CachedChunksIndex},
 };
+use irys_types::gossip::v2::GossipBroadcastMessageV2;
 use irys_types::{
     chunk::{max_chunk_offset, UnpackedChunk},
     hash_sha256,
     irys::IrysSigner,
-    validate_path, DataLedger, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof,
-    H256,
+    validate_path, DataLedger, DataRoot, DatabaseProvider, IngressProof, H256,
 };
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
@@ -429,7 +429,7 @@ impl Inner {
         // Gossip the chunk before moving onto ingress proof checks
         let chunk_data_root = chunk.data_root;
         let chunk_tx_offset = chunk.tx_offset;
-        let gossip_broadcast_message = GossipBroadcastMessage::from(chunk);
+        let gossip_broadcast_message = GossipBroadcastMessageV2::from(chunk);
 
         if let Err(error) = self
             .service_senders

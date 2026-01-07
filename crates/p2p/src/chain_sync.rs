@@ -292,23 +292,17 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
                     orphaned_block.header.block_hash
                 );
                 let block_pool = self.block_pool.clone();
-                let gossip_data_handler = self.gossip_data_handler.clone();
-                let header = orphaned_block.header;
+                let block_header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
+                let block_body = orphaned_block.block_body;
                 futures.push(async move {
-                    // Fetch transactions using unified method (cache + mempool + network)
-                    let block_transactions = gossip_data_handler
-                        .fetch_and_build_block_transactions(&header, None)
-                        .await
-                        .map_err(|e| {
-                            ChainSyncError::Internal(format!(
-                                "Failed to fetch block transactions: {:?}",
-                                e
-                            ))
-                        })?;
+                    debug!(
+                        "Using cached block body for orphaned ancestor: {:?}",
+                        block_header.block_hash
+                    );
 
                     block_pool
-                        .process_block(header, block_transactions, is_fast_tracking)
+                        .process_block(block_header, block_body, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
@@ -593,31 +587,16 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                     // Get cached block header from block_pool
                     if let Some(cached_block) = inner.block_pool.get_cached_block(&block_hash).await
                     {
-                        // Use GossipDataHandler for network-enabled tx fetching
-                        match inner
-                            .gossip_data_handler
-                            .fetch_and_build_block_transactions(&cached_block.header, None)
+                        if let Err(e) = inner
+                            .block_pool
+                            .process_block(
+                                cached_block.header,
+                                cached_block.block_body,
+                                cached_block.is_fast_tracking,
+                            )
                             .await
                         {
-                            Ok(block_transactions) => {
-                                if let Err(e) = inner
-                                    .block_pool
-                                    .process_block(
-                                        cached_block.header,
-                                        block_transactions,
-                                        cached_block.is_fast_tracking,
-                                    )
-                                    .await
-                                {
-                                    error!("Failed to reprocess block {:?}: {:?}", block_hash, e);
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to fetch transactions for reprocessing block {:?}: {:?}",
-                                    block_hash, e
-                                );
-                            }
+                            error!("Failed to reprocess block {:?}: {:?}", block_hash, e);
                         }
                     } else {
                         error!(
@@ -1529,9 +1508,10 @@ mod tests {
         use crate::types::GossipResponse;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, IrysBlockHeader,
-            NodeConfig, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
+            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, PeerAddress,
+            PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1553,8 +1533,8 @@ mod tests {
             let sync_state_clone = sync_state.clone();
             fake_gossip_server.set_on_pull_data_request(move |data_request| {
                 match data_request {
-                    GossipDataRequest::ExecutionPayload(_) => GossipResponse::Accepted(None),
-                    GossipDataRequest::Block(block_hash) => {
+                    GossipDataRequestV2::ExecutionPayload(_) => GossipResponse::Accepted(None),
+                    GossipDataRequestV2::BlockHeader(block_hash) => {
                         info!("Fake server pull data request: {block_hash:?}");
                         let mut block_requests = block_requests.lock().unwrap();
                         let requests_len = block_requests.len();
@@ -1565,13 +1545,14 @@ mod tests {
                             GossipResponse::Accepted(None)
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
-                            GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
+                            GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
                                 IrysBlockHeader::new_mock_header(),
                             ))))
                         }
                     }
-                    GossipDataRequest::Chunk(_) => GossipResponse::Accepted(None),
-                    GossipDataRequest::Transaction(_) => GossipResponse::Accepted(None),
+                    GossipDataRequestV2::Chunk(_) => GossipResponse::Accepted(None),
+                    GossipDataRequestV2::BlockBody(_) => GossipResponse::Accepted(None),
+                    GossipDataRequestV2::Transaction(_) => GossipResponse::Accepted(None),
                 }
             });
 
@@ -1636,6 +1617,7 @@ mod tests {
                     address: fake_peer_address,
                     last_seen: 0,
                     is_online: true,
+                    protocol_version: Default::default(),
                 },
                 true,
             );
@@ -1739,6 +1721,7 @@ mod tests {
                     address: fake_peer_address,
                     last_seen: 0,
                     is_online: true,
+                    protocol_version: Default::default(),
                 },
                 true,
             );
@@ -1773,10 +1756,10 @@ mod tests {
         use eyre::Result as EyreResult;
         use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
+        use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, GossipData, GossipDataRequest, IrysAddress, IrysBlockHeader,
-            NodeConfig, NodeInfo, PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
-            SyncMode,
+            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, NodeInfo,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1794,7 +1777,7 @@ mod tests {
             let s2_calls = Arc::new(Mutex::new(0_usize));
             let s1_calls_clone = s1_calls.clone();
             server1.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequestV2::BlockHeader(_hash) => {
                     let mut c = s1_calls_clone.lock().unwrap();
                     *c += 1;
                     GossipResponse::Accepted(None)
@@ -1804,10 +1787,10 @@ mod tests {
 
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequestV2::BlockHeader(_hash) => {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
-                    GossipResponse::Accepted(Some(GossipData::Block(Arc::new(
+                    GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
                         IrysBlockHeader::new_mock_header(),
                     ))))
                 }
@@ -1870,6 +1853,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
                 reputation_score: PeerScore::new(99),
@@ -1881,6 +1865,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
 
             let addr_a = IrysAddress::repeat_byte(0xA0);
@@ -1927,7 +1912,7 @@ mod tests {
             let s2_calls = Arc::new(Mutex::new(0_usize));
             let s1_calls_clone = s1_calls.clone();
             server1.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequestV2::BlockHeader(_hash) => {
                     *s1_calls_clone.lock().unwrap() += 1;
                     GossipResponse::Accepted(None)
                 }
@@ -1935,7 +1920,7 @@ mod tests {
             });
             let s2_calls_clone = s2_calls.clone();
             server2.set_on_pull_data_request(move |req| match req {
-                GossipDataRequest::Block(_hash) => {
+                GossipDataRequestV2::BlockHeader(_hash) => {
                     *s2_calls_clone.lock().unwrap() += 1;
                     GossipResponse::Accepted(None)
                 }
@@ -1994,6 +1979,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
                 reputation_score: PeerScore::new(99),
@@ -2005,6 +1991,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                protocol_version: Default::default(),
             };
             let addr_a = IrysAddress::repeat_byte(0xA1);
             let addr_b = IrysAddress::repeat_byte(0xB1);

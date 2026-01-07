@@ -4,14 +4,13 @@ use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
 use crate::validation::send_block_to_block_tree;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::{
     async_trait, block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::IrysAddress;
+use irys_types::{BlockTransactions, IrysAddress};
 use irys_types::{
     DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
     U256,

@@ -3,7 +3,7 @@ use crate::mempool_service::{
     ChunkIngressError, IngressProofError, MempoolServiceMessage, TxIngressError, TxReadError,
 };
 use crate::services::ServiceSenders;
-use crate::CriticalChunkIngressError;
+use crate::{CriticalChunkIngressError, MempoolReadGuard};
 use eyre::eyre;
 use irys_types::{
     chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
@@ -60,6 +60,16 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
         &self,
         new_whitelist: HashSet<IrysAddress>,
     ) -> eyre::Result<()>;
+
+    /// Returns a read guard to the internal mempool state for multi-query flows.
+    ///
+    /// This method mirrors the facade pattern used by `handle_ingest_ingress_proof` and
+    /// `MempoolServiceMessage::GetReadGuard`. It is intended for internal/multi-query
+    /// flows where multiple sequential reads are required.
+    ///
+    /// **Important**: Callers must not hold the guard across long-running work.
+    /// Use only for short synchronous reads to avoid blocking other operations.
+    async fn get_internal_read_guard(&self) -> MempoolReadGuard;
 }
 
 #[derive(Clone, Debug)]
@@ -171,29 +181,6 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .expect("to process CommitmentTxIngressMessage")
     }
 
-    async fn handle_ingest_ingress_proof(
-        &self,
-        ingress_proof: IngressProof,
-    ) -> Result<(), IngressProofError> {
-        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        let data_root = ingress_proof.data_root;
-        self.service
-            .send(MempoolServiceMessage::IngestIngressProof(
-                ingress_proof,
-                oneshot_tx,
-            ))
-            .map_err(|_| {
-                IngressProofError::Other(format!(
-                    "Error sending IngestIngressProof message for data_root {:?}",
-                    data_root
-                ))
-            })?;
-
-        oneshot_rx
-            .await
-            .expect("to process IngestIngressProof message")
-    }
-
     async fn handle_chunk_ingress(&self, chunk: UnpackedChunk) -> Result<(), ChunkIngressError> {
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
         let chunk_data_root = chunk.data_root;
@@ -233,6 +220,29 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             })?;
 
         oneshot_rx.await.expect("to process TxExistenceQuery")
+    }
+
+    async fn handle_ingest_ingress_proof(
+        &self,
+        ingress_proof: IngressProof,
+    ) -> Result<(), IngressProofError> {
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        let data_root = ingress_proof.data_root;
+        self.service
+            .send(MempoolServiceMessage::IngestIngressProof(
+                ingress_proof,
+                oneshot_tx,
+            ))
+            .map_err(|_| {
+                IngressProofError::Other(format!(
+                    "Error sending IngestIngressProof message for data_root {:?}",
+                    data_root
+                ))
+            })?;
+
+        oneshot_rx
+            .await
+            .expect("to process IngestIngressProof message")
     }
 
     async fn get_block_header(
@@ -305,5 +315,14 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
             .map_err(|send_error| eyre!("{send_error:?}"))?;
 
         rx.await.map_err(|recv_error| eyre!("{recv_error:?}"))
+    }
+
+    async fn get_internal_read_guard(&self) -> MempoolReadGuard {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.service
+            .send(MempoolServiceMessage::GetReadGuard(tx))
+            .expect("to send GetInternalReadGuard message");
+
+        rx.await.expect("to process GetInternalReadGuard message")
     }
 }

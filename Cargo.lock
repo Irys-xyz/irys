@@ -5181,7 +5181,6 @@ dependencies = [
  "irys-types",
  "reth",
  "rstest",
- "semver 1.0.27",
  "serde",
  "serde_json",
  "socket2 0.5.10",

@@ -3,7 +3,6 @@ use crate::{
     api::{
         block_index_endpoint_request, chunk_endpoint_request, client_request,
         info_endpoint_request, network_config_endpoint_request, peer_list_endpoint_request,
-        version_endpoint_request,
     },
     utils::IrysNodeTest,
 };
@@ -46,11 +45,6 @@ async fn heavy_external_api() -> eyre::Result<()> {
         _response.headers().get("content-type").unwrap(),
         &ContentType::json().to_string()
     );
-
-    // FIXME: Test to be updated with future endpoint work
-    let mut _response = version_endpoint_request(&address).await;
-    //assert_eq!(response.status(), 200);
-    //assert_eq!(response.content_type(), ContentType::json());
 
     let response = info_endpoint_request(&address).await;
 
