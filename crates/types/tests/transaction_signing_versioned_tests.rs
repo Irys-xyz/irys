@@ -49,7 +49,8 @@ fn commitment_tx_signing_uses_discriminant() {
     let buf = &mut &buf[..];
     // decode the header
     let _hdr = alloy_rlp::Header::decode(buf).unwrap();
-    assert_eq!(buf[0], 1);
+    // first byte should be the version
+    assert_eq!(buf[0], 2);
 
     // Actually test signing works with the versioned structure
     signer

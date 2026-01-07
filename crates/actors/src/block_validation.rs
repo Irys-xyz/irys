@@ -37,7 +37,7 @@ use irys_types::{
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
 use irys_types::{BlockHash, LedgerChunkRange};
-use irys_types::{CommitmentType, IrysTransactionCommon};
+use irys_types::{CommitmentTypeV1, IrysTransactionCommon};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -1754,15 +1754,15 @@ pub async fn commitment_txs_are_valid(
     };
 
     for tx in commitment_txs {
-        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type() {
+        if let CommitmentTypeV1::Unpledge { partition_hash, .. } = tx.commitment_type() {
             let owner = parent_epoch_snapshot
                 .partition_assignments
-                .get_assignment(*partition_hash)
+                .get_assignment(partition_hash)
                 .map(|assignment| assignment.miner_address);
             if owner != Some(tx.signer()) {
                 return Err(ValidationError::UnpledgePartitionNotOwned {
                     tx_id: tx.id(),
-                    partition_hash: *partition_hash,
+                    partition_hash,
                     signer: tx.signer(),
                 });
             }

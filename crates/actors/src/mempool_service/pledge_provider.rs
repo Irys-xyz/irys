@@ -1,6 +1,6 @@
 use crate::mempool_service::AtomicMempoolState;
 use irys_domain::BlockTreeReadGuard;
-use irys_types::CommitmentType;
+use irys_types::CommitmentTypeV1;
 use irys_types::{transaction::PledgeDataProvider, IrysAddress, H256};
 use std::collections::HashSet;
 
@@ -28,7 +28,7 @@ impl MempoolPledgeProvider {
     async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
-        commitment_type_filter: impl Fn(&CommitmentType) -> bool,
+        commitment_type_filter: impl Fn(CommitmentTypeV1) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
         self.mempool_state
@@ -80,7 +80,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
         let mempool_pledge_count = self
             .count_mempool_commitments(
                 &user_address,
-                |ct| matches!(ct, CommitmentType::Pledge { .. }),
+                |ct| matches!(ct, CommitmentTypeV1::Pledge { .. }),
                 &mut seen_ids,
             )
             .await;
@@ -89,7 +89,7 @@ impl PledgeDataProvider for MempoolPledgeProvider {
         let pending_unpledges = self
             .count_mempool_commitments(
                 &user_address,
-                |ct| matches!(ct, CommitmentType::Unpledge { .. }),
+                |ct| matches!(ct, CommitmentTypeV1::Unpledge { .. }),
                 &mut seen_ids,
             )
             .await;

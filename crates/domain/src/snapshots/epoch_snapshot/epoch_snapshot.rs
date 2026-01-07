@@ -318,7 +318,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentType::Unstake = &commitment.commitment_type() else {
+            let irys_types::CommitmentTypeV1::Unstake = &commitment.commitment_type() else {
                 continue;
             };
             let signer = commitment.signer();
@@ -749,12 +749,14 @@ impl EpochSnapshot {
         let mut pledge_commitments: Vec<&CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments.iter() {
             match commitment_tx.commitment_type() {
-                irys_types::CommitmentType::Stake => stake_commitments.push(commitment_tx),
-                irys_types::CommitmentType::Pledge { .. } => pledge_commitments.push(commitment_tx),
+                irys_types::CommitmentTypeV1::Stake => stake_commitments.push(commitment_tx),
+                irys_types::CommitmentTypeV1::Pledge { .. } => {
+                    pledge_commitments.push(commitment_tx)
+                }
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
-                irys_types::CommitmentType::Unpledge { .. } => {}
+                irys_types::CommitmentTypeV1::Unpledge { .. } => {}
                 // Unstakes are applied in `apply_unstakes()` after pledges have been processed
-                irys_types::CommitmentType::Unstake => {}
+                irys_types::CommitmentTypeV1::Unstake => {}
             }
         }
 
@@ -823,7 +825,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentType::Unpledge { partition_hash, .. } =
+            let irys_types::CommitmentTypeV1::Unpledge { partition_hash, .. } =
                 &commitment.commitment_type()
             else {
                 continue;
@@ -1440,7 +1442,7 @@ mod tests {
     mod unpledge_processing {
         use super::*;
         use irys_types::CommitmentStatus;
-        use irys_types::{transaction::CommitmentType, U256};
+        use irys_types::{transaction::CommitmentTypeV1, U256};
 
         fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {
             let mut snapshot = EpochSnapshot::default();
@@ -1503,7 +1505,7 @@ mod tests {
         ) -> CommitmentTransaction {
             let mut tx = CommitmentTransaction::new(config);
             tx.set_signer(signer);
-            tx.set_commitment_type(CommitmentType::Unpledge {
+            tx.set_commitment_type(CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: ph,
             });

@@ -4,7 +4,7 @@ use alloy_genesis::GenesisAccount;
 
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
-use irys_types::CommitmentType;
+use irys_types::CommitmentTypeV1;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, NodeConfig, H256,
 };
@@ -455,7 +455,7 @@ async fn create_stake_tx(
 
     let consensus = &node.node_ctx.config.consensus;
     let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
-        commitment_type: CommitmentType::Stake,
+        commitment_type: CommitmentTypeV1::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,

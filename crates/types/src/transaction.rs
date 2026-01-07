@@ -1,17 +1,15 @@
-pub use crate::ingress::IngressProof;
-pub use crate::CommitmentType;
 pub use crate::{
-    address_base58_stringify, optional_string_u64, string_u64, Arbitrary, Base64, Compact,
-    ConsensusConfig, IrysAddress, IrysSignature, Node, Proof, Signature, H256, U256,
-};
-use crate::{decode_rlp_version, CommitmentTransaction, TxChunkOffset, UnpackedChunk};
-use crate::{
-    encode_rlp_version,
+    address_base58_stringify, decode_rlp_version, encode_rlp_version,
+    ingress::IngressProof,
+    optional_string_u64, string_u64,
     versioning::{
         compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
         VersioningError,
     },
+    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, Compact, ConsensusConfig,
+    IrysAddress, IrysSignature, Node, Proof, Signature, TxChunkOffset, UnpackedChunk, H256, U256,
 };
+
 use alloy_primitives::keccak256;
 use alloy_rlp::{Encodable as _, RlpDecodable, RlpEncodable};
 use irys_macros_integer_tagged::IntegerTagged;
@@ -489,10 +487,10 @@ impl CommitmentTransaction {
 
     pub fn total_cost(&self) -> U256 {
         let additional_fee = match &self.commitment_type() {
-            CommitmentType::Stake => self.value(),
-            CommitmentType::Pledge { .. } => self.value(),
-            CommitmentType::Unpledge { .. } => U256::zero(),
-            CommitmentType::Unstake => U256::zero(),
+            CommitmentTypeV1::Stake => self.value(),
+            CommitmentTypeV1::Pledge { .. } => self.value(),
+            CommitmentTypeV1::Unpledge { .. } => U256::zero(),
+            CommitmentTypeV1::Unstake => U256::zero(),
         };
         U256::from(self.fee()).saturating_add(additional_fee)
     }
@@ -919,7 +917,7 @@ mod tests {
         ));
         assert_eq!(header, decoded);
         // Verify version discriminant is preserved in RLP encoding
-        assert_eq!(decoded.version(), 1);
+        assert_eq!(decoded.version(), 2);
     }
 
     #[test]
@@ -955,8 +953,8 @@ mod tests {
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
         assert_eq!(original_tx, decoded_tx);
         // Verify version discriminant is preserved in Compact encoding
-        assert_eq!(decoded_tx.version(), 1);
-        assert_eq!(buffer[0], 1); // First byte should be the version discriminant
+        assert_eq!(decoded_tx.version(), 2);
+        assert_eq!(buffer[0], 2); // First byte should be the version discriminant
         assert!(rest.is_empty(), "the whole buffer should be consumed");
     }
 
@@ -1244,7 +1242,7 @@ mod pledge_decay_parametrized_tests {
         // Verify the commitment type is correct
         assert!(matches!(
             unpledge_tx.commitment_type,
-            CommitmentType::Unpledge { .. }
+            CommitmentTypeV1::Unpledge { .. }
         ));
 
         // Verify unpledge total cost only includes fee (not value)
@@ -1275,12 +1273,12 @@ mod pledge_decay_parametrized_tests {
             CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer, ph).await;
 
         match tx.commitment_type() {
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 partition_hash,
                 pledge_count_before_executing,
             } => {
-                assert_eq!(*pledge_count_before_executing, 2);
-                assert_eq!(*partition_hash, ph);
+                assert_eq!(pledge_count_before_executing, 2);
+                assert_eq!(partition_hash, ph);
             }
             _ => panic!("unexpected type"),
         }
@@ -1295,7 +1293,7 @@ mod commitment_ordering_tests {
 
     fn create_test_commitment(
         id: &str,
-        commitment_type: CommitmentType,
+        commitment_type: CommitmentTypeV1,
         fee: u64,
     ) -> CommitmentTransactionV1 {
         CommitmentTransactionV1 {
@@ -1318,10 +1316,10 @@ mod commitment_ordering_tests {
 
     #[test]
     fn test_stake_comes_before_pledge() {
-        let stake = create_test_commitment("stake", CommitmentType::Stake, 100);
+        let stake = create_test_commitment("stake", CommitmentTypeV1::Stake, 100);
         let pledge = create_test_commitment(
             "pledge",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 1,
             },
             200,
@@ -1332,8 +1330,8 @@ mod commitment_ordering_tests {
 
     #[test]
     fn test_stake_sorted_by_fee() {
-        let stake_low = create_test_commitment("stake1", CommitmentType::Stake, 50);
-        let stake_high = create_test_commitment("stake2", CommitmentType::Stake, 150);
+        let stake_low = create_test_commitment("stake1", CommitmentTypeV1::Stake, 50);
+        let stake_high = create_test_commitment("stake2", CommitmentTypeV1::Stake, 150);
 
         assert!(stake_high < stake_low);
     }
@@ -1342,21 +1340,21 @@ mod commitment_ordering_tests {
     fn test_pledge_sorted_by_count_then_fee() {
         let pledge_count2_fee100 = create_test_commitment(
             "p1",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 2,
             },
             100,
         );
         let pledge_count2_fee200 = create_test_commitment(
             "p2",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 2,
             },
             200,
         );
         let pledge_count5_fee300 = create_test_commitment(
             "p3",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 5,
             },
             300,
@@ -1374,7 +1372,7 @@ mod commitment_ordering_tests {
     fn test_unpledge_sorted_by_count_then_fee() {
         let unpledge_count1_fee50 = create_test_commitment(
             "unpledge_1_fee50",
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: partition_hash(1),
             },
@@ -1382,7 +1380,7 @@ mod commitment_ordering_tests {
         );
         let unpledge_count1_fee10 = create_test_commitment(
             "unpledge_1_fee10",
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: partition_hash(2),
             },
@@ -1390,7 +1388,7 @@ mod commitment_ordering_tests {
         );
         let unpledge_count4_fee80 = create_test_commitment(
             "unpledge_4_fee80",
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 4,
                 partition_hash: partition_hash(3),
             },
@@ -1404,39 +1402,39 @@ mod commitment_ordering_tests {
     #[test]
     fn test_complete_ordering() {
         // Create commitments with distinct IDs for easier verification
-        let stake_high = create_test_commitment("stake_high", CommitmentType::Stake, 150);
-        let stake_low = create_test_commitment("stake_low", CommitmentType::Stake, 50);
+        let stake_high = create_test_commitment("stake_high", CommitmentTypeV1::Stake, 150);
+        let stake_low = create_test_commitment("stake_low", CommitmentTypeV1::Stake, 50);
         let pledge_2_high = create_test_commitment(
             "pledge_2_high",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 2,
             },
             200,
         );
         let pledge_2_low = create_test_commitment(
             "pledge_2_low",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 2,
             },
             50,
         );
         let pledge_5 = create_test_commitment(
             "pledge_5",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 5,
             },
             100,
         );
         let pledge_10 = create_test_commitment(
             "pledge_10",
-            CommitmentType::Pledge {
+            CommitmentTypeV1::Pledge {
                 pledge_count_before_executing: 10,
             },
             300,
         );
         let unpledge_count1 = create_test_commitment(
             "unpledge_1",
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: partition_hash(4),
             },
@@ -1444,13 +1442,13 @@ mod commitment_ordering_tests {
         );
         let unpledge_count3 = create_test_commitment(
             "unpledge_3",
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing: 3,
                 partition_hash: partition_hash(5),
             },
             20,
         );
-        let unstake = create_test_commitment("unstake", CommitmentType::Unstake, 75);
+        let unstake = create_test_commitment("unstake", CommitmentTypeV1::Unstake, 75);
 
         let mut commitments = vec![
             pledge_5.clone(),

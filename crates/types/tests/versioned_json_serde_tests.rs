@@ -95,10 +95,10 @@ fn test_commitment_transaction_json_structure() {
         "Should have 'commitmentType' field"
     );
 
-    // Version should be 1
+    // Version should be 2
     assert_eq!(
         obj.get("version").and_then(serde_json::Value::as_u64),
-        Some(1),
-        "Version should be 1"
+        Some(2),
+        "Version should be 2"
     );
 }

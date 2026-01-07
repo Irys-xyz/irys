@@ -178,17 +178,12 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 None
             };
 
-            // Build the wrapper binary and generate config if we're tracking failures
-            let config_file = if !no_update_failures {
+            // Build the wrapper binary and generate config
+            let config_file = {
                 let wrapper_path = build_wrapper(sh)?;
                 let wrapper_path_str = wrapper_path.to_string_lossy().to_string();
 
-                Some(generate_nextest_config(
-                    &wrapper_path_str,
-                    failed_tests_filter.as_deref(),
-                )?)
-            } else {
-                None
+                generate_nextest_config(&wrapper_path_str, failed_tests_filter.as_deref())?
             };
 
             // Build the nextest command
@@ -200,17 +195,16 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 "--all-targets".to_string(),
             ];
 
-            // Add config file if we have one
-            if let Some(ref config) = config_file {
-                let config_path = config.path().to_string_lossy().to_string();
-                nextest_args.push("--config-file".to_string());
-                nextest_args.push(config_path);
+            // Add config file
 
-                // Use the rerun profile if filtering to failed tests
-                if failed_tests_filter.is_some() {
-                    nextest_args.push("--profile".to_string());
-                    nextest_args.push("xtask-rerun-failures".to_string());
-                }
+            let config_path = config_file.path().to_string_lossy().to_string();
+            nextest_args.push("--config-file".to_string());
+            nextest_args.push(config_path);
+
+            // Use the rerun profile if filtering to failed tests
+            if failed_tests_filter.is_some() {
+                nextest_args.push("--profile".to_string());
+                nextest_args.push("xtask-rerun-failures".to_string());
             }
 
             // Add user-provided args
