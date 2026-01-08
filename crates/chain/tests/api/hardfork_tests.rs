@@ -13,7 +13,7 @@ use tracing::info;
 const ONE_HOUR_SECS: u64 = 3600;
 const ACTIVATION_DELAY_SECS: u64 = 10;
 const AURORA_MIN_VERSION: u8 = 2;
-const MAX_ACTIVATION_BLOCKS: u32 = 1000;
+const MAX_ACTIVATION_BLOCKS: u32 = 50;
 const MAX_BLOCKS_TO_SEARCH: u64 = 5;
 const POLL_INTERVAL_MS: u64 = 100;
 

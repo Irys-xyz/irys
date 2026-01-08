@@ -1347,6 +1347,16 @@ pub trait BlockProdStrategy {
         let is_epoch = self.is_epoch_block(block_height);
 
         if !is_epoch {
+            // Filter commitments by version using block timestamp for consistency with validators
+            self.inner()
+                .config
+                .consensus
+                .hardforks
+                .retain_valid_commitment_versions(
+                    &mut mempool_txs.commitment_tx,
+                    block_timestamp.to_secs(),
+                );
+
             debug!(
                 block.height = block_height,
                 custom.commitment_ids = ?mempool_txs
