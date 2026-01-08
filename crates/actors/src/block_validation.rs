@@ -688,15 +688,7 @@ pub async fn prevalidate_block(
             }
         }
 
-        // Validate commitment transactions: count, IDs, and signatures
-        validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
-        debug!(
-            block.hash = ?block.block_hash,
-            block.height = ?block.height,
-            "commitment_transactions_valid",
-        );
-
-        // Validate commitment transaction versions against hardfork rules
+        // Validate commitment transaction versions against hardfork rules (cheap check before signatures)
         if let Some((tx_id, position, version, minimum)) = find_invalid_commitment_version(
             &config.consensus,
             commitment_txs,
@@ -709,6 +701,14 @@ pub async fn prevalidate_block(
                 minimum,
             });
         }
+
+        // Validate commitment transactions: count, IDs, and signatures
+        validate_transactions(commitment_txs, &commitment_ledger.tx_ids.0)?;
+        debug!(
+            block.hash = ?block.block_hash,
+            block.height = ?block.height,
+            "commitment_transactions_valid",
+        );
     } else if !commitment_txs.is_empty() {
         // Commitment transactions provided but no commitment ledger in block header
         return Err(PreValidationError::UnexpectedCommitmentTransactions);
@@ -1777,7 +1777,7 @@ pub async fn commitment_txs_are_valid(
         config
             .consensus
             .hardforks
-            .filter_commitments_by_version(&mut expected_commitments, block_timestamp);
+            .retain_valid_commitment_versions(&mut expected_commitments, block_timestamp);
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in commitment_txs

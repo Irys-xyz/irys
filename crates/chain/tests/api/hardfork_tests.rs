@@ -17,6 +17,15 @@ const MAX_ACTIVATION_BLOCKS: u32 = 1000;
 const MAX_BLOCKS_TO_SEARCH: u64 = 5;
 const POLL_INTERVAL_MS: u64 = 100;
 
+fn assert_http_bad_request(err: &eyre::Error) {
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("400") || err_msg.contains("Bad Request"),
+        "Expected HTTP 400 Bad Request, got: {}",
+        err_msg
+    );
+}
+
 fn now_secs() -> u64 {
     UnixTimestamp::now()
         .expect("system time should be after unix epoch")
@@ -156,7 +165,7 @@ async fn find_tx_in_blocks(
 
 async fn wait_until_activation(node: &IrysNodeTest<IrysNodeCtx>, activation_timestamp: u64) {
     info!("Waiting for Aurora activation...");
-    let mut last_block_timestamp = 0u64;
+    let mut last_block_timestamp = 0_u64;
     for _ in 0..MAX_ACTIVATION_BLOCKS {
         let block = node.mine_block().await.expect("mining should succeed");
         last_block_timestamp = block.timestamp_secs().as_secs();
@@ -232,12 +241,7 @@ mod single_version_acceptance {
                 "{:?} should be rejected after Aurora",
                 version
             );
-            let err_msg = result.unwrap_err().to_string();
-            assert!(
-                err_msg.contains("400"),
-                "Should return HTTP 400, got: {}",
-                err_msg
-            );
+            assert_http_bad_request(&result.unwrap_err());
         }
 
         node.stop().await;
@@ -482,12 +486,7 @@ mod edge_cases {
             "V1 should be rejected at/after activation boundary"
         );
 
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("400"),
-            "Should return HTTP 400, got: {}",
-            err_msg
-        );
+        assert_http_bad_request(&result.unwrap_err());
 
         node.stop().await;
         Ok(())

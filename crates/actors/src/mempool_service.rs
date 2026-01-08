@@ -660,7 +660,7 @@ impl Inner {
         self.config
             .consensus
             .hardforks
-            .filter_commitments_by_version(&mut sorted_commitments, UnixTimestamp::now()?);
+            .retain_valid_commitment_versions(&mut sorted_commitments, UnixTimestamp::now()?);
 
         balances.extend(
             fetch_balances_for_transactions(

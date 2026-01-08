@@ -1380,7 +1380,7 @@ pub trait BlockProdStrategy {
             .config
             .consensus
             .hardforks
-            .filter_commitments_by_version(&mut commitment_txs, block_timestamp.to_secs());
+            .retain_valid_commitment_versions(&mut commitment_txs, block_timestamp.to_secs());
 
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user

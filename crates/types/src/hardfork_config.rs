@@ -107,9 +107,9 @@ impl IrysHardforkConfig {
             .map(|aurora| aurora.minimum_commitment_tx_version)
     }
 
-    /// Filter commitment transactions by version based on hardfork rules.
+    /// Retain only commitment transactions that meet the minimum version requirement.
     /// Removes transactions that don't meet the minimum version requirement at the given timestamp.
-    pub fn filter_commitments_by_version<T: VersionDiscriminant>(
+    pub fn retain_valid_commitment_versions<T: VersionDiscriminant>(
         &self,
         commitments: &mut Vec<T>,
         timestamp: UnixTimestamp,
