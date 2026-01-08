@@ -1772,12 +1772,7 @@ pub async fn commitment_txs_are_valid(
             block.height
         );
 
-        // Get expected commitments from parent's snapshot, filtering by version if hardfork active
-        let mut expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
-        config
-            .consensus
-            .hardforks
-            .retain_valid_commitment_versions(&mut expected_commitments, block_timestamp);
+        let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
         for (idx, pair) in commitment_txs
