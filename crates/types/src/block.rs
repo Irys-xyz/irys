@@ -20,13 +20,14 @@ use crate::{
     IrysSignature, Proof, H256, U256,
 };
 use crate::{CommitmentTransaction, IrysAddress};
-
 use alloy_primitives::map::foldhash::HashSet;
 use alloy_primitives::{keccak256, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
 use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
+use reth_db::table::{Decode, Encode};
+use reth_db::DatabaseError;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -867,6 +868,24 @@ impl PartialEq<DataLedger> for u32 {
     }
 }
 
+impl Decode for DataLedger {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        // Decode bytes to u32 (assuming little-endian)
+        let id = u32::from_le_bytes(value.try_into().map_err(|_| DatabaseError::Decode)?);
+
+        // Convert u32 to DataLedger
+        Self::from_u32(id).ok_or(DatabaseError::Decode)
+    }
+}
+
+impl Encode for DataLedger {
+    type Encoded = [u8; 4]; // u32 is 4 bytes
+
+    fn encode(self) -> Self::Encoded {
+        self.get_id().to_le_bytes()
+    }
+}
+
 impl DataLedger {
     /// An array of all the Ledger numbers in order
     pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
@@ -954,7 +973,7 @@ pub struct BlockIndexItem {
 
 /// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
 /// and and the `tx_root` of the ledger in that block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, Arbitrary, Compact)]
 pub struct LedgerIndexItem {
     /// The total number of chunks in this ledger since genesis
     #[serde(with = "string_u64")]

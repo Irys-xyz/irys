@@ -6,7 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Base64, IrysAddress, PeerListItem};
+use irys_types::{Base64, DataLedger, IrysAddress, LedgerIndexItem, PeerListItem};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
 use reth_codecs::Compact;
@@ -78,7 +78,7 @@ add_wrapper_struct!((DataTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
-
+add_wrapper_struct!((LedgerIndexItem, CompactLedgerIndexItem));
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
 
 impl_compression_for_compact!(
@@ -94,7 +94,8 @@ impl_compression_for_compact!(
     DataRootInfos,
     GlobalChunkOffset,
     CompactBase64,
-    CompactCachedIngressProof
+    CompactCachedIngressProof,
+    CompactLedgerIndexItem
 );
 
 use paste::paste;
@@ -107,6 +108,14 @@ IrysTables;
 table IrysBlockHeaders {
     type Key = H256;
     type Value = CompactIrysBlockHeader;
+}
+
+// Block index table: DataLedger -> BlockNumber -> LedgerIndexItem
+// Stores block metadata for each block by ledger type (Publish/Submit/etc)
+table IrysBlockIndexItems {
+    type Key = DataLedger;
+    type Value = CompactLedgerIndexItem;
+    type SubKey = u64;
 }
 
 /// Stores PoA chunks
