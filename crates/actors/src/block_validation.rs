@@ -3809,3 +3809,164 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod commitment_version_tests {
+    use super::*;
+    use irys_types::{
+        hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
+        CommitmentTransactionV1, CommitmentTransactionV2, CommitmentType,
+    };
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    fn config_with_aurora(activation_secs: u64, min_version: u8) -> ConsensusConfig {
+        ConsensusConfig {
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+                    minimum_commitment_tx_version: min_version,
+                }),
+            },
+            ..ConsensusConfig::testnet()
+        }
+    }
+
+    fn config_without_aurora() -> ConsensusConfig {
+        ConsensusConfig {
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                aurora: None,
+            },
+            ..ConsensusConfig::testnet()
+        }
+    }
+
+    fn make_v1_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
+            commitment_type: CommitmentType::Stake,
+            ..CommitmentTransactionV1::new(consensus)
+        })
+    }
+
+    fn make_v2_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
+        CommitmentTransaction::V2(CommitmentTransactionV2 {
+            commitment_type: CommitmentType::Stake,
+            ..CommitmentTransactionV2::new(consensus)
+        })
+    }
+
+    #[rstest]
+    #[case::no_hardfork_v1_valid(None, 999, 1, true)]
+    #[case::no_hardfork_v2_valid(None, 999, 2, true)]
+    #[case::before_activation_v1_valid(Some(1000), 999, 1, true)]
+    #[case::before_activation_v2_valid(Some(1000), 999, 2, true)]
+    #[case::at_activation_v1_invalid(Some(1000), 1000, 1, false)]
+    #[case::at_activation_v2_valid(Some(1000), 1000, 2, true)]
+    #[case::after_activation_v1_invalid(Some(1000), 1001, 1, false)]
+    #[case::after_activation_v2_valid(Some(1000), 1001, 2, true)]
+    fn version_validation_scenarios(
+        #[case] activation_secs: Option<u64>,
+        #[case] timestamp_secs: u64,
+        #[case] tx_version: u8,
+        #[case] expect_valid: bool,
+    ) {
+        let config = match activation_secs {
+            Some(ts) => config_with_aurora(ts, 2),
+            None => config_without_aurora(),
+        };
+
+        let tx = match tx_version {
+            1 => make_v1_commitment(&config),
+            _ => make_v2_commitment(&config),
+        };
+        let txs = vec![tx];
+
+        let result = find_invalid_commitment_version(
+            &config,
+            &txs,
+            UnixTimestamp::from_secs(timestamp_secs),
+        );
+
+        if expect_valid {
+            assert!(result.is_none(), "Expected valid, got invalid");
+        } else {
+            assert!(result.is_some(), "Expected invalid, got valid");
+            let (_, _, version, minimum) = result.unwrap();
+            assert_eq!(version, tx_version);
+            assert_eq!(minimum, 2);
+        }
+    }
+
+    #[test]
+    fn mixed_versions_returns_first_invalid() {
+        let config = config_with_aurora(1000, 2);
+        let v2_tx = make_v2_commitment(&config);
+        let v1_tx = make_v1_commitment(&config);
+
+        // V2 first, then V1 - should return position 1 (the V1)
+        let txs = vec![v2_tx, v1_tx.clone()];
+        let result = find_invalid_commitment_version(&config, &txs, UnixTimestamp::from_secs(1001));
+
+        assert!(result.is_some());
+        let (tx_id, position, version, _) = result.unwrap();
+        assert_eq!(tx_id, v1_tx.id());
+        assert_eq!(position, 1);
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn empty_list_returns_none() {
+        let config = config_with_aurora(1000, 2);
+        let txs: Vec<CommitmentTransaction> = vec![];
+
+        let result = find_invalid_commitment_version(&config, &txs, UnixTimestamp::from_secs(1001));
+        assert!(result.is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn version_validation_property(
+            activation_ts in 1000_u64..u64::MAX / 2,
+            time_offset in 0_i64..2000_i64,
+            tx_version in 1_u8..=3_u8,
+        ) {
+            let query_ts = if time_offset >= 0 {
+                activation_ts.saturating_add(time_offset as u64)
+            } else {
+                activation_ts.saturating_sub(time_offset.unsigned_abs())
+            };
+
+            let config = config_with_aurora(activation_ts, 2);
+            let tx = match tx_version {
+                1 => make_v1_commitment(&config),
+                _ => make_v2_commitment(&config),
+            };
+            let txs = vec![tx];
+
+            let result = find_invalid_commitment_version(
+                &config,
+                &txs,
+                UnixTimestamp::from_secs(query_ts),
+            );
+
+            let is_active = query_ts >= activation_ts;
+            let should_be_valid = !is_active || tx_version >= 2;
+
+            if should_be_valid {
+                prop_assert!(result.is_none());
+            } else {
+                prop_assert!(result.is_some());
+            }
+        }
+    }
+}
