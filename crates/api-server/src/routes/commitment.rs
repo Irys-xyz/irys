@@ -133,12 +133,16 @@ async fn process_commitment_transaction(
                     StatusCode::BAD_REQUEST,
                 )))
             }
-            TxIngressError::InvalidVersion { version, minimum } => Err(ApiError::from((
-                format!(
-                    "Transaction version {version} is below minimum required version {minimum}"
-                ),
-                StatusCode::BAD_REQUEST,
-            ))),
+            TxIngressError::InvalidVersion { version, minimum } => {
+                // This path is reached when API check passes but mempool check fails,
+                // which can happen if hardfork activation occurs between the two checks
+                tracing::debug!(
+                    "Version validation at mempool level (race during hardfork activation): version={}, minimum={}",
+                    version,
+                    minimum
+                );
+                Err(ApiError::InvalidTransactionVersion { version, minimum })
+            }
         };
     }
 

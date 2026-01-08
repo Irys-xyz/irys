@@ -133,13 +133,9 @@ pub async fn post_tx(
                 )
                     .into())
             }
-            TxIngressError::InvalidVersion { version, minimum } => Err((
-                format!(
-                    "Transaction version {version} is below minimum required version {minimum}"
-                ),
-                StatusCode::BAD_REQUEST,
-            )
-                .into()),
+            TxIngressError::InvalidVersion { version, minimum } => {
+                Err(ApiError::InvalidTransactionVersion { version, minimum })
+            }
         };
     }
 

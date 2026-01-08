@@ -156,16 +156,18 @@ async fn find_tx_in_blocks(
 
 async fn wait_until_activation(node: &IrysNodeTest<IrysNodeCtx>, activation_timestamp: u64) {
     info!("Waiting for Aurora activation...");
+    let mut last_block_timestamp = 0u64;
     for _ in 0..MAX_ACTIVATION_BLOCKS {
         let block = node.mine_block().await.expect("mining should succeed");
-        if block.timestamp_secs().as_secs() >= activation_timestamp {
+        last_block_timestamp = block.timestamp_secs().as_secs();
+        if last_block_timestamp >= activation_timestamp {
             info!("Aurora activated at block {}", block.height);
             return;
         }
     }
     panic!(
-        "Failed to reach activation timestamp after {} blocks",
-        MAX_ACTIVATION_BLOCKS
+        "Failed to reach activation timestamp {} after {} blocks (last block timestamp: {})",
+        activation_timestamp, MAX_ACTIVATION_BLOCKS, last_block_timestamp
     );
 }
 
