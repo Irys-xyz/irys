@@ -616,9 +616,9 @@ mod epoch_block_filtering {
     }
 
     /// Epoch block at hardfork boundary: V1 commitments accepted pre-activation
-    /// should be filtered out when the epoch block falls post-activation.
+    /// should NOT be filtered out when the epoch block falls post-activation.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_epoch_at_hardfork_boundary_filters_v1() -> eyre::Result<()> {
+    async fn heavy_test_epoch_at_hardfork_boundary_doesnt_filter_v1() -> eyre::Result<()> {
         initialize_tracing();
 
         // Hardfork activates slightly in the future
