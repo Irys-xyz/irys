@@ -1235,12 +1235,12 @@ pub trait BlockProdStrategy {
             }
             Err(e) => {
                 error!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block.block_hash.0, &block.height, e
+                    "Newly produced block {} ({}) failed pre-validation: {:?}",
+                    &block.block_hash, &block.height, e
                 );
                 Err(eyre!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block.block_hash.0,
+                    "Newly produced block {} ({}) failed pre-validation: {:?}",
+                    &block.block_hash,
                     &block.height,
                     e
                 ))
@@ -1343,11 +1343,12 @@ pub trait BlockProdStrategy {
         // Sort txs to be of deterministic order
         mempool_txs.submit_tx.sort();
         mempool_txs.commitment_tx.sort();
+
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
         if !is_epoch {
-            // Filter commitments by version using block timestamp for consistency with validators
+            // Filter commitments by version using block timestamp
             self.inner()
                 .config
                 .consensus
@@ -1369,6 +1370,10 @@ pub trait BlockProdStrategy {
             return Ok(self.build_non_epoch_bundle(mempool_txs));
         }
 
+        // =====
+        // ONLY EPOCH BLOCK PROCESSING
+        // =====
+
         // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
             self.fetch_parent_snapshots(prev_block_header)?;
@@ -1384,13 +1389,8 @@ pub trait BlockProdStrategy {
                 &self.inner().config.consensus,
             )?;
 
-        // Filter epoch commitments by version if hardfork is active. Use the block's timestamp
-        let mut commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
-        self.inner()
-            .config
-            .consensus
-            .hardforks
-            .retain_valid_commitment_versions(&mut commitment_txs, block_timestamp.to_secs());
+        // note: we do not filter txs by version for epoch blocks
+        let commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
 
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user

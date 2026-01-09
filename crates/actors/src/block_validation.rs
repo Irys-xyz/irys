@@ -686,20 +686,20 @@ pub async fn prevalidate_block(
                     got: commitment_txs.len(),
                 });
             }
-        }
 
-        // Validate commitment transaction versions against hardfork rules (cheap check before signatures)
-        if let Some((tx_id, position, version, minimum)) = find_invalid_commitment_version(
-            &config.consensus,
-            commitment_txs,
-            block.timestamp_secs(),
-        ) {
-            return Err(PreValidationError::CommitmentVersionInvalid {
-                tx_id,
-                position,
-                version,
-                minimum,
-            });
+            // Validate commitment transaction versions against hardfork rules (cheap check before signatures)
+            if let Some((tx_id, position, version, minimum)) = find_invalid_commitment_version(
+                &config.consensus,
+                commitment_txs,
+                block.timestamp_secs(),
+            ) {
+                return Err(PreValidationError::CommitmentVersionInvalid {
+                    tx_id,
+                    position,
+                    version,
+                    minimum,
+                });
+            }
         }
 
         // Validate commitment transactions: count, IDs, and signatures
@@ -1715,19 +1715,27 @@ pub async fn commitment_txs_are_valid(
 ) -> Result<(), ValidationError> {
     // Validate commitment transaction versions against hardfork rules
     let block_timestamp = block.timestamp_secs();
-    if let Some((tx_id, position, version, minimum)) =
-        find_invalid_commitment_version(&config.consensus, commitment_txs, block_timestamp)
-    {
-        error!(
-            "Commitment transaction {} at position {} has version {}, minimum is {}",
-            tx_id, position, version, minimum
-        );
-        return Err(ValidationError::CommitmentVersionInvalid {
-            tx_id,
-            position,
-            version,
-            minimum,
-        });
+
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
+
+    if !is_epoch_block {
+        // only filter txs for non-epoch blocks
+        if let Some((tx_id, position, version, minimum)) =
+            find_invalid_commitment_version(&config.consensus, commitment_txs, block_timestamp)
+        {
+            error!(
+                "Commitment transaction {} at position {} has version {}, minimum is {}",
+                tx_id, position, version, minimum
+            );
+            return Err(ValidationError::CommitmentVersionInvalid {
+                tx_id,
+                position,
+                version,
+                minimum,
+            });
+        }
     }
 
     // Validate that all commitment transactions have correct values
@@ -1761,10 +1769,6 @@ pub async fn commitment_txs_are_valid(
             })?;
         (commitment_snapshot, epoch_snapshot)
     };
-
-    let is_epoch_block = block
-        .height
-        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
 
     if is_epoch_block {
         debug!(

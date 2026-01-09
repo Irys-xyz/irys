@@ -670,12 +670,12 @@ mod epoch_block_filtering {
             .unwrap_or_default();
 
         // If block1 was pre-activation, it may contain both V1 and V2.
-        // But epoch block (post-activation) should filter the epoch commitments.
+        // But epoch block (post-activation) should contain both V1 and V2
         if block1_timestamp < aurora_activation {
-            // The epoch rollup should filter out V1 since epoch block is post-activation
+            // The epoch rollup should NOT filter out V1 even if the epoch block is post-activation
             assert!(
-                !commitment_tx_ids.contains(&v1_tx.id()),
-                "Epoch block (post-activation) should filter V1 from epoch commitments"
+                commitment_tx_ids.contains(&v1_tx.id()),
+                "Epoch block (post-activation) include V1 from epoch commitments"
             );
         }
 
