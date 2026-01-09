@@ -492,3 +492,199 @@ mod edge_cases {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod epoch_block_filtering {
+    use super::*;
+    use irys_database::SystemLedger;
+
+    const NUM_BLOCKS_IN_EPOCH: usize = 2;
+
+    #[derive(Clone, Copy, Debug)]
+    enum AuroraState {
+        Disabled,
+        PreActivation,
+        PostActivation,
+    }
+
+    fn aurora_config_with_epoch(state: AuroraState) -> NodeConfig {
+        let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
+        let aurora = match state {
+            AuroraState::Disabled => None,
+            AuroraState::PreActivation => Some(Aurora {
+                activation_timestamp: UnixTimestamp::from_secs(
+                    now_secs().saturating_add(ONE_HOUR_SECS),
+                ),
+                minimum_commitment_tx_version: AURORA_MIN_VERSION,
+            }),
+            AuroraState::PostActivation => Some(Aurora {
+                activation_timestamp: UnixTimestamp::from_secs(
+                    now_secs().saturating_sub(ONE_HOUR_SECS),
+                ),
+                minimum_commitment_tx_version: AURORA_MIN_VERSION,
+            }),
+        };
+        config.consensus.get_mut().hardforks = IrysHardforkConfig {
+            frontier: default_test_frontier(),
+            next_name_tbd: None,
+            aurora,
+        };
+        config
+    }
+
+    /// Test epoch block commitment filtering across different aurora states.
+    /// - Disabled: both V1 and V2 included
+    /// - PreActivation: both V1 and V2 included
+    /// - PostActivation: only V2 included (V1 rejected at mempool)
+    #[rstest]
+    #[case::aurora_disabled_includes_all(AuroraState::Disabled, true, true)]
+    #[case::pre_activation_includes_all(AuroraState::PreActivation, true, true)]
+    #[case::post_activation_v2_only(AuroraState::PostActivation, false, true)]
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_epoch_block_commitment_filtering(
+        #[case] aurora_state: AuroraState,
+        #[case] v1_in_epoch: bool,
+        #[case] v2_in_epoch: bool,
+    ) -> eyre::Result<()> {
+        initialize_tracing();
+
+        let mut config = aurora_config_with_epoch(aurora_state);
+        let [signer1, signer2] = create_funded_signers(&mut config);
+        let node = IrysNodeTest::new_genesis(config).start().await;
+
+        // Attempt to post V1 - may be rejected if post-activation
+        let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
+        let v1_result = node.post_commitment_tx(&v1_tx).await;
+
+        // V2 should always be accepted
+        let v2_tx = create_stake_tx(&node, &signer2, TxVersion::V2).await;
+        node.post_commitment_tx(&v2_tx).await?;
+
+        // Mine to epoch block
+        node.mine_blocks(NUM_BLOCKS_IN_EPOCH).await?;
+
+        let epoch_block = node.get_block_by_height(NUM_BLOCKS_IN_EPOCH as u64).await?;
+        assert_eq!(
+            epoch_block.height % NUM_BLOCKS_IN_EPOCH as u64,
+            0,
+            "Block should be an epoch block"
+        );
+
+        let commitment_tx_ids = epoch_block
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map(|l| &l.tx_ids.0)
+            .cloned()
+            .unwrap_or_default();
+
+        // Verify V1 presence based on expectation
+        if v1_in_epoch {
+            assert!(
+                v1_result.is_ok(),
+                "{:?}: V1 should be accepted into mempool",
+                aurora_state
+            );
+            assert!(
+                commitment_tx_ids.contains(&v1_tx.id()),
+                "{:?}: epoch block should contain V1 commitment",
+                aurora_state
+            );
+        } else {
+            assert!(
+                v1_result.is_err(),
+                "{:?}: V1 should be rejected by mempool",
+                aurora_state
+            );
+            assert!(
+                !commitment_tx_ids.contains(&v1_tx.id()),
+                "{:?}: epoch block should NOT contain V1 commitment",
+                aurora_state
+            );
+        }
+
+        // Verify V2 presence
+        if v2_in_epoch {
+            assert!(
+                commitment_tx_ids.contains(&v2_tx.id()),
+                "{:?}: epoch block should contain V2 commitment",
+                aurora_state
+            );
+        }
+
+        node.stop().await;
+        Ok(())
+    }
+
+    /// Epoch block at hardfork boundary: V1 commitments accepted pre-activation
+    /// should be filtered out when the epoch block falls post-activation.
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_epoch_at_hardfork_boundary_filters_v1() -> eyre::Result<()> {
+        initialize_tracing();
+
+        // Hardfork activates slightly in the future
+        let aurora_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
+        config.consensus.get_mut().hardforks = IrysHardforkConfig {
+            frontier: default_test_frontier(),
+            next_name_tbd: None,
+            aurora: Some(Aurora {
+                activation_timestamp: UnixTimestamp::from_secs(aurora_activation),
+                minimum_commitment_tx_version: AURORA_MIN_VERSION,
+            }),
+        };
+        let [signer1, signer2] = create_funded_signers(&mut config);
+        let node = IrysNodeTest::new_genesis(config).start().await;
+
+        // Before activation: submit both V1 and V2
+        let v1_tx = create_stake_tx(&node, &signer1, TxVersion::V1).await;
+        let v2_tx = create_stake_tx(&node, &signer2, TxVersion::V2).await;
+
+        node.post_commitment_tx(&v1_tx).await?;
+        node.post_commitment_tx(&v2_tx).await?;
+
+        // Mine first block (pre-activation) - should include both
+        let block1 = node.mine_block().await?;
+        let block1_timestamp = block1.timestamp_secs().as_secs();
+
+        // Wait for activation
+        wait_for_wallclock(aurora_activation).await;
+
+        // Mine epoch block (post-activation)
+        let epoch_block = node.mine_block().await?;
+        assert_eq!(
+            epoch_block.height % NUM_BLOCKS_IN_EPOCH as u64,
+            0,
+            "Block should be an epoch block"
+        );
+        let epoch_timestamp = epoch_block.timestamp_secs().as_secs();
+        assert!(
+            epoch_timestamp >= aurora_activation,
+            "Epoch block timestamp should be at or after activation"
+        );
+
+        let commitment_tx_ids = epoch_block
+            .system_ledgers
+            .get(SystemLedger::Commitment as usize)
+            .map(|l| &l.tx_ids.0)
+            .cloned()
+            .unwrap_or_default();
+
+        // If block1 was pre-activation, it may contain both V1 and V2.
+        // But epoch block (post-activation) should filter the epoch commitments.
+        if block1_timestamp < aurora_activation {
+            // The epoch rollup should filter out V1 since epoch block is post-activation
+            assert!(
+                !commitment_tx_ids.contains(&v1_tx.id()),
+                "Epoch block (post-activation) should filter V1 from epoch commitments"
+            );
+        }
+
+        assert!(
+            commitment_tx_ids.contains(&v2_tx.id()),
+            "Epoch block should contain V2 commitment"
+        );
+
+        node.stop().await;
+        Ok(())
+    }
+}
