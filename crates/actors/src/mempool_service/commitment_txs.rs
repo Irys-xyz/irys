@@ -3,7 +3,7 @@ use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
 use irys_domain::CommitmentSnapshotStatus;
 use irys_types::{
     CommitmentTransaction, CommitmentValidationError, IrysAddress, IrysTransactionCommon as _,
-    IrysTransactionId, TxKnownStatus, H256,
+    IrysTransactionId, TxKnownStatus, UnixTimestamp, VersionDiscriminant as _, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
@@ -40,6 +40,31 @@ impl Inner {
                 e
             );
             return Err(TxIngressError::InvalidSignature(commitment_tx.signer()));
+        }
+
+        // Validate commitment transaction version against hardfork rules
+        let now = UnixTimestamp::now()
+            .map_err(|e| TxIngressError::Other(format!("System time error: {}", e)))?;
+        if !self
+            .config
+            .consensus
+            .hardforks
+            .is_commitment_version_valid(commitment_tx.version(), now)
+        {
+            let minimum = self
+                .config
+                .consensus
+                .hardforks
+                .minimum_commitment_version_at(now)
+                .ok_or_else(|| {
+                    TxIngressError::Other(
+                        "Internal configuration error: minimum version not found".to_string(),
+                    )
+                })?;
+            return Err(TxIngressError::InvalidVersion {
+                version: commitment_tx.version(),
+                minimum,
+            });
         }
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted

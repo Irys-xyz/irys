@@ -66,6 +66,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -224,6 +225,7 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {

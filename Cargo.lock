@@ -5661,6 +5661,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "arbitrary",
+ "assert_matches",
  "async-trait",
  "base58",
  "base64-url",

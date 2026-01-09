@@ -593,7 +593,8 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 10,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None, // Disabled on mainnet
+                next_name_tbd: None,
+                aurora: None,
             },
         }
     }
@@ -740,7 +741,8 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None, // Can be enabled for testnet experiments
+                next_name_tbd: None,
+                aurora: None,
             },
         }
     }

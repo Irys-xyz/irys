@@ -110,6 +110,9 @@ impl From<TxIngressError> for GossipError {
             TxIngressError::FundMisalignment(reason) => {
                 Self::Internal(InternalGossipError::FundMisalignment(reason))
             }
+            TxIngressError::InvalidVersion { version, minimum } => {
+                Self::InvalidData(InvalidDataError::TransactionInvalidVersion { version, minimum })
+            }
         }
     }
 }
@@ -175,6 +178,8 @@ pub enum InvalidDataError {
     IngressProofAnchor(irys_types::BlockHash),
     #[error("Block body transactions do not match the header")]
     BlockBodyTransactionsMismatch,
+    #[error("Invalid transaction version {version}, minimum required is {minimum}")]
+    TransactionInvalidVersion { version: u8, minimum: u8 },
 }
 
 #[derive(Debug, Error, Clone)]

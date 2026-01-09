@@ -32,6 +32,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_unpledge = self.invalid_unpledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -194,6 +195,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let commitment_txs = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -323,6 +325,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let commitment = self.commitment.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -427,6 +430,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let mut commitments = self.commitments.clone();
             commitments.sort(); // mimic canonical ordering
