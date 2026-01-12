@@ -5,13 +5,14 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_chain::IrysNodeCtx;
-use irys_database::{tables::IngressProofs, SystemLedger};
+use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentType;
+use irys_types::SystemLedger;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
     IngressProofsList, IrysBlockHeader, NodeConfig, H256,

@@ -10,10 +10,7 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid,
-};
-use irys_types::SystemLedger;
+use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -25,13 +22,14 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
+use irys_types::SystemLedger;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, UnixTimestamp, H256, U256,
+    IrysBlockHeader, PoaData, SealedBlock, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
@@ -359,16 +357,18 @@ pub enum ValidationError {
 }
 
 /// Full pre-validation steps for a block
-#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
-    block: &IrysBlockHeader,
+    sealed_block: &SealedBlock,
     previous_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
-    transactions: &BlockTransactions,
 ) -> Result<(), PreValidationError> {
+    let block = sealed_block.header();
+    let transactions = sealed_block.transactions();
+
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -391,7 +391,7 @@ pub async fn prevalidate_block(
     }
 
     // Check prev_output (vdf)
-    prev_output_is_valid(&block, &previous_block)?;
+    prev_output_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -399,7 +399,7 @@ pub async fn prevalidate_block(
     );
 
     // Check block height continuity
-    height_is_valid(&block, &previous_block)?;
+    height_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -415,15 +415,15 @@ pub async fn prevalidate_block(
 
     // Check the difficulty
     difficulty_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         &config.consensus.difficulty_adjustment,
     )?;
 
     // Validate the last_diff_timestamp field
     last_diff_timestamp_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         &config.consensus.difficulty_adjustment,
     )?;
 
@@ -434,7 +434,7 @@ pub async fn prevalidate_block(
     );
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
-    previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
+    previous_cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -442,7 +442,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(&block, &previous_block)?;
+    cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -453,7 +453,7 @@ pub async fn prevalidate_block(
     debug!("poa data not expired");
 
     // Check the solution_hash
-    solution_hash_is_valid(&block, &previous_block)?;
+    solution_hash_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -461,7 +461,7 @@ pub async fn prevalidate_block(
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
-    solution_hash_link_is_valid(&block, &poa_chunk)?;
+    solution_hash_link_is_valid(block, &poa_chunk)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -469,7 +469,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the previous solution hash references the parent correctly
-    previous_solution_hash_is_valid(&block, &previous_block)?;
+    previous_solution_hash_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -479,7 +479,7 @@ pub async fn prevalidate_block(
     // Validate VDF seeds/next_seed against parent before any VDF-related processing
     let vdf_reset_frequency: u64 = config.vdf.reset_frequency as u64;
     if !matches!(
-        is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
+        is_seed_data_valid(block, previous_block, vdf_reset_frequency),
         ValidationResult::Valid
     ) {
         return Err(PreValidationError::VDFCheckpointsInvalid(
@@ -489,8 +489,8 @@ pub async fn prevalidate_block(
 
     // Ensure the last_epoch_hash field correctly references the most recent epoch block
     last_epoch_hash_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
@@ -518,7 +518,7 @@ pub async fn prevalidate_block(
     let ema_valid = {
         let res = parent_ema_snapshot
             .calculate_ema_for_new_block(
-                &previous_block,
+                previous_block,
                 block.oracle_irys_price,
                 config.consensus.token_price_safe_range,
                 config.consensus.ema.price_adjustment_interval,
@@ -549,7 +549,7 @@ pub async fn prevalidate_block(
     }
 
     // Validate ingress proof signer uniqueness
-    validate_unique_ingress_proof_signers(&block)?;
+    validate_unique_ingress_proof_signers(block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,

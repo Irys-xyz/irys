@@ -16,7 +16,7 @@ use irys_domain::ChainState;
 use irys_types::storage_pricing::{
     calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
 };
-use irys_types::{BlockTransactions, IngressProofsList};
+use irys_types::IngressProofsList;
 use irys_types::{
     Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
     UnixTimestamp, U256,
@@ -120,22 +120,16 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block directly to block tree service for validation
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -246,22 +240,16 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Validate the block directly via block tree service
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -318,18 +306,18 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
         .await?;
 
     // Produce a block using the standard production strategy which will pick the tx from mempool
-    let block = genesis_node.mine_block().await?;
-    let block = Arc::new(block);
+    let (header, _payload, txs) = genesis_node.mine_block_with_payload().await?;
+
+    let body = irys_types::BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: txs.all_data_txs().cloned().collect(),
+        commitment_transactions: txs.commitment_txs.clone(),
+    };
+    let block = Arc::new(irys_types::SealedBlock::new(header.as_ref().clone(), body).unwrap());
 
     // Send for validation and expect the block to be stored (accepted)
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), false).await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert!(matches!(
         outcome,
         BlockValidationOutcome::StoredOnNode(ChainState::Onchain)
@@ -607,22 +595,17 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         },
     };
 
-    let (promote_block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
+    let (promote_block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Validate by sending block directly to the block tree
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        promote_block.clone(),
-        transactions,
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, promote_block.clone(), false).await?;
 
     // Expect the block to be rejected for insufficient perm_fee during prevalidation
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &promote_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &promote_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| {

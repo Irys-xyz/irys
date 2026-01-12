@@ -3,11 +3,10 @@ use eyre::Result;
 use irys_actors::block_validation::{prevalidate_block, PreValidationError};
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
-use irys_types::SystemLedger;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_types::{
-    BlockTransactions, CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader,
-    NodeConfig, UnixTimestampMs, H256, U256,
+    CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
+    SealedBlock, SystemLedger, UnixTimestampMs, H256, U256,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 struct PrevalidationTestContext {
     node: IrysNodeTest<IrysNodeCtx>,
     config: NodeConfig,
-    block: Arc<IrysBlockHeader>,
+    block: Arc<SealedBlock>,
     parent_block: IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_ema_snapshot: Arc<EmaSnapshot>,
@@ -32,14 +31,14 @@ impl PrevalidationTestContext {
         let prod = ProductionStrategy {
             inner: node.node_ctx.block_producer_inner.clone(),
         };
-        let (block, _, _, _) = prod
+        let (block, _, _) = prod
             .fully_produce_new_block_without_gossip(&solution_context(&node.node_ctx).await?)
             .await?
             .unwrap();
 
         // Get parent info and snapshots
         let parent_block = node
-            .get_block_by_height(block.height - 1)
+            .get_block_by_height(block.header().height - 1)
             .await
             .expect("parent block");
         let parent_hash = parent_block.block_hash;
@@ -62,19 +61,14 @@ impl PrevalidationTestContext {
         })
     }
 
-    async fn prevalidate(
-        &self,
-        block: IrysBlockHeader,
-        txs: &BlockTransactions,
-    ) -> Result<(), PreValidationError> {
+    async fn prevalidate(&self, block: &SealedBlock) -> Result<(), PreValidationError> {
         prevalidate_block(
             block,
-            self.parent_block.clone(),
+            &self.parent_block,
             self.parent_epoch_snapshot.clone(),
             self.node.node_ctx.config.clone(),
             self.node.node_ctx.reward_curve.clone(),
             &self.parent_ema_snapshot,
-            txs,
         )
         .await
     }
@@ -116,7 +110,7 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
     };
     use irys_types::{block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats};
-    use reth::{core::primitives::SealedBlock, payload::EthBuiltPayload};
+    use reth::{core::primitives::SealedBlock as RethSealedBlock, payload::EthBuiltPayload};
 
     struct EvilBlockProdStrategy {
         pub prod: ProductionStrategy,
@@ -165,16 +159,10 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
             mempool_bundle: irys_actors::block_producer::MempoolTxsBundle,
             _current_timestamp: UnixTimestampMs,
             block_reward: Amount<irys_types::storage_pricing::phantoms::Irys>,
-            eth_built_payload: &SealedBlock<reth_ethereum_primitives::Block>,
+            eth_built_payload: &RethSealedBlock<reth_ethereum_primitives::Block>,
             prev_block_ema_snapshot: &EmaSnapshot,
             treasury: U256,
-        ) -> eyre::Result<
-            Option<(
-                Arc<IrysBlockHeader>,
-                Option<AdjustmentStats>,
-                BlockTransactions,
-            )>,
-        > {
+        ) -> eyre::Result<Option<(Arc<SealedBlock>, Option<AdjustmentStats>)>> {
             self.prod
                 .produce_block_without_broadcasting(
                     solution,
@@ -215,14 +203,14 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
         invalid_timestamp: UnixTimestampMs::from_millis(future_timestamp),
     };
 
-    let (block, _, _, _) = block_prod_strategy
+    let (block, _, _) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Get parent info and snapshots
     let parent_block_header = genesis_node
-        .get_block_by_height(block.height - 1)
+        .get_block_by_height(block.header().height - 1)
         .await
         .expect("parent block header");
     let parent_hash = parent_block_header.block_hash;
@@ -238,13 +226,12 @@ async fn heavy_test_future_block_rejection() -> Result<()> {
 
     // Verify prevalidation fails with TimestampTooFarInFuture
     let result = prevalidate_block(
-        (*block).clone(),
-        parent_block_header,
+        &block,
+        &parent_block_header,
         parent_epoch_snapshot,
         genesis_node.node_ctx.config.clone(),
         genesis_node.node_ctx.reward_curve.clone(),
         &parent_ema_snapshot,
-        &Default::default(),
     )
     .await;
 
@@ -266,12 +253,15 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     // Tamper the VDF seeds (make them parent-inconsistent)
-    let mut tampered = (*ctx.block).clone();
-    let mut seed_bytes = tampered.vdf_limiter_info.seed.0;
+    let mut tampered_header = ctx.block.header().clone();
+    let mut seed_bytes = tampered_header.vdf_limiter_info.seed.0;
     seed_bytes[0] ^= 0xFF;
-    tampered.vdf_limiter_info.seed.0 = seed_bytes;
+    tampered_header.vdf_limiter_info.seed.0 = seed_bytes;
 
-    let result = ctx.prevalidate(tampered, &Default::default()).await;
+    // Reconstruct SealedBlock
+    let tampered_block = Arc::new(SealedBlock::new(tampered_header, ctx.block.body().clone())?);
+
+    let result = ctx.prevalidate(&tampered_block).await;
 
     let err_msg = result
         .expect_err("pre-validation should fail for tampered VDF seeds")
@@ -290,11 +280,29 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     let max = ctx.config.consensus_config().mempool.max_data_txs_per_block as usize;
-    let mut txs = BlockTransactions::default();
-    txs.data_txs
-        .insert(DataLedger::Submit, mock_data_txs(max + 1));
+    // Create excessive transactions
+    let excessive_txs = mock_data_txs(max + 1);
 
-    let result = ctx.prevalidate((*ctx.block).clone(), &txs).await;
+    // Construct new body with excessive transactions
+    let mut body = ctx.block.body().clone();
+    body.data_transactions = excessive_txs.clone();
+
+    // Update header to match new transactions (so SealedBlock accepts it)
+    let mut header = ctx.block.header().clone();
+    use irys_types::H256List;
+    let tx_ids: H256List = H256List(excessive_txs.iter().map(|tx| tx.id).collect());
+
+    // Update Submit ledger in header
+    let ledger = header
+        .data_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == DataLedger::Submit as u32)
+        .expect("Submit ledger should exist");
+    ledger.tx_ids = tx_ids;
+
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    let result = ctx.prevalidate(&bad_block).await;
 
     match result {
         Err(PreValidationError::TooManyDataTxs { max: m, got }) => {
@@ -315,9 +323,10 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
     // Check if block has a commitment ledger (needed for this test)
     let has_commitment_ledger = ctx
         .block
+        .header()
         .system_ledgers
         .iter()
-        .any(|l| l.ledger_id == SystemLedger::Commitment);
+        .any(|l| l.ledger_id == SystemLedger::Commitment as u32);
 
     if !has_commitment_ledger {
         // Skip if block doesn't have commitment ledger (not at epoch boundary)
@@ -330,12 +339,31 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
         .consensus_config()
         .mempool
         .max_commitment_txs_per_block as usize;
-    let txs = BlockTransactions {
-        commitment_txs: mock_commitment_txs(max + 1),
-        ..Default::default()
-    };
 
-    let result = ctx.prevalidate((*ctx.block).clone(), &txs).await;
+    let excessive_txs = mock_commitment_txs(max + 1);
+
+    let mut body = ctx.block.body().clone();
+    body.commitment_transactions = excessive_txs.clone();
+
+    let mut header = ctx.block.header().clone();
+    use irys_types::H256List;
+    let tx_ids: H256List = H256List(
+        excessive_txs
+            .iter()
+            .map(irys_types::CommitmentTransaction::id)
+            .collect(),
+    );
+
+    let ledger = header
+        .system_ledgers
+        .iter_mut()
+        .find(|l| l.ledger_id == SystemLedger::Commitment as u32)
+        .expect("Commitment ledger should exist");
+    ledger.tx_ids = tx_ids;
+
+    let bad_block = Arc::new(SealedBlock::new(header, body)?);
+
+    let result = ctx.prevalidate(&bad_block).await;
 
     match result {
         Err(PreValidationError::TooManyCommitmentTxs { max: m, got }) => {
@@ -344,111 +372,6 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
         }
         other => panic!("expected TooManyCommitmentTxs, got {:?}", other),
     }
-
-    ctx.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn heavy_test_prevalidation_rejects_mismatched_tx_ids() -> Result<()> {
-    let ctx = PrevalidationTestContext::new().await?;
-
-    let submit_ledger = ctx
-        .block
-        .data_ledgers
-        .iter()
-        .find(|l| l.ledger_id == DataLedger::Submit)
-        .expect("submit ledger");
-
-    if submit_ledger.tx_ids.0.is_empty() {
-        // Skip if no submit txs in block
-        ctx.stop().await;
-        return Ok(());
-    }
-
-    let expected_id = submit_ledger.tx_ids.0[0];
-    let actual_id = H256::from_low_u64_be(999);
-
-    let mut tx = DataTransactionHeader::default();
-    tx.id = actual_id;
-
-    let mut txs = BlockTransactions::default();
-    txs.data_txs.insert(DataLedger::Submit, vec![tx]);
-
-    let result = ctx.prevalidate((*ctx.block).clone(), &txs).await;
-
-    match result {
-        Err(PreValidationError::TransactionIdMismatch { expected, actual }) => {
-            assert_eq!(expected, expected_id);
-            assert_eq!(actual, actual_id);
-        }
-        other => panic!("expected TransactionIdMismatch, got {:?}", other),
-    }
-
-    ctx.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn heavy_test_prevalidation_rejects_missing_transactions() -> Result<()> {
-    let ctx = PrevalidationTestContext::new().await?;
-
-    let submit_ledger = ctx
-        .block
-        .data_ledgers
-        .iter()
-        .find(|l| l.ledger_id == DataLedger::Submit)
-        .expect("submit ledger");
-
-    if submit_ledger.tx_ids.0.is_empty() {
-        // Skip if no submit txs in block
-        ctx.stop().await;
-        return Ok(());
-    }
-
-    let expected_ids = submit_ledger.tx_ids.0.clone();
-
-    let mut txs = BlockTransactions::default();
-    txs.data_txs.insert(DataLedger::Submit, vec![]);
-
-    let result = ctx.prevalidate((*ctx.block).clone(), &txs).await;
-
-    match result {
-        Err(PreValidationError::MissingTransactions(missing)) => {
-            assert_eq!(missing, expected_ids);
-        }
-        other => panic!("expected MissingTransactions, got {:?}", other),
-    }
-
-    ctx.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn heavy_test_prevalidation_rejects_unexpected_commitments() -> Result<()> {
-    let ctx = PrevalidationTestContext::new().await?;
-
-    // Remove any commitment ledger from block
-    let mut block = (*ctx.block).clone();
-    block
-        .system_ledgers
-        .retain(|l| l.ledger_id != SystemLedger::Commitment);
-
-    let txs = BlockTransactions {
-        commitment_txs: vec![CommitmentTransaction::default()],
-        ..Default::default()
-    };
-
-    let result = ctx.prevalidate(block, &txs).await;
-
-    assert!(
-        matches!(
-            result,
-            Err(PreValidationError::UnexpectedCommitmentTransactions)
-        ),
-        "expected UnexpectedCommitmentTransactions, got {:?}",
-        result
-    );
 
     ctx.stop().await;
     Ok(())

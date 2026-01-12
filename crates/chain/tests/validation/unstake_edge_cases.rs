@@ -12,8 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{BlockTransactions, CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
-use std::collections::HashMap;
+use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -136,7 +135,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
         },
     };
 
-    let (block, _stats, _transactions, _payload) = block_prod_strategy
+    let (block, _stats, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
@@ -147,17 +146,9 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     }
 
     // Send block to genesis node for validation
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unstake.clone()],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
-    let genesis_outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    let genesis_outcome =
+        read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         genesis_outcome,
         |e| {
@@ -173,17 +164,8 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
     );
 
     // Send block to peer node for validation
-    send_block_to_block_tree(
-        &peer_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unstake],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
-    let peer_outcome = read_block_from_state(&peer_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&peer_node.node_ctx, Arc::clone(&block), false).await?;
+    let peer_outcome = read_block_from_state(&peer_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         peer_outcome,
         |e| {
@@ -296,7 +278,7 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
         },
     };
 
-    let (block, _stats, _transactions, _payload) = block_prod_strategy
+    let (block, _stats, _payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("Block producer strategy returned no block"))?;
@@ -305,17 +287,8 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
     gossip_commitment_to_node(&genesis_node, &invalid_unstake).await?;
 
     // Send block to genesis node for validation
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        Arc::clone(&block),
-        BlockTransactions {
-            commitment_txs: vec![invalid_unstake],
-            data_txs: HashMap::new(),
-        },
-        false,
-    )
-    .await?;
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, Arc::clone(&block), false).await?;
+    let outcome = read_block_from_state(&genesis_node.node_ctx, &block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| {

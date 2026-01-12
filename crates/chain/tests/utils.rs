@@ -47,8 +47,9 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
-    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
+    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
+    H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -1969,12 +1970,15 @@ impl IrysNodeTest<IrysNodeCtx> {
         irys_block_header: &IrysBlockHeader,
         block_transactions: BlockTransactions,
     ) -> eyre::Result<()> {
+        let block_body = BlockBody {
+            block_hash: irys_block_header.block_hash,
+            data_transactions: block_transactions.all_data_txs().cloned().collect(),
+            commitment_transactions: block_transactions.commitment_txs.clone(),
+        };
+        let sealed_block = SealedBlock::new(irys_block_header.clone(), block_body)?;
+
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(Arc::new(sealed_block), false)
             .await
         {
             Ok(_) => Ok(()),
@@ -2126,13 +2130,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             .add_execution_payload_to_cache(eth_payload.block().clone())
             .await;
 
+        let block_body = BlockBody {
+            block_hash: irys_block_header.block_hash,
+            data_transactions: block_transactions.all_data_txs().cloned().collect(),
+            commitment_transactions: block_transactions.commitment_txs.clone(),
+        };
+        let sealed_block = SealedBlock::new(irys_block_header.clone(), block_body)?;
+
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(Arc::new(sealed_block), false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 

@@ -1123,6 +1123,7 @@ impl BlockBody {
     }
 }
 
+#[derive(Debug)]
 pub struct SealedBlock {
     header: IrysBlockHeader,
     body: BlockBody,
@@ -1133,15 +1134,19 @@ impl SealedBlock {
     pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
         // Verifies all tx signatures and that the tx ids in the body match those in the header
         body.tx_ids_match_the_header(&header)?;
-        
+
         // Order transactions according to header specification
         let transactions = Self::order_transactions(
             &header,
             body.data_transactions.clone(),
             body.commitment_transactions.clone(),
         )?;
-        
-        Ok(Self { header, body, transactions })
+
+        Ok(Self {
+            header,
+            body,
+            transactions,
+        })
     }
 
     pub fn header(&self) -> &IrysBlockHeader {
@@ -1151,11 +1156,11 @@ impl SealedBlock {
     pub fn body(&self) -> &BlockBody {
         &self.body
     }
-    
+
     pub fn transactions(&self) -> &BlockTransactions {
         &self.transactions
     }
-    
+
     /// Order pre-fetched transactions into BlockTransactions structure.
     ///
     /// Transactions are returned in the exact order specified in the block header,

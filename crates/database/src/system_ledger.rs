@@ -1,8 +1,7 @@
-use eyre::eyre;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
-    irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Compact, Config,
-    H256List, IrysBlockHeader, SystemLedger, SystemTransactionLedger, H256, U256,
+    irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Config, H256List,
+    IrysBlockHeader, SystemLedger, SystemTransactionLedger, H256, U256,
 };
 
 /// Creates a signed pledge commitment transaction

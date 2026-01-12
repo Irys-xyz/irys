@@ -2,8 +2,7 @@ use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::{data_ledger::*};
-use irys_types::{CommitmentStatus, DataLedger, SystemLedger};
+use irys_database::data_ledger::*;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
@@ -13,6 +12,7 @@ use irys_types::{
     partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, IrysAddress,
     PartitionChunkOffset,
 };
+use irys_types::{CommitmentStatus, DataLedger, SystemLedger};
 use openssl::sha;
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
