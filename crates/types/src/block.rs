@@ -1123,6 +1123,27 @@ impl BlockBody {
     }
 }
 
+pub struct SealedBlock {
+    header: IrysBlockHeader,
+    body: BlockBody,
+}
+
+impl SealedBlock {
+    pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
+        // Verifies all tx signatures and that the tx ids in the body match those in the header
+        body.tx_ids_match_the_header(&header)?;
+        Ok(Self { header, body })
+    }
+
+    pub fn header(&self) -> &IrysBlockHeader {
+        &self.header
+    }
+
+    pub fn body(&self) -> &BlockBody {
+        &self.body
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::ingress::{IngressProof, IngressProofV1};

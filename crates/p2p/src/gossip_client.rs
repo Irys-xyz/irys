@@ -955,7 +955,7 @@ impl GossipClient {
         header: Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, Arc<BlockBody>), PeerNetworkError> {
+    ) -> Result<(IrysAddress, BlockBody), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
         self.pull_data_from_network(
             data_request,
@@ -963,7 +963,7 @@ impl GossipClient {
             use_trusted_peers_only,
             peer_list,
             |gossip_data| match gossip_data {
-                GossipDataV2::BlockBody(body) => Ok(body),
+                GossipDataV2::BlockBody(body) => Ok((*body).clone()),
                 _ => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()
