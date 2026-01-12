@@ -23,7 +23,8 @@ hardfork!(
     #[derive(serde::Serialize, serde::Deserialize)]
     IrysHardfork {
         Frontier,
-        NextNameTBD
+        NextNameTBD,
+        Aurora
     }
 );
 
@@ -46,7 +47,15 @@ impl IrysChainHardforks {
         if let Some(ref fork) = config.next_name_tbd {
             forks.push((
                 IrysHardfork::NextNameTBD,
-                ForkCondition::Timestamp(fork.activation_timestamp),
+                ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
+            ));
+        }
+
+        // Conditionally add Aurora hardfork if configured
+        if let Some(ref fork) = config.aurora {
+            forks.push((
+                IrysHardfork::Aurora,
+                ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
             ));
         }
 
@@ -107,8 +116,8 @@ impl IrysHardfork {
                 (EthereumHardfork::Cancun, ForkCondition::ZERO_TIMESTAMP),
                 (EthereumHardfork::Prague, ForkCondition::ZERO_TIMESTAMP),
             ],
-            // NextNameTBD doesn't add any new Ethereum hardforks
             Self::NextNameTBD => &[],
+            Self::Aurora => &[],
         }
     }
 }
