@@ -14,13 +14,12 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
-use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash,
-    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, SealedBlock, H256,
+    IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -677,32 +676,9 @@ where
         }
 
         if !previous_block_status.is_processed() {
-            let block_transactions = match order_transactions_for_block(
-                block.header(),
-                block.body().data_transactions.clone(),
-                block.body().commitment_transactions.clone(),
-            ) {
-                Ok(txs) => txs,
-                Err(
-                    e @ BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-                        block_hash,
-                        ..
-                    }),
-                ) => {
-                    error!(
-                        "Block pool: Header/body mismatch for orphan block {:?}. Removing from cache.",
-                        block_hash
-                    );
-                    self.blocks_cache
-                        .remove_block(
-                            &block_hash,
-                            BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
-                        )
-                        .await;
-                    return Err(e);
-                }
-                Err(e) => return Err(e),
-            };
+            // For orphan blocks, we already have ordered transactions from SealedBlock
+            let block_transactions = block.transactions();
+            
             self.blocks_cache
                 .change_block_processing_status(block_hash, false)
                 .await;
@@ -843,32 +819,8 @@ where
             .wait_for_block_tree_can_process_height(block_height)
             .await;
 
-        let block_transactions = match order_transactions_for_block(
-            block.header(),
-            block.body().data_transactions.clone(),
-            block.body().commitment_transactions.clone(),
-        ) {
-            Ok(txs) => txs,
-            Err(
-                e @ BlockPoolError::Critical(CriticalBlockPoolError::HeaderBodyMismatch {
-                    block_hash,
-                    ..
-                }),
-            ) => {
-                error!(
-                    "Block pool: Header/body mismatch for block {:?}. Removing from cache.",
-                    block_hash
-                );
-                self.blocks_cache
-                    .remove_block(
-                        &block_hash,
-                        BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
-                    )
-                    .await;
-                return Err(e);
-            }
-            Err(e) => return Err(e),
-        };
+        // Transactions are already ordered in SealedBlock
+        let block_transactions = block.transactions();
 
         debug!(
             "Block pool: Processing block {:?} with {} submit, {} publish, {} commitment txs",
@@ -911,8 +863,7 @@ where
         if let Err(block_discovery_error) = self
             .block_discovery
             .handle_block(
-                Arc::new(block.header().clone()),
-                block_transactions,
+                Arc::clone(&block),
                 skip_validation_for_fast_track,
             )
             .await

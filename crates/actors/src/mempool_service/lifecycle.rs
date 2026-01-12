@@ -3,7 +3,8 @@ use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
+use irys_database::{insert_commitment_tx, tx_header_by_txid};
+use irys_types::SystemLedger;
 use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, H256,

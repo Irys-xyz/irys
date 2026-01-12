@@ -19,7 +19,7 @@ use crate::{
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
-use crate::{CommitmentTransaction, IrysAddress};
+use crate::{CommitmentTransaction, IrysAddress, SystemLedger};
 
 use alloy_primitives::map::foldhash::HashSet;
 use alloy_primitives::{keccak256, TxHash, B256};
@@ -1126,13 +1126,22 @@ impl BlockBody {
 pub struct SealedBlock {
     header: IrysBlockHeader,
     body: BlockBody,
+    transactions: BlockTransactions,
 }
 
 impl SealedBlock {
     pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
         // Verifies all tx signatures and that the tx ids in the body match those in the header
         body.tx_ids_match_the_header(&header)?;
-        Ok(Self { header, body })
+        
+        // Order transactions according to header specification
+        let transactions = Self::order_transactions(
+            &header,
+            body.data_transactions.clone(),
+            body.commitment_transactions.clone(),
+        )?;
+        
+        Ok(Self { header, body, transactions })
     }
 
     pub fn header(&self) -> &IrysBlockHeader {
@@ -1141,6 +1150,144 @@ impl SealedBlock {
 
     pub fn body(&self) -> &BlockBody {
         &self.body
+    }
+    
+    pub fn transactions(&self) -> &BlockTransactions {
+        &self.transactions
+    }
+    
+    /// Order pre-fetched transactions into BlockTransactions structure.
+    ///
+    /// Transactions are returned in the exact order specified in the block header,
+    /// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+    fn order_transactions(
+        block_header: &IrysBlockHeader,
+        data_txs: Vec<DataTransactionHeader>,
+        commitment_txs: Vec<CommitmentTransaction>,
+    ) -> eyre::Result<BlockTransactions> {
+        use std::collections::{HashMap, HashSet};
+
+        // Extract required IDs from block header (preserving order)
+        // Use ledger_id-based lookup to avoid relying on vector ordering
+        let submit_ids: Vec<H256> = block_header
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::Submit as u32)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        let publish_ids: Vec<H256> = block_header
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::Publish as u32)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        let commitment_ids: Vec<H256> = block_header
+            .system_ledgers
+            .iter()
+            .find(|l| l.ledger_id == SystemLedger::Commitment as u32) // SystemLedger::Commitment
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        // Create sets for quick lookup
+        let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
+        let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
+
+        // Collect transactions into maps by ID
+        let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
+        let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
+        let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
+
+        for data_tx in data_txs {
+            // Note: A tx can be in both submit and publish ledgers (published after submission)
+            // so we check both independently and clone if needed for both
+            let in_submit = submit_ids_set.contains(&data_tx.id);
+            let in_publish = publish_ids_set.contains(&data_tx.id);
+
+            if in_submit && in_publish {
+                submit_txs_map.insert(data_tx.id, data_tx.clone());
+                publish_txs_map.insert(data_tx.id, data_tx);
+            } else if in_submit {
+                submit_txs_map.insert(data_tx.id, data_tx);
+            } else if in_publish {
+                publish_txs_map.insert(data_tx.id, data_tx);
+            }
+        }
+
+        for commitment_tx in commitment_txs {
+            commitment_txs_map.insert(commitment_tx.id(), commitment_tx);
+        }
+
+        // Build final vectors in the exact order specified by block header
+        let submit_txs: Vec<_> = submit_ids
+            .iter()
+            .filter_map(|id| submit_txs_map.remove(id))
+            .collect();
+
+        let publish_txs: Vec<_> = publish_ids
+            .iter()
+            .filter_map(|id| publish_txs_map.remove(id))
+            .collect();
+
+        let commitment_txs: Vec<_> = commitment_ids
+            .iter()
+            .filter_map(|id| commitment_txs_map.remove(id))
+            .collect();
+
+        // Validate header/body consistency: check that resolved counts match expected counts
+        if submit_txs.len() != submit_ids.len() {
+            let missing_ids: Vec<H256> = submit_ids
+                .iter()
+                .filter(|id| !submit_txs.iter().any(|tx| &tx.id == *id))
+                .copied()
+                .collect();
+            eyre::bail!(
+                "Header/body mismatch in block {:?}: submit ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+                block_header.block_hash,
+                submit_ids.len(),
+                submit_txs.len(),
+                missing_ids
+            );
+        }
+
+        if publish_txs.len() != publish_ids.len() {
+            let missing_ids: Vec<H256> = publish_ids
+                .iter()
+                .filter(|id| !publish_txs.iter().any(|tx| &tx.id == *id))
+                .copied()
+                .collect();
+            eyre::bail!(
+                "Header/body mismatch in block {:?}: publish ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+                block_header.block_hash,
+                publish_ids.len(),
+                publish_txs.len(),
+                missing_ids
+            );
+        }
+
+        if commitment_txs.len() != commitment_ids.len() {
+            let missing_ids: Vec<H256> = commitment_ids
+                .iter()
+                .filter(|id| !commitment_txs.iter().any(|tx| &tx.id() == *id))
+                .copied()
+                .collect();
+            eyre::bail!(
+                "Header/body mismatch in block {:?}: commitment ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+                block_header.block_hash,
+                commitment_ids.len(),
+                commitment_txs.len(),
+                missing_ids
+            );
+        }
+
+        Ok(BlockTransactions {
+            commitment_txs,
+            data_txs: HashMap::from([
+                (DataLedger::Submit, submit_txs),
+                (DataLedger::Publish, publish_txs),
+            ]),
+        })
     }
 }
 

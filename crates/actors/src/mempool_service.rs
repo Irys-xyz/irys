@@ -27,8 +27,9 @@ use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
+    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
+use irys_types::SystemLedger;
 use irys_domain::{
     get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
     StorageModulesReadGuard,

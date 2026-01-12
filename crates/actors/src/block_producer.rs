@@ -16,7 +16,8 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
+use irys_types::SystemLedger;
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation,
@@ -30,11 +31,11 @@ use irys_reth_node_bridge::node::NodeProvider;
 use irys_reward_curve::HalvingCurve;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
-    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockTransactions,
-    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
-    H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData, Signature,
-    SystemTransactionLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, VDFLimiterInfo,
-    H256, U256,
+    next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockBody,
+    BlockTransactions, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
+    DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
+    SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger, TokioServiceHandle,
+    UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -1212,10 +1213,21 @@ pub trait BlockProdStrategy {
             }
         }
 
+        // Construct BlockBody from transactions
+        let mut all_data_txs = Vec::new();
+        all_data_txs.extend(transactions.data_txs.get(&DataLedger::Submit).cloned().unwrap_or_default());
+        all_data_txs.extend(transactions.data_txs.get(&DataLedger::Publish).cloned().unwrap_or_default());
+        
+        let block_body = BlockBody {
+            block_hash: block.block_hash,
+            data_transactions: all_data_txs,
+            commitment_transactions: transactions.commitment_txs.clone(),
+        };
+
         match self
             .inner()
             .block_discovery
-            .handle_block(Arc::clone(&block), transactions, false)
+            .handle_block(Arc::new(IrysSealedBlock::new((*block).clone(), block_body).expect("Failed to create SealedBlock")), false)
             .await
         {
             Ok(()) => Ok(()),

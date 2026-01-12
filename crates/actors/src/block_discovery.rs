@@ -20,7 +20,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     get_ingress_proofs, BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config,
     DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId,
-    TokioServiceHandle, H256,
+    SealedBlock, TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -100,8 +100,7 @@ pub enum BlockDiscoveryInternalError {
 pub trait BlockDiscoveryFacade: Clone + Unpin + Send + Sync + 'static {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError>;
 }
@@ -121,15 +120,13 @@ impl BlockDiscoveryFacadeImpl {
 impl BlockDiscoveryFacade for BlockDiscoveryFacadeImpl {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(BlockDiscoveryMessage::BlockDiscovered {
                 block,
-                transactions,
                 skip_vdf,
                 response: Some(tx),
             })
@@ -238,16 +235,15 @@ impl BlockDiscoveryService {
         match msg {
             BlockDiscoveryMessage::BlockDiscovered {
                 block,
-                transactions,
                 skip_vdf,
                 response,
             } => {
-                let block_hash = block.block_hash;
-                let block_height = block.height;
+                let block_hash = block.header().block_hash;
+                let block_height = block.header().height;
                 let result = self
                     .inner
                     .clone()
-                    .block_discovered(block, transactions, skip_vdf)
+                    .block_discovered(block, skip_vdf)
                     .await;
                 if let Some(sender) = response {
                     if let Err(e) = sender.send(result) {
@@ -266,27 +262,25 @@ impl BlockDiscoveryService {
     }
 }
 
-#[derive(Debug)]
 pub enum BlockDiscoveryMessage {
     BlockDiscovered {
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf: bool,
         response: Option<oneshot::Sender<Result<(), BlockDiscoveryError>>>,
     },
 }
 
 impl BlockDiscoveryServiceInner {
-    #[tracing::instrument(level = "trace", skip_all, fields(block.height = %block.height, block.hash = %block.block_hash))]
+    #[tracing::instrument(level = "trace", skip_all, fields(block.height = %block.header().height, block.hash = %block.header().block_hash))]
     pub async fn block_discovered(
         &self,
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf: bool,
     ) -> Result<(), BlockDiscoveryError> {
         // Validate discovered block
-        let new_block_header = block;
+        let new_block_header = block.header();
         let parent_block_hash = new_block_header.previous_block_hash;
+        let transactions = block.transactions();
 
         //====================================
         // Block header pre-validation
@@ -609,8 +603,8 @@ impl BlockDiscoveryServiceInner {
         };
 
         let validation_result = prevalidate_block(
-            (*new_block_header).clone(),
-            previous_block_header.clone(),
+            new_block_header,
+            &previous_block_header,
             parent_epoch_snapshot.clone(),
             config,
             reward_curve,
@@ -737,8 +731,8 @@ impl BlockDiscoveryServiceInner {
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
                 block_tree_sender
                     .send(BlockTreeServiceMessage::BlockPreValidated {
-                        block: new_block_header.clone(),
-                        transactions,
+                        block: Arc::new(new_block_header.clone()),
+                        transactions: transactions.clone(),
                         skip_vdf_validation: skip_vdf,
                         response: oneshot_tx,
                     })
@@ -767,7 +761,7 @@ impl BlockDiscoveryServiceInner {
                 let block_hash_for_log = new_block_header.block_hash;
                 let block_height_for_log = new_block_header.height;
                 if let Err(error) =
-                    gossip_sender.send(GossipBroadcastMessageV2::from(new_block_header))
+                    gossip_sender.send(GossipBroadcastMessageV2::from(Arc::new(new_block_header.clone())))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",
