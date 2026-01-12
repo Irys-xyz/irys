@@ -2,15 +2,15 @@ use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::{data_ledger::*, SystemLedger};
-use irys_types::CommitmentStatus;
+use irys_database::{data_ledger::*};
+use irys_types::{CommitmentStatus, DataLedger, SystemLedger};
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
     IrysBlockHeader, NodeConfig, SimpleRNG, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
+    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, IrysAddress,
     PartitionChunkOffset,
 };
 use openssl::sha;
@@ -1391,7 +1391,7 @@ mod tests {
 
     mod validate_commitments {
         use crate::EpochSnapshot;
-        use irys_database::SystemLedger;
+        use irys_types::SystemLedger;
         use irys_types::{ConsensusConfig, H256List, SystemTransactionLedger};
 
         #[test]

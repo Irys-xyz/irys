@@ -92,7 +92,7 @@ fn _check_db_for_commitments() -> eyre::Result<()> {
 
         let ledger =
             match header.system_ledgers.iter().find(|tx_ledger| {
-                tx_ledger.ledger_id == irys_database::SystemLedger::Commitment as u32
+                tx_ledger.ledger_id == irys_types::SystemLedger::Commitment as u32
             }) {
                 Some(ledger) => ledger,
                 None => continue,

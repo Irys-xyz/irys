@@ -11,8 +11,9 @@ use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
+    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid,
 };
+use irys_types::SystemLedger;
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -360,8 +361,8 @@ pub enum ValidationError {
 /// Full pre-validation steps for a block
 #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
 pub async fn prevalidate_block(
-    block: IrysBlockHeader,
-    previous_block: IrysBlockHeader,
+    block: &IrysBlockHeader,
+    previous_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
