@@ -412,6 +412,8 @@ pub fn compare_commitment_transactions(
     use std::cmp::Ordering;
 
     fn commitment_priority(commitment_type: &CommitmentTypeV1) -> u8 {
+        // NOTE: IF YOU ARE UPDATING THIS MATCH, MAKE SURE YOU UPDATE THE PRIORITY CMP BELOW
+        // IT HAS A WILDCARD MATCH THAT MAY NOT DO WHAT YOU WANT
         match commitment_type {
             CommitmentTypeV1::Stake => 0,
             CommitmentTypeV1::Pledge { .. } => 1,
@@ -457,6 +459,7 @@ pub fn compare_commitment_transactions(
             (CommitmentTypeV1::Unstake, CommitmentTypeV1::Unstake) => other_fee
                 .cmp(&self_fee)
                 .then_with(|| self_id.cmp(&other_id)),
+            // UPDATE ME IF YOU ADD A NEW COMMITMENT TYPE
             _ => Ordering::Equal,
         },
     }
