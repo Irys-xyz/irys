@@ -93,7 +93,7 @@ fn test_versioned_block_header_compact_with_default() {
 
 #[test]
 fn test_versioned_data_transaction_header_compact_with_default() {
-    // Test with Default implementation which sets version = 2
+    // Test with Default implementation which sets version = 1
     let versioned = DataTransactionHeader::default();
     assert_eq!(versioned.version(), 1, "default should set version to 1");
 
