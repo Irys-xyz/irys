@@ -412,8 +412,6 @@ pub fn compare_commitment_transactions(
     use std::cmp::Ordering;
 
     fn commitment_priority(commitment_type: &CommitmentTypeV1) -> u8 {
-        // NOTE: IF YOU ARE UPDATING THIS MATCH, MAKE SURE YOU UPDATE THE PRIORITY CMP BELOW
-        // IT HAS A WILDCARD MATCH THAT MAY NOT DO WHAT YOU WANT
         match commitment_type {
             CommitmentTypeV1::Stake => 0,
             CommitmentTypeV1::Pledge { .. } => 1,
@@ -459,8 +457,7 @@ pub fn compare_commitment_transactions(
             (CommitmentTypeV1::Unstake, CommitmentTypeV1::Unstake) => other_fee
                 .cmp(&self_fee)
                 .then_with(|| self_id.cmp(&other_id)),
-            // UPDATE ME IF YOU ADD A NEW COMMITMENT TYPE
-            _ => Ordering::Equal,
+            _ => unreachable!("equal priorities imply identical commitment types"),
         },
     }
 }
@@ -545,19 +542,29 @@ mod tests {
     }
 
     #[test]
-    fn test_stake_id_tiebreaker() {
+    fn test_id_tiebreaker() {
         let id_low = H256::from_low_u64_be(1);
         let id_high = H256::from_low_u64_be(2);
 
-        let result = compare_commitment_transactions(
-            &stake(),
-            U256::from(100),
-            id_low,
-            &stake(),
-            U256::from(100),
-            id_high,
-        );
-        assert_eq!(result, Ordering::Less);
+        // Test all commitment types with the same pattern
+        let test_cases = [
+            (stake(), stake()),
+            (pledge(0), pledge(0)),
+            (unpledge(0), unpledge(0)),
+            (unstake(), unstake()),
+        ];
+
+        for (self_type, other_type) in test_cases {
+            let result = compare_commitment_transactions(
+                &self_type,
+                U256::from(100),
+                id_low,
+                &other_type,
+                U256::from(100),
+                id_high,
+            );
+            assert_eq!(result, Ordering::Less);
+        }
     }
 
     // ===================
