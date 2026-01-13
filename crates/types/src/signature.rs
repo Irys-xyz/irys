@@ -338,6 +338,7 @@ mod tests {
 
         let mut buf = Vec::new();
         transaction.encode(&mut buf);
+        // bytes taken from the tx parity tests of the JS client
         assert_eq!(
             buf,
             vec![
