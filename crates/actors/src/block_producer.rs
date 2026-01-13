@@ -32,8 +32,8 @@ use irys_types::SystemLedger;
 use irys_types::{
     app_state::DatabaseProvider, block_production::SolutionContext, calculate_difficulty,
     next_cumulative_diff, storage_pricing::Amount, AdjustmentStats, Base64, BlockBody,
-    BlockTransactions, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
+    CommitmentTransaction, Config, DataLedger, DataTransactionHeader, DataTransactionLedger,
+    H256List, IrysAddress, IrysBlockHeader, IrysTokenPrice, PoaData,
     SealedBlock as IrysSealedBlock, Signature, SystemTransactionLedger, TokioServiceHandle,
     UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
@@ -126,15 +126,7 @@ pub enum BlockProducerCommand {
     /// Announce to the node a mining solution has been found
     SolutionFound {
         solution: SolutionContext,
-        response: oneshot::Sender<
-            eyre::Result<
-                Option<(
-                    Arc<irys_types::IrysBlockHeader>,
-                    EthBuiltPayload,
-                    BlockTransactions,
-                )>,
-            >,
-        >,
+        response: oneshot::Sender<eyre::Result<Option<(Arc<IrysSealedBlock>, EthBuiltPayload)>>>,
     },
     /// Set the test blocks remaining (for testing)
     SetTestBlocksRemaining(Option<u64>),
@@ -372,11 +364,7 @@ impl BlockProducerService {
                         debug!("Test blocks remaining after publication: {}", *remaining);
                     }
 
-                    let _ = response.send(Ok(Some((
-                        Arc::new(block.header().clone()),
-                        eth_built_payload,
-                        block.transactions().clone(),
-                    ))));
+                    let _ = response.send(Ok(Some((block, eth_built_payload))));
                     return Ok(());
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");

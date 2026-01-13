@@ -1248,7 +1248,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
-        maybe.ok_or_eyre("block not returned")
+        let (sealed_block, eth_payload) = maybe.ok_or_eyre("block not returned")?;
+        Ok((
+            Arc::new(sealed_block.header().clone()),
+            eth_payload,
+            sealed_block.transactions().clone(),
+        ))
     }
 
     pub async fn mine_block_without_gossip(
@@ -1967,32 +1972,24 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
-        irys_block_header: &IrysBlockHeader,
-        block_transactions: BlockTransactions,
+        sealed_block: Arc<SealedBlock>,
     ) -> eyre::Result<()> {
-        let block_body = BlockBody {
-            block_hash: irys_block_header.block_hash,
-            data_transactions: block_transactions.all_data_txs().cloned().collect(),
-            commitment_transactions: block_transactions.commitment_txs.clone(),
-        };
-        let sealed_block = SealedBlock::new(irys_block_header.clone(), block_body)?;
-
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(sealed_block), false)
+            .handle_block(Arc::clone(&sealed_block), false)
             .await
         {
             Ok(_) => Ok(()),
             Err(res) => {
                 tracing::error!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 );
                 Err(eyre!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 ))
             }
