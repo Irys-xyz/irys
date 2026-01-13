@@ -13,14 +13,13 @@ fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
             deserialize_with = "serde_utils::signing_key_from_hex",
             serialize_with = "serde_utils::serializes_signing_key"
         )]
+        // currently unused
         r#priv: SigningKey,
     }
 
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests/fixtures/commitments.json");
     let test_data = std::fs::read_to_string(path)?;
-
-    // let test_data = std::fs::read_to_string("./fixtures/commitments.json")?;
 
     let data: Vec<TxSigningTestData> = serde_json::from_str(&test_data)?;
     for tx in data {
