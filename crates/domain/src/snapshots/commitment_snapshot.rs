@@ -390,14 +390,14 @@ mod tests {
         commitment_type: CommitmentTypeV1,
         value: U256,
     ) -> CommitmentTransaction {
-        let mut tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
+        let mut tx = CommitmentTransaction::V2(irys_types::CommitmentTransactionV2 {
             id: H256::zero(),
             anchor: H256::zero(),
             signer,
             signature: IrysSignature::default(),
             fee: 100,
             value,
-            commitment_type,
+            commitment_type: commitment_type.into(),
             chain_id: 1,
         });
         // Generate a proper ID for the transaction

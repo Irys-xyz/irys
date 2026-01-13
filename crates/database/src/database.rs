@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(result, Some(tx_header));
 
         // Write a commitment tx
-        let commitment_tx = CommitmentTransaction::V1(irys_types::CommitmentTransactionV1 {
+        let commitment_tx = CommitmentTransaction::V2(irys_types::CommitmentTransactionV2 {
             // Override some defaults to insure deserialization is working
             id: H256::from([10_u8; 32]),
             ..Default::default()

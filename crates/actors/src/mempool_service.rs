@@ -3067,7 +3067,7 @@ where
 mod bounded_mempool_tests {
     use super::*;
     use irys_types::{
-        CommitmentTransactionV1, CommitmentTypeV1, DataLedger, DataTransactionHeaderV1,
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
         IrysSignature,
     };
 
@@ -3096,14 +3096,14 @@ mod bounded_mempool_tests {
 
     /// Creates a test commitment transaction with specified signer and value
     fn create_test_commitment_tx(signer: IrysAddress, value: u64) -> CommitmentTransaction {
-        CommitmentTransaction::V1(CommitmentTransactionV1 {
+        CommitmentTransaction::V2(CommitmentTransactionV2 {
             id: H256::random(), // Random ID for testing
             anchor: H256::zero(),
             signer,
             signature: IrysSignature::default(),
             fee: 100,
             value: U256::from(value),
-            commitment_type: CommitmentTypeV1::Stake,
+            commitment_type: CommitmentTypeV2::Stake,
             chain_id: 1,
         })
     }

@@ -755,10 +755,10 @@ mod tests {
     use super::*;
     use irys_types::ingress::IngressProofV1;
     use irys_types::{
-        ingress::IngressProof, irys::IrysSigner, CommitmentTransactionV1, ConsensusConfig,
-        IrysBlockHeader, IrysSignature, Signature, H256,
+        ingress::IngressProof, irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysSignature,
+        Signature, H256,
     };
-    use irys_types::{BlockHash, CommitmentTypeV1};
+    use irys_types::{BlockHash, CommitmentTransactionV2, CommitmentTypeV1};
     use itertools::Itertools as _;
 
     fn create_test_commitment(
@@ -768,9 +768,9 @@ mod tests {
     ) -> CommitmentTransaction {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
-        CommitmentTransaction::V1(CommitmentTransactionV1 {
+        CommitmentTransaction::V2(CommitmentTransactionV2 {
             id: H256::from([7_u8; 32]),
-            commitment_type,
+            commitment_type: commitment_type.into(),
             anchor: H256::from([8_u8; 32]),
             signer: signer.address(),
             value,
