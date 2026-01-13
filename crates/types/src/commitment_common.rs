@@ -109,9 +109,9 @@ impl VersionDiscriminant for CommitmentTransaction {
 
 impl CommitmentTransaction {
     /// Calculate the value for a pledge at the given count
-    /// Delegates to the inner type's implementation
+    /// Delegates to CommitmentTransactionV2's implementation
     pub fn calculate_pledge_value_at_count(config: &ConsensusConfig, pledge_count: u64) -> U256 {
-        CommitmentTransactionV1::calculate_pledge_value_at_count(config, pledge_count)
+        CommitmentTransactionV2::calculate_pledge_value_at_count(config, pledge_count)
     }
 
     /// Get the commitment type from any version
