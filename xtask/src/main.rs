@@ -195,14 +195,34 @@ fn run_command(command: Commands, sh: &Shell) -> eyre::Result<()> {
                 "--all-targets".to_string(),
             ];
 
+            // Validate passthrough args don't conflict with xtask-injected flags.
+            // (Avoid duplicate --config-file/--profile ambiguity.)
+            let user_has_config_file = args
+                .iter()
+                .any(|a| a == "--config-file" || a.starts_with("--config-file="));
+
+            let user_has_profile = args
+                .iter()
+                .any(|a| a == "--profile" || a.starts_with("--profile="));
+
             // Add config file
 
             let config_path = config_file.path().to_string_lossy().to_string();
+            if user_has_config_file {
+                return Err(eyre::eyre!(
+                    "Do not pass --config-file via xtask passthrough args; xtask manages nextest config generation."
+                ));
+            }
             nextest_args.push("--config-file".to_string());
             nextest_args.push(config_path);
 
             // Use the rerun profile if filtering to failed tests
             if failed_tests_filter.is_some() {
+                if user_has_profile {
+                    return Err(eyre::eyre!(
+                        "Do not pass --profile via xtask passthrough args when using --rerun-failures; xtask selects the profile."
+                    ));
+                }
                 nextest_args.push("--profile".to_string());
                 nextest_args.push("xtask-rerun-failures".to_string());
             }
