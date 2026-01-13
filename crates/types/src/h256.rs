@@ -83,7 +83,7 @@ impl TryFrom<&[u8]> for H256 {
 impl H256 {
     pub fn try_from_slice(slice: &[u8]) -> eyre::Result<Self> {
         if slice.len() != 32 {
-            eyre::bail!("Input length must be 32")
+            eyre::bail!("Input length must be 32, got {}", slice.len())
         }
         Ok(H256::from_slice(slice))
     }
