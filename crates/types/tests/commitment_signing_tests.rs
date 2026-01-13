@@ -17,7 +17,6 @@ fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
     }
 
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    eprintln!("PATH {:?}", &path);
     path.push("tests/fixtures/commitments.json");
     let test_data = std::fs::read_to_string(path)?;
 
