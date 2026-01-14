@@ -1,6 +1,6 @@
 use crate::{Arbitrary, IrysAddress, Signature};
 use alloy_primitives::{bytes, U256 as RethU256};
-use base58::{FromBase58, ToBase58 as _};
+use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
@@ -9,11 +9,24 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 //==============================================================================
 // IrysSignature
 //------------------------------------------------------------------------------
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Arbitrary, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Arbitrary, Hash)]
 /// Wrapper newtype around [`Signature`], with enforced boolean parity
 pub struct IrysSignature(Signature);
 
 // TODO: eventually implement ERC-2098 to save a byte
+
+/// As base58 is rather expensive, we want to make sure that input is well formed as soon as possible
+/// this constant is computed using the below `compute_max_str_len` function (to_base58() is not a const fn)
+const MAX_BS58_SIG_STRING_LENGTH: usize = 89;
+
+// #[test]
+// fn compute_max_str_len() {
+//     dbg!(
+//         IrysSignature::new(Signature::from_bytes_and_parity(&[u8::MAX; 64], true))
+//             .to_base58()
+//             .len()
+//     );
+// }
 
 impl IrysSignature {
     pub fn new(signature: Signature) -> Self {
@@ -40,11 +53,40 @@ impl IrysSignature {
     pub fn recover_signer(&self, prehash: [u8; 32]) -> eyre::Result<IrysAddress> {
         Ok(recover_signer(&self.0, prehash.into())?.into())
     }
+
+    pub fn from_base58(str: &str) -> eyre::Result<Self> {
+        if str.len() > MAX_BS58_SIG_STRING_LENGTH {
+            eyre::bail!(
+                "Invalid signature length, max is {}, got {}",
+                MAX_BS58_SIG_STRING_LENGTH,
+                &str.len()
+            )
+        }
+        // Decode the base58 string into bytes
+        let decoded = str
+            .from_base58()
+            .map_err(|e| eyre::eyre!("Invalid base58 string: {:?}", &e))?;
+        // from_raw does the 65 len check
+        let sig = Signature::from_raw(&decoded)?;
+        Ok(Self(sig))
+    }
+
+    pub fn to_base58(&self) -> String {
+        self.0.as_bytes().to_base58()
+    }
 }
 
 impl Default for IrysSignature {
     fn default() -> Self {
         Self::new(Signature::new(RethU256::ZERO, RethU256::ZERO, false))
+    }
+}
+
+impl std::fmt::Debug for IrysSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("IrysSignature")
+            .field(&self.to_base58())
+            .finish()
     }
 }
 
@@ -113,23 +155,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
         // First, deserialize the base58-encoded string
         let s: String = Deserialize::deserialize(deserializer)?;
 
-        // Decode the base58 string into bytes
-        let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
-
-        // Ensure the byte array is exactly 65 bytes (r, s, and v values of the signature)
-        if bytes.len() != 65 {
-            return Err(de::Error::invalid_length(
-                bytes.len(),
-                &"expected 65 bytes for signature",
-            ));
-        }
-
-        // Convert the byte array into a Signature struct using TryFrom
-        let sig = Signature::try_from(bytes.as_slice()).map_err(de::Error::custom)?;
-
-        // Return the IrysSignature by wrapping the Signature
-        Ok(Self::new(sig))
+        Self::from_base58(&s).map_err(de::Error::custom)
     }
 }
 
@@ -169,8 +195,9 @@ impl alloy_rlp::Decodable for IrysSignature {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
-    use crate::{BoundedFee, CommitmentTransaction, CommitmentType, IrysAddress, Signable as _};
+    use crate::{BoundedFee, CommitmentTransaction, CommitmentTypeV2, IrysAddress, Signable as _};
 
     use crate::{irys::IrysSigner, ConsensusConfig, DataTransaction, DataTransactionHeader, H256};
     use alloy_core::hex;
@@ -274,9 +301,9 @@ mod tests {
     fn commitment_tx_signature_signing_serialization() -> eyre::Result<()> {
         // spellchecker:off
         // from the JS Client - `txSigningParity`
-        const SIG_HEX: &str = "0x559103e7798f0523cf37487224ddd6c2189276be86ec85d3b2ae7468b097f616173ba6d3056266f80dbeab90d793e6734dba1d92e81427e716bcd8853cca25fe1b";
+        const SIG_HEX: &str = "0x70b9868fde4a5e6a461a63683dd94da9dc443140fd451063088a17c22c8def1e3d351697a13aa18501cb5887b98524a1b3d060d2af8a1b877cb532f7f52a70f21b";
         // Base58 encoding of the signature (for version=1 signing preimage)
-        const SIG_BS58: &str = "8YxBZcsHQXARCXnhcd5svVYWCYEBZWcWf8pE5TPai39ogdT3WXfWyd6VZ73duogV1t81pwTU1gdKj9nJQ9DiJAL2W";
+        const SIG_BS58: &str = "AwxMVRKDEnExepqnuCuFBXkiEWkg59whzZGnrGTCsYo2TQhVUUWe4ufescKiLxGVTdndCjVixGAXUvVAjEhid3nEe";
         // spellchecker:on
         let testing_config = ConsensusConfig::testing();
         let irys_signer = IrysSigner {
@@ -286,15 +313,18 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let mut transaction = CommitmentTransaction::V1(crate::CommitmentTransactionV1 {
+        let mut transaction = CommitmentTransaction::V2(crate::CommitmentTransactionV2 {
             id: Default::default(),
-            anchor: H256::from([1_u8; 32]),
+            // anchor: H256::from([1_u8; 32]),
+            anchor: H256::from_base58("GqrCZEc5WU4gXj9qveAUDkNRPhsPPjWrD8buKAc5sXdZ"),
+
             signer: IrysAddress::ZERO,
-            commitment_type: CommitmentType::Unpledge {
-                pledge_count_before_executing: 12,
-                partition_hash: [2_u8; 32].into(),
+            commitment_type: CommitmentTypeV2::Unpledge {
+                pledge_count_before_executing: u64::MAX,
+                // partition_hash: [2_u8; 32].into(),
+                partition_hash: H256::from_base58("12Yjd3YA9xjzkqDfdcXVWgyu6TpAq9WJdh6NJRWzZBKt"),
             },
-            chain_id: testing_config.chain_id,
+            chain_id: 1270,
             signature: Default::default(),
             fee: 1234,
             value: 222.into(),
@@ -314,6 +344,22 @@ mod tests {
         let (signature2, _) = IrysSignature::from_compact(&bytes, bytes.len());
 
         assert_eq!(*transaction.signature(), signature2);
+
+        let mut buf = Vec::new();
+        transaction.encode(&mut buf);
+        // bytes taken from the tx parity tests of the JS client
+        assert_eq!(
+            buf,
+            vec![
+                248, 107, 2, 160, 235, 98, 207, 255, 20, 72, 55, 95, 138, 3, 64, 73, 43, 2, 195,
+                255, 161, 69, 141, 190, 217, 103, 225, 140, 51, 128, 116, 217, 123, 237, 192, 176,
+                148, 100, 241, 162, 130, 158, 14, 105, 140, 24, 231, 121, 45, 110, 116, 246, 125,
+                137, 170, 10, 50, 235, 3, 136, 255, 255, 255, 255, 255, 255, 255, 255, 160, 0, 101,
+                118, 169, 82, 205, 224, 235, 245, 44, 177, 1, 87, 152, 203, 219, 186, 168, 206,
+                177, 83, 183, 19, 181, 32, 176, 137, 138, 119, 71, 87, 223, 130, 4, 246, 130, 4,
+                210, 129, 222
+            ]
+        );
 
         // serde-json base58 roundtrip
         let ser = serde_json::to_string(&transaction.signature())?;

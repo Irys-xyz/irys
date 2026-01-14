@@ -10,12 +10,12 @@ fn data_tx_version_is_1() {
 }
 
 #[test]
-fn commitment_tx_version_is_1() {
+fn commitment_tx_version_is_2() {
     let config = ConsensusConfig::testing();
     let tx = CommitmentTransaction::new_stake(&config, irys_types::H256::zero());
     assert_eq!(
         tx.version(),
-        1,
-        "new_stake() should create V1 with version=1"
+        2,
+        "new_stake() should create V2 with version=2"
     );
 }

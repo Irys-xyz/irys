@@ -4,8 +4,8 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::{
     hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
     irys::IrysSigner,
-    CommitmentTransaction, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentType,
-    ConsensusConfig, IrysTransactionId, NodeConfig, UnixTimestamp,
+    CommitmentTransaction, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1,
+    CommitmentTypeV2, ConsensusConfig, IrysTransactionId, NodeConfig, UnixTimestamp,
 };
 use rstest::rstest;
 use tracing::info;
@@ -66,14 +66,14 @@ fn create_stake_inner(
 ) -> CommitmentTransaction {
     match version {
         TxVersion::V1 => CommitmentTransaction::V1(CommitmentTransactionV1 {
-            commitment_type: CommitmentType::Stake,
+            commitment_type: CommitmentTypeV1::Stake,
             anchor,
             fee,
             value,
             ..CommitmentTransactionV1::new(consensus)
         }),
         TxVersion::V2 => CommitmentTransaction::V2(CommitmentTransactionV2 {
-            commitment_type: CommitmentType::Stake,
+            commitment_type: CommitmentTypeV2::Stake,
             anchor,
             fee,
             value,
