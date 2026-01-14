@@ -1,0 +1,239 @@
+use reth_codecs::Compact;
+use serde::{Deserialize, Serialize};
+use crate::{CommitmentTransaction, DataTransactionHeader};
+
+/// Metadata tracked for all transaction types
+/// Stored separately from transaction headers to enable easier future migrations
+#[derive(Clone, Debug, Default, PartialEq, Eq, Compact, Serialize, Deserialize, arbitrary::Arbitrary)]
+pub struct TransactionMetadata {
+    /// Height of the block where this transaction was first included
+    /// - For data txs: when included in Submit ledger
+    /// - For commitment txs: when included in commitment ledger
+    pub included_height: Option<u64>,
+}
+
+impl TransactionMetadata {
+    pub fn new() -> Self {
+        Self {
+            included_height: None,
+        }
+    }
+
+    pub fn with_included_height(height: u64) -> Self {
+        Self {
+            included_height: Some(height),
+        }
+    }
+
+    pub fn is_included(&self) -> bool {
+        self.included_height.is_some()
+    }
+}
+
+/// Wrapper for data transactions with metadata
+/// This ensures metadata travels with the transaction and gets cleaned up automatically
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataTxWithMetadata {
+    pub tx: DataTransactionHeader,
+    pub metadata: TransactionMetadata,
+}
+
+impl DataTxWithMetadata {
+    pub fn new(tx: DataTransactionHeader) -> Self {
+        Self {
+            tx,
+            metadata: TransactionMetadata::new(),
+        }
+    }
+
+    pub fn with_metadata(tx: DataTransactionHeader, metadata: TransactionMetadata) -> Self {
+        Self { tx, metadata }
+    }
+
+    pub fn with_included_height(tx: DataTransactionHeader, height: u64) -> Self {
+        Self {
+            tx,
+            metadata: TransactionMetadata::with_included_height(height),
+        }
+    }
+
+    /// Get the transaction ID
+    pub fn id(&self) -> crate::H256 {
+        self.tx.id
+    }
+
+    /// Set the included height
+    pub fn set_included_height(&mut self, height: u64) {
+        self.metadata.included_height = Some(height);
+    }
+
+    /// Clear the included height (used during re-orgs)
+    pub fn clear_included_height(&mut self) {
+        self.metadata.included_height = None;
+    }
+
+    /// Split into transaction and metadata for database storage
+    pub fn split(self) -> (DataTransactionHeader, TransactionMetadata) {
+        (self.tx, self.metadata)
+    }
+
+    /// Get references to both parts
+    pub fn as_parts(&self) -> (&DataTransactionHeader, &TransactionMetadata) {
+        (&self.tx, &self.metadata)
+    }
+}
+
+/// Implement Deref so we can access transaction fields directly
+impl std::ops::Deref for DataTxWithMetadata {
+    type Target = DataTransactionHeader;
+    
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+/// Wrapper for commitment transactions with metadata
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitmentTxWithMetadata {
+    pub tx: CommitmentTransaction,
+    pub metadata: TransactionMetadata,
+}
+
+impl CommitmentTxWithMetadata {
+    pub fn new(tx: CommitmentTransaction) -> Self {
+        Self {
+            tx,
+            metadata: TransactionMetadata::new(),
+        }
+    }
+
+    pub fn with_metadata(tx: CommitmentTransaction, metadata: TransactionMetadata) -> Self {
+        Self { tx, metadata }
+    }
+
+    pub fn with_included_height(tx: CommitmentTransaction, height: u64) -> Self {
+        Self {
+            tx,
+            metadata: TransactionMetadata::with_included_height(height),
+        }
+    }
+
+    /// Get the transaction ID
+    pub fn id(&self) -> crate::H256 {
+        self.tx.id()
+    }
+
+    /// Set the included height
+    pub fn set_included_height(&mut self, height: u64) {
+        self.metadata.included_height = Some(height);
+    }
+
+    /// Clear the included height (used during re-orgs)
+    pub fn clear_included_height(&mut self) {
+        self.metadata.included_height = None;
+    }
+
+    /// Split into transaction and metadata for database storage
+    pub fn split(self) -> (CommitmentTransaction, TransactionMetadata) {
+        (self.tx, self.metadata)
+    }
+
+    /// Get references to both parts
+    pub fn as_parts(&self) -> (&CommitmentTransaction, &TransactionMetadata) {
+        (&self.tx, &self.metadata)
+    }
+}
+
+/// Implement Deref so we can access transaction fields directly
+impl std::ops::Deref for CommitmentTxWithMetadata {
+    type Target = CommitmentTransaction;
+    
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+/// Transaction status as exposed via API
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TransactionStatus {
+    /// Transaction is in mempool but not yet in any block
+    Pending,
+    /// Transaction is included in a block but the block hasn't been migrated to index yet
+    Included,
+    /// Transaction's block has been migrated to the block index (finalized)
+    Confirmed,
+}
+
+/// API response for transaction status queries
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionStatusResponse {
+    pub status: TransactionStatus,
+    /// Only present if status is INCLUDED or CONFIRMED
+    #[serde(skip_serializing_if = "Option::is_none", with = "crate::serialization::optional_string_u64")]
+    pub block_height: Option<u64>,
+    /// Only present if status is INCLUDED or CONFIRMED
+    /// Calculated as: current_head_height - block_height
+    #[serde(skip_serializing_if = "Option::is_none", with = "crate::serialization::optional_string_u64")]
+    pub confirmations: Option<u64>,
+}
+
+impl TransactionStatusResponse {
+    pub fn pending() -> Self {
+        Self {
+            status: TransactionStatus::Pending,
+            block_height: None,
+            confirmations: None,
+        }
+    }
+
+    pub fn included(block_height: u64, current_head_height: u64) -> Self {
+        Self {
+            status: TransactionStatus::Included,
+            block_height: Some(block_height),
+            confirmations: Some(current_head_height.saturating_sub(block_height)),
+        }
+    }
+
+    pub fn confirmed(block_height: u64, current_head_height: u64) -> Self {
+        Self {
+            status: TransactionStatus::Confirmed,
+            block_height: Some(block_height),
+            confirmations: Some(current_head_height.saturating_sub(block_height)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metadata_creation() {
+        let metadata = TransactionMetadata::new();
+        assert!(!metadata.is_included());
+
+        let metadata = TransactionMetadata::with_included_height(100);
+        assert!(metadata.is_included());
+        assert_eq!(metadata.included_height, Some(100));
+    }
+
+    #[test]
+    fn test_status_response_creation() {
+        let pending = TransactionStatusResponse::pending();
+        assert_eq!(pending.status, TransactionStatus::Pending);
+        assert!(pending.block_height.is_none());
+        assert!(pending.confirmations.is_none());
+
+        let included = TransactionStatusResponse::included(100, 110);
+        assert_eq!(included.status, TransactionStatus::Included);
+        assert_eq!(included.block_height, Some(100));
+        assert_eq!(included.confirmations, Some(10));
+
+        let confirmed = TransactionStatusResponse::confirmed(100, 110);
+        assert_eq!(confirmed.status, TransactionStatus::Confirmed);
+        assert_eq!(confirmed.block_height, Some(100));
+        assert_eq!(confirmed.confirmations, Some(10));
+    }
+}
