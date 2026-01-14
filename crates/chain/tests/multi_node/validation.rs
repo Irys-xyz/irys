@@ -1,5 +1,3 @@
-use std::sync::{Arc, Mutex};
-
 use crate::utils::{
     assert_validation_error, read_block_from_state, solution_context, IrysNodeTest,
 };
@@ -11,12 +9,30 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs,
     BlockProdStrategy, BlockProducerInner, MempoolServiceMessage, MempoolTxs, ProductionStrategy,
 };
+use irys_chain::IrysNodeCtx;
+use irys_database::db::IrysDatabaseExt as _;
+use irys_database::tables::IrysBlockHeaders;
 use irys_types::{
     ingress::generate_ingress_proof, storage_pricing::Amount, CommitmentTransaction,
     DataTransactionHeader, IngressProofsList, IrysBlockHeader, NodeConfig, UnixTimestampMs, H256,
     U256,
 };
 use reth::payload::EthBuiltPayload;
+use reth_db::transaction::DbTxMut as _;
+use std::sync::{Arc, Mutex};
+
+fn insert_block_header_for_gossip_test(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    block_hash: H256,
+    header: IrysBlockHeader,
+) -> eyre::Result<()> {
+    // Since this block would be rejected by the validation of the producer itself, we need to
+    // manually insert it into the db for gossiping block bodies
+    node.node_ctx.db.update_eyre(move |tx| {
+        tx.put::<IrysBlockHeaders>(block_hash, header.into())?;
+        Ok(())
+    })
+}
 
 // This test creates a malicious block producer that squares the reward amount instead of using the correct value.
 // The assertion will fail (block will be discarded) because the block rewards between irys block and reth
@@ -86,6 +102,7 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
+    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone())?;
     peer_node.gossip_enable();
 
     peer_node.gossip_block_to_peers(&block)?;
@@ -154,6 +171,10 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
     let mut irys_block = block.as_ref().clone();
     irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
+    // Re-signing actually changes the block hash, so we need to manually insert the header to the db
+    //  for this test to work, because fetching the block body from the peer now requires that
+    //  peer to actually have this block header in its database/mempool/cache
+    insert_block_header_for_gossip_test(&peer_node, irys_block.block_hash, irys_block.clone())?;
     let irys_block = Arc::new(irys_block);
     peer_node.gossip_enable();
 
@@ -247,6 +268,9 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
+
+    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone())?;
+
     peer_node.gossip_enable();
 
     peer_node.gossip_block_to_peers(&block)?;
@@ -344,6 +368,7 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
         .fully_produce_new_block(solution_context(&peer_node.node_ctx).await?)
         .await?
         .unwrap();
+    insert_block_header_for_gossip_test(&peer_node, block.block_hash, block.as_ref().clone())?;
     peer_node.gossip_enable();
 
     peer_node.gossip_block_to_peers(&block)?;

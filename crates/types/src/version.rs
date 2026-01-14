@@ -16,20 +16,49 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[serde(tag = "status")]
 pub enum PeerResponse {
     #[serde(rename = "accepted")]
-    Accepted(AcceptedResponse),
+    Accepted(HandshakeResponse),
     #[serde(rename = "rejected")]
     Rejected(RejectedResponse),
 }
 
 // Explicit integer protocol versions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Hash, Arbitrary,
+)]
 #[repr(u32)]
-#[derive(Default)]
 pub enum ProtocolVersion {
-    #[default]
     V1 = 1,
-    // V2 = 2,
-    // V3 = 3,
+    V2 = 2,
+}
+
+impl Default for ProtocolVersion {
+    fn default() -> Self {
+        Self::current()
+    }
+}
+
+impl From<u32> for ProtocolVersion {
+    fn from(v: u32) -> Self {
+        match v {
+            1 => Self::V1,
+            2 => Self::V2,
+            _ => Self::default(),
+        }
+    }
+}
+
+impl ProtocolVersion {
+    pub const fn current() -> Self {
+        Self::V2
+    }
+
+    pub fn supported_versions() -> &'static [Self] {
+        &[Self::V1, Self::V2]
+    }
+
+    pub fn supported_versions_u32() -> &'static [u32] {
+        &[Self::V1 as u32, Self::V2 as u32]
+    }
 }
 
 /// Builds a user-agent string to identify this node implementation in the P2P network.
@@ -118,7 +147,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VersionRequest {
+pub struct HandshakeRequest {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     pub mining_address: IrysAddress,
@@ -129,12 +158,12 @@ pub struct VersionRequest {
     pub signature: IrysSignature,
 }
 
-impl Default for VersionRequest {
+impl Default for HandshakeRequest {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
             mining_address: IrysAddress::ZERO,
-            protocol_version: ProtocolVersion::default(),
+            protocol_version: ProtocolVersion::current(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -147,7 +176,7 @@ impl Default for VersionRequest {
     }
 }
 
-impl VersionRequest {
+impl HandshakeRequest {
     fn encode_for_signing<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -256,7 +285,7 @@ impl Compact for PeerAddress {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AcceptedResponse {
+pub struct HandshakeResponse {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
@@ -265,11 +294,11 @@ pub struct AcceptedResponse {
     pub message: Option<String>,
 }
 
-impl Default for AcceptedResponse {
+impl Default for HandshakeResponse {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
-            protocol_version: ProtocolVersion::default(),
+            protocol_version: ProtocolVersion::current(),
             peers: Vec::new(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -353,13 +382,13 @@ pub struct NodeInfo {
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
-    use crate::{Config, IrysSignature, NodeConfig, VersionRequest, H256};
+    use crate::{Config, HandshakeRequest, IrysSignature, NodeConfig, H256};
     use crate::{IrysAddress, U256};
     use serde_json;
 
     #[test]
     fn should_sign_and_verify_signature() {
-        let mut version_request = VersionRequest::default();
+        let mut version_request = HandshakeRequest::default();
         let testing_config = NodeConfig::testing();
         let config = Config::new(testing_config);
         let signer = config.irys_signer();

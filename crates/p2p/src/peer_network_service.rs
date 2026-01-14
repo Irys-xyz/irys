@@ -5,11 +5,12 @@ use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt as _};
 use irys_database::insert_peer_list_item;
 use irys_database::reth_db::{Database as _, DatabaseError};
 use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
+use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
-    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, GossipDataRequest,
-    HandshakeMessage, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
+    build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
+    HandshakeRequest, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
     PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    RejectedResponse, RethPeerInfo, TokioServiceHandle, VersionRequest,
+    RejectedResponse, RethPeerInfo, TokioServiceHandle,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -23,6 +24,7 @@ use tokio::sync::Mutex;
 use tokio::sync::{broadcast, mpsc::UnboundedReceiver};
 use tokio::time::{interval, sleep, MissedTickBehavior};
 use tracing::{debug, error, info, instrument, warn};
+
 const FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const INACTIVE_PEERS_HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 const SUCCESSFUL_ANNOUNCEMENT_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -69,7 +71,8 @@ struct PeerNetworkServiceState {
 struct HandshakeTask {
     api_address: SocketAddr,
     gossip_address: SocketAddr,
-    version_request: VersionRequest,
+    handshake_request: HandshakeRequest,
+    config: Config,
     is_trusted_peer: bool,
     peer_filter_mode: PeerFilterMode,
     peer_list: PeerList,
@@ -137,6 +140,22 @@ fn build_peer_address(config: &Config) -> PeerAddress {
         },
     }
 }
+impl PeerNetworkServiceState {
+    fn create_handshake_request(&self) -> HandshakeRequest {
+        let mut handshake_request = HandshakeRequest {
+            address: self.peer_address,
+            chain_id: self.chain_id,
+            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            ..HandshakeRequest::default()
+        };
+        self.config
+            .irys_signer()
+            .sign_p2p_handshake(&mut handshake_request)
+            .expect("Failed to sign handshake request");
+        handshake_request
+    }
+}
+
 impl PeerNetworkServiceInner {
     fn new(
         db: DatabaseProvider,
@@ -206,20 +225,9 @@ impl PeerNetworkServiceInner {
         self.peer_list.decrease_peer_score(mining_addr, reason);
     }
 
-    async fn create_version_request(&self) -> VersionRequest {
+    async fn create_handshake_request(&self) -> HandshakeRequest {
         let state = self.state.lock().await;
-        let mut version_request = VersionRequest {
-            address: state.peer_address,
-            chain_id: state.chain_id,
-            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
-            ..VersionRequest::default()
-        };
-        state
-            .config
-            .irys_signer()
-            .sign_p2p_handshake(&mut version_request)
-            .expect("Failed to sign version request");
-        version_request
+        state.create_handshake_request()
     }
 
     fn sender(&self) -> PeerNetworkSender {
@@ -376,9 +384,17 @@ impl PeerNetworkService {
         let peer_gossip_addr = peer.address.gossip;
         let reth_peer_info = peer.address.execution;
 
-        let version_request = self.inner.create_version_request().await;
+        let handshake_request = self.inner.create_handshake_request().await;
         let is_trusted_peer = self.inner.peer_list().is_trusted_peer(&peer_api_addr);
-        let (gossip_client, peer_filter_mode, peer_list, sender, reth_peer_sender, peers_limit) = {
+        let (
+            gossip_client,
+            peer_filter_mode,
+            peer_list,
+            sender,
+            reth_peer_sender,
+            peers_limit,
+            config,
+        ) = {
             let state = self.inner.state.lock().await;
             (
                 state.gossip_client.clone(),
@@ -387,6 +403,7 @@ impl PeerNetworkService {
                 self.inner.sender(),
                 state.reth_peer_sender.clone(),
                 state.peers_limit,
+                state.config.clone(),
             )
         };
 
@@ -394,7 +411,8 @@ impl PeerNetworkService {
             gossip_client,
             peer_api_addr,
             peer_gossip_addr,
-            version_request,
+            handshake_request,
+            config,
             sender,
             is_trusted_peer,
             peer_filter_mode,
@@ -463,24 +481,15 @@ impl PeerNetworkService {
             debug!("Need to announce yourself to peer {:?}", api_address);
             state.currently_running_announcements.insert(api_address);
 
-            let mut version_request = VersionRequest {
-                address: state.peer_address,
-                chain_id: state.chain_id,
-                user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
-                ..VersionRequest::default()
-            };
-            state
-                .config
-                .irys_signer()
-                .sign_p2p_handshake(&mut version_request)
-                .expect("Failed to sign version request");
+            let handshake_request = state.create_handshake_request();
 
             let gossip_address = handshake.gossip_address;
 
             HandshakeTask {
                 api_address,
                 gossip_address,
-                version_request,
+                handshake_request,
+                config: state.config.clone(),
                 is_trusted_peer: self.inner.peer_list().is_trusted_peer(&api_address),
                 peer_filter_mode: state.config.node_config.peer_filter_mode,
                 peer_list: self.inner.peer_list(),
@@ -502,7 +511,8 @@ impl PeerNetworkService {
                 task.gossip_client,
                 task.api_address,
                 task.gossip_address,
-                task.version_request,
+                task.handshake_request,
+                task.config,
                 task.sender,
                 task.is_trusted_peer,
                 task.peer_filter_mode,
@@ -589,7 +599,7 @@ impl PeerNetworkService {
     }
     async fn handle_request_data_from_network(
         &self,
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
         retries: u8,
@@ -638,7 +648,7 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         peer_list: PeerList,
         sender: PeerNetworkSender,
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         retries: u8,
         top_active_window: usize,
@@ -763,6 +773,22 @@ impl PeerNetworkService {
                                     )),
                                 ));
                             }
+                            RejectionReason::UnsupportedProtocolVersion(unsupported_version) => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} has unsupported protocol version {}",
+                                        peer.0, unsupported_version
+                                    )),
+                                ));
+                            }
+                            RejectionReason::UnsupportedFeature => {
+                                last_error = Some(GossipError::PeerNetwork(
+                                    PeerNetworkError::FailedToRequestData(format!(
+                                        "Peer {:?} does not support requested feature for {:?}",
+                                        peer.0, data_request
+                                    )),
+                                ));
+                            }
                         }
                     }
                     Err(err) => {
@@ -823,7 +849,8 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         api_address: SocketAddr,
         gossip_address: SocketAddr,
-        version_request: VersionRequest,
+        handshake_request: HandshakeRequest,
+        config: Config,
         sender: PeerNetworkSender,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
@@ -834,7 +861,8 @@ impl PeerNetworkService {
             gossip_client,
             api_address,
             gossip_address,
-            version_request,
+            handshake_request,
+            config,
             sender.clone(),
             is_trusted_peer,
             peer_filter_mode,
@@ -859,15 +887,77 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         api_address: SocketAddr,
         gossip_address: SocketAddr,
-        version_request: VersionRequest,
+        mut handshake_request: HandshakeRequest,
+        config: Config,
         sender: PeerNetworkSender,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
         peer_list: PeerList,
         peers_limit: usize,
     ) -> Result<(), PeerListServiceError> {
+        let peer_protocol_versions = gossip_client
+            .get_protocol_versions(PeerAddress {
+                gossip: gossip_address,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| {
+                warn!(
+                    "Failed to get protocol versions from gossip address {}: {}",
+                    gossip_address, e
+                );
+                PeerListServiceError::PostVersionError(e.to_string())
+            })?;
+
+        let our_supported_versions = irys_types::ProtocolVersion::supported_versions_u32();
+
+        // Find the intersection of supported versions
+        let mut common_versions: Vec<u32> = peer_protocol_versions
+            .iter()
+            .filter(|v| our_supported_versions.contains(v))
+            .copied()
+            .collect();
+
+        if common_versions.is_empty() {
+            warn!(
+                "Peer at {} has no compatible protocol versions. Peer supports: {:?}, We support: {:?}",
+                gossip_address, peer_protocol_versions, our_supported_versions
+            );
+            return Err(PeerListServiceError::PostVersionError(format!(
+                "Peer {} has no compatible protocol versions",
+                gossip_address
+            )));
+        }
+
+        // Use the highest common version
+        common_versions.sort_unstable();
+        let negotiated_protocol_version = *common_versions.last().unwrap();
+
+        debug!(
+            "Negotiated protocol version {} with peer {} (peer supports: {:?}, we support: {:?})",
+            negotiated_protocol_version,
+            gossip_address,
+            peer_protocol_versions,
+            our_supported_versions
+        );
+
+        let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
+
+        if handshake_request.protocol_version != protocol_version {
+            // The initiator adopts the negotiated highest common protocol version after version
+            // negotiation. The negotiated_protocol_version is computed from the intersection of
+            // peer_protocol_versions (advertised by the peer) and our_supported_versions (what
+            // this node supports). The handshake_request is then re-signed via
+            // config.irys_signer().sign_p2p_handshake to authenticate the updated protocol version.
+            handshake_request.protocol_version = protocol_version;
+            config
+                .irys_signer()
+                .sign_p2p_handshake(&mut handshake_request)
+                .expect("Failed to sign handshake request");
+        }
+
         let peer_response_result = gossip_client
-            .post_version(gossip_address, version_request.clone())
+            .post_handshake(gossip_address, handshake_request.clone())
             .await
             .map_err(|e| {
                 warn!(
@@ -1041,6 +1131,7 @@ mod tests {
             response_time: 100,
             last_seen: 123,
             is_online,
+            protocol_version: Default::default(),
         };
         (mining_addr, peer)
     }

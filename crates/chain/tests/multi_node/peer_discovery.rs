@@ -9,9 +9,10 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 
 use irys_domain::ScoreDecreaseReason;
+use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
-    build_user_agent, irys::IrysSigner, BlockHash, NodeConfig, PeerAddress, PeerResponse,
-    RethPeerInfo, VersionRequest,
+    build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequest, HandshakeResponse, NodeConfig,
+    PeerAddress, RethPeerInfo,
 };
 use tracing::{debug, error, info};
 
@@ -44,6 +45,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     node.node_ctx.start_mining().unwrap();
 
     let app = node.start_public_api().await;
+    let gossip = node.start_mock_gossip_server().await;
 
     // Invoke the peer list endpoint
     let req = TestRequest::get().uri("/v1/peer-list").to_request();
@@ -59,7 +61,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
-    let mut version_request = VersionRequest {
+    let mut version_request = HandshakeRequest {
         chain_id: miner_signer_1.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
@@ -78,49 +80,46 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
-        .uri("/v1/version")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.1:12345".parse().unwrap())
         .set_json(&version_request)
         .to_request();
-    let resp = call_service(&app, req).await;
+    let resp = call_service(&gossip, req).await;
     let body = read_body(resp).await;
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_response: PeerResponse =
+    let peer_response: GossipResponse<HandshakeResponse> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
 
-    // Convert to pretty JSON string
-    let pretty_json =
-        serde_json::to_string_pretty(&peer_response).expect("Failed to serialize to pretty JSON");
-    println!("Pretty JSON:\n{}", pretty_json);
+    // Assert the response is a successful handshake
+    match peer_response {
+        GossipResponse::Accepted(_handshake_response) => {
+            // Test passes
+        }
+        GossipResponse::Rejected(reason) => {
+            panic!("Expected Accepted response, got Rejected: {:?}", reason);
+        }
+    }
 
     // Test that we get rejected if the source IP doesn't match the gossip IP
     let req = TestRequest::post()
-        .uri("/v1/version")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.5:12345".parse().unwrap())
         .set_json(&version_request)
         .to_request();
-    let resp = call_service(&app, req).await;
+    let resp = call_service(&gossip, req).await;
     let body = read_body(resp).await;
 
     // Parse String to JSON
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_response: PeerResponse =
+    let peer_response: GossipResponse<HandshakeResponse> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
 
     match peer_response {
-        PeerResponse::Accepted(_) => panic!("Expected Rejected response, got Accepted"),
-        PeerResponse::Rejected(response) => {
-            assert!(matches!(
-                response.reason,
-                irys_types::RejectionReason::InvalidCredentials
-            ));
-            assert_eq!(
-                response.message,
-                Some("The source address does not match the request address".to_string())
-            );
-            assert!(response.retry_after.is_none(), "Expected no retry after");
+        GossipResponse::Accepted(_) => panic!("Expected Rejected response, got Accepted"),
+        GossipResponse::Rejected(reason) => {
+            assert!(matches!(reason, RejectionReason::InvalidCredentials));
         }
     }
 
@@ -150,21 +149,21 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     });
 
     let req = TestRequest::post()
-        .uri("/v1/version")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
-    let resp = call_service(&app, req).await;
+    let resp = call_service(&gossip, req).await;
     let body = read_body(resp).await;
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_response: PeerResponse =
+    let peer_response: GossipResponse<HandshakeResponse> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     debug!("\nParsed Response:");
     debug!("{}", serde_json::to_string_pretty(&peer_response).unwrap());
 
     // Verify the version response body contains the previously discovered peers
     match peer_response {
-        PeerResponse::Accepted(accepted) => {
+        GossipResponse::Accepted(accepted) => {
             assert!(!accepted.peers.is_empty(), "Expected at least 1 peers");
             debug!("Accepted peers: {:?}", accepted.peers);
             assert!(
@@ -179,7 +178,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 "Missing expected peer 127.0.0.1:8080"
             );
         }
-        PeerResponse::Rejected(rejected) => {
+        GossipResponse::Rejected(rejected) => {
             panic!("Expected Accepted response, got {:?}", rejected)
         }
     }
@@ -204,36 +203,28 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     });
 
     let req = TestRequest::post()
-        .uri("/v1/version")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.2:12345".parse().unwrap())
         .set_json(&version_json) // Pass the JSON value directly
         .to_request();
-    let resp = call_service(&app, req).await;
+    let resp = call_service(&gossip, req).await;
     let body = read_body(resp).await;
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_response: PeerResponse =
+    let peer_response: GossipResponse<HandshakeResponse> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     debug!("\nParsed Response:");
     debug!("{}", serde_json::to_string_pretty(&peer_response).unwrap());
 
     // Verify the version response body contains the previously discovered peers
     match peer_response {
-        PeerResponse::Accepted(_) => panic!("Expected Rejected response, got Accepted"),
-        PeerResponse::Rejected(response) => {
-            assert!(matches!(
-                response.reason,
-                irys_types::RejectionReason::InvalidCredentials
-            ));
-            assert_eq!(
-                response.message,
-                Some("Signature verification failed".to_string())
-            );
-            assert!(response.retry_after.is_none(), "Expected no retry after");
+        GossipResponse::Accepted(_) => panic!("Expected Rejected response, got Accepted"),
+        GossipResponse::Rejected(reason) => {
+            assert!(matches!(reason, RejectionReason::InvalidCredentials));
         }
     }
 
     let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
-    let mut version_request = VersionRequest {
+    let mut version_request = HandshakeRequest {
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
@@ -252,21 +243,21 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
-        .uri("/v1/version")
+        .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
         .peer_addr("127.0.0.3:12345".parse().unwrap())
         .set_json(version_request)
         .to_request();
-    let resp = call_service(&app, req).await;
+    let resp = call_service(&gossip, req).await;
     let body = read_body(resp).await;
     let body_str = String::from_utf8(body.to_vec()).expect("Response body is not valid UTF-8");
-    let peer_response: PeerResponse =
+    let peer_response: GossipResponse<HandshakeResponse> =
         serde_json::from_str(&body_str).expect("Failed to parse JSON");
     println!("\nParsed Response:");
     println!("{}", serde_json::to_string_pretty(&peer_response).unwrap());
 
     // Verify the version response body contains the previously discovered peers
     match peer_response {
-        PeerResponse::Accepted(accepted) => {
+        GossipResponse::Accepted(accepted) => {
             assert!(accepted.peers.len() >= 2, "Expected at least 2 peers");
             assert!(
                 accepted.peers.contains(&PeerAddress {
@@ -291,7 +282,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 "Missing expected peer 127.0.0.2:8080"
             );
         }
-        PeerResponse::Rejected(_) => panic!("Expected Accepted response, got Rejected"),
+        GossipResponse::Rejected(_) => panic!("Expected Accepted response, got Rejected"),
     }
 
     // Verify the peer_list shows all the peers

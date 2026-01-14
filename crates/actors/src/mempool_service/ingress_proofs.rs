@@ -8,7 +8,8 @@ use irys_database::{
 use irys_database::{delete_ingress_proof, store_ingress_proof};
 use irys_domain::BlockTreeReadGuard;
 use irys_types::irys::IrysSigner;
-use irys_types::{Config, DataRoot, DatabaseProvider, GossipBroadcastMessage, IngressProof, H256};
+use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::{Config, DataRoot, DatabaseProvider, IngressProof, H256};
 use reth_db::{Database as _, DatabaseError};
 use tracing::{debug, error, instrument, warn};
 
@@ -62,7 +63,7 @@ impl Inner {
 
         let gossip_sender = &self.service_senders.gossip_broadcast;
         let data_root = ingress_proof.data_root;
-        let gossip_broadcast_message = GossipBroadcastMessage::from(ingress_proof);
+        let gossip_broadcast_message = GossipBroadcastMessageV2::from(ingress_proof);
 
         if let Err(error) = gossip_sender.send(gossip_broadcast_message) {
             tracing::error!(
@@ -285,7 +286,7 @@ pub fn generate_and_store_ingress_proof(
     config: &Config,
     data_root: DataRoot,
     anchor_hint: Option<H256>,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     cache_sender: &CacheServiceSender,
 ) -> eyre::Result<IngressProof> {
     let signer: IrysSigner = config.irys_signer();
@@ -366,7 +367,7 @@ pub fn reanchor_and_store_ingress_proof(
     config: &Config,
     signer: &IrysSigner,
     proof: &IngressProof,
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     cache_sender: &CacheServiceSender,
 ) -> eyre::Result<IngressProof> {
     let is_already_generating = {
@@ -440,7 +441,7 @@ pub fn reanchor_and_store_ingress_proof(
 }
 
 pub fn gossip_ingress_proof(
-    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessage>,
+    gossip_sender: &tokio::sync::mpsc::UnboundedSender<GossipBroadcastMessageV2>,
     ingress_proof: &IngressProof,
     block_tree_guard: &BlockTreeReadGuard,
     db: &DatabaseProvider,
@@ -449,7 +450,7 @@ pub fn gossip_ingress_proof(
     // Validate anchor freshness prior to broadcast
     match Inner::validate_ingress_proof_anchor_static(block_tree_guard, db, config, ingress_proof) {
         Ok(()) => {
-            let msg = GossipBroadcastMessage::from(ingress_proof.clone());
+            let msg = GossipBroadcastMessageV2::from(ingress_proof.clone());
             if let Err(e) = gossip_sender.send(msg) {
                 tracing::error!(proof.data_root = ?ingress_proof.data_root, "Failed to gossip regenerated ingress proof: {e}");
             }

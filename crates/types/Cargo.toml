@@ -64,7 +64,7 @@ proptest.workspace = true
 test-fuzz.workspace = true
 rstest.workspace = true
 pretty_assertions.workspace = true
-proptest.workspace = true
+assert_matches.workspace = true
 
 [build-dependencies]
 build-print = "0"

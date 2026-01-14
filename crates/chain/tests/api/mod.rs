@@ -2,6 +2,7 @@ use irys_types::DataLedger;
 mod api;
 mod client;
 mod external_api;
+mod hardfork_tests;
 mod pricing_endpoint;
 mod supply_endpoint;
 mod tx;
@@ -49,8 +50,4 @@ pub async fn network_config_endpoint_request(address: &str) -> reqwest::Response
 
 pub async fn peer_list_endpoint_request(address: &str) -> reqwest::Response {
     client_request(&format!("{}{}", &address, "/v1/peer-list")).await
-}
-
-pub async fn version_endpoint_request(address: &str) -> reqwest::Response {
-    client_request(&format!("{}{}", &address, "/v1/version")).await
 }
