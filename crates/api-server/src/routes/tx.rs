@@ -302,3 +302,48 @@ pub async fn get_tx_promotion_status(
         promotion_height: tx_header.promoted_height,
     }))
 }
+
+/// GET /v1/tx/{tx_id}/status
+/// Returns the current status of a transaction
+pub async fn get_tx_status(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<irys_types::TransactionStatusResponse>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx status by tx_id: {}", tx_id);
+
+    // Get current head height from block tree
+    let current_head_height = state
+        .block_tree
+        .read()
+        .await
+        .head()
+        .map(|entry| entry.block.height)
+        .ok_or_else(|| ApiError::Internal {
+            err: "Unable to get block tree head".to_owned(),
+        })?;
+
+    // Compute status
+    let status = state
+        .db
+        .view_eyre(|db_tx| {
+            irys_actors::compute_transaction_status(
+                db_tx,
+                &tx_id,
+                &state.block_index.read_blocking(),
+                current_head_height,
+                &state.mempool_guard,
+            )
+        })
+        .map_err(|e| ApiError::Internal {
+            err: format!("Database error: {}", e),
+        })?;
+
+    match status {
+        Some(status) => Ok(Json(status)),
+        None => Err(ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: "Transaction not found".to_owned(),
+        }),
+    }
+}

@@ -66,4 +66,33 @@ impl MempoolReadGuard {
             .pending_chunk_count_for_data_root(data_root)
             .await
     }
+
+    /// Check if a transaction ID is in the recent valid transactions cache
+    pub fn is_recent_valid_tx_blocking(&self, tx_id: &IrysTransactionId) -> bool {
+        let state = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.mempool_state.read())
+        });
+        state.recent_valid_tx.contains(tx_id)
+    }
+
+    /// Get transaction metadata from mempool (returns None if not found or no metadata)
+    pub fn get_tx_metadata_blocking(&self, tx_id: &IrysTransactionId) -> Option<irys_types::TransactionMetadata> {
+        let state = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.mempool_state.read())
+        });
+        
+        // Check data transactions
+        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get(tx_id) {
+            return Some(wrapped_tx.metadata.clone());
+        }
+        
+        // Check commitment transactions
+        for txs in state.valid_commitment_tx.values() {
+            if let Some(wrapped_tx) = txs.iter().find(|w| w.id() == *tx_id) {
+                return Some(wrapped_tx.metadata.clone());
+            }
+        }
+        
+        None
+    }
 }

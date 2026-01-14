@@ -117,6 +117,10 @@ pub fn routes() -> impl HttpServiceFactory {
         .route("/tx", web::post().to(tx::post_tx))
         .route("/tx/{tx_id}", web::get().to(tx::get_transaction_api))
         .route(
+            "/tx/{tx_id}/status",
+            web::get().to(tx::get_tx_status),
+        )
+        .route(
             "/tx/{tx_id}/promotion-status",
             web::get().to(tx::get_tx_promotion_status),
         )
