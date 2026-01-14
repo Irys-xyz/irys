@@ -64,8 +64,10 @@ pub struct NodeConfig {
     pub reward_address: IrysAddress,
 
     // whether we should try to stake & pledge our local drives
+    #[serde(default)]
     pub stake_pledge_drives: bool,
 
+    #[serde(default = "default_genesis_peer_discovery_timeout_millis")]
     pub genesis_peer_discovery_timeout_millis: u64,
 
     /// Default network configuration used by all services unless overridden
@@ -82,23 +84,29 @@ pub struct NodeConfig {
     pub reth: RethConfig,
 
     /// StorageModule configuration
+    #[serde(default)]
     pub storage: StorageSyncConfig,
 
     /// DataSyncService configuration
+    #[serde(default)]
     pub data_sync: DataSyncServiceConfig,
 
     /// Data packing and compression settings
+    #[serde(default)]
     pub packing: PackingConfig,
 
     /// Cache management configuration
+    #[serde(default)]
     pub cache: CacheConfig,
 
     /// Settings for the price oracle system (list).
     #[serde(default)]
     pub oracles: Vec<OracleConfig>,
 
+    #[serde(default)]
     pub vdf: VdfNodeConfig,
 
+    #[serde(default)]
     pub mempool: MempoolNodeConfig,
 
     /// Specifies which consensus rules the node follows
@@ -397,7 +405,7 @@ impl_network_config_with_defaults!(RethNetworkConfig);
 /// # Data Packing Configuration
 ///
 /// Controls how data is compressed and packed for storage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PackingConfig {
     #[serde(default)]
@@ -587,6 +595,11 @@ impl Default for SyncConfig {
 /// This keeps legacy configurations working by defaulting to unrestricted mode.
 fn default_peer_filter_mode() -> PeerFilterMode {
     PeerFilterMode::Unrestricted
+}
+
+/// Default genesis peer discovery timeout (20s)
+fn default_genesis_peer_discovery_timeout_millis() -> u64 {
+    20_000
 }
 
 /// Default network configuration when not specified in the config file.
