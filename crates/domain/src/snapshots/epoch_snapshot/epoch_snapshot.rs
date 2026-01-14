@@ -254,7 +254,7 @@ impl EpochSnapshot {
         tracing::error!(
             "JESSEDEBUG COMMITMENTS {:?}",
             &new_epoch_commitments.iter().fold(vec![], |mut acc, c| {
-                acc.push(c.id);
+                acc.push(c.id());
                 acc
             })
         );
@@ -771,11 +771,11 @@ impl EpochSnapshot {
         tracing::error!(
             "JESSEDEBUG COMMITMENTS {:?} {:?}",
             &stake_commitments.iter().fold(vec![], |mut acc, c| {
-                acc.push(c.id);
+                acc.push(c.id());
                 acc
             }),
             &pledge_commitments.iter().fold(vec![], |mut acc, c| {
-                acc.push(c.id);
+                acc.push(c.id());
                 acc
             })
         );
@@ -970,6 +970,7 @@ impl EpochSnapshot {
         // of pledges and unassigned hashes leads to deterministic pledge assignment
 
         if self.epoch_height == 0 {
+            // spellchecker:off
             let ordered_ids = [
                 "SpDAfdVyX6Mp8dNkckqjcAJa1xthPmiTnb27FqZkMoW",
                 "2DyovVioBZofArMo9R1mmoRQ5QMyawu6mdHtfmBRDiqJ",
@@ -1052,6 +1053,7 @@ impl EpochSnapshot {
                 "5tMNMeVSjFcFf2m5RMa9pitVFyAe4wcg5JnBdsSBciuP",
             ]
             .map(H256::from_base58);
+            // spellchecker:on
 
             let position_map: std::collections::HashMap<_, _> = ordered_ids
                 .iter()
