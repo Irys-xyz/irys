@@ -26,8 +26,9 @@ pub mod tables;
 pub use data_ledger::*;
 pub use database::*;
 pub use db_index::{
-    batch_clear_tx_included_height, batch_set_tx_included_height, clear_tx_included_height,
-    get_tx_metadata, set_tx_included_height,
+    batch_clear_tx_included_height, batch_clear_tx_promoted_height, batch_set_tx_included_height,
+    batch_set_tx_promoted_height, clear_tx_included_height, clear_tx_promoted_height,
+    get_tx_metadata, set_tx_included_height, set_tx_promoted_height,
 };
 pub use system_ledger::*;
 

@@ -296,10 +296,20 @@ pub async fn get_tx_promotion_status(
             err: "Unable to find tx".to_owned(),
         })?;
 
-    // Report its promoted status
+    // Prefer DB metadata as the source of truth; fall back to mempool header for older state.
+    let db_metadata = state
+        .db
+        .view_eyre(|db_tx| {
+            irys_database::get_tx_metadata(db_tx, &tx_id).map_err(|e| eyre::eyre!("{:?}", e))
+        })
+        .map_err(|e| ApiError::Internal {
+            err: format!("Database error: {}", e),
+        })?;
 
     Ok(web::Json(PromotionStatus {
-        promotion_height: tx_header.promoted_height,
+        promotion_height: db_metadata
+            .and_then(|m| m.promoted_height)
+            .or(tx_header.promoted_height),
     }))
 }
 

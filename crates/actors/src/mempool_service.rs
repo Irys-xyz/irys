@@ -2068,6 +2068,7 @@ impl AtomicMempoolState {
             } else {
                 tx.metadata = Some(TransactionMetadata {
                     included_height: Some(height),
+                    promoted_height: None,
                 });
             }
             true
@@ -2102,6 +2103,7 @@ impl AtomicMempoolState {
                 } else {
                     *metadata_mut = Some(TransactionMetadata {
                         included_height: Some(height),
+                        promoted_height: None,
                     });
                 }
                 return true;

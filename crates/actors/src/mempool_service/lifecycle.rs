@@ -44,6 +44,16 @@ impl Inner {
 
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
+        // Persist promoted_height for publish ledger txs.
+        if !published_txids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_set_tx_promoted_height(tx, published_txids, block.height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                tracing::error!("Failed to batch set promoted_height in database: {}", e);
+            }
+        }
+
         if !published_txids.is_empty() {
             for txid in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter() {
                 // Check if tx exists in DB first
@@ -605,7 +615,7 @@ impl Inner {
             .unwrap_or_default();
 
         // these txs have been confirmed, but NOT migrated
-        for tx_id in orphaned_confirmed_publish_txs {
+        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
             debug!("reorging orphaned publish tx: {}", &tx_id);
             // Clear promotion state for txs that were promoted on an orphaned fork
             if let Err(e) = self.mark_unpromoted_in_mempool(tx_id).await {
@@ -613,6 +623,19 @@ impl Inner {
                     tx.id = %tx_id,
                     tx.err = %e,
                     "Failed to unpromote tx during reorg"
+                );
+            }
+        }
+
+        // Clear promoted_height in database for publish-ledger txs orphaned by the reorg.
+        if !orphaned_confirmed_publish_txs.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_clear_tx_promoted_height(tx, &orphaned_confirmed_publish_txs)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!(
+                    "Failed to batch clear promoted_height in database during reorg: {}",
+                    e
                 );
             }
         }
@@ -637,6 +660,7 @@ impl Inner {
             .await;
 
         let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
+        let mut promoted_height_updates: Vec<(H256, u64)> = Vec::new();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
                 let txid = tx.id;
@@ -650,6 +674,7 @@ impl Inner {
                 let tx_proofs = get_ingress_proofs(publish_ledger, &txid)?;
 
                 tx.promoted_height = Some(promoted_in_block.height);
+                promoted_height_updates.push((txid, promoted_in_block.height));
                 // update entry
                 self.mempool_state.update_submit_transaction(tx).await;
                 debug!(
@@ -661,6 +686,22 @@ impl Inner {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",
                     &published_in_both.get(idx)
+                );
+            }
+        }
+
+        // Ensure the metadata table reflects the canonical promoted heights for txs published in both forks.
+        if !promoted_height_updates.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|db_tx| {
+                for (tx_id, height) in &promoted_height_updates {
+                    irys_database::set_tx_promoted_height(db_tx, tx_id, *height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                Ok(())
+            }) {
+                error!(
+                    "Failed to update promoted_height in database during reorg reconciliation: {}",
+                    e
                 );
             }
         }
@@ -808,6 +849,14 @@ impl Inner {
                 .map_err(|e| eyre::eyre!("{:?}", e))
         }) {
             error!("Failed to batch set included_height in database: {}", e);
+        }
+
+        // Fallback: ensure promoted_height metadata exists for publish-ledger txs in this migrated block.
+        if let Err(e) = self.irys_db.update_eyre(|tx| {
+            irys_database::batch_set_tx_promoted_height(tx, &publish_tx_ids, block_height)
+                .map_err(|e| eyre::eyre!("{:?}", e))
+        }) {
+            error!("Failed to batch set promoted_height in database: {}", e);
         }
 
         // add block with optional poa chunk to index

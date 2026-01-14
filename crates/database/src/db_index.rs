@@ -37,6 +37,17 @@ pub fn set_tx_included_height(
     put_tx_metadata(tx, tx_id, metadata)
 }
 
+/// Set the promoted_height for a transaction
+pub fn set_tx_promoted_height(
+    tx: &(impl DbTxMut + DbTx),
+    tx_id: &H256,
+    height: u64,
+) -> Result<(), reth_db::DatabaseError> {
+    let mut metadata = get_tx_metadata(tx, tx_id)?.unwrap_or_default();
+    metadata.promoted_height = Some(height);
+    put_tx_metadata(tx, tx_id, metadata)
+}
+
 /// Clear the included_height for a transaction (used during re-orgs)
 pub fn clear_tx_included_height(
     tx: &(impl DbTxMut + DbTx),
@@ -44,6 +55,16 @@ pub fn clear_tx_included_height(
 ) -> Result<(), reth_db::DatabaseError> {
     let mut metadata = get_tx_metadata(tx, tx_id)?.unwrap_or_default();
     metadata.included_height = None;
+    put_tx_metadata(tx, tx_id, metadata)
+}
+
+/// Clear the promoted_height for a transaction (used during re-orgs)
+pub fn clear_tx_promoted_height(
+    tx: &(impl DbTxMut + DbTx),
+    tx_id: &H256,
+) -> Result<(), reth_db::DatabaseError> {
+    let mut metadata = get_tx_metadata(tx, tx_id)?.unwrap_or_default();
+    metadata.promoted_height = None;
     put_tx_metadata(tx, tx_id, metadata)
 }
 
@@ -59,6 +80,18 @@ pub fn batch_set_tx_included_height(
     Ok(())
 }
 
+/// Batch set the promoted_height for a list of transactions
+pub fn batch_set_tx_promoted_height(
+    tx: &(impl DbTxMut + DbTx),
+    tx_ids: &[H256],
+    height: u64,
+) -> Result<(), reth_db::DatabaseError> {
+    for tx_id in tx_ids {
+        set_tx_promoted_height(tx, tx_id, height)?;
+    }
+    Ok(())
+}
+
 /// Batch operation: Clear included_height for multiple transactions (re-org handling)
 pub fn batch_clear_tx_included_height(
     tx: &(impl DbTxMut + DbTx),
@@ -66,6 +99,17 @@ pub fn batch_clear_tx_included_height(
 ) -> Result<(), reth_db::DatabaseError> {
     for tx_id in tx_ids {
         clear_tx_included_height(tx, tx_id)?;
+    }
+    Ok(())
+}
+
+/// Batch clear the promoted_height for a list of transactions
+pub fn batch_clear_tx_promoted_height(
+    tx: &(impl DbTxMut + DbTx),
+    tx_ids: &[H256],
+) -> Result<(), reth_db::DatabaseError> {
+    for tx_id in tx_ids {
+        clear_tx_promoted_height(tx, tx_id)?;
     }
     Ok(())
 }
