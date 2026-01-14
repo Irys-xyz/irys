@@ -556,6 +556,7 @@ mod tests {
     #[case::pledge_one(CommitmentTypeV1::Pledge { pledge_count_before_executing: 1 })]
     #[case::pledge_hundred(CommitmentTypeV1::Pledge { pledge_count_before_executing: 100 })]
     #[case::pledge_max(CommitmentTypeV1::Pledge { pledge_count_before_executing: u64::MAX })]
+    #[case::unpledge(CommitmentTypeV1::Unpledge { pledge_count_before_executing: 42, partition_hash: [255_u8; 32].into() })]
     fn test_commitment_type_rlp_roundtrip(#[case] original: CommitmentTypeV1) {
         // Encode
         let mut buf = BytesMut::new();

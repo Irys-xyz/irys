@@ -588,6 +588,10 @@ mod tests {
     #[case::pledge_one(CommitmentTypeV2::Pledge { pledge_count_before_executing: 1 })]
     #[case::pledge_hundred(CommitmentTypeV2::Pledge { pledge_count_before_executing: 100 })]
     #[case::pledge_max(CommitmentTypeV2::Pledge { pledge_count_before_executing: u64::MAX })]
+    #[case::unpledge_one(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 1, partition_hash: [u8::MIN; 32].into() })]
+    #[case::unpledge_hundred(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 100, partition_hash: [128_u8; 32].into() })]
+    #[case::unpledge_max(CommitmentTypeV2::Unpledge { pledge_count_before_executing: u64::MAX, partition_hash: [u8::MAX; 32].into() })]
+    #[case::unstake(CommitmentTypeV2::Unstake)]
     fn test_commitment_type_rlp_roundtrip(#[case] original: CommitmentTypeV2) {
         // Encode
         let mut buf = BytesMut::new();
@@ -608,6 +612,7 @@ mod tests {
     #[case::pledge_hundred(CommitmentTypeV2::Pledge { pledge_count_before_executing: 100 }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::pledge_max(CommitmentTypeV2::Pledge { pledge_count_before_executing: u64::MAX }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::unpledge(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 42, partition_hash: [7_u8; 32].into() }, 1 + 8 + 32, COMMITMENT_TYPE_UNPLEDGE)]
+    #[case::unstake(CommitmentTypeV2::Unstake, 1, COMMITMENT_TYPE_UNSTAKE)]
     fn test_commitment_type_compact_roundtrip(
         #[case] original: CommitmentTypeV2,
         #[case] expected_len: usize,

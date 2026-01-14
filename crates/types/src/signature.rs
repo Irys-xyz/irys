@@ -1,6 +1,6 @@
 use crate::{Arbitrary, IrysAddress, Signature};
 use alloy_primitives::{bytes, U256 as RethU256};
-use base58::{FromBase58, ToBase58 as _};
+use base58::{FromBase58 as _, ToBase58 as _};
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use reth_primitives::transaction::recover_signer;
@@ -14,6 +14,19 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 pub struct IrysSignature(Signature);
 
 // TODO: eventually implement ERC-2098 to save a byte
+
+/// As base58 is rather expensive, we want to make sure that input is well formed as soon as possible
+/// this constant is computed using the below `compute_max_str_len` function (to_base58() is not a const fn)
+const MAX_BS58_SIG_STRING_LENGTH: usize = 89;
+
+// #[test]
+// fn compute_max_str_len() {
+//     dbg!(
+//         IrysSignature::new(Signature::from_bytes_and_parity(&[u8::MAX; 64], true))
+//             .to_base58()
+//             .len()
+//     );
+// }
 
 impl IrysSignature {
     pub fn new(signature: Signature) -> Self {
@@ -42,12 +55,24 @@ impl IrysSignature {
     }
 
     pub fn from_base58(str: &str) -> eyre::Result<Self> {
+        if str.len() > MAX_BS58_SIG_STRING_LENGTH {
+            eyre::bail!(
+                "Invalid signature length, max is {}, got {}",
+                MAX_BS58_SIG_STRING_LENGTH,
+                &str.len()
+            )
+        }
         // Decode the base58 string into bytes
         let decoded = str
             .from_base58()
             .map_err(|e| eyre::eyre!("Invalid base58 string: {:?}", &e))?;
+        // from_raw does the 65 len check
         let sig = Signature::from_raw(&decoded)?;
         Ok(Self(sig))
+    }
+
+    pub fn to_base58(&self) -> String {
+        self.0.as_bytes().to_base58()
     }
 }
 
@@ -60,7 +85,7 @@ impl Default for IrysSignature {
 impl std::fmt::Debug for IrysSignature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("IrysSignature")
-            .field(&self.0.as_bytes().to_base58())
+            .field(&self.to_base58())
             .finish()
     }
 }
@@ -130,23 +155,7 @@ impl<'de> Deserialize<'de> for IrysSignature {
         // First, deserialize the base58-encoded string
         let s: String = Deserialize::deserialize(deserializer)?;
 
-        // Decode the base58 string into bytes
-        let bytes = FromBase58::from_base58(s.as_str())
-            .map_err(|e| de::Error::custom(format!("Failed to decode from base58 {:?}", e)))?;
-
-        // Ensure the byte array is exactly 65 bytes (r, s, and v values of the signature)
-        if bytes.len() != 65 {
-            return Err(de::Error::invalid_length(
-                bytes.len(),
-                &"expected 65 bytes for signature",
-            ));
-        }
-
-        // Convert the byte array into a Signature struct using TryFrom
-        let sig = Signature::try_from(bytes.as_slice()).map_err(de::Error::custom)?;
-
-        // Return the IrysSignature by wrapping the Signature
-        Ok(Self::new(sig))
+        Self::from_base58(&s).map_err(de::Error::custom)
     }
 }
 
