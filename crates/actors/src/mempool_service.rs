@@ -47,8 +47,9 @@ use irys_types::{
         phantoms::{Irys, NetworkFee},
         Amount,
     },
-    ChunkPathHash, CommitmentTransaction, CommitmentTxWithMetadata, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, DataTxWithMetadata, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
+    ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
+    DataTransactionHeader, IrysAddress, MempoolConfig, TransactionMetadata, TxChunkOffset,
+    UnpackedChunk,
 };
 use irys_types::{BlockHash, CommitmentTypeV1};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
@@ -1758,7 +1759,7 @@ impl AtomicMempoolState {
         mempool_state_guard
             .valid_commitment_tx
             .values()
-            .flat_map(|txs| txs.iter().map(|wrapped| wrapped.tx.clone()))
+            .flat_map(|txs| txs.iter().cloned())
             .collect::<Vec<_>>()
     }
 
@@ -1786,10 +1787,10 @@ impl AtomicMempoolState {
                 + mempool_state_guard.pending_pledges.len() * PRESUMED_PLEDGES_PER_ACCOUNT,
         );
 
-        // Collect from valid_commitment_tx (unwrap from wrappers)
+        // Collect from valid_commitment_tx
         for txs in mempool_state_guard.valid_commitment_tx.values() {
-            for wrapped in txs {
-                all_txs.insert(wrapped.id(), &wrapped.tx);
+            for tx in txs {
+                all_txs.insert(tx.id(), tx);
             }
         }
 
@@ -1822,8 +1823,8 @@ impl AtomicMempoolState {
         let mempool_state_guard = self.read().await;
         let mut results = HashMap::with_capacity(data_tx_ids.len());
         for tx_id in data_tx_ids {
-            if let Some(wrapped) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
-                results.insert(*tx_id, wrapped.tx.clone());
+            if let Some(tx) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
+                results.insert(*tx_id, tx.clone());
             }
         }
         results
@@ -1844,7 +1845,7 @@ impl AtomicMempoolState {
         let data_tx_total_size: u64 = state
             .valid_submit_ledger_tx
             .values()
-            .map(|wrapped| wrapped.data_size)
+            .map(|tx| tx.data_size)
             .sum();
 
         let mempool_config = &config.consensus_config().mempool;
@@ -1936,16 +1937,11 @@ impl AtomicMempoolState {
             .await
             .valid_submit_ledger_tx
             .get(tx_id)
-            .map(|wrapped| wrapped.tx.clone())
+            .cloned()
     }
 
     pub async fn all_valid_submit_ledgers_cloned(&self) -> BTreeMap<H256, DataTransactionHeader> {
-        self.read()
-            .await
-            .valid_submit_ledger_tx
-            .iter()
-            .map(|(k, wrapped)| (*k, wrapped.tx.clone()))
-            .collect()
+        self.read().await.valid_submit_ledger_tx.clone()
     }
 
     /// For confirmed blocks, we log warnings but don't fail if mempool is full
@@ -1981,8 +1977,8 @@ impl AtomicMempoolState {
             .get(user_address)
             .map(|txs| {
                 txs.iter()
-                    .filter(|wrapped| commitment_type_filter(wrapped.commitment_type()))
-                    .filter(|wrapped| seen_ids.insert(wrapped.id()))
+                    .filter(|tx| commitment_type_filter(tx.commitment_type()))
+                    .filter(|tx| seen_ids.insert(tx.id()))
                     .count() as u64
             })
             .unwrap_or(0)
@@ -2024,12 +2020,7 @@ impl AtomicMempoolState {
     pub async fn all_valid_commitment_txs_cloned(
         &self,
     ) -> BTreeMap<IrysAddress, Vec<CommitmentTransaction>> {
-        self.read()
-            .await
-            .valid_commitment_tx
-            .iter()
-            .map(|(k, wrapped_txs)| (*k, wrapped_txs.iter().map(|w| w.tx.clone()).collect()))
-            .collect()
+        self.read().await.valid_commitment_tx.clone()
     }
 
     pub async fn all_valid_submit_ledger_ids(&self) -> Vec<H256> {
@@ -2059,7 +2050,7 @@ impl AtomicMempoolState {
             .await
             .valid_commitment_tx
             .get(address)
-            .map(|wrapped_txs| wrapped_txs.iter().map(|w| w.tx.clone()).collect())
+            .cloned()
     }
 
     pub async fn remove_valid_submit_ledger_tx(&self, tx_id: &H256) {
@@ -2071,8 +2062,14 @@ impl AtomicMempoolState {
     /// Returns true if the transaction was found and updated
     pub async fn set_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
         let mut state = self.write().await;
-        if let Some(wrapped) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            wrapped.set_included_height(height);
+        if let Some(tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
+            if let Some(ref mut metadata) = tx.metadata {
+                metadata.included_height = Some(height);
+            } else {
+                tx.metadata = Some(TransactionMetadata {
+                    included_height: Some(height),
+                });
+            }
             true
         } else {
             false
@@ -2083,8 +2080,10 @@ impl AtomicMempoolState {
     /// Returns true if the transaction was found and updated
     pub async fn clear_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
-        if let Some(wrapped) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            wrapped.clear_included_height();
+        if let Some(tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
+            if let Some(ref mut metadata) = tx.metadata {
+                metadata.included_height = None;
+            }
             true
         } else {
             false
@@ -2093,15 +2092,18 @@ impl AtomicMempoolState {
 
     /// Set included_height for a commitment transaction
     /// Returns true if the transaction was found and updated
-    pub async fn set_commitment_tx_included_height(
-        &self,
-        tx_id: H256,
-        height: u64,
-    ) -> bool {
+    pub async fn set_commitment_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
         let mut state = self.write().await;
         for txs in state.valid_commitment_tx.values_mut() {
-            if let Some(wrapped) = txs.iter_mut().find(|w| w.id() == tx_id) {
-                wrapped.set_included_height(height);
+            if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
+                let metadata_mut = tx.metadata_mut();
+                if let Some(ref mut metadata) = metadata_mut {
+                    metadata.included_height = Some(height);
+                } else {
+                    *metadata_mut = Some(TransactionMetadata {
+                        included_height: Some(height),
+                    });
+                }
                 return true;
             }
         }
@@ -2113,8 +2115,10 @@ impl AtomicMempoolState {
     pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
         for txs in state.valid_commitment_tx.values_mut() {
-            if let Some(wrapped) = txs.iter_mut().find(|w| w.id() == tx_id) {
-                wrapped.clear_included_height();
+            if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
+                if let Some(ref mut metadata) = tx.metadata_mut() {
+                    metadata.included_height = None;
+                }
                 return true;
             }
         }
@@ -2185,6 +2189,30 @@ impl AtomicMempoolState {
             std::mem::take(&mut state.valid_submit_ledger_tx),
             std::mem::take(&mut state.valid_commitment_tx),
         )
+    }
+
+    /// Check if a transaction ID is in the recent valid transactions cache
+    pub async fn is_recent_valid_tx(&self, tx_id: &H256) -> bool {
+        self.read().await.recent_valid_tx.contains(tx_id)
+    }
+
+    /// Get transaction metadata from mempool (returns None if not found or no metadata)
+    pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TransactionMetadata> {
+        let state = self.read().await;
+
+        // Check data transactions
+        if let Some(tx) = state.valid_submit_ledger_tx.get(tx_id) {
+            return tx.metadata.clone();
+        }
+
+        // Check commitment transactions
+        for txs in state.valid_commitment_tx.values() {
+            if let Some(tx) = txs.iter().find(|t| t.id() == *tx_id) {
+                return tx.metadata().clone();
+            }
+        }
+
+        None
     }
 
     pub async fn remove_transactions_from_pending_valid_pool(&self, submit_tx_ids: &[H256]) {
@@ -2460,12 +2488,10 @@ impl AtomicMempoolState {
 #[derive(Debug)]
 pub struct MempoolState {
     /// bounded map with manual capacity enforcement
-    /// Wrapped data transactions with metadata - automatically cleaned up together
-    pub valid_submit_ledger_tx: BTreeMap<H256, DataTxWithMetadata>,
+    pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub max_submit_txs: usize,
     /// bounded map with manual capacity enforcement
-    /// Wrapped commitment transactions with metadata - automatically cleaned up together
-    pub valid_commitment_tx: BTreeMap<IrysAddress, Vec<CommitmentTxWithMetadata>>,
+    pub valid_commitment_tx: BTreeMap<IrysAddress, Vec<CommitmentTransaction>>,
     pub max_commitment_addresses: usize,
     pub max_commitments_per_address: usize,
     /// The miner's signer instance, used to sign ingress proofs
@@ -2521,40 +2547,30 @@ impl MempoolState {
         &mut self,
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
-        self.bounded_insert_data_tx_wrapped(DataTxWithMetadata::new(tx))
-    }
-
-    /// Insert wrapped data tx with bounds enforcement.
-    /// Internal method that works with wrapped types.
-    pub fn bounded_insert_data_tx_wrapped(
-        &mut self,
-        wrapped_tx: DataTxWithMetadata,
-    ) -> Result<(), TxIngressError> {
         use std::collections::btree_map::Entry;
-        let tx_id = wrapped_tx.id();
-        
+
         // If tx already exists we still update it.
         // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
         // Preserve metadata when updating
-        if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx_id) {
+        if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx.id) {
             let old_metadata = value.get().metadata.clone();
-            let mut new_wrapped = wrapped_tx;
+            let mut new_tx = tx;
             // Preserve existing metadata if new one doesn't have it
-            if new_wrapped.metadata.included_height.is_none() && old_metadata.included_height.is_some() {
-                new_wrapped.metadata = old_metadata;
+            if new_tx.metadata.is_none() && old_metadata.is_some() {
+                new_tx.metadata = old_metadata;
             }
-            value.insert(new_wrapped);
+            value.insert(new_tx);
             return Ok(());
         }
 
         // If at capacity, evict lowest fee tx
         if self.valid_submit_ledger_tx.len() >= self.max_submit_txs {
             if let Some((evict_id, evicted_fee)) = self.find_lowest_fee_data_tx() {
-                let new_fee = wrapped_tx.user_fee();
+                let new_fee = tx.user_fee();
                 // Only evict if new tx has higher fee
                 if new_fee <= evicted_fee {
                     warn!(
-                        new.tx_id = ?tx_id,
+                        new.tx_id = ?tx.id,
                         new.fee = ?new_fee,
                         lowest.fee = ?evicted_fee,
                         "Rejecting lower-fee tx: mempool full"
@@ -2568,7 +2584,7 @@ impl MempoolState {
                 warn!(
                     evicted.tx_id = ?evict_id,
                     evicted.fee = ?evicted_fee,
-                    new.tx_id = ?tx_id,
+                    new.tx_id = ?tx.id,
                     new.fee = ?new_fee,
                     "Mempool full: evicted lowest fee data tx"
                 );
@@ -2579,7 +2595,7 @@ impl MempoolState {
             }
         }
 
-        self.valid_submit_ledger_tx.insert(tx_id, wrapped_tx);
+        self.valid_submit_ledger_tx.insert(tx.id, tx);
         Ok(())
     }
 
@@ -2588,8 +2604,8 @@ impl MempoolState {
     fn find_lowest_fee_data_tx(&self) -> Option<(H256, BoundedFee)> {
         self.valid_submit_ledger_tx
             .iter()
-            .min_by_key(|(_, wrapped)| wrapped.user_fee())
-            .map(|(id, wrapped)| (*id, wrapped.user_fee()))
+            .min_by_key(|(_, tx)| tx.user_fee())
+            .map(|(id, tx)| (*id, tx.user_fee()))
     }
 
     /// Insert commitment tx with bounds enforcement.
@@ -2600,17 +2616,8 @@ impl MempoolState {
         &mut self,
         tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
-        self.bounded_insert_commitment_tx_wrapped(CommitmentTxWithMetadata::new(tx.clone()))
-    }
-
-    /// Insert wrapped commitment tx with bounds enforcement.
-    /// Internal method that works with wrapped types.
-    pub fn bounded_insert_commitment_tx_wrapped(
-        &mut self,
-        wrapped_tx: CommitmentTxWithMetadata,
-    ) -> Result<(), TxIngressError> {
-        let address = wrapped_tx.signer();
-        let tx_id = wrapped_tx.id();
+        let address = tx.signer();
+        let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
         if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
@@ -2625,7 +2632,7 @@ impl MempoolState {
         // If address doesn't exist and we're at global address limit, evict lowest value address
         if !address_exists && self.valid_commitment_tx.len() >= self.max_commitment_addresses {
             if let Some((evict_address, evict_total_value)) = self.find_lowest_value_address() {
-                let new_value = wrapped_tx.total_cost();
+                let new_value = tx.total_cost();
 
                 // Only evict if new commitment has higher value than the address being evicted
                 if new_value <= evict_total_value {
@@ -2680,7 +2687,7 @@ impl MempoolState {
             )));
         }
 
-        txs.push(wrapped_tx);
+        txs.push(tx.clone());
         Ok(())
     }
 
@@ -2692,7 +2699,7 @@ impl MempoolState {
             .map(|(addr, txs)| {
                 let total = txs
                     .iter()
-                    .map(|wrapped| wrapped.total_cost())
+                    .map(irys_types::CommitmentTransaction::total_cost)
                     .fold(U256::zero(), irys_types::U256::saturating_add);
                 (*addr, total)
             })
@@ -3185,6 +3192,7 @@ mod bounded_mempool_tests {
             promoted_height: None,
             signature: IrysSignature::default(),
             chain_id: 1,
+            metadata: None,
         })
     }
 
@@ -3199,6 +3207,7 @@ mod bounded_mempool_tests {
             value: U256::from(value),
             commitment_type: CommitmentTypeV2::Stake,
             chain_id: 1,
+            metadata: None,
         })
     }
 

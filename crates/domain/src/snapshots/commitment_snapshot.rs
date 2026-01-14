@@ -399,6 +399,7 @@ mod tests {
             value,
             commitment_type: commitment_type.into(),
             chain_id: 1,
+            metadata: None,
         });
         // Generate a proper ID for the transaction
         tx.set_id(H256::random());

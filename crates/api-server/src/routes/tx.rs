@@ -312,32 +312,41 @@ pub async fn get_tx_status(
     let tx_id: H256 = path.into_inner();
     info!("Get tx status by tx_id: {}", tx_id);
 
-    // Get current head height from block tree
-    let current_head_height = state
-        .block_tree
-        .read()
-        .await
-        .head()
-        .map(|entry| entry.block.height)
-        .ok_or_else(|| ApiError::Internal {
-            err: "Unable to get block tree head".to_owned(),
-        })?;
+    let current_head_height = {
+        // Get current head height from the block tree
+        let block_tree = state.block_tree.read();
+        let tip_block =
+            block_tree
+                .get_block(&block_tree.tip)
+                .ok_or_else(|| ApiError::Internal {
+                    err: "Unable to get block tree tip".to_owned(),
+                })?;
+        tip_block.height
+    };
 
-    // Compute status
-    let status = state
+    // Load metadata from DB (if present)
+    let db_metadata = state
         .db
         .view_eyre(|db_tx| {
-            irys_actors::compute_transaction_status(
-                db_tx,
-                &tx_id,
-                &state.block_index.read_blocking(),
-                current_head_height,
-                &state.mempool_guard,
-            )
+            irys_database::db_index::get_tx_metadata(db_tx, &tx_id)
+                .map_err(|e| eyre::eyre!("{:?}", e))
         })
         .map_err(|e| ApiError::Internal {
             err: format!("Database error: {}", e),
         })?;
+
+    // Compute status (async mempool reads)
+    let status = irys_actors::compute_transaction_status(
+        db_metadata,
+        &tx_id,
+        &state.block_index,
+        current_head_height,
+        &state.mempool_guard,
+    )
+    .await
+    .map_err(|e| ApiError::Internal {
+        err: format!("Status computation error: {}", e),
+    })?;
 
     match status {
         Some(status) => Ok(Json(status)),

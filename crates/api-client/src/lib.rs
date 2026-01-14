@@ -79,7 +79,16 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
     ) -> Result<Vec<BlockIndexItem>>;
 
     async fn node_info(&self, peer: SocketAddr) -> Result<NodeInfo>;
+
+    /// Get the transaction status (PENDING, INCLUDED, or CONFIRMED)
+    async fn get_transaction_status(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<TransactionStatusResponse>;
 }
+
+pub use irys_types::{TransactionStatus, TransactionStatusResponse};
 
 /// Real implementation of the API client that makes actual HTTP requests
 #[derive(Clone, Debug)]
@@ -294,6 +303,23 @@ impl ApiClient for IrysApiClient {
             Err(e) => Err(e),
         }
     }
+
+    async fn get_transaction_status(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<TransactionStatusResponse> {
+        // H256 Display prints full base58; using Display here is correct.
+        let path = format!("/tx/{}/status", tx_id);
+        self.make_request::<TransactionStatusResponse, _>(peer, Method::GET, &path, None::<&()>)
+            .await?
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "Expected transaction status response to have a body: {}",
+                    tx_id
+                )
+            })
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -374,6 +400,14 @@ pub mod test_utils {
 
         async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
             Ok(NodeInfo::default())
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _peer: SocketAddr,
+            _tx_id: H256,
+        ) -> Result<TransactionStatusResponse> {
+            Err(eyre!("Transaction not found"))
         }
     }
 }
@@ -469,6 +503,14 @@ mod tests {
             _with_poa: bool,
         ) -> Result<Option<CombinedBlockHeader>> {
             Ok(None)
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _peer: SocketAddr,
+            _tx_id: H256,
+        ) -> Result<TransactionStatusResponse> {
+            Err(eyre::eyre!("Transaction not found"))
         }
     }
 

@@ -20,6 +20,28 @@ impl Inner {
         &self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
+        // Persist included_height for all txs in this confirmed block.
+        // This drives the /v1/tx/{txId}/status endpoint's INCLUDED status.
+        let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+        let publish_txids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+        let commitment_txids = block.get_commitment_ledger_tx_ids();
+
+        let all_tx_ids: Vec<H256> = submit_txids
+            .iter()
+            .chain(publish_txids.iter())
+            .chain(commitment_txids.iter())
+            .copied()
+            .collect();
+
+        if !all_tx_ids.is_empty() {
+            self.irys_db
+                .update_eyre(|tx| {
+                    irys_database::batch_set_tx_included_height(tx, &all_tx_ids, block.height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))
+                })
+                .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?;
+        }
+
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
 
         if !published_txids.is_empty() {
@@ -643,6 +665,24 @@ impl Inner {
             }
         }
 
+        // Batch clear included_height in database for all orphaned transactions
+        let all_orphaned_tx_ids: Vec<H256> = orphaned_confirmed_ledger_txs
+            .values()
+            .flat_map(|txs| txs.iter().copied())
+            .collect();
+
+        if !all_orphaned_tx_ids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_clear_tx_included_height(tx, &all_orphaned_tx_ids)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!(
+                    "Failed to batch clear included_height in database during reorg: {}",
+                    e
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -668,7 +708,7 @@ impl Inner {
         // stage 1: move commitment transactions from tree to index
         let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
         let commitments = self
-            .handle_get_commitment_tx_message(commitment_tx_ids)
+            .handle_get_commitment_tx_message(commitment_tx_ids.clone())
             .await;
 
         // Remove all commitments from mempool in one batch operation
@@ -750,6 +790,25 @@ impl Inner {
         mempool_state
             .remove_transactions_from_pending_valid_pool(&submit_tx_ids)
             .await;
+
+        // Fallback: ensure included_height metadata exists for all migrated txs.
+        // (INCLUDED should already have been set at block confirmation time.)
+        let block_height = event.block.height;
+
+        // Persist metadata to database in batch for all migrated transactions
+        let all_tx_ids: Vec<H256> = submit_tx_ids
+            .iter()
+            .chain(publish_tx_ids.iter())
+            .chain(commitment_tx_ids.iter())
+            .copied()
+            .collect();
+
+        if let Err(e) = self.irys_db.update_eyre(|tx| {
+            irys_database::batch_set_tx_included_height(tx, &all_tx_ids, block_height)
+                .map_err(|e| eyre::eyre!("{:?}", e))
+        }) {
+            error!("Failed to batch set included_height in database: {}", e);
+        }
 
         // add block with optional poa chunk to index
         self.irys_db

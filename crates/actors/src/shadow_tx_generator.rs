@@ -777,6 +777,7 @@ mod tests {
             fee,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
             chain_id: config.chain_id,
+            metadata: None,
         })
     }
 

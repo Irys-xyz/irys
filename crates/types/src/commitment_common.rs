@@ -9,7 +9,7 @@ pub use crate::{
     },
     Arbitrary, Base64, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1,
     CommitmentValidationError, Compact, ConsensusConfig, IrysAddress, IrysSignature, Node,
-    PledgeDataProvider, Proof, Signature, H256, U256,
+    PledgeDataProvider, Proof, Signature, TransactionMetadata, H256, U256,
 };
 
 use alloy_rlp::Encodable as _;
@@ -258,6 +258,33 @@ impl CommitmentTransaction {
         match self {
             Self::V1(v1) => v1.chain_id = chain_id,
             Self::V2(v2) => v2.chain_id = chain_id,
+        }
+    }
+
+    /// Get the metadata
+    #[inline]
+    pub fn metadata(&self) -> &Option<crate::TransactionMetadata> {
+        match self {
+            Self::V1(v1) => &v1.metadata,
+            Self::V2(v2) => &v2.metadata,
+        }
+    }
+
+    /// Get mutable metadata
+    #[inline]
+    pub fn metadata_mut(&mut self) -> &mut Option<crate::TransactionMetadata> {
+        match self {
+            Self::V1(v1) => &mut v1.metadata,
+            Self::V2(v2) => &mut v2.metadata,
+        }
+    }
+
+    /// Set the metadata
+    #[inline]
+    pub fn set_metadata(&mut self, metadata: Option<crate::TransactionMetadata>) {
+        match self {
+            Self::V1(v1) => v1.metadata = metadata,
+            Self::V2(v2) => v2.metadata = metadata,
         }
     }
 }

@@ -243,6 +243,7 @@ mod tests {
             bundle_format: None,
             chain_id: testing_config.chain_id,
             promoted_height: None,
+            metadata: None,
             signature: Default::default(),
         });
 
@@ -328,6 +329,7 @@ mod tests {
             signature: Default::default(),
             fee: 1234,
             value: 222.into(),
+            metadata: None,
         });
 
         irys_signer.sign_commitment(&mut transaction)?;

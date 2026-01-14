@@ -1,10 +1,21 @@
 use reth_codecs::Compact;
 use serde::{Deserialize, Serialize};
-use crate::{CommitmentTransaction, DataTransactionHeader};
 
 /// Metadata tracked for all transaction types
 /// Stored separately from transaction headers to enable easier future migrations
-#[derive(Clone, Debug, Default, PartialEq, Eq, Compact, Serialize, Deserialize, arbitrary::Arbitrary)]
+/// This is NEVER serialized with the transaction - it's internal state only
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Compact,
+    Serialize,
+    Deserialize,
+    arbitrary::Arbitrary,
+)]
 pub struct TransactionMetadata {
     /// Height of the block where this transaction was first included
     /// - For data txs: when included in Submit ledger
@@ -30,129 +41,6 @@ impl TransactionMetadata {
     }
 }
 
-/// Wrapper for data transactions with metadata
-/// This ensures metadata travels with the transaction and gets cleaned up automatically
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DataTxWithMetadata {
-    pub tx: DataTransactionHeader,
-    pub metadata: TransactionMetadata,
-}
-
-impl DataTxWithMetadata {
-    pub fn new(tx: DataTransactionHeader) -> Self {
-        Self {
-            tx,
-            metadata: TransactionMetadata::new(),
-        }
-    }
-
-    pub fn with_metadata(tx: DataTransactionHeader, metadata: TransactionMetadata) -> Self {
-        Self { tx, metadata }
-    }
-
-    pub fn with_included_height(tx: DataTransactionHeader, height: u64) -> Self {
-        Self {
-            tx,
-            metadata: TransactionMetadata::with_included_height(height),
-        }
-    }
-
-    /// Get the transaction ID
-    pub fn id(&self) -> crate::H256 {
-        self.tx.id
-    }
-
-    /// Set the included height
-    pub fn set_included_height(&mut self, height: u64) {
-        self.metadata.included_height = Some(height);
-    }
-
-    /// Clear the included height (used during re-orgs)
-    pub fn clear_included_height(&mut self) {
-        self.metadata.included_height = None;
-    }
-
-    /// Split into transaction and metadata for database storage
-    pub fn split(self) -> (DataTransactionHeader, TransactionMetadata) {
-        (self.tx, self.metadata)
-    }
-
-    /// Get references to both parts
-    pub fn as_parts(&self) -> (&DataTransactionHeader, &TransactionMetadata) {
-        (&self.tx, &self.metadata)
-    }
-}
-
-/// Implement Deref so we can access transaction fields directly
-impl std::ops::Deref for DataTxWithMetadata {
-    type Target = DataTransactionHeader;
-    
-    fn deref(&self) -> &Self::Target {
-        &self.tx
-    }
-}
-
-/// Wrapper for commitment transactions with metadata
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitmentTxWithMetadata {
-    pub tx: CommitmentTransaction,
-    pub metadata: TransactionMetadata,
-}
-
-impl CommitmentTxWithMetadata {
-    pub fn new(tx: CommitmentTransaction) -> Self {
-        Self {
-            tx,
-            metadata: TransactionMetadata::new(),
-        }
-    }
-
-    pub fn with_metadata(tx: CommitmentTransaction, metadata: TransactionMetadata) -> Self {
-        Self { tx, metadata }
-    }
-
-    pub fn with_included_height(tx: CommitmentTransaction, height: u64) -> Self {
-        Self {
-            tx,
-            metadata: TransactionMetadata::with_included_height(height),
-        }
-    }
-
-    /// Get the transaction ID
-    pub fn id(&self) -> crate::H256 {
-        self.tx.id()
-    }
-
-    /// Set the included height
-    pub fn set_included_height(&mut self, height: u64) {
-        self.metadata.included_height = Some(height);
-    }
-
-    /// Clear the included height (used during re-orgs)
-    pub fn clear_included_height(&mut self) {
-        self.metadata.included_height = None;
-    }
-
-    /// Split into transaction and metadata for database storage
-    pub fn split(self) -> (CommitmentTransaction, TransactionMetadata) {
-        (self.tx, self.metadata)
-    }
-
-    /// Get references to both parts
-    pub fn as_parts(&self) -> (&CommitmentTransaction, &TransactionMetadata) {
-        (&self.tx, &self.metadata)
-    }
-}
-
-/// Implement Deref so we can access transaction fields directly
-impl std::ops::Deref for CommitmentTxWithMetadata {
-    type Target = CommitmentTransaction;
-    
-    fn deref(&self) -> &Self::Target {
-        &self.tx
-    }
-}
-
 /// Transaction status as exposed via API
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -171,11 +59,19 @@ pub enum TransactionStatus {
 pub struct TransactionStatusResponse {
     pub status: TransactionStatus,
     /// Only present if status is INCLUDED or CONFIRMED
-    #[serde(skip_serializing_if = "Option::is_none", with = "crate::serialization::optional_string_u64")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::serialization::optional_string_u64"
+    )]
     pub block_height: Option<u64>,
     /// Only present if status is INCLUDED or CONFIRMED
     /// Calculated as: current_head_height - block_height
-    #[serde(skip_serializing_if = "Option::is_none", with = "crate::serialization::optional_string_u64")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::serialization::optional_string_u64"
+    )]
     pub confirmations: Option<u64>,
 }
 

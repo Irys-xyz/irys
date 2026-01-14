@@ -924,6 +924,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         bundle_format: Some(0),
         chain_id: 1,
         promoted_height: Some(1),
+        metadata: None,
         signature: Default::default(),
     })
     .sign(&test_signer)?;

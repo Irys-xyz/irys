@@ -8,7 +8,9 @@ use crate::{
 use irys_types::ingress::CachedIngressProof;
 use irys_types::{Base64, IrysAddress, PeerListItem};
 use irys_types::{ChunkPathHash, DataRoot, H256};
-use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, TransactionMetadata};
+use irys_types::{
+    CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, TransactionMetadata,
+};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
 use reth_db::{TableType, TableViewer};

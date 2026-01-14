@@ -60,6 +60,13 @@ pub struct CommitmentTransactionV2 {
     #[rlp(skip)]
     #[rlp(default)]
     pub signature: IrysSignature,
+
+    /// INTERNAL: Transaction metadata (inclusion height, etc.)
+    /// This field is NEVER serialized - not in RLP, not in JSON, not in Compact
+    #[rlp(skip)]
+    #[rlp(default)]
+    #[serde(skip)]
+    pub metadata: Option<crate::TransactionMetadata>,
 }
 
 impl Ord for CommitmentTransactionV2 {
@@ -93,6 +100,7 @@ impl CommitmentTransactionV2 {
             fee: 0,
             value: U256::zero(),
             signature: IrysSignature::new(Signature::test_signature()),
+            metadata: None,
         }
     }
 

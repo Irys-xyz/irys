@@ -75,6 +75,7 @@ mod tests {
     use super::*;
     use crate::open_or_create_db;
     use crate::tables::IrysTables;
+    use reth_db::Database as _;
     use tempfile::tempdir;
 
     #[test]
@@ -137,4 +138,3 @@ mod tests {
         }
     }
 }
-

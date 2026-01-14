@@ -1,42 +1,33 @@
-use irys_database::db_index::get_tx_metadata;
-use irys_domain::block_index::BlockIndex;
-use irys_types::{TransactionStatusResponse, H256};
-use reth_db::transaction::DbTx;
+use irys_domain::BlockIndexReadGuard;
+use irys_types::{TransactionMetadata, TransactionStatusResponse, H256};
 
 use crate::MempoolReadGuard;
 
 /// Compute transaction status based on mempool state, metadata, and block index
-/// 
-/// Works with the wrapper pattern: checks mempool for wrapped transactions,
-/// then falls back to database metadata for migrated/historical transactions.
-pub fn compute_transaction_status(
-    db_tx: &impl DbTx,
+pub async fn compute_transaction_status(
+    db_metadata: Option<TransactionMetadata>,
     tx_id: &H256,
-    block_index: &BlockIndex,
+    block_index_guard: &BlockIndexReadGuard,
     current_head_height: u64,
     mempool_guard: &MempoolReadGuard,
 ) -> eyre::Result<Option<TransactionStatusResponse>> {
     // First check mempool for metadata
-    let mempool_metadata = mempool_guard.get_tx_metadata_blocking(tx_id);
-    
+    let mempool_metadata = mempool_guard.get_tx_metadata(tx_id).await;
+
     // Check if in mempool
-    let in_mempool = mempool_metadata.is_some()
-        || mempool_guard.is_recent_valid_tx_blocking(tx_id);
+    let in_mempool = mempool_metadata.is_some() || mempool_guard.is_recent_valid_tx(tx_id).await;
 
     // Try mempool metadata first, then database
-    let metadata = if let Some(m) = mempool_metadata {
-        Some(m)
-    } else {
-        get_tx_metadata(db_tx, tx_id).ok().flatten()
-    };
+    let metadata = mempool_metadata.or(db_metadata);
 
     match (metadata, in_mempool) {
         (Some(metadata), _) if metadata.included_height.is_some() => {
             let included_height = metadata.included_height.unwrap();
-            
+
+            let block_index = block_index_guard.read();
             // Check if the block has been migrated to index
-            let is_confirmed = block_index.contains_height(included_height);
-            
+            let is_confirmed = block_index.get_item(included_height).is_some();
+
             if is_confirmed {
                 Ok(Some(TransactionStatusResponse::confirmed(
                     included_height,

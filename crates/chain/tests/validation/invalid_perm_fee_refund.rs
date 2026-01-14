@@ -91,6 +91,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         bundle_format: Some(0),
         chain_id: 1,
         promoted_height: Some(2), // Mark as promoted!
+        metadata: None,
         signature: Default::default(),
     });
 
