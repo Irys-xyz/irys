@@ -3828,7 +3828,7 @@ mod commitment_version_tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
                 }),
             },
