@@ -101,7 +101,7 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
 
 fn aurora_config_with_timestamp(activation_secs: u64) -> NodeConfig {
     create_test_config(Some(Aurora {
-        activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+        activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_secs),
         minimum_commitment_tx_version: AURORA_MIN_VERSION,
     }))
 }
@@ -512,13 +512,13 @@ mod epoch_block_filtering {
         let aurora = match state {
             AuroraState::Disabled => None,
             AuroraState::PreActivation => Some(Aurora {
-                activation_timestamp: UnixTimestamp::from_secs(
+                activation_timestamp_unix_secs: UnixTimestamp::from_secs(
                     now_secs().saturating_add(ONE_HOUR_SECS),
                 ),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
             }),
             AuroraState::PostActivation => Some(Aurora {
-                activation_timestamp: UnixTimestamp::from_secs(
+                activation_timestamp_unix_secs: UnixTimestamp::from_secs(
                     now_secs().saturating_sub(ONE_HOUR_SECS),
                 ),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
@@ -628,7 +628,7 @@ mod epoch_block_filtering {
             frontier: default_test_frontier(),
             next_name_tbd: None,
             aurora: Some(Aurora {
-                activation_timestamp: UnixTimestamp::from_secs(aurora_activation),
+                activation_timestamp_unix_secs: UnixTimestamp::from_secs(aurora_activation),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
             }),
         };
