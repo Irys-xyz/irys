@@ -181,4 +181,64 @@ mod tests {
             assert_eq!(metadata.unwrap().included_height, None);
         }
     }
+
+    #[test]
+    fn test_tx_promoted_height_operations() {
+        let temp_dir = tempdir().unwrap();
+        let db = open_or_create_db(temp_dir.path(), IrysTables::ALL, None).unwrap();
+
+        let tx_id = H256::random();
+
+        // Initially no metadata
+        let metadata = db.view(|tx| get_tx_metadata(tx, &tx_id)).unwrap().unwrap();
+        assert!(metadata.is_none());
+
+        // Set promoted height
+        db.update(|tx| set_tx_promoted_height(tx, &tx_id, 100))
+            .unwrap()
+            .unwrap();
+
+        // Verify it was set
+        let metadata = db.view(|tx| get_tx_metadata(tx, &tx_id)).unwrap().unwrap();
+        assert_eq!(metadata.unwrap().promoted_height, Some(100));
+
+        // Clear it
+        db.update(|tx| clear_tx_promoted_height(tx, &tx_id))
+            .unwrap()
+            .unwrap();
+
+        // Verify it was cleared
+        let metadata = db.view(|tx| get_tx_metadata(tx, &tx_id)).unwrap().unwrap();
+        assert_eq!(metadata.unwrap().promoted_height, None);
+    }
+
+    #[test]
+    fn test_batch_promoted_height_operations() {
+        let temp_dir = tempdir().unwrap();
+        let db = open_or_create_db(temp_dir.path(), IrysTables::ALL, None).unwrap();
+
+        let tx_ids = vec![H256::random(), H256::random(), H256::random()];
+
+        // Batch set promoted height
+        db.update(|tx| batch_set_tx_promoted_height(tx, &tx_ids, 200))
+            .unwrap()
+            .unwrap();
+
+        // Verify all were set
+        for tx_id in &tx_ids {
+            let metadata = db.view(|tx| get_tx_metadata(tx, tx_id)).unwrap().unwrap();
+            assert_eq!(metadata.unwrap().promoted_height, Some(200));
+        }
+
+        // Batch clear promoted height
+        db.update(|tx| batch_clear_tx_promoted_height(tx, &tx_ids))
+            .unwrap()
+            .unwrap();
+
+        // Verify all were cleared
+        for tx_id in &tx_ids {
+            let metadata = db.view(|tx| get_tx_metadata(tx, tx_id)).unwrap().unwrap();
+            assert_eq!(metadata.unwrap().promoted_height, None);
+        }
+    }
 }

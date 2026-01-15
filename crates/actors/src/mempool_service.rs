@@ -2078,17 +2078,16 @@ impl AtomicMempoolState {
     }
 
     /// Clear included_height for a data transaction (re-org handling)
-    /// Returns true if the transaction was found and updated
+    /// Returns true if the transaction was found with Some metadata and the height was actually cleared
     pub async fn clear_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
         if let Some(tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
             if let Some(ref mut metadata) = tx.metadata {
                 metadata.included_height = None;
+                return true;
             }
-            true
-        } else {
-            false
         }
+        false
     }
 
     /// Set included_height for a commitment transaction
@@ -2113,15 +2112,15 @@ impl AtomicMempoolState {
     }
 
     /// Clear included_height for a commitment transaction
-    /// Returns true if the transaction was found and updated
+    /// Returns true if the transaction was found with Some metadata and the height was actually cleared
     pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
                 if let Some(ref mut metadata) = tx.metadata_mut() {
                     metadata.included_height = None;
+                    return true;
                 }
-                return true;
             }
         }
         false
@@ -2210,6 +2209,13 @@ impl AtomicMempoolState {
         // Check commitment transactions
         for txs in state.valid_commitment_tx.values() {
             if let Some(tx) = txs.iter().find(|t| t.id() == *tx_id) {
+                return tx.metadata().clone();
+            }
+        }
+
+        // Check pending pledges
+        for inner_cache in state.pending_pledges.iter() {
+            if let Some(tx) = inner_cache.1.get(tx_id) {
                 return tx.metadata().clone();
             }
         }

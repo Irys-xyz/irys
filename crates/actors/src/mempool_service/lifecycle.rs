@@ -710,6 +710,8 @@ impl Inner {
         let all_orphaned_tx_ids: Vec<H256> = orphaned_confirmed_ledger_txs
             .values()
             .flat_map(|txs| txs.iter().copied())
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect();
 
         if !all_orphaned_tx_ids.is_empty() {

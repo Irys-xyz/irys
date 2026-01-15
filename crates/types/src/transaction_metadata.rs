@@ -66,9 +66,11 @@ impl TransactionMetadata {
         }
     }
 
+    /// Constructor for the common case where a transaction is both included and promoted
+    /// at the same height (e.g., single-block promotion)
     pub fn with_promoted_height(height: u64) -> Self {
         Self {
-            included_height: None,
+            included_height: Some(height),
             promoted_height: Some(height),
         }
     }
@@ -179,5 +181,56 @@ mod tests {
         assert_eq!(confirmed.status, TransactionStatus::Confirmed);
         assert_eq!(confirmed.block_height, Some(100));
         assert_eq!(confirmed.confirmations, Some(10));
+    }
+
+    #[test]
+    fn test_compact_encoding_roundtrip() {
+        // Create metadata with both heights
+        let original = TransactionMetadata {
+            included_height: Some(100),
+            promoted_height: Some(200),
+        };
+
+        // Encode
+        let mut buf = Vec::new();
+        let size = Compact::to_compact(&original, &mut buf);
+        assert!(size > 0);
+
+        // Decode
+        let (decoded, rest) = TransactionMetadata::from_compact(&buf, buf.len());
+
+        // Verify
+        assert_eq!(decoded, original);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_compact_backward_compatibility() {
+        // Simulate older encoding that only has included_height
+        let mut buf = Vec::new();
+        Compact::to_compact(&Some(100u64), &mut buf);
+
+        // Decode with new implementation
+        let (decoded, rest) = TransactionMetadata::from_compact(&buf, buf.len());
+
+        // Verify backward compatibility
+        assert_eq!(decoded.included_height, Some(100));
+        assert_eq!(decoded.promoted_height, None);
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_confirmations_saturating() {
+        // Test edge case where block_height > current_head_height
+        let response = TransactionStatusResponse::included(110, 100);
+        assert_eq!(response.confirmations, Some(0));
+
+        // Normal case
+        let response = TransactionStatusResponse::included(100, 110);
+        assert_eq!(response.confirmations, Some(10));
+
+        // Same height
+        let response = TransactionStatusResponse::included(100, 100);
+        assert_eq!(response.confirmations, Some(0));
     }
 }
