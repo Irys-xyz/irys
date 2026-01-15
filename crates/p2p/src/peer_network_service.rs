@@ -367,31 +367,35 @@ impl PeerNetworkService {
         };
         let sender_inner = self.inner.clone();
 
-        for (mining_addr, peer) in inactive_peers {
+        for (peer_id, peer) in inactive_peers {
             let client = gossip_client.clone();
             let peer_list = self.inner.peer_list();
             let inner_clone = sender_inner.clone();
+            let mining_addr = peer.mining_address;
             tokio::spawn(async move {
-                match client.check_health(peer.address, &peer_list).await {
+                match client
+                    .check_health(&mining_addr, peer.address, &peer_list)
+                    .await
+                {
                     Ok(true) => {
-                        debug!("Peer {:?} is online", mining_addr);
-                        inner_clone.increase_peer_score(&mining_addr, ScoreIncreaseReason::Online);
+                        debug!("Peer {:?} is online", peer_id);
+                        inner_clone.increase_peer_score(&peer_id, ScoreIncreaseReason::Online);
                     }
                     Ok(false) => {
-                        debug!("Peer {:?} is offline", mining_addr);
+                        debug!("Peer {:?} is offline", peer_id);
                         inner_clone.decrease_peer_score(
-                            &mining_addr,
+                            &peer_id,
                             ScoreDecreaseReason::Offline("Health check returned false".to_string()),
                         );
                     }
                     Err(GossipClientError::HealthCheck(url, status)) => {
                         let message = format!(
                             "Peer {:?} ({}) health check failed with status {}",
-                            mining_addr, url, status
+                            peer_id, url, status
                         );
                         debug!("{message}");
                         inner_clone.decrease_peer_score(
-                            &mining_addr,
+                            &peer_id,
                             ScoreDecreaseReason::NetworkError(message),
                         );
                     }
