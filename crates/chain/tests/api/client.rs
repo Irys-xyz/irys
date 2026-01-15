@@ -2,7 +2,7 @@
 
 use crate::utils::IrysNodeTest;
 use irys_api_client::ApiClientExt as _;
-use irys_api_client::{ApiClient as _, IrysApiClient};
+use irys_api_client::{ApiClient as _, IrysApiClient, TransactionStatus};
 use irys_chain::IrysNodeCtx;
 use irys_types::{BlockIndexQuery, IrysTransactionResponse, NodeConfig};
 use std::{
@@ -217,8 +217,6 @@ async fn api_client_wait_for_promotion_happy_path() {
 /// Tests the transaction status API lifecycle: PENDING -> INCLUDED -> CONFIRMED
 #[test_log::test(tokio::test)]
 async fn api_tx_status_lifecycle() {
-    use irys_api_client::TransactionStatus;
-
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;
@@ -310,7 +308,7 @@ async fn api_tx_status_commitment_tx() {
     // NOTE: stake commitments can legitimately be skipped for inclusion when the signer is already staked,
     // which would leave the tx PENDING forever and make this test flaky.
     let anchor = ctx.get_anchor().await.expect("expected anchor");
-    let signer = ctx.cfg.signer();
+    let signer = ctx.node_ctx.config.irys_signer();
     let mut pledge_tx = irys_types::CommitmentTransaction::new_pledge(
         &ctx.node_ctx.config.consensus,
         anchor,
