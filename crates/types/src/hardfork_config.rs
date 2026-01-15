@@ -47,7 +47,7 @@ pub struct NextNameTBD {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Aurora {
-    pub activation_timestamp: UnixTimestamp,
+    pub activation_timestamp_unix_secs: UnixTimestamp,
     pub minimum_commitment_tx_version: u8,
 }
 
@@ -88,7 +88,7 @@ impl IrysHardforkConfig {
     pub fn aurora_at(&self, timestamp: UnixTimestamp) -> Option<&Aurora> {
         self.aurora
             .as_ref()
-            .filter(|f| timestamp >= f.activation_timestamp)
+            .filter(|f| timestamp >= f.activation_timestamp_unix_secs)
     }
 
     /// Check if a commitment transaction version is valid at a given timestamp.
@@ -162,7 +162,7 @@ mod tests {
             },
             next_name_tbd: None,
             aurora: Some(Aurora {
-                activation_timestamp: UnixTimestamp::from_secs(1500),
+                activation_timestamp_unix_secs: UnixTimestamp::from_secs(1500),
                 minimum_commitment_tx_version: 2,
             }),
         };
@@ -282,7 +282,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
+                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
             };
@@ -306,7 +306,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
+                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
             };
@@ -353,7 +353,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
+                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
             };
@@ -383,7 +383,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
                 }),
             }
