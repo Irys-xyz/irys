@@ -40,6 +40,20 @@ impl Inner {
                         .map_err(|e| eyre::eyre!("{:?}", e))
                 })
                 .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?;
+
+            // Also update mempool metadata for data transactions
+            for txid in submit_txids.iter().chain(publish_txids.iter()) {
+                self.mempool_state
+                    .set_data_tx_included_height(*txid, block.height)
+                    .await;
+            }
+
+            // Update commitment transactions in mempool
+            for txid in commitment_txids.iter() {
+                self.mempool_state
+                    .set_commitment_tx_included_height(*txid, block.height)
+                    .await;
+            }
         }
 
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;

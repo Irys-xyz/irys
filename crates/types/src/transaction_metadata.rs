@@ -5,7 +5,16 @@ use serde::{Deserialize, Serialize};
 /// Stored separately from transaction headers to enable easier future migrations
 /// This is NEVER serialized with the transaction - it's internal state only
 #[derive(
-    Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, arbitrary::Arbitrary, Compact,
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    arbitrary::Arbitrary,
+    Compact,
 )]
 pub struct TransactionMetadata {
     /// Height of the block where this transaction was first included
@@ -152,37 +161,58 @@ mod tests {
 
     #[test]
     fn test_compact_encoding_roundtrip() {
-        // Create metadata with both heights
+        // Test 1: Both heights set
         let original = TransactionMetadata {
             included_height: Some(100),
             promoted_height: Some(200),
         };
-
-        // Encode
         let mut buf = Vec::new();
         let size = Compact::to_compact(&original, &mut buf);
         assert!(size > 0);
-
-        // Decode
         let (decoded, rest) = TransactionMetadata::from_compact(&buf, buf.len());
-
-        // Verify
         assert_eq!(decoded, original);
         assert!(rest.is_empty());
-    }
 
-    #[test]
-    fn test_compact_backward_compatibility() {
-        // Simulate older encoding that only has included_height
+        // Test 2: Only included_height set
+        let original = TransactionMetadata {
+            included_height: Some(100),
+            promoted_height: None,
+        };
         let mut buf = Vec::new();
-        Compact::to_compact(&Some(100u64), &mut buf);
-
-        // Decode with new implementation
+        let size = Compact::to_compact(&original, &mut buf);
+        assert!(size > 0);
         let (decoded, rest) = TransactionMetadata::from_compact(&buf, buf.len());
-
-        // Verify backward compatibility
         assert_eq!(decoded.included_height, Some(100));
         assert_eq!(decoded.promoted_height, None);
+        assert_eq!(decoded, original);
+        assert!(rest.is_empty());
+
+        // Test 3: Only promoted_height set
+        let original = TransactionMetadata {
+            included_height: None,
+            promoted_height: Some(200),
+        };
+        let mut buf = Vec::new();
+        let size = Compact::to_compact(&original, &mut buf);
+        assert!(size > 0);
+        let (decoded, rest) = TransactionMetadata::from_compact(&buf, buf.len());
+        assert_eq!(decoded.included_height, None);
+        assert_eq!(decoded.promoted_height, Some(200));
+        assert_eq!(decoded, original);
+        assert!(rest.is_empty());
+
+        // Test 4: Neither height set (default)
+        let original = TransactionMetadata {
+            included_height: None,
+            promoted_height: None,
+        };
+        let mut buf = Vec::new();
+        let size = Compact::to_compact(&original, &mut buf);
+        assert!(size > 0);
+        let (decoded, rest) = TransactionMetadata::from_compact(&buf, buf.len());
+        assert_eq!(decoded.included_height, None);
+        assert_eq!(decoded.promoted_height, None);
+        assert_eq!(decoded, original);
         assert!(rest.is_empty());
     }
 

@@ -2262,6 +2262,22 @@ impl AtomicMempoolState {
         Some(result)
     }
 
+    /// Atomically sets the included_height on a data transaction in the mempool.
+    /// Returns true if the tx was found and updated, false otherwise.
+    pub async fn set_data_tx_included_height(&self, txid: H256, height: u64) -> bool {
+        let mut state = self.write().await;
+        if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
+            if wrapped_header.metadata.included_height.is_none() {
+                wrapped_header.metadata.included_height = Some(height);
+                tracing::debug!(tx.id = %txid, included_height = height, "Set included_height in mempool");
+            }
+            state.recent_valid_tx.put(txid, ());
+            true
+        } else {
+            false
+        }
+    }
+
     pub async fn put_recent_invalid(&self, tx_id: H256) {
         self.write().await.recent_invalid_tx.put(tx_id, ());
     }
