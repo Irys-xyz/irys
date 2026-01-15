@@ -1297,7 +1297,7 @@ impl StorageModule {
                     Ok(None) => return Ok(None),
                     Err(err) => return Err(eyre::eyre!("Database read should succeed: {:?}", err)),
                 };
-     
+
                 let path_buff = Base64::from(data_path);
                 let proof = get_leaf_proof(&path_buff)?;
                 // -1 as it starts with 0
