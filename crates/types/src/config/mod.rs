@@ -562,6 +562,10 @@ mod tests {
         [hardforks.frontier]
         number_of_ingress_proofs_total = 1
         number_of_ingress_proofs_from_assignees = 0
+
+        [hardforks.aurora]
+        minimum_commitment_tx_version = 2
+        activation_timestamp = 1768476600000
         "#;
 
         // Create the expected config
