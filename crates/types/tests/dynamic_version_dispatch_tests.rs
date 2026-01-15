@@ -39,7 +39,10 @@ fn block_header_uses_new_constructor() {
 fn commitment_tx_v1_construction_from_inner() {
     // Test that we can construct a versioned type from an inner V1 type
     let tx = CommitmentTransactionV1::default();
-    let versioned = CommitmentTransaction::V1(tx);
+    let versioned = CommitmentTransaction::V1(irys_types::CommitmentV1WithMetadata {
+        tx,
+        metadata: Default::default(),
+    });
     assert_eq!(versioned.version(), 1);
 }
 

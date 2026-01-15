@@ -1686,7 +1686,12 @@ mod tests {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(commitment_tx)];
+        let commitment_txs = vec![CommitmentTransaction::V2(
+            irys_types::CommitmentV2WithMetadata {
+                tx: commitment_tx,
+                metadata: Default::default(),
+            },
+        )];
 
         // Execute ordering function
         let result = order_transactions_for_block(&header, data_txs, commitment_txs)
@@ -1882,9 +1887,12 @@ mod tests {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(commitment_tx)];
-
-        // Execute ordering function - should return error
+        let commitment_txs = vec![CommitmentTransaction::V2(
+            irys_types::CommitmentV2WithMetadata {
+                tx: commitment_tx,
+                metadata: Default::default(),
+            },
+        )];
         let result = order_transactions_for_block(&header, data_txs, commitment_txs);
 
         // Verify the function returns an error for the mismatch

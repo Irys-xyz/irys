@@ -3851,16 +3851,22 @@ mod commitment_version_tests {
     }
 
     fn make_v1_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction::V1(CommitmentTransactionV1 {
-            commitment_type: CommitmentTypeV1::Stake,
-            ..CommitmentTransactionV1::new(consensus)
+        CommitmentTransaction::V1(irys_types::CommitmentV1WithMetadata {
+            tx: CommitmentTransactionV1 {
+                commitment_type: CommitmentTypeV1::Stake,
+                ..CommitmentTransactionV1::new(consensus)
+            },
+            metadata: Default::default(),
         })
     }
 
     fn make_v2_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction::V2(CommitmentTransactionV2 {
-            commitment_type: CommitmentTypeV2::Stake,
-            ..CommitmentTransactionV2::new(consensus)
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                commitment_type: CommitmentTypeV2::Stake,
+                ..CommitmentTransactionV2::new(consensus)
+            },
+            metadata: Default::default(),
         })
     }
 

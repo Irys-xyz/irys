@@ -243,7 +243,6 @@ mod tests {
             bundle_format: None,
             chain_id: testing_config.chain_id,
             promoted_height: None,
-            metadata: None,
             signature: Default::default(),
         });
 
@@ -314,22 +313,26 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let mut transaction = CommitmentTransaction::V2(crate::CommitmentTransactionV2 {
-            id: Default::default(),
-            // anchor: H256::from([1_u8; 32]),
-            anchor: H256::from_base58("GqrCZEc5WU4gXj9qveAUDkNRPhsPPjWrD8buKAc5sXdZ"),
+        let mut transaction = CommitmentTransaction::V2(crate::CommitmentV2WithMetadata {
+            tx: crate::CommitmentTransactionV2 {
+                id: Default::default(),
+                // anchor: H256::from([1_u8; 32]),
+                anchor: H256::from_base58("GqrCZEc5WU4gXj9qveAUDkNRPhsPPjWrD8buKAc5sXdZ"),
 
-            signer: IrysAddress::ZERO,
-            commitment_type: CommitmentTypeV2::Unpledge {
-                pledge_count_before_executing: u64::MAX,
-                // partition_hash: [2_u8; 32].into(),
-                partition_hash: H256::from_base58("12Yjd3YA9xjzkqDfdcXVWgyu6TpAq9WJdh6NJRWzZBKt"),
+                signer: IrysAddress::ZERO,
+                commitment_type: CommitmentTypeV2::Unpledge {
+                    pledge_count_before_executing: u64::MAX,
+                    // partition_hash: [2_u8; 32].into(),
+                    partition_hash: H256::from_base58(
+                        "12Yjd3YA9xjzkqDfdcXVWgyu6TpAq9WJdh6NJRWzZBKt",
+                    ),
+                },
+                chain_id: 1270,
+                signature: Default::default(),
+                fee: 1234,
+                value: 222.into(),
             },
-            chain_id: 1270,
-            signature: Default::default(),
-            fee: 1234,
-            value: 222.into(),
-            metadata: None,
+            metadata: Default::default(),
         });
 
         irys_signer.sign_commitment(&mut transaction)?;

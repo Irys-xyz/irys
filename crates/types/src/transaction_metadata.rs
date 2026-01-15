@@ -234,3 +234,82 @@ mod tests {
         assert_eq!(response.confirmations, Some(0));
     }
 }
+
+/// Wrapper for data transactions with metadata
+/// This ensures metadata travels with the transaction and gets cleaned up automatically
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataTxWithMetadata {
+    pub tx: crate::DataTransactionHeader,
+    pub metadata: TransactionMetadata,
+}
+
+impl DataTxWithMetadata {
+    pub fn new(tx: crate::DataTransactionHeader) -> Self {
+        Self {
+            tx,
+            metadata: TransactionMetadata::new(),
+        }
+    }
+
+    pub fn with_metadata(tx: crate::DataTransactionHeader, metadata: TransactionMetadata) -> Self {
+        Self { tx, metadata }
+    }
+
+    pub fn with_included_height(tx: crate::DataTransactionHeader, height: u64) -> Self {
+        Self {
+            tx,
+            metadata: TransactionMetadata::with_included_height(height),
+        }
+    }
+
+    /// Get the transaction ID
+    pub fn id(&self) -> crate::H256 {
+        self.tx.id
+    }
+
+    /// Set the included height
+    pub fn set_included_height(&mut self, height: u64) {
+        self.metadata.included_height = Some(height);
+    }
+
+    /// Set the promoted height
+    pub fn set_promoted_height(&mut self, height: u64) {
+        self.metadata.promoted_height = Some(height);
+    }
+
+    /// Clear the included height (used during re-orgs)
+    pub fn clear_included_height(&mut self) {
+        self.metadata.included_height = None;
+    }
+
+    /// Clear the promoted height (used during re-orgs)
+    pub fn clear_promoted_height(&mut self) {
+        self.metadata.promoted_height = None;
+    }
+
+    /// Split into transaction and metadata for database storage
+    pub fn split(self) -> (crate::DataTransactionHeader, TransactionMetadata) {
+        (self.tx, self.metadata)
+    }
+
+    /// Get references to both parts
+    pub fn as_parts(&self) -> (&crate::DataTransactionHeader, &TransactionMetadata) {
+        (&self.tx, &self.metadata)
+    }
+}
+
+/// Implement Deref so we can access transaction fields directly
+impl std::ops::Deref for DataTxWithMetadata {
+    type Target = crate::DataTransactionHeader;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+/// Implement DerefMut so we can mutate transaction fields directly
+impl std::ops::DerefMut for DataTxWithMetadata {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.tx
+    }
+}

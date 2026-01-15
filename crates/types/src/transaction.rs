@@ -258,13 +258,6 @@ pub struct DataTransactionHeaderV1 {
     #[rlp(default)]
     #[serde(skip)]
     pub promoted_height: Option<u64>,
-
-    /// INTERNAL: Transaction metadata (inclusion height, etc.)
-    /// This field is NEVER serialized - not in RLP, not in JSON, not in Compact
-    #[rlp(skip)]
-    #[rlp(default)]
-    #[serde(skip)]
-    pub metadata: Option<crate::TransactionMetadata>,
 }
 
 /// Ordering for DataTransactionHeader by transaction ID
@@ -360,7 +353,6 @@ impl DataTransactionHeaderV1 {
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
             promoted_height: None,
-            metadata: None,
         }
     }
 
@@ -826,7 +818,6 @@ mod tests {
             bundle_format: None,
             chain_id: 1,
             promoted_height: None,
-            metadata: None,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
         };
 
@@ -1118,7 +1109,6 @@ mod tests {
             bundle_format: None,
             chain_id: config.chain_id,
             promoted_height: None,
-            metadata: None,
             signature: Signature::test_signature().into(),
         })
     }
@@ -1315,7 +1305,6 @@ mod commitment_ordering_tests {
             value: U256::zero(),
             commitment_type,
             chain_id: 1,
-            metadata: None,
         }
     }
 
