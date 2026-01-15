@@ -264,10 +264,19 @@ async fn api_tx_status_lifecycle() {
     assert!(status.block_height.is_some());
     assert!(status.confirmations.is_some());
 
+    let included_height = status
+        .block_height
+        .expect("included status should have block_height");
+    let migration_depth = ctx.node_ctx.config.consensus.block_migration_depth as u64;
+
     // Mine more blocks to reach migration depth and make it CONFIRMED
-    for _ in 0..55 {
+    for _ in 0..(migration_depth + 2) {
         ctx.mine_block().await.expect("expected mined block");
     }
+
+    ctx.wait_until_block_index_height(included_height, 15)
+        .await
+        .expect("block index should reach included tx height");
 
     // Check status - should be CONFIRMED
     let status = api_client
