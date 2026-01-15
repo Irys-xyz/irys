@@ -2091,12 +2091,23 @@ impl AtomicMempoolState {
     /// Returns true if the transaction was found and updated
     pub async fn set_commitment_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
         let mut state = self.write().await;
+        
+        // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
                 tx.metadata_mut().included_height = Some(height);
                 return true;
             }
         }
+        
+        // Check pending pledges
+        for (_, pledges_cache) in state.pending_pledges.iter_mut() {
+            if let Some(tx) = pledges_cache.get_mut(&tx_id) {
+                tx.metadata_mut().included_height = Some(height);
+                return true;
+            }
+        }
+        
         false
     }
 
@@ -2104,12 +2115,23 @@ impl AtomicMempoolState {
     /// Returns true if the transaction was found and the height was cleared
     pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
+        
+        // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
                 tx.metadata_mut().included_height = None;
                 return true;
             }
         }
+        
+        // Check pending pledges
+        for (_, pledges_cache) in state.pending_pledges.iter_mut() {
+            if let Some(tx) = pledges_cache.get_mut(&tx_id) {
+                tx.metadata_mut().included_height = None;
+                return true;
+            }
+        }
+        
         false
     }
 
@@ -2206,8 +2228,12 @@ impl AtomicMempoolState {
             }
         }
 
-        // Note: pending_pledges still uses unwrapped CommitmentTransaction
-        // They don't have metadata tracking yet (could be added if needed)
+        // Check pending pledges - they also have metadata
+        for (_, pledges_cache) in state.pending_pledges.iter() {
+            if let Some(tx) = pledges_cache.peek(tx_id) {
+                return Some(tx.metadata().clone());
+            }
+        }
 
         None
     }
