@@ -7,19 +7,8 @@ pub enum CircuitState {
 }
 
 impl CircuitState {
-    fn try_from_u8(value: u8) -> Result<Self, u8> {
-        match value {
-            0 => Ok(Self::Closed),
-            1 => Ok(Self::Open),
-            2 => Ok(Self::HalfOpen),
-            invalid => Err(invalid),
-        }
-    }
-}
-
-impl From<u8> for CircuitState {
-    fn from(value: u8) -> Self {
-        match Self::try_from_u8(value) {
+    pub(crate) fn from_u8_failsafe(value: u8) -> Self {
+        match Self::try_from(value) {
             Ok(state) => state,
             Err(invalid) => {
                 tracing::error!(
@@ -28,6 +17,19 @@ impl From<u8> for CircuitState {
                 );
                 Self::Open
             }
+        }
+    }
+}
+
+impl TryFrom<u8> for CircuitState {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Closed),
+            1 => Ok(Self::Open),
+            2 => Ok(Self::HalfOpen),
+            invalid => Err(invalid),
         }
     }
 }
