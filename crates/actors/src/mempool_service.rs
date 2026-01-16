@@ -2063,12 +2063,34 @@ impl AtomicMempoolState {
         state.valid_submit_ledger_tx.remove(tx_id);
     }
 
-    /// Set included_height for a data transaction
-    /// Returns true if the transaction was found and updated
-    pub async fn set_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
+    /// Set included_height for a data transaction with optional overwrite
+    /// 
+    /// # Parameters
+    /// - `tx_id`: Transaction ID to update
+    /// - `height`: Block height to set
+    /// - `overwrite`: If false, only sets height if currently None; if true, sets unconditionally
+    /// 
+    /// Returns true if the transaction was found and updated, false otherwise.
+    /// Also updates the recent_valid_tx cache when the transaction is found.
+    pub async fn set_tx_included_height(
+        &self,
+        tx_id: H256,
+        height: u64,
+        overwrite: bool,
+    ) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            wrapped_tx.set_included_height(height);
+            if overwrite || wrapped_tx.metadata.included_height.is_none() {
+                wrapped_tx.metadata.included_height = Some(height);
+                tracing::debug!(
+                    tx.id = %tx_id,
+                    included_height = height,
+                    overwrite = overwrite,
+                    "Set included_height in mempool"
+                );
+            }
+            // Always update recent_valid_tx cache when tx is found
+            state.recent_valid_tx.put(tx_id, ());
             true
         } else {
             false
@@ -2289,19 +2311,11 @@ impl AtomicMempoolState {
     }
 
     /// Atomically sets the included_height on a data transaction in the mempool.
+    /// This is a convenience wrapper around set_tx_included_height with overwrite=false.
     /// Returns true if the tx was found and updated, false otherwise.
     pub async fn set_data_tx_included_height(&self, txid: H256, height: u64) -> bool {
-        let mut state = self.write().await;
-        if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-            if wrapped_header.metadata.included_height.is_none() {
-                wrapped_header.metadata.included_height = Some(height);
-                tracing::debug!(tx.id = %txid, included_height = height, "Set included_height in mempool");
-            }
-            state.recent_valid_tx.put(txid, ());
-            true
-        } else {
-            false
-        }
+        // Use the consolidated method with overwrite=false to maintain backward compatibility
+        self.set_tx_included_height(txid, height, false).await
     }
 
     /// Atomically clears the included_height on a data transaction in the mempool.
