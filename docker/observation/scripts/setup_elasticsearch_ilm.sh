@@ -10,17 +10,17 @@ RETRY_INTERVAL=5
 echo "Configuring Elasticsearch with ${RETENTION_DAYS}-day retention..."
 
 echo "Waiting for Elasticsearch to be ready..."
-for i in $(seq 1 $MAX_RETRIES); do
+for i in $(seq 1 "$MAX_RETRIES"); do
     if curl -s "$ES_HOST/_cluster/health" | grep -q '"status":"green"\|"status":"yellow"'; then
         echo "Elasticsearch is ready"
         break
     fi
-    if [ $i -eq $MAX_RETRIES ]; then
+    if [ "$i" -eq "$MAX_RETRIES" ]; then
         echo "Elasticsearch not ready after $MAX_RETRIES attempts"
         exit 1
     fi
     echo "Waiting for Elasticsearch... ($i/$MAX_RETRIES)"
-    sleep $RETRY_INTERVAL
+    sleep "$RETRY_INTERVAL"
 done
 
 # Create ILM policy with configurable retention

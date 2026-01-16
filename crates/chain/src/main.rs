@@ -33,11 +33,11 @@ async fn main() -> eyre::Result<()> {
             || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
 
         if telemetry_enabled {
-            info!("Telemetry enabled, initializing OpenTelemetry");
             telemetry::init_telemetry()?;
+            info!("Telemetry enabled, OpenTelemetry initialized");
         } else {
-            info!("Telemetry not enabled, using standard tracing");
             init_tracing().expect("initializing tracing should work");
+            info!("Telemetry not enabled, using standard tracing");
         }
     }
     #[cfg(not(feature = "telemetry"))]

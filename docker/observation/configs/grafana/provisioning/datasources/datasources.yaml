@@ -18,7 +18,7 @@ datasources:
         datasourceUid: prometheus
         spanStartTimeShift: -1h
         spanEndTimeShift: 1h
-        tags: [{ key: 'service.name', value: 'service' }]
+        tags: [{key: 'service.name', value: 'service'}]
       serviceMap:
         datasourceUid: prometheus
       search:
@@ -37,7 +37,7 @@ datasources:
     jsonData:
       index: ".ds-logs-generic.otel-*"
       timeField: "@timestamp"
-      esVersion: "8.0.0"
+      esVersion: "8.17.0"
       logMessageField: body.text
       logLevelField: severity_text
       maxConcurrentShardRequests: 5

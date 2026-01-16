@@ -41,9 +41,9 @@ This starts all 3 Irys nodes and the observability stack, then waits for nodes t
 - Running custom tests against the cluster
 
 Nodes are available at:
-- http://localhost:19080 (Node 1 - Genesis)
-- http://localhost:19081 (Node 2 - Peer)
-- http://localhost:19082 (Node 3 - Peer)
+- <http://localhost:19080> (Node 1 - Genesis)
+- <http://localhost:19081> (Node 2 - Peer)
+- <http://localhost:19082> (Node 3 - Peer)
 
 Stop the cluster:
 ```bash
@@ -92,14 +92,16 @@ This test environment includes the shared observability stack from `docker/obser
 | OTEL Collector | 4317 (gRPC), 4318 (HTTP) | OpenTelemetry receiver |
 
 **Accessing Grafana:**
-```
+
+```text
 http://localhost:3000
 Username: admin
 Password: admin
 ```
 
 **Telemetry Flow:**
-```
+
+```text
 Irys Nodes → OTEL Collector → Tempo (traces)
                             → Prometheus (metrics)
                             → Elasticsearch (logs)

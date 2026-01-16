@@ -86,7 +86,7 @@ Each node should have a unique `OTEL_SERVICE_NAME` (e.g., `irys-node-1`, `irys-n
 
 ## Architecture
 
-```
+```text
 ┌─────────────────┐
 │  Applications   │
 │  (Irys nodes)   │
@@ -115,7 +115,8 @@ Each node should have a unique `OTEL_SERVICE_NAME` (e.g., `irys-node-1`, `irys-n
 ## Accessing Services
 
 ### Grafana
-```
+
+```text
 URL: http://localhost:3000
 Username: admin
 Password: admin
@@ -128,9 +129,9 @@ Pre-configured datasources:
 
 ### Direct Access
 
-- **Prometheus**: http://localhost:9090
-- **Tempo**: http://localhost:3200
-- **Elasticsearch**: http://localhost:9200
+- **Prometheus**: <http://localhost:9090>
+- **Tempo**: <http://localhost:3200>
+- **Elasticsearch**: <http://localhost:9200>
 
 ## Data Retention
 

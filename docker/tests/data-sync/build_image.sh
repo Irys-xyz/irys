@@ -17,9 +17,9 @@ echo ""
 
 cd "$REPO_ROOT"
 
-BUILD_ARGS=""
+BUILD_ARGS=()
 if [ "$ENABLE_TELEMETRY" = "true" ] || [ "$ENABLE_TELEMETRY" = "1" ]; then
-    BUILD_ARGS="--build-arg CARGO_FEATURES=telemetry"
+    BUILD_ARGS+=(--build-arg CARGO_FEATURES=telemetry)
     echo "Building with telemetry support..."
 else
     echo "Building without telemetry (set ENABLE_TELEMETRY=true to enable)"
@@ -27,7 +27,7 @@ fi
 
 # Use DOCKER_BUILDKIT=0 to avoid buildx issues
 DOCKER_BUILDKIT=0 docker build \
-    $BUILD_ARGS \
+    "${BUILD_ARGS[@]}" \
     -t "$IMAGE_NAME" \
     -f docker/Dockerfile.release \
     .
