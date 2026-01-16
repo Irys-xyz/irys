@@ -7,7 +7,7 @@ pub enum CircuitState {
 }
 
 impl CircuitState {
-    pub(crate) fn try_from_u8(value: u8) -> Result<Self, u8> {
+    fn try_from_u8(value: u8) -> Result<Self, u8> {
         match value {
             0 => Ok(Self::Closed),
             1 => Ok(Self::Open),

@@ -1,8 +1,8 @@
-use std::num::NonZeroU32;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::config::{CircuitBreakerConfig, FailureThreshold, RecoveryAttempts};
+use super::config::{BreakerCapacity, CircuitBreakerConfig, FailureThreshold, RecoveryAttempts};
 
 pub(crate) static TEST_TIME_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 
@@ -33,6 +33,7 @@ pub(crate) fn nanos_to_instant(nanos: u64) -> Instant {
 }
 
 pub(crate) struct TestConfigBuilder {
+    capacity: usize,
     failure_threshold: u32,
     cooldown_duration: Duration,
     stale_timeout: Duration,
@@ -42,6 +43,7 @@ pub(crate) struct TestConfigBuilder {
 impl Default for TestConfigBuilder {
     fn default() -> Self {
         Self {
+            capacity: 100,
             failure_threshold: 3,
             cooldown_duration: Duration::from_millis(100),
             stale_timeout: Duration::from_secs(60),
@@ -51,6 +53,11 @@ impl Default for TestConfigBuilder {
 }
 
 impl TestConfigBuilder {
+    pub(crate) fn capacity(mut self, capacity: usize) -> Self {
+        self.capacity = capacity;
+        self
+    }
+
     pub(crate) fn failure_threshold(mut self, threshold: u32) -> Self {
         self.failure_threshold = threshold;
         self
@@ -73,13 +80,16 @@ impl TestConfigBuilder {
 
     pub(crate) fn build(self) -> CircuitBreakerConfig {
         CircuitBreakerConfig {
+            capacity: BreakerCapacity::new(
+                NonZeroUsize::new(self.capacity).expect("capacity must be > 0"),
+            ),
             failure_threshold: FailureThreshold::new(
-                NonZeroU32::new(self.failure_threshold).unwrap(),
+                NonZeroU32::new(self.failure_threshold).expect("failure_threshold must be > 0"),
             ),
             cooldown_duration: self.cooldown_duration,
             stale_timeout: self.stale_timeout,
             recovery_attempts: RecoveryAttempts::new(
-                NonZeroU32::new(self.recovery_attempts).unwrap(),
+                NonZeroU32::new(self.recovery_attempts).expect("recovery_attempts must be > 0"),
             ),
         }
     }

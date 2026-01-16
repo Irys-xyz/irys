@@ -21,7 +21,6 @@ use reth::primitives::Block;
 use reth::revm::primitives::B256;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -77,10 +76,7 @@ impl GossipClient {
         peer_id: IrysPeerId,
         circuit_config: CircuitBreakerConfig,
     ) -> Self {
-        let circuit_breaker = CircuitBreakerManager::new(
-            NonZeroUsize::new(1000).expect("capacity is non-zero"),
-            circuit_config,
-        );
+        let circuit_breaker = CircuitBreakerManager::new(circuit_config);
 
         Self {
             mining_address,
