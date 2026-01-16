@@ -63,8 +63,8 @@ fn test_versioned_commitment_transaction_compact_roundtrip() {
 
     assert!(!buf.is_empty(), "buffer should contain encoded data");
 
-    // Check that the first byte is the discriminant (1)
-    assert_eq!(buf[0], 1, "first byte should be the discriminant");
+    // Check that the first byte is the discriminant (2)
+    assert_eq!(buf[0], 2, "first byte should be the discriminant");
 
     // Decode from compact format
     let (decoded_versioned, rest) = CommitmentTransaction::from_compact(&buf, buf.len());
@@ -73,7 +73,7 @@ fn test_versioned_commitment_transaction_compact_roundtrip() {
 
     // Verify the decoded version matches the original
     assert_eq!(decoded_versioned, versioned);
-    assert_eq!(decoded_versioned.version(), 1);
+    assert_eq!(decoded_versioned.version(), 2);
 }
 
 #[test]
@@ -108,9 +108,9 @@ fn test_versioned_data_transaction_header_compact_with_default() {
 
 #[test]
 fn test_versioned_commitment_transaction_compact_with_default() {
-    // Test with Default implementation which sets version = 1
+    // Test with Default implementation which sets version = 2
     let versioned = CommitmentTransaction::default();
-    assert_eq!(versioned.version(), 1, "default should set version to 1");
+    assert_eq!(versioned.version(), 2, "default should set version to 2");
 
     let mut buf = Vec::new();
     versioned.to_compact(&mut buf);

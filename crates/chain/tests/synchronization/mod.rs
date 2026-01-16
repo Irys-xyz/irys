@@ -4,10 +4,8 @@ use alloy_genesis::GenesisAccount;
 
 use irys_api_client::ApiClient as _;
 use irys_chain::IrysNodeCtx;
-use irys_types::CommitmentType;
-use irys_types::{
-    irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV1, NodeConfig, H256,
-};
+use irys_types::{irys::IrysSigner, CommitmentTransaction, NodeConfig, H256};
+use irys_types::{CommitmentTransactionV2, CommitmentTypeV2};
 use reth::rpc::eth::EthApiServer as _;
 use std::time::Duration;
 use tracing::{debug, info};
@@ -454,12 +452,12 @@ async fn create_stake_tx(
         .expect("Failed to get stake price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut stake_tx = CommitmentTransaction::V1(CommitmentTransactionV1 {
-        commitment_type: CommitmentType::Stake,
+    let mut stake_tx = CommitmentTransaction::V2(CommitmentTransactionV2 {
+        commitment_type: CommitmentTypeV2::Stake,
         anchor,
         fee: price_info.fee.try_into().expect("fee should fit in u64"),
         value: price_info.value,
-        ..CommitmentTransactionV1::new(consensus)
+        ..CommitmentTransactionV2::new(consensus)
     });
 
     info!("Created stake_tx with value: {:?}", stake_tx.value());

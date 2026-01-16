@@ -1288,8 +1288,16 @@ impl StorageModule {
                     return Err(eyre!("could not find DataRootInfo for partition_offset"));
                 };
 
-                let data_path = get_data_path_by_offset(tx, partition_offset)?
-                    .ok_or(eyre::eyre!("Unable to find a chunk for that data_path"))?;
+                // Storage behavior for multi-chunk transactions:
+                // - First chunk write creates both tx_path and its specific data_path
+                // - Subsequent chunks only create their own data_paths under the existing tx_path
+                // - Reading an unwritten chunk returns None (tx_path exists, but chunk's data_path doesn't)
+                let data_path =  match  get_data_path_by_offset(tx, partition_offset) {
+                    Ok(Some(data_path)) => data_path,
+                    Ok(None) => return Ok(None),
+                    Err(err) => return Err(eyre::eyre!("Database read should succeed: {:?}", err)),
+                };
+
                 let path_buff = Base64::from(data_path);
                 let proof = get_leaf_proof(&path_buff)?;
                 // -1 as it starts with 0
