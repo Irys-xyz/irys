@@ -15,7 +15,7 @@ services:
     restart: unless-stopped
     depends_on:
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     networks:
       observation_network:
         ipv4_address: 172.23.0.2
@@ -42,7 +42,7 @@ services:
       test-irys-1:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     networks:
       observation_network:
         ipv4_address: 172.23.0.3
@@ -72,7 +72,7 @@ services:
       test-irys-1:
         condition: service_started
       otel-collector:
-        condition: service_started
+        condition: service_healthy
     networks:
       observation_network:
         ipv4_address: 172.23.0.4
