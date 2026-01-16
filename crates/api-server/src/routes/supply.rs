@@ -13,10 +13,11 @@ use crate::ApiState;
 const PERCENT_SCALE: u128 = 10000;
 const PERCENT_DIVISOR: u128 = 100;
 
-#[derive(Debug, Deserialize)]
-pub struct SupplyQuery {
-    #[serde(default)]
-    pub exact: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalculationMethod {
+    Actual,
+    Estimated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,14 +30,13 @@ pub struct SupplyResponse {
     pub block_height: u64,
     pub inflation_cap: String,
     pub inflation_progress_percent: String,
-    pub calculation_method: String,
+    pub calculation_method: CalculationMethod,
 }
 
 /// GET /supply - Returns total token supply.
-/// Query `?exact=true` to use actual cumulative emissions (errors if unavailable or recalculating).
-/// Defaults to estimated emissions based on block height and halving curve.
-pub async fn supply(state: web::Data<ApiState>, query: web::Query<SupplyQuery>) -> impl Responder {
-    match calculate_supply(&state, query.exact) {
+/// Uses actual cumulative emissions when available, falls back to estimated if not ready.
+pub async fn supply(state: web::Data<ApiState>) -> impl Responder {
+    match calculate_supply(&state) {
         Ok(response) => HttpResponse::Ok().json(response),
         Err(e) => ApiError::CustomWithStatus(
             format!("Error calculating supply: {}", e),
@@ -64,7 +64,7 @@ fn get_latest_block(state: &ApiState) -> Result<IrysBlockHeader> {
         .ok_or_else(|| eyre!("Block header not found for tip in tree or database"))
 }
 
-fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse> {
+fn calculate_supply(state: &ApiState) -> Result<SupplyResponse> {
     let block_height = get_latest_block(state)?.height;
 
     let config = &state.config.consensus;
@@ -77,20 +77,15 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
             acc + U256::from_le_bytes(account.balance.to_le_bytes())
         });
 
-    let (emitted_amount, calculation_method) = if use_exact {
-        if let Some(supply_state) = &state.supply_state {
-            if !supply_state.is_ready() {
-                return Err(eyre!(
-                    "Supply state is recalculating (backfill in progress during node startup). \
-                    Retry later or use exact=false for estimated supply."
-                ));
-            }
-            (supply_state.get().cumulative_emitted, "actual")
+    // Use actual supply if available, otherwise fall back to estimated
+    let (emitted_amount, calculation_method) = if let Some(supply_state) = &state.supply_state {
+        if supply_state.is_ready() {
+            (
+                supply_state.get().cumulative_emitted,
+                CalculationMethod::Actual,
+            )
         } else {
-            return Err(eyre!(
-                "Supply state not available (node may still be initializing). \
-                Retry later or use exact=false for estimated supply."
-            ));
+            calculate_estimated_emission(config, block_height)?
         }
     } else {
         calculate_estimated_emission(config, block_height)?
@@ -108,14 +103,14 @@ fn calculate_supply(state: &ApiState, use_exact: bool) -> Result<SupplyResponse>
             emitted_amount,
             config.block_reward_config.inflation_cap.amount,
         ),
-        calculation_method: calculation_method.to_string(),
+        calculation_method,
     })
 }
 
 fn calculate_estimated_emission(
     config: &irys_types::ConsensusConfig,
     block_height: u64,
-) -> Result<(U256, &'static str)> {
+) -> Result<(U256, CalculationMethod)> {
     let curve = HalvingCurve {
         inflation_cap: config.block_reward_config.inflation_cap,
         half_life_secs: config.block_reward_config.half_life_secs as u128,
@@ -127,7 +122,7 @@ fn calculate_estimated_emission(
         .ok_or_else(|| eyre!("Block height overflow in time calculation"))?;
 
     let emitted = curve.reward_between(0, simulated_time_seconds)?;
-    Ok((emitted.amount, "estimated"))
+    Ok((emitted.amount, CalculationMethod::Estimated))
 }
 
 fn calculate_inflation_progress(emitted: U256, cap: U256) -> String {
@@ -169,7 +164,7 @@ mod tests {
         let config = ConsensusConfig::testing();
         let (emitted, method) = calculate_estimated_emission(&config, 0).unwrap();
         assert_eq!(emitted, U256::zero());
-        assert_eq!(method, "estimated");
+        assert_eq!(method, CalculationMethod::Estimated);
     }
 
     proptest! {
@@ -202,7 +197,7 @@ mod tests {
         fn emission_method_always_estimated(height in 0_u64..1_000_000_u64) {
             let config = ConsensusConfig::testing();
             let (_, method) = calculate_estimated_emission(&config, height).unwrap();
-            prop_assert_eq!(method, "estimated");
+            prop_assert_eq!(method, CalculationMethod::Estimated);
         }
     }
 }

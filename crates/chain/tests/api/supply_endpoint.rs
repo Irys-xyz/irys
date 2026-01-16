@@ -1,7 +1,7 @@
 //! Supply endpoint integration tests
 
 use crate::utils::IrysNodeTest;
-use irys_api_server::routes::supply::SupplyResponse;
+use irys_api_server::routes::supply::{CalculationMethod, SupplyResponse};
 use irys_chain::IrysNodeCtx;
 use irys_types::{NodeConfig, U256};
 use std::time::Duration;
@@ -9,7 +9,6 @@ use tokio::time::sleep;
 
 const BLOCKS_FOR_ESTIMATED_TEST: usize = 25;
 const BLOCKS_FOR_MIGRATION_TEST: usize = 30;
-const BLOCKS_FOR_PARAM_VALIDATION_TEST: usize = 10;
 
 struct ParsedSupplyAmounts {
     total: U256,
@@ -140,13 +139,21 @@ fn validate_supply_invariants(
     Ok(())
 }
 
-/// Tests the supply endpoint with default (estimated) calculation
+/// Tests the supply endpoint returns valid supply data (actual or estimated based on readiness)
 #[test_log::test(tokio::test)]
-async fn test_supply_endpoint_estimated() -> eyre::Result<()> {
+async fn test_supply_endpoint_returns_valid_supply() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node().await;
     ctx.mine_blocks(BLOCKS_FOR_ESTIMATED_TEST).await?;
 
     let supply = fetch_supply(&client, &format!("{}/v1/supply", address)).await?;
+
+    // Should return either Actual or Estimated depending on supply state readiness
+    assert!(
+        supply.calculation_method == CalculationMethod::Actual
+            || supply.calculation_method == CalculationMethod::Estimated,
+        "Calculation method should be Actual or Estimated, got '{:?}'",
+        supply.calculation_method
+    );
 
     validate_supply_invariants(&ctx, &supply)?;
 
@@ -154,9 +161,9 @@ async fn test_supply_endpoint_estimated() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verifies exact supply calculation after block migration/pruning.
+/// Verifies actual supply calculation after block migration/pruning.
 #[test_log::test(tokio::test)]
-async fn test_supply_endpoint_exact() -> eyre::Result<()> {
+async fn test_supply_endpoint_actual() -> eyre::Result<()> {
     let (ctx, client, address) = setup_test_node_with_small_tree().await;
 
     // Mine blocks (6x block_tree_depth) - with block_tree_depth=5, this ensures
@@ -164,11 +171,12 @@ async fn test_supply_endpoint_exact() -> eyre::Result<()> {
     let num_blocks_to_mine = BLOCKS_FOR_MIGRATION_TEST;
     setup_with_migrated_blocks(&ctx, num_blocks_to_mine).await?;
 
-    let supply = fetch_supply(&client, &format!("{}/v1/supply?exact=true", address)).await?;
+    let supply = fetch_supply(&client, &format!("{}/v1/supply", address)).await?;
 
     assert_eq!(
-        supply.calculation_method, "actual",
-        "Should use actual calculation method"
+        supply.calculation_method,
+        CalculationMethod::Actual,
+        "Should use actual calculation method when supply state is ready"
     );
     assert!(
         supply.block_height >= num_blocks_to_mine as u64,
@@ -185,32 +193,6 @@ async fn test_supply_endpoint_exact() -> eyre::Result<()> {
         "Emitted supply should be positive after mining {} blocks",
         num_blocks_to_mine
     );
-
-    ctx.stop().await;
-    Ok(())
-}
-
-/// Tests supply endpoint handles invalid query parameters gracefully
-#[test_log::test(tokio::test)]
-async fn test_supply_endpoint_invalid_params() -> eyre::Result<()> {
-    let (ctx, client, address) = setup_test_node().await;
-    setup_with_migrated_blocks(&ctx, BLOCKS_FOR_PARAM_VALIDATION_TEST).await?;
-
-    let response = client
-        .get(format!("{}/v1/supply?exact=invalid", address))
-        .send()
-        .await?;
-
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-
-    let response_false = client
-        .get(format!("{}/v1/supply?exact=false", address))
-        .send()
-        .await?;
-
-    assert_eq!(response_false.status(), reqwest::StatusCode::OK);
-    let supply_info = response_false.json::<SupplyResponse>().await?;
-    assert_eq!(supply_info.calculation_method, "estimated");
 
     ctx.stop().await;
     Ok(())
