@@ -565,7 +565,8 @@ pub fn prune_ledger_range<T: DbTxMut, U: RangeBounds<BlockHeight>>(
     let mut cursor = tx.cursor_write::<IrysBlockIndexItems>()?;
     let mut range_walker = cursor.walk_range(range)?;
 
-    while let Some(Ok((_height, item))) = range_walker.next() {
+    while let Some(result) = range_walker.next() {
+        let (_height, item) = result?;
         if item.ledger == ledger {
             range_walker.delete_current()?;
         }
