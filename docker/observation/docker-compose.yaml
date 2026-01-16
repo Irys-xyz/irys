@@ -42,11 +42,11 @@ services:
       elasticsearch:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
-      interval: 10s
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   # Tempo - Spans/tracing
   tempo:
@@ -134,9 +134,11 @@ services:
         ipv4_address: 172.23.0.106
     volumes:
       - ./scripts/setup_elasticsearch_ilm.sh:/setup_elasticsearch_ilm.sh:ro
+      - ./configs/elasticsearch:/configs:ro
     environment:
       - ES_HOST=http://elasticsearch:9200
       - RETENTION_DAYS=${LOG_RETENTION_DAYS:-7}
+      - ES_REPLICAS=${ES_REPLICAS:-0}
     entrypoint: ["/bin/sh", "/setup_elasticsearch_ilm.sh"]
     depends_on:
       elasticsearch:

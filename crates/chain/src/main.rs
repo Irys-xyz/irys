@@ -9,7 +9,7 @@ use tracing_subscriber::{
 };
 
 #[cfg(feature = "telemetry")]
-use irys_utils::telemetry;
+use irys_utils::init_telemetry;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -33,7 +33,7 @@ async fn main() -> eyre::Result<()> {
             || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
 
         if telemetry_enabled {
-            telemetry::init_telemetry()?;
+            init_telemetry()?;
             info!("Telemetry enabled, OpenTelemetry initialized");
         } else {
             init_tracing().expect("initializing tracing should work");

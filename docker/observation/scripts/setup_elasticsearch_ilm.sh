@@ -1,18 +1,20 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
 # Setup Elasticsearch ILM policy for configurable log retention
-set -euo pipefail
+set -eu
 
 ES_HOST="${ES_HOST:-http://elasticsearch:9200}"
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
 # Replica count: 0 for single-node/dev, increase for multi-node production clusters
 ES_REPLICAS="${ES_REPLICAS:-0}"
+CONFIG_DIR="${CONFIG_DIR:-/configs}"
 MAX_RETRIES=30
 RETRY_INTERVAL=5
 
 echo "Configuring Elasticsearch with ${RETENTION_DAYS}-day retention, ${ES_REPLICAS} replica(s)..."
 
 echo "Waiting for Elasticsearch to be ready..."
-for i in $(seq 1 "$MAX_RETRIES"); do
+i=1
+while [ "$i" -le "$MAX_RETRIES" ]; do
     if curl -s "$ES_HOST/_cluster/health" | grep -q '"status":"green"\|"status":"yellow"'; then
         echo "Elasticsearch is ready"
         break
@@ -23,63 +25,31 @@ for i in $(seq 1 "$MAX_RETRIES"); do
     fi
     echo "Waiting for Elasticsearch... ($i/$MAX_RETRIES)"
     sleep "$RETRY_INTERVAL"
+    i=$((i + 1))
 done
 
 # Create ILM policy with configurable retention
-echo "Creating ILM policy 'logs-${RETENTION_DAYS}d-retention'..."
-curl -s -X PUT "$ES_HOST/_ilm/policy/logs-retention" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"policy\": {
-      \"phases\": {
-        \"hot\": {
-          \"min_age\": \"0ms\",
-          \"actions\": {
-            \"rollover\": {
-              \"max_age\": \"1d\",
-              \"max_primary_shard_size\": \"10gb\"
-            }
-          }
-        },
-        \"delete\": {
-          \"min_age\": \"${RETENTION_DAYS}d\",
-          \"actions\": {
-            \"delete\": {}
-          }
-        }
-      }
-    }
-  }"
+echo "Creating ILM policy 'logs-retention'..."
+sed "s/\${RETENTION_DAYS}/$RETENTION_DAYS/g" "$CONFIG_DIR/ilm-policy.json" | \
+  curl -s -X PUT "$ES_HOST/_ilm/policy/logs-retention" \
+    -H 'Content-Type: application/json' \
+    -d @-
 echo ""
 
 # Create index template that applies the ILM policy to Irys logs indices
 echo "Creating index template 'irys-logs-template'..."
-curl -s -X PUT "$ES_HOST/_index_template/irys-logs-template" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"index_patterns\": [\"irys-logs*\"],
-    \"template\": {
-      \"settings\": {
-        \"index.lifecycle.name\": \"logs-retention\",
-        \"number_of_shards\": 1,
-        \"number_of_replicas\": ${ES_REPLICAS}
-      }
-    },
-    \"priority\": 200
-  }"
+sed "s/\${ES_REPLICAS}/$ES_REPLICAS/g" "$CONFIG_DIR/index-template.json" | \
+  curl -s -X PUT "$ES_HOST/_index_template/irys-logs-template" \
+    -H 'Content-Type: application/json' \
+    -d @-
 echo ""
 
 # Create the initial irys-logs index
 echo "Creating initial 'irys-logs' index..."
-response=$(curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs" \
-  -H 'Content-Type: application/json' \
-  -d "{
-    \"settings\": {
-      \"index.lifecycle.name\": \"logs-retention\",
-      \"number_of_shards\": 1,
-      \"number_of_replicas\": ${ES_REPLICAS}
-    }
-  }")
+response=$(sed "s/\${ES_REPLICAS}/$ES_REPLICAS/g" "$CONFIG_DIR/index-settings.json" | \
+  curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs" \
+    -H 'Content-Type: application/json' \
+    -d @-)
 http_code=$(echo "$response" | tail -n1)
 body=$(echo "$response" | sed '$d')
 if [ "$http_code" -eq 200 ]; then
