@@ -62,33 +62,24 @@ pub enum CommitmentValidationError {
 
 // Wrapper struct to hold transaction + metadata
 // This is a transparent wrapper that delegates serde to the inner transaction
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Arbitrary, Compact)]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Arbitrary,
+    Compact,
+    Serialize,
+    Deserialize,
+)]
 pub struct DataTransactionHeaderV1WithMetadata {
+    #[serde(flatten)]
     pub tx: DataTransactionHeaderV1,
+    #[serde(skip)]
     pub metadata: TransactionMetadata,
-}
-
-impl serde::Serialize for DataTransactionHeaderV1WithMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // Only serialize the transaction, not metadata
-        self.tx.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for DataTransactionHeaderV1WithMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let tx = DataTransactionHeaderV1::deserialize(deserializer)?;
-        Ok(Self {
-            tx,
-            metadata: TransactionMetadata::new(),
-        })
-    }
 }
 
 #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]

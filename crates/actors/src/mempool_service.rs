@@ -2266,10 +2266,21 @@ impl AtomicMempoolState {
             .valid_submit_ledger_tx
             .entry(tx.id)
             .and_modify(|existing| {
-                // Preserve the metadata when updating
-                let metadata = existing.metadata().clone();
+                // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
+                let existing_metadata = existing.metadata().clone();
+                let incoming_metadata = tx.metadata().clone();
+
+                let merged_metadata = TransactionMetadata {
+                    included_height: incoming_metadata
+                        .included_height
+                        .or(existing_metadata.included_height),
+                    promoted_height: incoming_metadata
+                        .promoted_height
+                        .or(existing_metadata.promoted_height),
+                };
+
                 *existing = tx;
-                existing.set_metadata(metadata);
+                existing.set_metadata(merged_metadata);
             });
     }
 

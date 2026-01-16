@@ -482,12 +482,22 @@ impl Inner {
 
         // Clear included_height for orphaned commitment transactions before resubmitting
         for id in orphaned_commitment_tx_ids.iter() {
+            // Clear in-memory mempool state
             if self
                 .mempool_state
                 .clear_commitment_tx_included_height(*id)
                 .await
             {
-                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx");
+                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
+            }
+
+            // Also clear the persisted included_height in the database
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::clear_tx_included_height(tx, id).map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                tracing::warn!(tx.id = %id, error = %e, "Failed to clear included_height in DB for orphaned commitment tx");
+            } else {
+                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in DB");
             }
         }
 

@@ -14,6 +14,7 @@ pub use crate::{
 
 use alloy_rlp::Encodable as _;
 use irys_macros_integer_tagged::IntegerTagged;
+use serde::{Deserialize, Serialize};
 
 #[derive(
     PartialEq,
@@ -64,62 +65,20 @@ impl TryFrom<u8> for CommitmentStatus {
 
 // Wrapper structs to hold transaction + metadata for each version
 // These are transparent wrappers that delegate serde to the inner transaction
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary, Serialize, Deserialize)]
 pub struct CommitmentV1WithMetadata {
+    #[serde(flatten)]
     pub tx: CommitmentTransactionV1,
+    #[serde(skip)]
     pub metadata: TransactionMetadata,
 }
 
-impl serde::Serialize for CommitmentV1WithMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // Only serialize the transaction, not metadata
-        self.tx.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for CommitmentV1WithMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let tx = CommitmentTransactionV1::deserialize(deserializer)?;
-        Ok(Self {
-            tx,
-            metadata: TransactionMetadata::new(),
-        })
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary, Serialize, Deserialize)]
 pub struct CommitmentV2WithMetadata {
+    #[serde(flatten)]
     pub tx: CommitmentTransactionV2,
+    #[serde(skip)]
     pub metadata: TransactionMetadata,
-}
-
-impl serde::Serialize for CommitmentV2WithMetadata {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        // Only serialize the transaction, not metadata
-        self.tx.serialize(serializer)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for CommitmentV2WithMetadata {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let tx = CommitmentTransactionV2::deserialize(deserializer)?;
-        Ok(Self {
-            tx,
-            metadata: TransactionMetadata::new(),
-        })
-    }
 }
 
 // Commitment Transaction versioned wrapper with metadata
