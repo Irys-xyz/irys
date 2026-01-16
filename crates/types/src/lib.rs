@@ -8,6 +8,7 @@ pub mod block;
 pub mod block_production;
 pub mod chainspec;
 pub mod chunk;
+pub mod chunk_provider;
 pub mod chunked;
 pub mod commitment_common;
 pub mod commitment_v1;

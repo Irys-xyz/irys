@@ -1,4 +1,4 @@
-use crate::hardfork_config::{FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{FrontierParams, IrysHardforkConfig, Sprite};
 use crate::serde_utils;
 use crate::{
     storage_pricing::{
@@ -8,7 +8,7 @@ use crate::{
         },
         Amount,
     },
-    IrysAddress, H256,
+    IrysAddress, UnixTimestamp, H256,
 };
 use alloy_core::hex::FromHex as _;
 use alloy_eips::eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M;
@@ -594,6 +594,7 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None,
+                sprite: None,
                 aurora: None,
             },
         }
@@ -626,6 +627,19 @@ impl ConsensusConfig {
             num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             difficulty_adjustment,
             vdf,
+            // Enable Sprite hardfork from genesis for testing
+            hardforks: IrysHardforkConfig {
+                frontier: base.hardforks.frontier.clone(),
+                next_name_tbd: base.hardforks.next_name_tbd.clone(),
+                sprite: Some(Sprite {
+                    activation_timestamp: UnixTimestamp::from_secs(0), // Active from genesis for tests
+                    cost_per_mb: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD per MB
+                    base_fee_floor: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD floor
+                    max_pd_chunks_per_block: 7_500,
+                    min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
+                }),
+                aurora: None,
+            },
             ..base
         }
     }
@@ -742,6 +756,7 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 next_name_tbd: None,
+                sprite: None,
                 aurora: None,
             },
         }

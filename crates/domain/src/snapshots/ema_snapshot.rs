@@ -136,21 +136,16 @@ impl EmaSnapshot {
         let crossing_interval_boundary =
             new_block.height.is_multiple_of(blocks_in_interval) && new_block.height > 0;
 
-        // Update the interval tracking
-        let (ema_price_2_intervals_ago, ema_price_1_interval_ago) = if crossing_interval_boundary {
-            // Shift the intervals:
-            // - What was 1 interval ago becomes 2 intervals ago
-            // - What was the last interval becomes 1 interval ago
-            (
-                self.ema_price_1_interval_ago,
-                self.ema_price_current_interval,
-            )
+        let ema_price_2_intervals_ago =
+            self.calculate_public_pricing_ema_for_height(new_block.height, blocks_in_interval);
+
+        // Calculate ema_price_1_interval_ago
+        let ema_price_1_interval_ago = if crossing_interval_boundary {
+            // Shift: what was current becomes 1 interval ago
+            self.ema_price_current_interval
         } else {
-            // Keep the same interval tracking
-            (
-                self.ema_price_2_intervals_ago,
-                self.ema_price_1_interval_ago,
-            )
+            // Keep the same
+            self.ema_price_1_interval_ago
         };
 
         // Update oracle_price_for_ema_predecessor and ema_price_last_interval when we hit an EMA recalculation block
@@ -262,6 +257,25 @@ impl EmaSnapshot {
     /// Get the EMA price that should be used for public pricing.
     pub fn ema_for_public_pricing(&self) -> IrysTokenPrice {
         self.ema_price_2_intervals_ago
+    }
+
+    /// Calculate what ema_price_2_intervals_ago will be for a new block at the given height.
+    pub fn calculate_public_pricing_ema_for_height(
+        &self,
+        new_block_height: u64,
+        blocks_in_interval: u64,
+    ) -> IrysTokenPrice {
+        let crossing_interval_boundary =
+            new_block_height.is_multiple_of(blocks_in_interval) && new_block_height > 0;
+
+        if crossing_interval_boundary {
+            // At interval boundary: shift intervals forward
+            // What was 1 interval ago becomes the new public pricing EMA
+            self.ema_price_1_interval_ago
+        } else {
+            // Not at boundary: pricing EMA stays the same
+            self.ema_price_2_intervals_ago
+        }
     }
 
     // NON CANONICAL HASH
