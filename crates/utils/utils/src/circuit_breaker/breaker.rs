@@ -42,7 +42,7 @@ impl CircuitBreaker {
     #[inline]
     pub(super) fn record_failure(&self) {
         let now_nanos = get_current_time_nanos();
-        let current_state = CircuitState::from(self.state.load(Ordering::Acquire));
+        let current_state = CircuitState::from_u8_failsafe(self.state.load(Ordering::Acquire));
 
         if current_state == CircuitState::HalfOpen {
             self.half_open_trial_count.store(0, Ordering::Relaxed);
@@ -114,7 +114,7 @@ impl CircuitBreaker {
         self.last_access_time_nanos
             .store(now_nanos, Ordering::Relaxed);
 
-        let current_state = CircuitState::from(self.state.load(Ordering::Acquire));
+        let current_state = CircuitState::from_u8_failsafe(self.state.load(Ordering::Acquire));
 
         match current_state {
             CircuitState::Closed => true,
@@ -133,7 +133,7 @@ impl CircuitBreaker {
 
     #[inline]
     pub(super) fn state(&self) -> CircuitState {
-        CircuitState::from(self.state.load(Ordering::Acquire))
+        CircuitState::from_u8_failsafe(self.state.load(Ordering::Acquire))
     }
 
     #[cfg(test)]
