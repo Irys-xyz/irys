@@ -5,7 +5,7 @@ IFS=$'\n\t'
 # =========================
 # Config (overridable via env)
 # =========================
-GENESIS_URL="${GENESIS_URL:-http://172.21.0.2:8080}"
+GENESIS_URL="${GENESIS_URL:-http://172.23.0.2:8080}"
 LOCAL_URL="${LOCAL_URL:-http://localhost:8080}"
 INFO_PATH="${INFO_PATH:-/v1/info}"
 GENESIS_PATH="${GENESIS_PATH:-/v1/genesis}"

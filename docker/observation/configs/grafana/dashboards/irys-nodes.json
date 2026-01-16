@@ -1,0 +1,448 @@
+{
+  "title": "Irys Nodes",
+  "uid": "irys-nodes",
+  "tags": ["irys", "nodes", "monitoring"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "node",
+        "label": "Node",
+        "type": "query",
+        "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+        "query": "{\"find\": \"terms\", \"field\": \"resource.attributes.service.name\", \"query\": \"resource.attributes.service.name: irys-node*\"}",
+        "refresh": 2,
+        "includeAll": true,
+        "allValue": "irys-node*",
+        "multi": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "options": [],
+        "sort": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Error Count (1h)",
+      "gridPos": { "x": 0, "y": 1, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND severity_text: ERROR",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Panic Count (1h)",
+      "gridPos": { "x": 6, "y": 1, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND body.text: panic",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Restarts (1h)",
+      "gridPos": { "x": 12, "y": 1, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND body.text: \"starting the node\"",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Deadlocks (1h)",
+      "gridPos": { "x": 18, "y": 1, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND body.text: deadlock",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": ["sum"],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors Over Time",
+      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND severity_text: ERROR",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            { "type": "terms", "field": "resource.attributes.service.name", "id": "3", "settings": { "size": "10", "order": "desc", "orderBy": "_count", "min_doc_count": "1" } },
+            { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }
+          ],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" }
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Log Volume",
+      "gridPos": { "x": 12, "y": 5, "w": 12, "h": 6 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node",
+          "metrics": [{ "type": "count", "id": "1" }],
+          "bucketAggs": [
+            { "type": "terms", "field": "resource.attributes.service.name", "id": "3", "settings": { "size": "10", "order": "desc", "orderBy": "_count", "min_doc_count": "1" } },
+            { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }
+          ],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Block Activity",
+      "gridPos": { "x": 0, "y": 11, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Block Tips (mark_tip / add_block)",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND body.text: (mark_tip OR add_block)",
+          "metrics": [{ "type": "raw_data", "id": "1", "settings": { "size": "100" } }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "body" },
+            "properties": [{ "id": "custom.width", "value": 500 }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "TraceId": true,
+              "SpanId": true,
+              "TraceFlags": true,
+              "SeverityNumber": true,
+              "ObservedTimestamp": true,
+              "highlight": true,
+              "sort": true
+            },
+            "indexByName": {
+              "@timestamp": 0,
+              "resource.attributes.service.name": 1,
+              "scope.name": 2,
+              "body.text": 3
+            },
+            "renameByName": {
+              "@timestamp": "_time",
+              "resource.attributes.service.name": "service.name",
+              "scope.name": "scope.name",
+              "body.text": "body"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Errors & Issues",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Error Messages",
+      "gridPos": { "x": 0, "y": 21, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node AND severity_text: ERROR",
+          "metrics": [{ "type": "raw_data", "id": "1", "settings": { "size": "100" } }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "body" },
+            "properties": [{ "id": "custom.width", "value": 600 }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "TraceId": true,
+              "SpanId": true,
+              "TraceFlags": true,
+              "SeverityNumber": true,
+              "ObservedTimestamp": true,
+              "highlight": true,
+              "sort": true
+            },
+            "indexByName": {
+              "@timestamp": 0,
+              "resource.attributes.service.name": 1,
+              "scope.name": 2,
+              "body.text": 3
+            },
+            "renameByName": {
+              "@timestamp": "_time",
+              "resource.attributes.service.name": "service.name",
+              "scope.name": "scope.name",
+              "body.text": "body"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "All Logs",
+      "gridPos": { "x": 0, "y": 29, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "All Logs (Live)",
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 10 },
+      "targets": [
+        {
+          "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
+          "query": "resource.attributes.service.name: $node",
+          "metrics": [{ "type": "raw_data", "id": "1", "settings": { "size": "100" } }],
+          "timeField": "@timestamp",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "body" },
+            "properties": [{ "id": "custom.width", "value": 600 }]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": { "show": false }
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "TraceId": true,
+              "SpanId": true,
+              "TraceFlags": true,
+              "SeverityNumber": true,
+              "ObservedTimestamp": true,
+              "highlight": true,
+              "sort": true
+            },
+            "indexByName": {
+              "@timestamp": 0,
+              "resource.attributes.service.name": 1,
+              "scope.name": 2,
+              "body.text": 3
+            },
+            "renameByName": {
+              "@timestamp": "_time",
+              "resource.attributes.service.name": "service.name",
+              "scope.name": "scope.name",
+              "body.text": "body"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
