@@ -277,26 +277,7 @@ pub async fn get_tx_promotion_status(
     let tx_id: H256 = path.into_inner();
     debug!("Get tx_is_promoted by tx_id: {}", tx_id);
 
-    // Retrieve the transaction header from mempool or database
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    state
-        .mempool_service
-        .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
-        .unwrap();
-
-    let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
-        err: "Unable to read result from oneshot".to_owned(),
-    })?;
-
-    let tx_header = oneshot_res
-        .first()
-        .and_then(|opt| opt.as_ref())
-        .ok_or_else(|| ApiError::ErrNoId {
-            id: tx_id.to_string(),
-            err: "Unable to find tx".to_owned(),
-        })?;
-
-    // Prefer DB metadata as the source of truth; fall back to mempool header for older state.
+    // DB metadata is authoritative; fetch it first
     let db_metadata = state
         .db
         .view_eyre(|db_tx| {
@@ -306,10 +287,34 @@ pub async fn get_tx_promotion_status(
             err: format!("Database error: {}", e),
         })?;
 
+    let promotion_height = if let Some(metadata) = db_metadata {
+        // DB metadata exists - use it unconditionally
+        metadata.promoted_height
+    } else {
+        // No DB metadata - fall back to mempool header
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        state
+            .mempool_service
+            .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
+            .unwrap();
+
+        let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
+            err: "Unable to read result from oneshot".to_owned(),
+        })?;
+
+        let tx_header = oneshot_res
+            .first()
+            .and_then(|opt| opt.as_ref())
+            .ok_or_else(|| ApiError::ErrNoId {
+                id: tx_id.to_string(),
+                err: "Unable to find tx".to_owned(),
+            })?;
+
+        tx_header.promoted_height()
+    };
+
     Ok(web::Json(PromotionStatus {
-        promotion_height: db_metadata
-            .and_then(|m| m.promoted_height)
-            .or(tx_header.promoted_height()),
+        promotion_height,
     }))
 }
 
