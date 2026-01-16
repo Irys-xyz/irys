@@ -490,7 +490,7 @@ pub fn insert_block_index_items_for_block<T: DbTxMut>(
 
     for data_ledger in block.data_ledgers.iter() {
         // Create a LedgerIndexItem for each data ledger in the block
-        let ledger_enum = DataLedger::try_from(data_ledger.ledger_id).unwrap();
+        let ledger_enum = DataLedger::try_from(data_ledger.ledger_id)?;
         let ledger_index_item = LedgerIndexItem {
             total_chunks: data_ledger.total_chunks,
             tx_root: data_ledger.tx_root,
@@ -525,7 +525,9 @@ pub fn block_index_item_by_height<T: DbTx>(
         walker.collect::<Result<Vec<_>, DatabaseError>>()?;
 
     // Step 2: Retrieve the block_hash
-    let block_hash = tx.get::<MigratedBlockHashes>(*height)?.unwrap();
+    let block_hash = tx
+        .get::<MigratedBlockHashes>(*height)?
+        .ok_or_else(|| eyre::eyre!("No block hash found at height {}", height))?;
 
     // Step 3: Transform the CompactLedgerIndexItems into a single BlockIndexItem.
     // This transformation is necessary because:
