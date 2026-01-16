@@ -10,6 +10,7 @@ pub mod peer_events;
 pub mod peer_list;
 pub mod reth_provider;
 pub mod storage_module;
+pub mod supply_state;
 
 pub use block_index::*;
 pub use block_tree::*;
@@ -21,3 +22,4 @@ pub use peer_events::*;
 pub use peer_list::*;
 pub use reth_provider::*;
 pub use storage_module::*;
+pub use supply_state::*;

@@ -19,6 +19,7 @@ dashmap.workspace = true
 nodit.workspace = true
 priority-queue.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 lru.workspace = true
 reth-db.workspace = true
 eyre.workspace = true
