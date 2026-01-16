@@ -314,9 +314,15 @@ pub fn init_telemetry() -> Result<()> {
 ///
 /// This is a blocking call. When using tokio, call from `spawn_blocking`.
 ///
-/// # Errors
+/// # Returns
 ///
-/// Returns `Ok(true)` if any provider was flushed, `Ok(false)` if none were initialized.
+/// - `Ok(true)` - At least one provider (logger, tracer, or meter) flushed successfully
+/// - `Ok(false)` - No providers were flushed. This occurs when either:
+///   - No providers were initialized (telemetry was never started)
+///   - All initialized providers failed to flush (errors are printed to stderr)
+///
+/// Individual flush failures are logged to stderr but do not cause the function
+/// to return an error, allowing remaining providers to attempt flushing.
 #[must_use = "flush result indicates whether telemetry was exported"]
 #[cfg(feature = "telemetry")]
 pub fn flush_telemetry() -> Result<bool> {
