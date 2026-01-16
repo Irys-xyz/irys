@@ -476,6 +476,17 @@ impl Inner {
             "Should always be able to get all orphaned commitment transactions"
         );
 
+        // Clear included_height for orphaned commitment transactions before resubmitting
+        for id in orphaned_commitment_tx_ids.iter() {
+            if self
+                .mempool_state
+                .clear_commitment_tx_included_height(*id)
+                .await
+            {
+                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx");
+            }
+        }
+
         // resubmit each commitment tx
         for (id, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
             if let Err(e) = self
@@ -598,6 +609,17 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
+        // Clear included_height for orphaned submit transactions
+        for tx_id in submit_txs.iter().copied() {
+            if self
+                .mempool_state
+                .clear_data_tx_included_height(tx_id)
+                .await
+            {
+                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned submit tx");
+            }
+        }
+
         // these txs should be present in the database, as they're part of the (technically sort of still current) chain
         let full_orphaned_submit_txs = self.handle_get_data_tx_message(submit_txs.clone()).await;
 
@@ -627,6 +649,17 @@ impl Inner {
             .get(&DataLedger::Publish)
             .cloned()
             .unwrap_or_default();
+
+        // Clear included_height for orphaned publish transactions
+        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
+            if self
+                .mempool_state
+                .clear_data_tx_included_height(tx_id)
+                .await
+            {
+                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
+            }
+        }
 
         // these txs have been confirmed, but NOT migrated
         for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
