@@ -2091,7 +2091,7 @@ impl AtomicMempoolState {
     /// Returns true if the transaction was found and updated
     pub async fn set_commitment_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
         let mut state = self.write().await;
-        
+
         // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
@@ -2099,7 +2099,7 @@ impl AtomicMempoolState {
                 return true;
             }
         }
-        
+
         // Check pending pledges
         for (_, pledges_cache) in state.pending_pledges.iter_mut() {
             if let Some(tx) = pledges_cache.get_mut(&tx_id) {
@@ -2107,7 +2107,7 @@ impl AtomicMempoolState {
                 return true;
             }
         }
-        
+
         false
     }
 
@@ -2115,7 +2115,7 @@ impl AtomicMempoolState {
     /// Returns true if the transaction was found and the height was cleared
     pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
-        
+
         // Check valid commitment transactions
         for txs in state.valid_commitment_tx.values_mut() {
             if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
@@ -2123,7 +2123,7 @@ impl AtomicMempoolState {
                 return true;
             }
         }
-        
+
         // Check pending pledges
         for (_, pledges_cache) in state.pending_pledges.iter_mut() {
             if let Some(tx) = pledges_cache.get_mut(&tx_id) {
@@ -2131,7 +2131,7 @@ impl AtomicMempoolState {
                 return true;
             }
         }
-        
+
         false
     }
 
