@@ -1,5 +1,5 @@
 use irys_database::{
-    block_index_item_by_height, db::IrysDatabaseExt, insert_block_index_items_for_block,
+    block_index_item_by_height, db::IrysDatabaseExt as _, insert_block_index_items_for_block,
     open_or_create_db, prune_ledger_range, tables::IrysTables,
 };
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;

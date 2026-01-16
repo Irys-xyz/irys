@@ -885,8 +885,12 @@ impl PartialEq<DataLedger> for u32 {
 
 impl Decode for DataLedger {
     fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
-        // Decode bytes to u32 (assuming little-endian)
-        let id = u32::from_le_bytes(value.try_into().map_err(|_| DatabaseError::Decode)?);
+        if value.len() != 4 {
+            return Err(DatabaseError::Decode);
+        }
+
+        // Decode bytes to u32 (big-endian for consistent database key ordering)
+        let id = u32::from_be_bytes(value.try_into().map_err(|_| DatabaseError::Decode)?);
 
         // Convert u32 to DataLedger
         Self::from_u32(id).ok_or(DatabaseError::Decode)
@@ -897,7 +901,7 @@ impl Encode for DataLedger {
     type Encoded = [u8; 4]; // u32 is 4 bytes
 
     fn encode(self) -> Self::Encoded {
-        self.get_id().to_le_bytes()
+        self.get_id().to_be_bytes()
     }
 }
 
