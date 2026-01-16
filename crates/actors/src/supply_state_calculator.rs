@@ -8,6 +8,12 @@ use tracing::{debug, info, warn};
 
 const WAIT_POLL_INTERVAL_MS: u64 = 100;
 
+/// Waits for the first block migration to set `first_migration_height`.
+///
+/// We use this rather than block_index to determine backfill range because the migrate_block
+/// method updated the supply state.  Waiting for the first migrated block after restart allows us
+/// to be absolutely sure there isn't a mismatch or race condition between block migration and
+/// block index. This establishes a clear boundary between backfill (historical) and live tracking.
 async fn wait_for_first_migration(
     supply_state: &SupplyState,
     cancel: &CancellationToken,
