@@ -127,7 +127,7 @@
       "targets": [
         {
           "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
-          "query": "resource.attributes.service.name: $node AND body.text: *starting*node*",
+          "query": "resource.attributes.service.name: $node AND message: \"starting the node\"",
           "metrics": [{ "type": "count", "id": "1" }],
           "bucketAggs": [
             { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "1h", "min_doc_count": "0" } }
