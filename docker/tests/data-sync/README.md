@@ -24,9 +24,9 @@ This builds the debug image (`irys:debug`) which includes a shell required for t
 ```
 
 This starts a 3-node cluster:
-- **test-irys-1** (Genesis node): http://localhost:19080
-- **test-irys-2** (Peer node): http://localhost:19081
-- **test-irys-3** (Peer node): http://localhost:19082
+- **test-irys-1** (Genesis node): <http://localhost:19080>
+- **test-irys-2** (Peer node): <http://localhost:19081>
+- **test-irys-3** (Peer node): <http://localhost:19082>
 
 ### View logs
 

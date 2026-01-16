@@ -16,7 +16,7 @@ echo ""
 # Check if image exists
 if ! docker image inspect "$IMAGE_NAME" > /dev/null 2>&1; then
     echo "Image '$IMAGE_NAME' not found."
-    echo "Run ./build_image.sh first to build the image."
+    echo "Run ./build_release_image.sh first to build the image."
     exit 1
 fi
 
@@ -24,7 +24,7 @@ fi
 echo "Checking if containers are running..."
 containers_running=true
 for container in irys-1 irys-2; do
-    if ! docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
+    if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q "true"; then
         containers_running=false
         break
     fi

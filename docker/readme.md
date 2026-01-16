@@ -26,8 +26,8 @@ A 2-node cluster using the production distroless image.
 ```
 
 This starts:
-- **irys-1** (Genesis node): http://localhost:19080
-- **irys-2** (Peer node): http://localhost:19081
+- **irys-1** (Genesis node): <http://localhost:19080>
+- **irys-2** (Peer node): <http://localhost:19081>
 
 ### View logs
 
