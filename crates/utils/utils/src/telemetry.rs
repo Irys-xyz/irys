@@ -352,7 +352,7 @@ pub fn flush_telemetry() -> Result<bool> {
 #[must_use = "telemetry initialization result should be checked"]
 #[cfg(not(feature = "telemetry"))]
 pub fn init_telemetry() -> Result<()> {
-    tracing::warn!("Telemetry feature is not enabled, skipping OpenTelemetry initialization");
+    eprintln!("Telemetry feature is not enabled, skipping OpenTelemetry initialization");
     Ok(())
 }
 
