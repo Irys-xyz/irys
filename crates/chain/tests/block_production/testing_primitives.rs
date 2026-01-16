@@ -64,6 +64,9 @@ async fn heavy_test_mine_tx() {
         .get_storage_tx_header_from_mempool(&tx.header.id)
         .await
         .expect("expected storage tx to be found in mempool");
-    assert_eq!(tx_header, tx.header);
+    // Compare only the transaction ID since metadata (like included_height) will differ
+    assert_eq!(tx_header.id, tx.header.id);
+    // Verify the transaction was included in a block
+    assert!(tx_header.metadata().included_height.is_some());
     irys_node.stop().await;
 }

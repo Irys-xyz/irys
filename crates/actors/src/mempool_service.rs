@@ -48,8 +48,8 @@ use irys_types::{
         Amount,
     },
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, DataTxWithMetadata, IrysAddress, MempoolConfig, TransactionMetadata,
-    TxChunkOffset, UnpackedChunk,
+    DataTransactionHeader, IrysAddress, MempoolConfig, TransactionMetadata, TxChunkOffset,
+    UnpackedChunk,
 };
 use irys_types::{BlockHash, CommitmentTypeV1};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
@@ -1823,8 +1823,8 @@ impl AtomicMempoolState {
         let mempool_state_guard = self.read().await;
         let mut results = HashMap::with_capacity(data_tx_ids.len());
         for tx_id in data_tx_ids {
-            if let Some(wrapped_tx) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
-                results.insert(*tx_id, wrapped_tx.tx.clone());
+            if let Some(tx) = mempool_state_guard.valid_submit_ledger_tx.get(tx_id) {
+                results.insert(*tx_id, tx.clone());
             }
         }
         results
@@ -1937,7 +1937,7 @@ impl AtomicMempoolState {
             .await
             .valid_submit_ledger_tx
             .get(tx_id)
-            .map(|wrapped| wrapped.tx.clone())
+            .cloned()
     }
 
     pub async fn all_valid_submit_ledgers_cloned(&self) -> BTreeMap<H256, DataTransactionHeader> {
@@ -1945,7 +1945,7 @@ impl AtomicMempoolState {
             .await
             .valid_submit_ledger_tx
             .iter()
-            .map(|(id, wrapped)| (*id, wrapped.tx.clone()))
+            .map(|(id, tx)| (*id, tx.clone()))
             .collect()
     }
 
@@ -2064,24 +2064,19 @@ impl AtomicMempoolState {
     }
 
     /// Set included_height for a data transaction with optional overwrite
-    /// 
+    ///
     /// # Parameters
     /// - `tx_id`: Transaction ID to update
     /// - `height`: Block height to set
     /// - `overwrite`: If false, only sets height if currently None; if true, sets unconditionally
-    /// 
+    ///
     /// Returns true if the transaction was found and updated, false otherwise.
     /// Also updates the recent_valid_tx cache when the transaction is found.
-    pub async fn set_tx_included_height(
-        &self,
-        tx_id: H256,
-        height: u64,
-        overwrite: bool,
-    ) -> bool {
+    pub async fn set_tx_included_height(&self, tx_id: H256, height: u64, overwrite: bool) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            if overwrite || wrapped_tx.metadata.included_height.is_none() {
-                wrapped_tx.metadata.included_height = Some(height);
+            if overwrite || wrapped_tx.metadata().included_height.is_none() {
+                wrapped_tx.metadata_mut().included_height = Some(height);
                 tracing::debug!(
                     tx.id = %tx_id,
                     included_height = height,
@@ -2102,7 +2097,7 @@ impl AtomicMempoolState {
     pub async fn clear_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            wrapped_tx.clear_included_height();
+            wrapped_tx.metadata_mut().included_height = None;
             true
         } else {
             false
@@ -2218,12 +2213,8 @@ impl AtomicMempoolState {
         let mut state = self.write().await;
         state.recent_valid_tx.clear();
 
-        // Take the wrapped types and unwrap them
-        let data_txs = std::mem::take(&mut state.valid_submit_ledger_tx)
-            .into_iter()
-            .map(|(id, wrapped)| (id, wrapped.tx))
-            .collect();
-
+        // Return the transactions directly (they already contain metadata)
+        let data_txs = std::mem::take(&mut state.valid_submit_ledger_tx);
         let commitment_txs = std::mem::take(&mut state.valid_commitment_tx);
 
         (data_txs, commitment_txs)
@@ -2238,9 +2229,9 @@ impl AtomicMempoolState {
     pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TransactionMetadata> {
         let state = self.read().await;
 
-        // Check data transactions - metadata is in the wrapper
+        // Check data transactions - metadata is embedded
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get(tx_id) {
-            return Some(wrapped_tx.metadata.clone());
+            return Some(wrapped_tx.metadata().clone());
         }
 
         // Check commitment transactions - metadata is embedded
@@ -2274,8 +2265,11 @@ impl AtomicMempoolState {
             .await
             .valid_submit_ledger_tx
             .entry(tx.id)
-            .and_modify(|wrapped_tx| {
-                wrapped_tx.tx = tx;
+            .and_modify(|existing| {
+                // Preserve the metadata when updating
+                let metadata = existing.metadata().clone();
+                *existing = tx;
+                existing.set_metadata(metadata);
             });
     }
 
@@ -2283,7 +2277,13 @@ impl AtomicMempoolState {
         let mut cleared = false;
         let mut state = self.write().await;
         if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-            wrapped_header.promoted_height = None;
+            // Clear both old and new promoted_height fields until migration is complete
+            wrapped_header.metadata_mut().promoted_height = None;
+            match wrapped_header {
+                DataTransactionHeader::V1(wrapper) => {
+                    wrapper.tx.promoted_height = None;
+                }
+            }
             state.recent_valid_tx.put(txid, ());
             tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
             cleared = true;
@@ -2302,9 +2302,11 @@ impl AtomicMempoolState {
         let mut state = self.write().await;
         let wrapped_header = state.valid_submit_ledger_tx.get_mut(&txid)?;
         if wrapped_header.promoted_height.is_none() {
+            // Set both old and new promoted_height fields until migration is complete
             wrapped_header.promoted_height = Some(height);
+            wrapped_header.metadata_mut().promoted_height = Some(height);
         }
-        let result = wrapped_header.tx.clone();
+        let result = wrapped_header.clone();
         tracing::debug!(tx.id = %txid, promoted_height = height, "Set promoted_height in mempool");
         state.recent_valid_tx.put(txid, ());
         Some(result)
@@ -2323,7 +2325,7 @@ impl AtomicMempoolState {
     pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-            wrapped_header.metadata.included_height = None;
+            wrapped_header.metadata_mut().included_height = None;
             tracing::debug!(tx.id = %txid, "Cleared included_height in mempool");
             state.recent_valid_tx.put(txid, ());
             true
@@ -2557,7 +2559,7 @@ impl AtomicMempoolState {
 #[derive(Debug)]
 pub struct MempoolState {
     /// bounded map with manual capacity enforcement
-    pub valid_submit_ledger_tx: BTreeMap<H256, DataTxWithMetadata>,
+    pub valid_submit_ledger_tx: BTreeMap<H256, DataTransactionHeader>,
     pub max_submit_txs: usize,
     /// bounded map with manual capacity enforcement
     pub valid_commitment_tx: BTreeMap<IrysAddress, Vec<CommitmentTransaction>>,
@@ -2622,10 +2624,11 @@ impl MempoolState {
         // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
         // Preserve metadata when updating
         if let Entry::Occupied(mut entry) = self.valid_submit_ledger_tx.entry(tx.id) {
-            let old_metadata = entry.get().metadata.clone();
-            // Create new wrapper preserving the old metadata
-            let new_wrapped = DataTxWithMetadata::with_metadata(tx, old_metadata);
-            entry.insert(new_wrapped);
+            let old_metadata = entry.get().metadata().clone();
+            // Update the metadata on the new transaction
+            let mut new_tx = tx;
+            new_tx.set_metadata(old_metadata);
+            entry.insert(new_tx);
             return Ok(());
         }
 
@@ -2661,10 +2664,7 @@ impl MempoolState {
             }
         }
 
-        // Insert the new transaction (wrapped)
-        let wrapped_tx = DataTxWithMetadata::new(tx);
-        self.valid_submit_ledger_tx
-            .insert(wrapped_tx.id(), wrapped_tx);
+        self.valid_submit_ledger_tx.insert(tx.id, tx);
         Ok(())
     }
 
@@ -3247,20 +3247,23 @@ mod bounded_mempool_tests {
 
     /// Creates a test data transaction with specified fee
     fn create_test_data_tx(fee: u64) -> DataTransactionHeader {
-        DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::random(),
-            anchor: H256::zero(),
-            signer: IrysAddress::random(),
-            data_root: H256::random(),
-            data_size: 1024,
-            header_size: 0,
-            term_fee: U256::from(fee).into(),
-            perm_fee: Some(U256::from(100).into()),
-            ledger_id: DataLedger::Publish as u32,
-            bundle_format: Some(0),
-            promoted_height: None,
-            signature: IrysSignature::default(),
-            chain_id: 1,
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(fee).into(),
+                perm_fee: Some(U256::from(100).into()),
+                ledger_id: DataLedger::Publish as u32,
+                bundle_format: Some(0),
+                promoted_height: None,
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: irys_types::TransactionMetadata::new(),
         })
     }
 

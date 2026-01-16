@@ -33,9 +33,12 @@ async fn test_get_tx() -> eyre::Result<()> {
     node.node_ctx.start_mining().unwrap();
     let db = node.node_ctx.db.clone();
 
-    let storage_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::random(),
-        ..Default::default()
+    let storage_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+        tx: DataTransactionHeaderV1 {
+            id: H256::random(),
+            ..Default::default()
+        },
+        metadata: irys_types::TransactionMetadata::new(),
     });
     info!("Generated storage_tx.id: {}", storage_tx.id);
 

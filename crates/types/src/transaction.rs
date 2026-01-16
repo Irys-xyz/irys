@@ -7,7 +7,8 @@ pub use crate::{
         VersioningError,
     },
     Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, Compact, ConsensusConfig,
-    IrysAddress, IrysSignature, Node, Proof, Signature, TxChunkOffset, UnpackedChunk, H256, U256,
+    IrysAddress, IrysSignature, Node, Proof, Signature, TransactionMetadata, TxChunkOffset,
+    UnpackedChunk, H256, U256,
 };
 
 use alloy_primitives::keccak256;
@@ -59,12 +60,43 @@ pub enum CommitmentValidationError {
     ForbiddenSigner,
 }
 
+// Wrapper struct to hold transaction + metadata
+// This is a transparent wrapper that delegates serde to the inner transaction
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Arbitrary, Compact)]
+pub struct DataTransactionHeaderV1WithMetadata {
+    pub tx: DataTransactionHeaderV1,
+    pub metadata: TransactionMetadata,
+}
+
+impl serde::Serialize for DataTransactionHeaderV1WithMetadata {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Only serialize the transaction, not metadata
+        self.tx.serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DataTransactionHeaderV1WithMetadata {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tx = DataTransactionHeaderV1::deserialize(deserializer)?;
+        Ok(Self {
+            tx,
+            metadata: TransactionMetadata::new(),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]
 #[repr(u8)]
 #[integer_tagged(tag = "version")]
 pub enum DataTransactionHeader {
     #[integer_tagged(version = 1)]
-    V1(DataTransactionHeaderV1) = 1,
+    V1(DataTransactionHeaderV1WithMetadata) = 1,
 }
 
 impl VersionDiscriminant for DataTransactionHeader {
@@ -77,7 +109,10 @@ impl VersionDiscriminant for DataTransactionHeader {
 
 impl Default for DataTransactionHeader {
     fn default() -> Self {
-        Self::V1(DataTransactionHeaderV1::default())
+        Self::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1::default(),
+            metadata: TransactionMetadata::new(),
+        })
     }
 }
 
@@ -102,7 +137,7 @@ impl Deref for DataTransactionHeader {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::V1(v1) => v1,
+            Self::V1(wrapper) => &wrapper.tx,
         }
     }
 }
@@ -110,7 +145,7 @@ impl Deref for DataTransactionHeader {
 impl DerefMut for DataTransactionHeader {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            Self::V1(v1) => v1,
+            Self::V1(wrapper) => &mut wrapper.tx,
         }
     }
 }
@@ -121,15 +156,16 @@ impl Compact for DataTransactionHeader {
         B: bytes::BufMut + AsMut<[u8]>,
     {
         match self {
-            Self::V1(inner) => compact_with_discriminant(1, inner, buf),
+            Self::V1(wrapper) => compact_with_discriminant(1, wrapper, buf),
         }
     }
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
         let (disc, rest) = split_discriminant(buf);
         match disc {
             1 => {
-                let (inner, rest2) = DataTransactionHeaderV1::from_compact(rest, rest.len());
-                (Self::V1(inner), rest2)
+                let (wrapper, rest2) =
+                    DataTransactionHeaderV1WithMetadata::from_compact(rest, rest.len());
+                (Self::V1(wrapper), rest2)
             }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
         }
@@ -146,7 +182,7 @@ impl alloy_rlp::Encodable for DataTransactionHeader {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         let mut buf = Vec::new();
         match self {
-            Self::V1(inner) => inner.encode(&mut buf),
+            Self::V1(wrapper) => wrapper.tx.encode(&mut buf),
         }
         encode_rlp_version(buf, self.version(), out);
     }
@@ -159,8 +195,11 @@ impl alloy_rlp::Decodable for DataTransactionHeader {
 
         match version {
             1 => {
-                let inner = DataTransactionHeaderV1::decode(buf)?;
-                Ok(Self::V1(inner))
+                let tx = DataTransactionHeaderV1::decode(buf)?;
+                Ok(Self::V1(DataTransactionHeaderV1WithMetadata {
+                    tx,
+                    metadata: TransactionMetadata::new(),
+                }))
             }
             _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
         }
@@ -170,7 +209,34 @@ impl alloy_rlp::Decodable for DataTransactionHeader {
 impl DataTransactionHeader {
     /// Create a new DataTransactionHeader wrapped in the versioned wrapper
     pub fn new(config: &ConsensusConfig) -> Self {
-        Self::V1(DataTransactionHeaderV1::new(config))
+        Self::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1::new(config),
+            metadata: TransactionMetadata::new(),
+        })
+    }
+
+    /// Get the metadata
+    #[inline]
+    pub fn metadata(&self) -> &TransactionMetadata {
+        match self {
+            Self::V1(v1) => &v1.metadata,
+        }
+    }
+
+    /// Get mutable metadata
+    #[inline]
+    pub fn metadata_mut(&mut self) -> &mut TransactionMetadata {
+        match self {
+            Self::V1(v1) => &mut v1.metadata,
+        }
+    }
+
+    /// Set the metadata
+    #[inline]
+    pub fn set_metadata(&mut self, new_metadata: TransactionMetadata) {
+        match self {
+            Self::V1(v1) => v1.metadata = new_metadata,
+        }
     }
 }
 
@@ -1096,20 +1162,23 @@ mod tests {
     }
 
     fn mock_header(config: &ConsensusConfig) -> DataTransactionHeader {
-        DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::from([255_u8; 32]),
-            anchor: H256::from([1_u8; 32]),
-            signer: IrysAddress::default(),
-            data_root: H256::from([3_u8; 32]),
-            data_size: 1024,
-            header_size: 0,
-            term_fee: BoundedFee::from(100_u64),
-            perm_fee: Some(BoundedFee::from(200_u64)),
-            ledger_id: 1,
-            bundle_format: None,
-            chain_id: config.chain_id,
-            promoted_height: None,
-            signature: Signature::test_signature().into(),
+        DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::from([255_u8; 32]),
+                anchor: H256::from([1_u8; 32]),
+                signer: IrysAddress::default(),
+                data_root: H256::from([3_u8; 32]),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: BoundedFee::from(100_u64),
+                perm_fee: Some(BoundedFee::from(200_u64)),
+                ledger_id: 1,
+                bundle_format: None,
+                chain_id: config.chain_id,
+                promoted_height: None,
+                signature: Signature::test_signature().into(),
+            },
+            metadata: TransactionMetadata::new(),
         })
     }
 

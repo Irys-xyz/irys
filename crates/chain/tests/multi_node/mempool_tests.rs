@@ -1137,10 +1137,14 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 
     // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
-        a1_b2_reorg_mempool_txs.submit_tx,
-        vec![a_blk1_tx1.header.clone()],
-        "We expected 1 submit tx from the mempool shape and for it to be {:?}",
-        a_blk1_tx1.header.clone()
+        a1_b2_reorg_mempool_txs.submit_tx.len(),
+        1,
+        "We expected 1 submit tx from the mempool shape"
+    );
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.submit_tx[0].id, a_blk1_tx1.header.id,
+        "Expected submit tx to be {:?}",
+        a_blk1_tx1.header.id
     );
 
     assert_eq!(
@@ -1194,7 +1198,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
     // note: as [`get_publish_txs_and_proofs`] resolves ingress proofs, calling get_best_mempool_txs will return the header with an ingress proof.
     // so we have a separate path & assert to ensure the ingress proof is being removed when the tx is orphaned
-    assert_eq!(a_blk1_tx1_mempool, a_blk1_tx1.header);
+    assert_eq!(
+        a_blk1_tx1_mempool.id, a_blk1_tx1.header.id,
+        "Transaction ID should match after reorg"
+    );
 
     // gossip A's orphaned tx to B
     // get it ready for promotion, and then mine a block on B to include it

@@ -230,21 +230,25 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
-            id: Default::default(),
-            anchor: H256::from([1_u8; 32]),
-            signer: IrysAddress::ZERO,
-            data_root: H256::from([3_u8; 32]),
-            data_size: 242,
-            header_size: 0,
-            term_fee: BoundedFee::from(99_u64),
-            perm_fee: Some(BoundedFee::from(98_u64)),
-            ledger_id: 0,
-            bundle_format: None,
-            chain_id: testing_config.chain_id,
-            promoted_height: None,
-            signature: Default::default(),
-        });
+        let original_header =
+            DataTransactionHeader::V1(crate::DataTransactionHeaderV1WithMetadata {
+                tx: crate::DataTransactionHeaderV1 {
+                    id: Default::default(),
+                    anchor: H256::from([1_u8; 32]),
+                    signer: IrysAddress::ZERO,
+                    data_root: H256::from([3_u8; 32]),
+                    data_size: 242,
+                    header_size: 0,
+                    term_fee: BoundedFee::from(99_u64),
+                    perm_fee: Some(BoundedFee::from(98_u64)),
+                    ledger_id: 0,
+                    bundle_format: None,
+                    chain_id: testing_config.chain_id,
+                    promoted_height: None,
+                    signature: Default::default(),
+                },
+                metadata: crate::TransactionMetadata::new(),
+            });
 
         let transaction = DataTransaction {
             header: original_header,

@@ -752,18 +752,24 @@ mod tests {
         let config = Config::new(node_config);
 
         // Create test transactions
-        let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::random(),
-            term_fee: U256::from(1000).into(),
-            data_size: 100,
-            ..Default::default()
+        let tx1 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                term_fee: U256::from(1000).into(),
+                data_size: 100,
+                ..Default::default()
+            },
+            metadata: irys_types::TransactionMetadata::new(),
         });
 
-        let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::random(),
-            term_fee: U256::from(2000).into(),
-            data_size: 200,
-            ..Default::default()
+        let tx2 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                term_fee: U256::from(2000).into(),
+                data_size: 200,
+                ..Default::default()
+            },
+            metadata: irys_types::TransactionMetadata::new(),
         });
 
         // Create miners with duplicates

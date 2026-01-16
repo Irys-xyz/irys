@@ -1625,7 +1625,10 @@ mod tests {
 
     #[test]
     fn order_transactions_matching_header_body() {
-        use irys_types::{CommitmentTransaction, DataTransactionHeaderV1, SystemTransactionLedger};
+        use irys_types::{
+            CommitmentTransaction, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+            SystemTransactionLedger, TransactionMetadata,
+        };
 
         // Create test transaction IDs
         let submit_tx_id1 = H256::repeat_byte(0x11);
@@ -1668,17 +1671,26 @@ mod tests {
 
         // Create matching transactions (deliberately in different order than header)
         let data_txs = vec![
-            DataTransactionHeader::V1(DataTransactionHeaderV1 {
-                id: submit_tx_id1,
-                ..Default::default()
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: submit_tx_id1,
+                    ..Default::default()
+                },
+                metadata: TransactionMetadata::new(),
             }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1 {
-                id: submit_tx_id2,
-                ..Default::default()
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: submit_tx_id2,
+                    ..Default::default()
+                },
+                metadata: TransactionMetadata::new(),
             }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1 {
-                id: publish_tx_id1,
-                ..Default::default()
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: publish_tx_id1,
+                    ..Default::default()
+                },
+                metadata: TransactionMetadata::new(),
             }),
         ];
 
@@ -1713,7 +1725,9 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_missing_tx() {
-        use irys_types::DataTransactionHeaderV1;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, TransactionMetadata,
+        };
 
         // Create test transaction IDs
         let submit_tx_id1 = H256::repeat_byte(0x11);
@@ -1752,10 +1766,15 @@ mod tests {
         let header = IrysBlockHeader::V1(header);
 
         // Create body with only ONE transaction (mismatch)
-        let data_txs = vec![DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: submit_tx_id1,
-            ..Default::default()
-        })];
+        let data_txs = vec![DataTransactionHeader::V1(
+            DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: submit_tx_id1,
+                    ..Default::default()
+                },
+                metadata: TransactionMetadata::new(),
+            },
+        )];
 
         let commitment_txs = vec![];
 
@@ -1788,7 +1807,9 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_wrong_ledger() {
-        use irys_types::DataTransactionHeaderV1;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, TransactionMetadata,
+        };
 
         // Create test transaction IDs
         let tx_id1 = H256::repeat_byte(0x13);
@@ -1826,10 +1847,15 @@ mod tests {
 
         // Create body with transaction that has a different ID than expected
         // (simulating the transaction being missing from expected ledger)
-        let data_txs = vec![DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::repeat_byte(0x99), // Different ID, not in any expected ledger
-            ..Default::default()
-        })];
+        let data_txs = vec![DataTransactionHeader::V1(
+            DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: H256::repeat_byte(0x99), // Different ID, not in any expected ledger
+                    ..Default::default()
+                },
+                metadata: TransactionMetadata::new(),
+            },
+        )];
 
         let commitment_txs = vec![];
 
@@ -1921,7 +1947,9 @@ mod tests {
 
     #[test]
     fn order_transactions_tx_in_both_ledgers() {
-        use irys_types::DataTransactionHeaderV1;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, TransactionMetadata,
+        };
 
         // Create a transaction ID that appears in both Submit and Publish
         let dual_tx_id = H256::repeat_byte(0x77);
@@ -1957,10 +1985,15 @@ mod tests {
         let header = IrysBlockHeader::V1(header);
 
         // Provide the transaction once in the body
-        let data_txs = vec![DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: dual_tx_id,
-            ..Default::default()
-        })];
+        let data_txs = vec![DataTransactionHeader::V1(
+            DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: dual_tx_id,
+                    ..Default::default()
+                },
+                metadata: TransactionMetadata::new(),
+            },
+        )];
 
         let commitment_txs = vec![];
 

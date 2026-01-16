@@ -515,7 +515,11 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1::default());
+        let tx_header =
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: irys_types::DataTransactionHeaderV1::default(),
+                metadata: irys_types::TransactionMetadata::new(),
+            });
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx

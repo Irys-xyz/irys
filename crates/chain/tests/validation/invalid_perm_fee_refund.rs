@@ -78,20 +78,23 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a data transaction that appears promoted
-    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::random(),
-        anchor: H256::zero(),
-        signer: test_signer.address(),
-        data_root: H256::random(),
-        data_size: 1024,
-        header_size: 0,
-        term_fee: U256::from(1000).into(),
-        perm_fee: Some(U256::from(2000).into()),
-        ledger_id: DataLedger::Submit as u32,
-        bundle_format: Some(0),
-        chain_id: 1,
-        promoted_height: Some(2), // Mark as promoted!
-        signature: Default::default(),
+    let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+        tx: DataTransactionHeaderV1 {
+            id: H256::random(),
+            anchor: H256::zero(),
+            signer: test_signer.address(),
+            data_root: H256::random(),
+            data_size: 1024,
+            header_size: 0,
+            term_fee: U256::from(1000).into(),
+            perm_fee: Some(U256::from(2000).into()),
+            ledger_id: DataLedger::Submit as u32,
+            bundle_format: Some(0),
+            chain_id: 1,
+            promoted_height: Some(2), // Mark as promoted!
+            signature: Default::default(),
+        },
+        metadata: irys_types::TransactionMetadata::new(),
     });
 
     // Create an invalid refund for this promoted transaction

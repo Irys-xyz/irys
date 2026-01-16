@@ -881,7 +881,8 @@ mod tests {
     use irys_testing_utils::initialize_tracing;
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
-        DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
+        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, IrysBlockHeader, NodeConfig,
+        TransactionMetadata, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -900,9 +901,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -984,9 +988,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1087,9 +1094,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create tx header + data root + chunk
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1179,9 +1189,12 @@ mod tests {
             None,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1256,15 +1269,21 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create two data roots: one "old" and one "new"
-        let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            data_root: DataRoot::random(),
-            ..Default::default()
+        let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                data_root: DataRoot::random(),
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
-        let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            data_root: DataRoot::random(),
-            ..Default::default()
+        let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                data_root: DataRoot::random(),
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header_old, None)?;
@@ -1390,10 +1409,13 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create one data root with two chunks and mark them old to be eligible
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            data_root: DataRoot::random(),
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                data_root: DataRoot::random(),
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1508,9 +1530,12 @@ mod tests {
             None,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1576,9 +1601,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: TransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;

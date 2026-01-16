@@ -1,13 +1,17 @@
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionV1, ConsensusConfig, DataTransactionHeader,
-    DataTransactionHeaderV1, IrysBlockHeader, IrysBlockHeaderV1, VersionDiscriminant as _,
+    DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, IrysBlockHeader,
+    IrysBlockHeaderV1, TransactionMetadata, VersionDiscriminant as _,
 };
 
 #[test]
 fn data_tx_v1_construction_from_inner() {
     // Test that we can construct a versioned type from an inner V1 type
     let header = DataTransactionHeaderV1::default();
-    let versioned = DataTransactionHeader::V1(header);
+    let versioned = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+        tx: header,
+        metadata: TransactionMetadata::new(),
+    });
     assert_eq!(versioned.version(), 1);
 }
 
