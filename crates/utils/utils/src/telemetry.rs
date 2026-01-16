@@ -28,6 +28,9 @@ static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
 #[cfg(feature = "telemetry")]
+static INIT_GUARD: OnceLock<()> = OnceLock::new();
+
+#[cfg(feature = "telemetry")]
 const EXPORTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(feature = "telemetry")]
@@ -253,6 +256,12 @@ fn install_panic_hook() {
 #[must_use = "telemetry initialization result should be checked"]
 #[cfg(feature = "telemetry")]
 pub fn init_telemetry() -> Result<()> {
+    // Use a guard to ensure atomic initialization and prevent race conditions
+    if INIT_GUARD.set(()).is_err() {
+        eprintln!("Warning: Telemetry already initialized, skipping duplicate initialization");
+        return Ok(());
+    }
+
     let config = TelemetryConfig::from_env();
     let resource = build_resource(&config.service_name);
 
@@ -279,15 +288,10 @@ pub fn init_telemetry() -> Result<()> {
     let logger_provider = build_logger_provider(log_exporters, resource.clone());
     let meter_provider = build_meter_provider(metrics_exporter, resource);
 
-    // Check if already initialized - return early to avoid subscriber.init() panic
-    let logger_already_set = LOGGER_PROVIDER.set(logger_provider.clone()).is_err();
-    let tracer_already_set = TRACER_PROVIDER.set(tracer_provider.clone()).is_err();
-    let meter_already_set = METER_PROVIDER.set(meter_provider.clone()).is_err();
-
-    if logger_already_set || tracer_already_set || meter_already_set {
-        eprintln!("Warning: Telemetry already initialized, skipping duplicate initialization");
-        return Ok(());
-    }
+    // These should all succeed since we hold the init guard
+    let _ = LOGGER_PROVIDER.set(logger_provider.clone());
+    let _ = TRACER_PROVIDER.set(tracer_provider.clone());
+    let _ = METER_PROVIDER.set(meter_provider.clone());
 
     opentelemetry::global::set_meter_provider(meter_provider);
     setup_tracing_subscriber(&tracer_provider, &logger_provider);
