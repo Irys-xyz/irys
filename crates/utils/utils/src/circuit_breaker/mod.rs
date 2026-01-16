@@ -15,7 +15,7 @@ mod state;
 #[cfg(test)]
 mod test_utils;
 
-pub use config::{CircuitBreakerConfig, FailureThreshold, RecoveryAttempts};
+pub use config::{BreakerCapacity, CircuitBreakerConfig, FailureThreshold, RecoveryAttempts};
 pub use manager::CircuitBreakerManager;
 pub use metrics::CircuitBreakerMetrics;
 pub use state::CircuitState;
@@ -57,7 +57,8 @@ fn has_timeout_elapsed(stored_nanos: u64, timeout: Duration) -> bool {
     }
     let current_nanos = get_current_time_nanos();
     let elapsed_nanos = current_nanos.saturating_sub(stored_nanos);
-    elapsed_nanos >= timeout.as_nanos() as u64
+    let timeout_nanos = timeout.as_nanos().min(u64::MAX as u128) as u64;
+    elapsed_nanos >= timeout_nanos
 }
 
 #[cfg(test)]

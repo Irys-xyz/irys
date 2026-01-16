@@ -50,6 +50,7 @@ where
         self.closed_count as f64 / self.total_count as f64
     }
 
+    #[must_use]
     pub fn summary(&self) -> String {
         format!(
             "Circuit Breakers: {} total ({} closed, {} open, {} half-open)",
