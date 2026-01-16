@@ -911,19 +911,23 @@ impl Inner {
             .copied()
             .collect();
 
-        if let Err(e) = self.irys_db.update_eyre(|tx| {
-            irys_database::batch_set_tx_included_height(tx, &all_tx_ids, block_height)
-                .map_err(|e| eyre::eyre!("{:?}", e))
-        }) {
-            error!("Failed to batch set included_height in database: {}", e);
+        if !all_tx_ids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_set_tx_included_height(tx, &all_tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!("Failed to batch set included_height in database: {}", e);
+            }
         }
 
         // Fallback: ensure promoted_height metadata exists for publish-ledger txs in this migrated block.
-        if let Err(e) = self.irys_db.update_eyre(|tx| {
-            irys_database::batch_set_tx_promoted_height(tx, &publish_tx_ids, block_height)
-                .map_err(|e| eyre::eyre!("{:?}", e))
-        }) {
-            error!("Failed to batch set promoted_height in database: {}", e);
+        if !publish_tx_ids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_set_tx_promoted_height(tx, &publish_tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!("Failed to batch set promoted_height in database: {}", e);
+            }
         }
 
         // add block with optional poa chunk to index
