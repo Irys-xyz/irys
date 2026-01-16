@@ -110,8 +110,8 @@ table IrysBlockHeaders {
     type Value = CompactIrysBlockHeader;
 }
 
-// Block index table: DataLedger -> BlockHeight -> LedgerIndexItem
-// Stores block metadata for each block by ledger type (Publish/Submit/etc)
+// Block index table: BlockHeight -> DataLedger -> LedgerIndexItem
+// Stores ledger metadata for each block, keyed by height with ledger type as subkey.
 // This indexing scheme is optimized for pruning ledgers by height which is
 // a function of expiring term ledgers.
 table IrysBlockIndexItems {
