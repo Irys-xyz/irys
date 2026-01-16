@@ -74,6 +74,8 @@ fn ledger_to_string(ledger: DataLedger) -> &'static str {
     match ledger {
         DataLedger::Publish => "Publish",
         DataLedger::Submit => "Submit",
+        DataLedger::OneYear => "OneYear",
+        DataLedger::ThirtyDay => "ThirtyDay",
     }
 }
 
