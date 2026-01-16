@@ -37,6 +37,9 @@ const METRICS_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_s
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
 #[cfg(feature = "telemetry")]
+const DEFAULT_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
+
+#[cfg(feature = "telemetry")]
 const DEFAULT_SERVICE_NAME: &str = "irys-node";
 
 #[cfg(feature = "telemetry")]
@@ -51,11 +54,18 @@ struct TelemetryConfig {
 #[cfg(feature = "telemetry")]
 impl TelemetryConfig {
     fn from_env() -> Self {
-        let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
+        let otlp_endpoint_env = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
+        let otlp_endpoint = otlp_endpoint_env
+            .clone()
+            .unwrap_or_else(|| DEFAULT_OTLP_ENDPOINT.to_string());
 
-        // Per OTEL spec, logs endpoint derives from base OTLP endpoint with /v1/logs appended
-        let default_logs_endpoint = format!("{}/v1/logs", otlp_endpoint.trim_end_matches('/'));
+        // Per OTEL spec, derive logs from base endpoint when explicitly configured,
+        // otherwise default to the OTLP/HTTP logs endpoint (port 4318).
+        let default_logs_endpoint = if otlp_endpoint_env.is_some() {
+            format!("{}/v1/logs", otlp_endpoint.trim_end_matches('/'))
+        } else {
+            DEFAULT_LOGS_ENDPOINT.to_string()
+        };
 
         Self {
             service_name: std::env::var("OTEL_SERVICE_NAME")
@@ -270,8 +280,6 @@ pub fn init_telemetry() -> Result<()> {
     let logger_provider = build_logger_provider(log_exporters, resource.clone());
     let meter_provider = build_meter_provider(metrics_exporter, resource);
 
-    opentelemetry::global::set_meter_provider(meter_provider.clone());
-
     if LOGGER_PROVIDER.set(logger_provider.clone()).is_err() {
         eprintln!(
             "Warning: Logger provider already initialized, skipping duplicate initialization"
@@ -282,8 +290,10 @@ pub fn init_telemetry() -> Result<()> {
             "Warning: Tracer provider already initialized, skipping duplicate initialization"
         );
     }
-    if METER_PROVIDER.set(meter_provider).is_err() {
+    if METER_PROVIDER.set(meter_provider.clone()).is_err() {
         eprintln!("Warning: Meter provider already initialized, skipping duplicate initialization");
+    } else {
+        opentelemetry::global::set_meter_provider(meter_provider);
     }
 
     setup_tracing_subscriber(&tracer_provider, &logger_provider);

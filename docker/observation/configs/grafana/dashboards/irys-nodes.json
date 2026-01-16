@@ -48,9 +48,6 @@
           "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
           "query": "resource.attributes.service.name: $node AND severity_text: ERROR",
           "metrics": [{ "type": "count", "id": "1" }],
-          "bucketAggs": [
-            { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "1h", "min_doc_count": "0" } }
-          ],
           "timeField": "@timestamp",
           "refId": "A"
         }
@@ -87,11 +84,8 @@
       "targets": [
         {
           "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
-          "query": "resource.attributes.service.name: $node AND body.text: *panic*",
+          "query": "resource.attributes.service.name: $node AND body.text: panic",
           "metrics": [{ "type": "count", "id": "1" }],
-          "bucketAggs": [
-            { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "1h", "min_doc_count": "0" } }
-          ],
           "timeField": "@timestamp",
           "refId": "A"
         }
@@ -129,9 +123,6 @@
           "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
           "query": "resource.attributes.service.name: $node AND body.text: \"starting the node\"",
           "metrics": [{ "type": "count", "id": "1" }],
-          "bucketAggs": [
-            { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "1h", "min_doc_count": "0" } }
-          ],
           "timeField": "@timestamp",
           "refId": "A"
         }
@@ -170,9 +161,6 @@
           "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
           "query": "resource.attributes.service.name: $node AND body.text: deadlock",
           "metrics": [{ "type": "count", "id": "1" }],
-          "bucketAggs": [
-            { "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "1h", "min_doc_count": "0" } }
-          ],
           "timeField": "@timestamp",
           "refId": "A"
         }
