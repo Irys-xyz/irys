@@ -393,7 +393,7 @@
         {
           "datasource": { "type": "elasticsearch", "uid": "elasticsearch" },
           "query": "resource.attributes.service.name: $node",
-          "metrics": [{ "type": "raw_data", "id": "1", "settings": { "size": "200" } }],
+          "metrics": [{ "type": "raw_data", "id": "1", "settings": { "size": "100" } }],
           "timeField": "@timestamp",
           "refId": "A"
         }

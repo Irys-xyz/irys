@@ -246,7 +246,6 @@ fn install_panic_hook() {
 /// - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
 /// - `AXIOM_LOGS_ENDPOINT`: Additional Axiom OTLP endpoint for logs (optional)
 ///   When set, logs are sent to BOTH the primary logs endpoint AND Axiom
-/// - `ENABLE_TELEMETRY`: Set to "true" to enable telemetry
 ///
 /// # Errors
 ///
@@ -280,22 +279,17 @@ pub fn init_telemetry() -> Result<()> {
     let logger_provider = build_logger_provider(log_exporters, resource.clone());
     let meter_provider = build_meter_provider(metrics_exporter, resource);
 
-    if LOGGER_PROVIDER.set(logger_provider.clone()).is_err() {
-        eprintln!(
-            "Warning: Logger provider already initialized, skipping duplicate initialization"
-        );
-    }
-    if TRACER_PROVIDER.set(tracer_provider.clone()).is_err() {
-        eprintln!(
-            "Warning: Tracer provider already initialized, skipping duplicate initialization"
-        );
-    }
-    if METER_PROVIDER.set(meter_provider.clone()).is_err() {
-        eprintln!("Warning: Meter provider already initialized, skipping duplicate initialization");
-    } else {
-        opentelemetry::global::set_meter_provider(meter_provider);
+    // Check if already initialized - return early to avoid subscriber.init() panic
+    let logger_already_set = LOGGER_PROVIDER.set(logger_provider.clone()).is_err();
+    let tracer_already_set = TRACER_PROVIDER.set(tracer_provider.clone()).is_err();
+    let meter_already_set = METER_PROVIDER.set(meter_provider.clone()).is_err();
+
+    if logger_already_set || tracer_already_set || meter_already_set {
+        eprintln!("Warning: Telemetry already initialized, skipping duplicate initialization");
+        return Ok(());
     }
 
+    opentelemetry::global::set_meter_provider(meter_provider);
     setup_tracing_subscriber(&tracer_provider, &logger_provider);
     install_panic_hook();
 
