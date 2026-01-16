@@ -9,7 +9,8 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::{Base64, IrysAddress, PeerListItem};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, TransactionMetadata,
+    CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
+    DataTransactionMetadata, IrysBlockHeader,
 };
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
@@ -80,7 +81,8 @@ add_wrapper_struct!((DataTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
 add_wrapper_struct!((PeerListItem, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
-add_wrapper_struct!((TransactionMetadata, CompactTransactionMetadata));
+add_wrapper_struct!((CommitmentTransactionMetadata, CompactCommitmentTxMetadata));
+add_wrapper_struct!((DataTransactionMetadata, CompactDataTxMetadata));
 
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
 
@@ -98,7 +100,8 @@ impl_compression_for_compact!(
     GlobalChunkOffset,
     CompactBase64,
     CompactCachedIngressProof,
-    CompactTransactionMetadata
+    CompactCommitmentTxMetadata,
+    CompactDataTxMetadata
 );
 
 use paste::paste;
@@ -131,11 +134,18 @@ table IrysCommitments {
     type Value = CompactCommitment;
 }
 
-/// Stores metadata for both data and commitment transactions
-/// Tracks inclusion height and other cross-cutting transaction metadata
-table IrysTransactionMetadata {
+/// Stores metadata for commitment transactions
+/// Tracks inclusion height
+table IrysCommitmentTxMetadata {
     type Key = H256;
-    type Value = CompactTransactionMetadata;
+    type Value = CompactCommitmentTxMetadata;
+}
+
+/// Stores metadata for data transactions
+/// Tracks inclusion height and promotion height
+table IrysDataTxMetadata {
+    type Key = H256;
+    type Value = CompactDataTxMetadata;
 }
 
 /// Indexes the DataRoots currently in the cache

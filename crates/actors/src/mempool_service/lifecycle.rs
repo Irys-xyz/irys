@@ -36,8 +36,30 @@ impl Inner {
         if !all_tx_ids.is_empty() {
             self.irys_db
                 .update_eyre(|tx| {
-                    irys_database::batch_set_tx_included_height(tx, &all_tx_ids, block.height)
-                        .map_err(|e| eyre::eyre!("{:?}", e))
+                    // Set included_height for data transactions
+                    let data_tx_ids: Vec<_> = submit_txids
+                        .iter()
+                        .chain(publish_txids.iter())
+                        .copied()
+                        .collect();
+                    if !data_tx_ids.is_empty() {
+                        irys_database::batch_set_data_tx_included_height(
+                            tx,
+                            &data_tx_ids,
+                            block.height,
+                        )
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                    // Set included_height for commitment transactions
+                    if !commitment_txids.is_empty() {
+                        irys_database::batch_set_commitment_tx_included_height(
+                            tx,
+                            &commitment_txids,
+                            block.height,
+                        )
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                    }
+                    Ok(())
                 })
                 .map_err(|e| TxIngressError::DatabaseError(e.to_string()))?;
 
@@ -61,7 +83,7 @@ impl Inner {
         // Persist promoted_height for publish ledger txs.
         if !published_txids.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_set_tx_promoted_height(tx, published_txids, block.height)
+                irys_database::batch_set_data_tx_promoted_height(tx, published_txids, block.height)
                     .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 tracing::error!("Failed to batch set promoted_height in database: {}", e);
@@ -493,7 +515,8 @@ impl Inner {
 
             // Also clear the persisted included_height in the database
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::clear_tx_included_height(tx, id).map_err(|e| eyre::eyre!("{:?}", e))
+                irys_database::clear_commitment_tx_included_height(tx, id)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 tracing::warn!(tx.id = %id, error = %e, "Failed to clear included_height in DB for orphaned commitment tx");
             } else {
@@ -691,8 +714,11 @@ impl Inner {
         // Clear promoted_height in database for publish-ledger txs orphaned by the reorg.
         if !orphaned_confirmed_publish_txs.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_clear_tx_promoted_height(tx, &orphaned_confirmed_publish_txs)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
+                irys_database::batch_clear_data_tx_promoted_height(
+                    tx,
+                    &orphaned_confirmed_publish_txs,
+                )
+                .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 error!(
                     "Failed to batch clear promoted_height in database during reorg: {}",
@@ -757,7 +783,7 @@ impl Inner {
         if !promoted_height_updates.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|db_tx| {
                 for (tx_id, height) in &promoted_height_updates {
-                    irys_database::set_tx_promoted_height(db_tx, tx_id, *height)
+                    irys_database::set_data_tx_promoted_height(db_tx, tx_id, *height)
                         .map_err(|e| eyre::eyre!("{:?}", e))?;
                 }
                 Ok(())
@@ -769,7 +795,7 @@ impl Inner {
             }
         }
 
-        // Batch clear included_height in database for all orphaned transactions
+        // Batch clear included_height in database for all orphaned data transactions
         let all_orphaned_tx_ids: Vec<H256> = orphaned_confirmed_ledger_txs
             .values()
             .flat_map(|txs| txs.iter().copied())
@@ -779,7 +805,7 @@ impl Inner {
 
         if !all_orphaned_tx_ids.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_clear_tx_included_height(tx, &all_orphaned_tx_ids)
+                irys_database::batch_clear_data_tx_included_height(tx, &all_orphaned_tx_ids)
                     .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 error!(
@@ -913,8 +939,30 @@ impl Inner {
 
         if !all_tx_ids.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_set_tx_included_height(tx, &all_tx_ids, block_height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
+                // Set included_height for data transactions
+                let data_tx_ids: Vec<_> = submit_tx_ids
+                    .iter()
+                    .chain(publish_tx_ids.iter())
+                    .copied()
+                    .collect();
+                if !data_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(
+                        tx,
+                        &data_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                // Set included_height for commitment transactions
+                if !commitment_tx_ids.is_empty() {
+                    irys_database::batch_set_commitment_tx_included_height(
+                        tx,
+                        &commitment_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                Ok(())
             }) {
                 error!("Failed to batch set included_height in database: {}", e);
             }
@@ -923,7 +971,7 @@ impl Inner {
         // Fallback: ensure promoted_height metadata exists for publish-ledger txs in this migrated block.
         if !publish_tx_ids.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_set_tx_promoted_height(tx, &publish_tx_ids, block_height)
+                irys_database::batch_set_data_tx_promoted_height(tx, &publish_tx_ids, block_height)
                     .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 error!("Failed to batch set promoted_height in database: {}", e);

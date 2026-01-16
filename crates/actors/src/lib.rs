@@ -30,7 +30,7 @@ pub use partition_mining_service::*;
 pub use reth_ethereum_primitives;
 pub use shadow_tx_generator::ShadowMetadata;
 pub use storage_module_service::*;
-pub use transaction_status::compute_transaction_status;
+pub use transaction_status::{compute_transaction_status, db_metadata_to_tx_metadata};
 
 pub use async_trait;
 pub use openssl::sha;

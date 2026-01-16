@@ -21,7 +21,7 @@ use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ing
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
-use crate::MempoolReadGuard;
+use crate::{MempoolReadGuard, TxMetadata};
 use eyre::{eyre, OptionExt as _};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
@@ -48,7 +48,7 @@ use irys_types::{
         Amount,
     },
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, IrysAddress, MempoolConfig, TransactionMetadata, TxChunkOffset,
+    DataTransactionHeader, DataTransactionMetadata, IrysAddress, MempoolConfig, TxChunkOffset,
     UnpackedChunk,
 };
 use irys_types::{BlockHash, CommitmentTypeV1};
@@ -2226,25 +2226,25 @@ impl AtomicMempoolState {
     }
 
     /// Get transaction metadata from mempool (returns None if not found or no metadata)
-    pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TransactionMetadata> {
+    pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TxMetadata> {
         let state = self.read().await;
 
         // Check data transactions - metadata is embedded
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get(tx_id) {
-            return Some(wrapped_tx.metadata().clone());
+            return Some(TxMetadata::Data(wrapped_tx.metadata().clone()));
         }
 
         // Check commitment transactions - metadata is embedded
         for txs in state.valid_commitment_tx.values() {
             if let Some(tx) = txs.iter().find(|t| t.id() == *tx_id) {
-                return Some(tx.metadata().clone());
+                return Some(TxMetadata::Commitment(tx.metadata().clone()));
             }
         }
 
         // Check pending pledges - they also have metadata
         for (_, pledges_cache) in state.pending_pledges.iter() {
             if let Some(tx) = pledges_cache.peek(tx_id) {
-                return Some(tx.metadata().clone());
+                return Some(TxMetadata::Commitment(tx.metadata().clone()));
             }
         }
 
@@ -2270,7 +2270,7 @@ impl AtomicMempoolState {
                 let existing_metadata = existing.metadata().clone();
                 let incoming_metadata = tx.metadata().clone();
 
-                let merged_metadata = TransactionMetadata {
+                let merged_metadata = DataTransactionMetadata {
                     included_height: incoming_metadata
                         .included_height
                         .or(existing_metadata.included_height),
@@ -3274,7 +3274,7 @@ mod bounded_mempool_tests {
                 signature: IrysSignature::default(),
                 chain_id: 1,
             },
-            metadata: irys_types::TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         })
     }
 

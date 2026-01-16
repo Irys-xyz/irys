@@ -1,11 +1,14 @@
 use irys_domain::BlockIndexReadGuard;
-use irys_types::{TransactionMetadata, TransactionStatusResponse, H256};
+use irys_types::{
+    CommitmentTransactionMetadata, DataTransactionMetadata, TransactionStatusResponse, H256,
+};
 
-use crate::MempoolReadGuard;
+use crate::{MempoolReadGuard, TxMetadata};
 
 /// Compute transaction status based on mempool state, metadata, and block index
+/// The db_metadata parameter can contain either commitment or data metadata from the database
 pub async fn compute_transaction_status(
-    db_metadata: Option<TransactionMetadata>,
+    db_metadata: Option<TxMetadata>,
     tx_id: &H256,
     block_index_guard: &BlockIndexReadGuard,
     current_head_height: u64,
@@ -21,8 +24,8 @@ pub async fn compute_transaction_status(
     let metadata = mempool_metadata.or(db_metadata);
 
     match (metadata, in_mempool) {
-        (Some(metadata), _) if metadata.included_height.is_some() => {
-            let included_height = metadata.included_height.unwrap();
+        (Some(metadata), _) if metadata.included_height().is_some() => {
+            let included_height = metadata.included_height().unwrap();
 
             let block_index = block_index_guard.read();
             // Check if the block has been migrated to index
@@ -49,4 +52,13 @@ pub async fn compute_transaction_status(
             Ok(None)
         }
     }
+}
+
+/// Helper to convert database metadata to TxMetadata enum
+pub fn db_metadata_to_tx_metadata(
+    commitment: Option<CommitmentTransactionMetadata>,
+    data: Option<DataTransactionMetadata>,
+) -> Option<TxMetadata> {
+    data.map(TxMetadata::Data)
+        .or_else(|| commitment.map(TxMetadata::Commitment))
 }

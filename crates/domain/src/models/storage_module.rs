@@ -2351,7 +2351,7 @@ mod tests {
                 data_size,
                 ..Default::default()
             },
-            metadata: irys_types::TransactionMetadata::new(),
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
         let _ = storage_module.index_transaction_data(

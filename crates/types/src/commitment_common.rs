@@ -7,9 +7,9 @@ pub use crate::{
         compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
         VersioningError,
     },
-    Arbitrary, Base64, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1,
-    CommitmentValidationError, Compact, ConsensusConfig, IrysAddress, IrysSignature, Node,
-    PledgeDataProvider, Proof, Signature, TransactionMetadata, H256, U256,
+    Arbitrary, Base64, CommitmentTransactionMetadata, CommitmentTransactionV1,
+    CommitmentTransactionV2, CommitmentTypeV1, CommitmentValidationError, Compact, ConsensusConfig,
+    IrysAddress, IrysSignature, Node, PledgeDataProvider, Proof, Signature, H256, U256,
 };
 
 use alloy_rlp::Encodable as _;
@@ -70,7 +70,7 @@ pub struct CommitmentV1WithMetadata {
     #[serde(flatten)]
     pub tx: CommitmentTransactionV1,
     #[serde(skip)]
-    pub metadata: TransactionMetadata,
+    pub metadata: CommitmentTransactionMetadata,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary, Serialize, Deserialize)]
@@ -78,7 +78,7 @@ pub struct CommitmentV2WithMetadata {
     #[serde(flatten)]
     pub tx: CommitmentTransactionV2,
     #[serde(skip)]
-    pub metadata: TransactionMetadata,
+    pub metadata: CommitmentTransactionMetadata,
 }
 
 // Commitment Transaction versioned wrapper with metadata
@@ -96,7 +96,7 @@ impl Default for CommitmentTransaction {
     fn default() -> Self {
         Self::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2::default(),
-            metadata: TransactionMetadata::new(),
+            metadata: CommitmentTransactionMetadata::new(),
         })
     }
 }
@@ -285,7 +285,7 @@ impl CommitmentTransaction {
 
     /// Get the metadata
     #[inline]
-    pub fn metadata(&self) -> &TransactionMetadata {
+    pub fn metadata(&self) -> &CommitmentTransactionMetadata {
         match self {
             Self::V1(v1) => &v1.metadata,
             Self::V2(v2) => &v2.metadata,
@@ -294,7 +294,7 @@ impl CommitmentTransaction {
 
     /// Get mutable metadata
     #[inline]
-    pub fn metadata_mut(&mut self) -> &mut TransactionMetadata {
+    pub fn metadata_mut(&mut self) -> &mut CommitmentTransactionMetadata {
         match self {
             Self::V1(v1) => &mut v1.metadata,
             Self::V2(v2) => &mut v2.metadata,
@@ -303,7 +303,7 @@ impl CommitmentTransaction {
 
     /// Set the metadata
     #[inline]
-    pub fn set_metadata(&mut self, new_metadata: TransactionMetadata) {
+    pub fn set_metadata(&mut self, new_metadata: CommitmentTransactionMetadata) {
         match self {
             Self::V1(v1) => v1.metadata = new_metadata,
             Self::V2(v2) => v2.metadata = new_metadata,
@@ -333,7 +333,7 @@ impl Compact for CommitmentTransaction {
                 (
                     Self::V1(CommitmentV1WithMetadata {
                         tx: inner,
-                        metadata: TransactionMetadata::new(),
+                        metadata: CommitmentTransactionMetadata::new(),
                     }),
                     rest2,
                 )
@@ -343,7 +343,7 @@ impl Compact for CommitmentTransaction {
                 (
                     Self::V2(CommitmentV2WithMetadata {
                         tx: inner,
-                        metadata: TransactionMetadata::new(),
+                        metadata: CommitmentTransactionMetadata::new(),
                     }),
                     rest2,
                 )
@@ -380,14 +380,14 @@ impl alloy_rlp::Decodable for CommitmentTransaction {
                 let inner = CommitmentTransactionV1::decode(buf)?;
                 Ok(Self::V1(CommitmentV1WithMetadata {
                     tx: inner,
-                    metadata: TransactionMetadata::new(),
+                    metadata: CommitmentTransactionMetadata::new(),
                 }))
             }
             CommitmentTransactionV2::VERSION => {
                 let inner = CommitmentTransactionV2::decode(buf)?;
                 Ok(Self::V2(CommitmentV2WithMetadata {
                     tx: inner,
-                    metadata: TransactionMetadata::new(),
+                    metadata: CommitmentTransactionMetadata::new(),
                 }))
             }
             _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
@@ -400,7 +400,7 @@ impl CommitmentTransaction {
     pub fn new(config: &ConsensusConfig) -> Self {
         Self::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2::new(config),
-            metadata: TransactionMetadata::new(),
+            metadata: CommitmentTransactionMetadata::new(),
         })
     }
 
@@ -408,7 +408,7 @@ impl CommitmentTransaction {
     pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
         Self::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2::new_stake(config, anchor),
-            metadata: TransactionMetadata::new(),
+            metadata: CommitmentTransactionMetadata::new(),
         })
     }
 
@@ -416,7 +416,7 @@ impl CommitmentTransaction {
     pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
         Self::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2::new_unstake(config, anchor),
-            metadata: TransactionMetadata::new(),
+            metadata: CommitmentTransactionMetadata::new(),
         })
     }
 
@@ -429,7 +429,7 @@ impl CommitmentTransaction {
     ) -> Self {
         Self::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2::new_pledge(config, anchor, provider, signer_address).await,
-            metadata: TransactionMetadata::new(),
+            metadata: CommitmentTransactionMetadata::new(),
         })
     }
 
@@ -450,7 +450,7 @@ impl CommitmentTransaction {
                 partition_hash,
             )
             .await,
-            metadata: TransactionMetadata::new(),
+            metadata: CommitmentTransactionMetadata::new(),
         })
     }
 

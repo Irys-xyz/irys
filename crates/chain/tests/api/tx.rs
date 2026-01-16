@@ -38,7 +38,7 @@ async fn test_get_tx() -> eyre::Result<()> {
             id: H256::random(),
             ..Default::default()
         },
-        metadata: irys_types::TransactionMetadata::new(),
+        metadata: irys_types::DataTransactionMetadata::new(),
     });
     info!("Generated storage_tx.id: {}", storage_tx.id);
 

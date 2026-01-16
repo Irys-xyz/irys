@@ -759,7 +759,7 @@ mod tests {
                 data_size: 100,
                 ..Default::default()
             },
-            metadata: irys_types::TransactionMetadata::new(),
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
         let tx2 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
@@ -769,7 +769,7 @@ mod tests {
                 data_size: 200,
                 ..Default::default()
             },
-            metadata: irys_types::TransactionMetadata::new(),
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
         // Create miners with duplicates

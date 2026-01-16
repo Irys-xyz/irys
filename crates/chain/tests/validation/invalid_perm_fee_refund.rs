@@ -94,7 +94,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             promoted_height: Some(2), // Mark as promoted!
             signature: Default::default(),
         },
-        metadata: irys_types::TransactionMetadata::new(),
+        metadata: irys_types::DataTransactionMetadata::new(),
     });
 
     // Create an invalid refund for this promoted transaction

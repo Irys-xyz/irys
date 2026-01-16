@@ -927,7 +927,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
             promoted_height: Some(1),
             signature: Default::default(),
         },
-        metadata: irys_types::TransactionMetadata::new(),
+        metadata: irys_types::DataTransactionMetadata::new(),
     })
     .sign(&test_signer)?;
 

@@ -1,7 +1,7 @@
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionV1, ConsensusConfig, DataTransactionHeader,
-    DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, IrysBlockHeader,
-    IrysBlockHeaderV1, TransactionMetadata, VersionDiscriminant as _,
+    DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+    IrysBlockHeader, IrysBlockHeaderV1, VersionDiscriminant as _,
 };
 
 #[test]
@@ -10,7 +10,7 @@ fn data_tx_v1_construction_from_inner() {
     let header = DataTransactionHeaderV1::default();
     let versioned = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
         tx: header,
-        metadata: TransactionMetadata::new(),
+        metadata: DataTransactionMetadata::new(),
     });
     assert_eq!(versioned.version(), 1);
 }

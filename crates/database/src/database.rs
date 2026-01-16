@@ -518,7 +518,7 @@ mod tests {
         let tx_header =
             DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                 tx: irys_types::DataTransactionHeaderV1::default(),
-                metadata: irys_types::TransactionMetadata::new(),
+                metadata: irys_types::DataTransactionMetadata::new(),
             });
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 

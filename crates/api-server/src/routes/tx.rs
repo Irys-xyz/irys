@@ -300,7 +300,7 @@ pub async fn get_tx_promotion_status(
     let db_metadata = state
         .db
         .view_eyre(|db_tx| {
-            irys_database::get_tx_metadata(db_tx, &tx_id).map_err(|e| eyre::eyre!("{:?}", e))
+            irys_database::get_data_tx_metadata(db_tx, &tx_id).map_err(|e| eyre::eyre!("{:?}", e))
         })
         .map_err(|e| ApiError::Internal {
             err: format!("Database error: {}", e),
@@ -334,12 +334,18 @@ pub async fn get_tx_status(
         tip_block.height
     };
 
-    // Load metadata from DB (if present)
+    // Load metadata from DB (if present) - check both data and commitment transactions metadata
     let db_metadata = state
         .db
         .view_eyre(|db_tx| {
-            irys_database::db_index::get_tx_metadata(db_tx, &tx_id)
-                .map_err(|e| eyre::eyre!("{:?}", e))
+            let data_metadata = irys_database::get_data_tx_metadata(db_tx, &tx_id)
+                .map_err(|e| eyre::eyre!("{:?}", e))?;
+            let commitment_metadata = irys_database::get_commitment_tx_metadata(db_tx, &tx_id)
+                .map_err(|e| eyre::eyre!("{:?}", e))?;
+            Ok(irys_actors::db_metadata_to_tx_metadata(
+                commitment_metadata,
+                data_metadata,
+            ))
         })
         .map_err(|e| ApiError::Internal {
             err: format!("Database error: {}", e),

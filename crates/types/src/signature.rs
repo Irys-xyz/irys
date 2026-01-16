@@ -247,7 +247,7 @@ mod tests {
                     promoted_height: None,
                     signature: Default::default(),
                 },
-                metadata: crate::TransactionMetadata::new(),
+                metadata: crate::DataTransactionMetadata::new(),
             });
 
         let transaction = DataTransaction {

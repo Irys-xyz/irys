@@ -7,7 +7,7 @@ pub use crate::{
         VersioningError,
     },
     Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, Compact, ConsensusConfig,
-    IrysAddress, IrysSignature, Node, Proof, Signature, TransactionMetadata, TxChunkOffset,
+    DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature, TxChunkOffset,
     UnpackedChunk, H256, U256,
 };
 
@@ -63,23 +63,13 @@ pub enum CommitmentValidationError {
 // Wrapper struct to hold transaction + metadata
 // This is a transparent wrapper that delegates serde to the inner transaction
 #[derive(
-    Clone,
-    Debug,
-    Default,
-    Eq,
-    PartialEq,
-    Ord,
-    PartialOrd,
-    Arbitrary,
-    Compact,
-    Serialize,
-    Deserialize,
+    Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Arbitrary, Serialize, Deserialize,
 )]
 pub struct DataTransactionHeaderV1WithMetadata {
     #[serde(flatten)]
     pub tx: DataTransactionHeaderV1,
     #[serde(skip)]
-    pub metadata: TransactionMetadata,
+    pub metadata: DataTransactionMetadata,
 }
 
 #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]
@@ -102,7 +92,7 @@ impl Default for DataTransactionHeader {
     fn default() -> Self {
         Self::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1::default(),
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         })
     }
 }
@@ -147,16 +137,21 @@ impl Compact for DataTransactionHeader {
         B: bytes::BufMut + AsMut<[u8]>,
     {
         match self {
-            Self::V1(wrapper) => compact_with_discriminant(1, wrapper, buf),
+            Self::V1(wrapper) => compact_with_discriminant(1, &wrapper.tx, buf),
         }
     }
     fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
         let (disc, rest) = split_discriminant(buf);
         match disc {
             1 => {
-                let (wrapper, rest2) =
-                    DataTransactionHeaderV1WithMetadata::from_compact(rest, rest.len());
-                (Self::V1(wrapper), rest2)
+                let (wrapper, rest2) = DataTransactionHeaderV1::from_compact(rest, rest.len());
+                (
+                    Self::V1(DataTransactionHeaderV1WithMetadata {
+                        tx: wrapper,
+                        metadata: DataTransactionMetadata::new(),
+                    }),
+                    rest2,
+                )
             }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
         }
@@ -189,7 +184,7 @@ impl alloy_rlp::Decodable for DataTransactionHeader {
                 let tx = DataTransactionHeaderV1::decode(buf)?;
                 Ok(Self::V1(DataTransactionHeaderV1WithMetadata {
                     tx,
-                    metadata: TransactionMetadata::new(),
+                    metadata: DataTransactionMetadata::new(),
                 }))
             }
             _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
@@ -202,13 +197,13 @@ impl DataTransactionHeader {
     pub fn new(config: &ConsensusConfig) -> Self {
         Self::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1::new(config),
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         })
     }
 
     /// Get the metadata
     #[inline]
-    pub fn metadata(&self) -> &TransactionMetadata {
+    pub fn metadata(&self) -> &DataTransactionMetadata {
         match self {
             Self::V1(v1) => &v1.metadata,
         }
@@ -216,7 +211,7 @@ impl DataTransactionHeader {
 
     /// Get mutable metadata
     #[inline]
-    pub fn metadata_mut(&mut self) -> &mut TransactionMetadata {
+    pub fn metadata_mut(&mut self) -> &mut DataTransactionMetadata {
         match self {
             Self::V1(v1) => &mut v1.metadata,
         }
@@ -224,7 +219,7 @@ impl DataTransactionHeader {
 
     /// Set the metadata
     #[inline]
-    pub fn set_metadata(&mut self, new_metadata: TransactionMetadata) {
+    pub fn set_metadata(&mut self, new_metadata: DataTransactionMetadata) {
         match self {
             Self::V1(v1) => v1.metadata = new_metadata,
         }
@@ -1169,7 +1164,7 @@ mod tests {
                 promoted_height: None,
                 signature: Signature::test_signature().into(),
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         })
     }
 

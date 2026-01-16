@@ -881,8 +881,8 @@ mod tests {
     use irys_testing_utils::initialize_tracing;
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
-        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, IrysBlockHeader, NodeConfig,
-        TransactionMetadata, TxChunkOffset, UnpackedChunk,
+        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+        IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -906,7 +906,7 @@ mod tests {
                 data_size: 64,
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -993,7 +993,7 @@ mod tests {
                 data_size: 64,
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1099,7 +1099,7 @@ mod tests {
                 data_size: 64,
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1194,7 +1194,7 @@ mod tests {
                 data_size: 64,
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1275,7 +1275,7 @@ mod tests {
                 data_root: DataRoot::random(),
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
             tx: DataTransactionHeaderV1 {
@@ -1283,7 +1283,7 @@ mod tests {
                 data_root: DataRoot::random(),
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header_old, None)?;
@@ -1415,7 +1415,7 @@ mod tests {
                 data_root: DataRoot::random(),
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1535,7 +1535,7 @@ mod tests {
                 data_size: 64,
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1606,7 +1606,7 @@ mod tests {
                 data_size: 64,
                 ..Default::default()
             },
-            metadata: TransactionMetadata::new(),
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
