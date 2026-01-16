@@ -1246,23 +1246,26 @@ impl IrysNode {
                 .await
             });
 
-            // Monitor backfill task - log errors but don't crash the node.
-            // If backfill fails, exact supply queries will return errors until restart.
+            // Monitor backfill task - panic the node on failure.
+            // Backfill errors indicate data integrity issues (missing blocks, database corruption)
+            // that require investigation and won't self-resolve.
             runtime_handle.spawn(async move {
                 match backfill_handle.await {
                     Ok(Ok(())) => {
                         tracing::info!("Supply state backfill completed successfully");
                     }
                     Ok(Err(e)) => {
-                        tracing::error!(
-                            error = %e,
-                            "Supply state backfill failed - exact supply queries will be unavailable"
+                        panic!(
+                            "FATAL: Supply state backfill failed: {}. \
+                            This indicates data integrity issues that require investigation.",
+                            e
                         );
                     }
                     Err(join_error) => {
-                        tracing::error!(
-                            error = %join_error,
-                            "Supply state backfill task panicked - exact supply queries will be unavailable"
+                        panic!(
+                            "FATAL: Supply state backfill task panicked: {}. \
+                            This indicates data integrity issues that require investigation.",
+                            join_error
                         );
                     }
                 }
