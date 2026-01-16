@@ -42,7 +42,7 @@ if [ "$containers_running" = false ]; then
         attempt=0
 
         while [ $attempt -lt $max_attempts ]; do
-            if curl -s http://localhost:$port/v1/info > /dev/null 2>&1; then
+            if curl -fsS http://localhost:$port/v1/info > /dev/null 2>&1; then
                 echo "Ready"
                 break
             fi

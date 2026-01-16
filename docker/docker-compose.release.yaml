@@ -25,6 +25,7 @@ services:
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
       - irys-1-data:/app/data
+    # for ufw/iptables
     cap_add:
       - NET_ADMIN
     entrypoint: ["/irys", "--config", "/app/config.toml"]
@@ -47,6 +48,7 @@ services:
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
       - irys-2-data:/app/data
+    # for ufw/iptables
     cap_add:
       - NET_ADMIN
     entrypoint: ["/irys", "--config", "/app/config.toml"]
@@ -61,4 +63,4 @@ networks:
     ipam:
       driver: default
       config:
-        - subnet: 172.20.0.0/16
+        - subnet: 172.20.0.0/24

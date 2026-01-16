@@ -12,6 +12,7 @@ WORKDIR /workspace
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     build-essential \
     pkg-config \
     clang \
@@ -23,6 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     file \
     && rm -rf /var/lib/apt/lists/*
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 # Copy the full workspace
 COPY . .
 
@@ -31,7 +34,7 @@ ENV RUSTFLAGS="-C target-cpu=x86-64"
 RUN cargo build --release --bin irys -p irys-chain --locked
 
 # Compute binary MD5 hash
-RUN set -o pipefail && md5sum /workspace/target/release/irys | awk '{print $1}' > /workspace/binary_md5.txt
+RUN md5sum /workspace/target/release/irys | awk '{print $1}' > /workspace/binary_md5.txt
 
 # --- Runtime stage: minimal Debian runtime ---
 FROM debian:bookworm-slim@sha256:94882f177083c7fa6764b9ef2a86ed3c29c99593b34d5441648a7fb3c0cd10ec
