@@ -26,7 +26,7 @@ services:
       - ENABLE_TELEMETRY=true
       - OTEL_SERVICE_NAME=irys-node-1
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -54,7 +54,7 @@ services:
       - ENABLE_TELEMETRY=true
       - OTEL_SERVICE_NAME=irys-node-2
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
@@ -84,7 +84,7 @@ services:
       - ENABLE_TELEMETRY=true
       - OTEL_SERVICE_NAME=irys-node-3
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
-      - OTEL_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
+      - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://otel-collector:4318/v1/logs
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
       - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro

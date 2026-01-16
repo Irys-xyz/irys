@@ -37,9 +37,6 @@ const METRICS_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_s
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
 
 #[cfg(feature = "telemetry")]
-const DEFAULT_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
-
-#[cfg(feature = "telemetry")]
 const DEFAULT_SERVICE_NAME: &str = "irys-node";
 
 #[cfg(feature = "telemetry")]
@@ -57,15 +54,19 @@ impl TelemetryConfig {
         let otlp_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
             .unwrap_or_else(|_| DEFAULT_OTLP_ENDPOINT.to_string());
 
+        // Per OTEL spec, logs endpoint derives from base OTLP endpoint with /v1/logs appended
+        let default_logs_endpoint = format!("{}/v1/logs", otlp_endpoint.trim_end_matches('/'));
+
         Self {
             service_name: std::env::var("OTEL_SERVICE_NAME")
                 .unwrap_or_else(|_| DEFAULT_SERVICE_NAME.to_string()),
-            traces_endpoint: std::env::var("OTEL_TRACES_ENDPOINT")
+            traces_endpoint: std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
                 .unwrap_or_else(|_| otlp_endpoint.clone()),
-            logs_endpoint: std::env::var("OTEL_LOGS_ENDPOINT")
-                .unwrap_or_else(|_| DEFAULT_LOGS_ENDPOINT.to_string()),
+            logs_endpoint: std::env::var("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
+                .unwrap_or(default_logs_endpoint),
             axiom_logs_endpoint: std::env::var("AXIOM_LOGS_ENDPOINT").ok(),
-            metrics_endpoint: std::env::var("OTEL_METRICS_ENDPOINT").unwrap_or(otlp_endpoint),
+            metrics_endpoint: std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+                .unwrap_or(otlp_endpoint),
         }
     }
 }
@@ -226,14 +227,15 @@ fn install_panic_hook() {
 
 /// Initialize OpenTelemetry for the observability stack (Grafana/Tempo/Prometheus/Elasticsearch)
 ///
-/// Environment variables:
+/// Environment variables (per OTEL specification):
 /// - `OTEL_EXPORTER_OTLP_ENDPOINT`: Base OTLP endpoint (default: `http://localhost:4317`)
+///   Signal-specific endpoints derive from this with paths appended (e.g., `/v1/logs`)
 /// - `OTEL_SERVICE_NAME`: Service name (default: "irys-node")
-/// - `OTEL_TRACES_ENDPOINT`: Override endpoint for traces (optional)
-/// - `OTEL_LOGS_ENDPOINT`: Override endpoint for logs (optional)
-/// - `OTEL_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
+/// - `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`: Override endpoint for traces (optional)
+/// - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: Override endpoint for logs (optional)
+/// - `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`: Override endpoint for metrics (optional)
 /// - `AXIOM_LOGS_ENDPOINT`: Additional Axiom OTLP endpoint for logs (optional)
-///   When set, logs are sent to BOTH `OTEL_LOGS_ENDPOINT` AND `AXIOM_LOGS_ENDPOINT`
+///   When set, logs are sent to BOTH the primary logs endpoint AND Axiom
 /// - `ENABLE_TELEMETRY`: Set to "true" to enable telemetry
 ///
 /// # Errors

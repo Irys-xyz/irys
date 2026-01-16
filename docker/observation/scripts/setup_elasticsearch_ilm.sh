@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Setup Elasticsearch ILM policy for configurable log retention
-set -e
+set -euo pipefail
 
 ES_HOST="${ES_HOST:-http://elasticsearch:9200}"
 RETENTION_DAYS="${RETENTION_DAYS:-7}"
@@ -67,9 +67,9 @@ curl -s -X PUT "$ES_HOST/_index_template/irys-logs-template" \
   }'
 echo ""
 
-# Create the initial irys-logs index
+# Create the initial irys-logs index (single-node: 0 replicas)
 echo "Creating initial 'irys-logs' index..."
-curl -s -X PUT "$ES_HOST/irys-logs" \
+response=$(curl -s -w "\n%{http_code}" -X PUT "$ES_HOST/irys-logs" \
   -H 'Content-Type: application/json' \
   -d '{
     "settings": {
@@ -77,7 +77,17 @@ curl -s -X PUT "$ES_HOST/irys-logs" \
       "number_of_shards": 1,
       "number_of_replicas": 0
     }
-  }' || echo "(index may already exist)"
+  }')
+http_code=$(echo "$response" | tail -n1)
+body=$(echo "$response" | sed '$d')
+if [ "$http_code" -eq 200 ]; then
+    echo "Index created successfully"
+elif [ "$http_code" -eq 400 ] && echo "$body" | grep -q "resource_already_exists_exception"; then
+    echo "(index already exists)"
+elif [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+    echo "Failed to create index (HTTP $http_code): $body"
+    exit 1
+fi
 echo ""
 
 echo "Elasticsearch ILM setup complete - logs will be retained for ${RETENTION_DAYS} days"
