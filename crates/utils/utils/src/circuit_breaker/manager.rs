@@ -1,7 +1,6 @@
 use dashmap::DashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -25,11 +24,11 @@ impl<K> CircuitBreakerManager<K>
 where
     K: Eq + Hash + Clone + Debug,
 {
-    pub fn new(capacity: NonZeroUsize, config: CircuitBreakerConfig) -> Self {
+    pub fn new(config: CircuitBreakerConfig) -> Self {
         Self {
             breakers: Arc::new(DashMap::new()),
             active_count: Arc::new(AtomicUsize::new(0)),
-            capacity: capacity.get(),
+            capacity: config.capacity.get(),
             config,
         }
     }
@@ -212,8 +211,7 @@ mod tests {
     #[tokio::test]
     async fn test_is_available_creates_breaker() {
         let config = CircuitBreakerConfig::p2p_defaults();
-        let manager =
-            CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(100).unwrap(), config);
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         let key = TestKey("test1".to_string());
         assert!(manager.is_available(&key));
@@ -223,8 +221,7 @@ mod tests {
     #[tokio::test]
     async fn test_record_failure_trips_circuit() {
         let config = test_config();
-        let manager =
-            CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(100).unwrap(), config);
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         let key = TestKey("test1".to_string());
 
@@ -238,8 +235,7 @@ mod tests {
     #[tokio::test]
     async fn test_record_success_closes_circuit() {
         let config = test_config();
-        let manager =
-            CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(100).unwrap(), config);
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         let key = TestKey("test1".to_string());
 
@@ -255,8 +251,7 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_removes_stale_breakers() {
         let config = test_config_with_stale_timeout(Duration::from_millis(100));
-        let manager =
-            CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(100).unwrap(), config);
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         let key1 = TestKey("test1".to_string());
         let key2 = TestKey("test2".to_string());
@@ -274,8 +269,7 @@ mod tests {
     #[tokio::test]
     async fn test_cleanup_keeps_active_breakers() {
         let config = test_config_with_stale_timeout(Duration::from_millis(200));
-        let manager =
-            CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(100).unwrap(), config);
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         let key1 = TestKey("test1".to_string());
         let key2 = TestKey("test2".to_string());
@@ -300,8 +294,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_capacity_enforcement_fail_closed() {
-        let config = CircuitBreakerConfig::p2p_defaults();
-        let manager = CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(3).unwrap(), config);
+        let config = TestConfigBuilder::default().capacity(3).build();
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         // Fill to capacity
         let key1 = TestKey("test1".to_string());
@@ -325,8 +319,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_capacity_enforcement_allows_after_cleanup() {
-        let config = test_config_with_stale_timeout(Duration::from_millis(100));
-        let manager = CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(2).unwrap(), config);
+        let config = TestConfigBuilder::default()
+            .capacity(2)
+            .stale_timeout(Duration::from_millis(100))
+            .build();
+        let manager = CircuitBreakerManager::<TestKey>::new(config);
 
         // Fill to capacity
         let key1 = TestKey("test1".to_string());
@@ -348,8 +345,7 @@ mod tests {
     #[tokio::test]
     async fn test_manager_clone_shares_state() {
         let config = CircuitBreakerConfig::p2p_defaults();
-        let manager1 =
-            CircuitBreakerManager::<TestKey>::new(NonZeroUsize::new(100).unwrap(), config);
+        let manager1 = CircuitBreakerManager::<TestKey>::new(config);
 
         let key = TestKey("test1".to_string());
         let _ = manager1.is_available(&key);
@@ -378,10 +374,7 @@ mod tests {
                 num_failures in 0_u32..20,
             ) {
                 let config = test_config();
-                let manager = CircuitBreakerManager::<String>::new(
-                    NonZeroUsize::new(100).unwrap(),
-                    config,
-                );
+                let manager = CircuitBreakerManager::<String>::new(config);
 
                 let key = "test-key".to_string();
 
@@ -403,10 +396,7 @@ mod tests {
                 )
             ) {
                 let config = CircuitBreakerConfig::p2p_defaults();
-                let manager = CircuitBreakerManager::<String>::new(
-                    NonZeroUsize::new(100).unwrap(),
-                    config,
-                );
+                let manager = CircuitBreakerManager::<String>::new(config);
 
                 for (is_success, key_idx) in operations {
                     let key = format!("key-{}", key_idx);
@@ -441,10 +431,7 @@ mod tests {
                 )
             ) {
                 let config = CircuitBreakerConfig::p2p_defaults();
-                let manager = CircuitBreakerManager::<String>::new(
-                    NonZeroUsize::new(100).unwrap(),
-                    config,
-                );
+                let manager = CircuitBreakerManager::<String>::new(config);
 
                 let key = "shared-key".to_string();
 

@@ -362,10 +362,11 @@ mod tests {
                     0..100
                 )
             ) {
-                use super::super::super::config::{FailureThreshold, RecoveryAttempts};
-                use std::num::NonZeroU32;
+                use super::super::super::config::{BreakerCapacity, FailureThreshold, RecoveryAttempts};
+                use std::num::{NonZeroU32, NonZeroUsize};
 
                 let config = CircuitBreakerConfig {
+                    capacity: BreakerCapacity::new(NonZeroUsize::new(100).unwrap()),
                     failure_threshold: FailureThreshold::new(NonZeroU32::new(3).unwrap()),
                     cooldown_duration: Duration::from_millis(10),
                     stale_timeout: Duration::from_secs(10),
