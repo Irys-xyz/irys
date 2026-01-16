@@ -80,7 +80,7 @@ impl CircuitBreaker {
     fn try_transition_to_half_open(&self) -> bool {
         let transition_succeeded = self
             .state
-            .compare_exchange_weak(
+            .compare_exchange(
                 CircuitState::Open as u8,
                 CircuitState::HalfOpen as u8,
                 Ordering::AcqRel,
