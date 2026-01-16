@@ -91,10 +91,9 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
             ledger_id: DataLedger::Submit as u32,
             bundle_format: Some(0),
             chain_id: 1,
-            promoted_height: Some(2), // Mark as promoted!
             signature: Default::default(),
         },
-        metadata: irys_types::DataTransactionMetadata::new(),
+        metadata: irys_types::DataTransactionMetadata::with_promoted_height(2), // Mark as promoted!
     });
 
     // Create an invalid refund for this promoted transaction

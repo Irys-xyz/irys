@@ -1161,7 +1161,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     };
 
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
-    a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
+    a_blk1_tx1_published.set_promoted_height(None); // <- mark this tx as unpublished
 
     // assert that A’s tx is among publish candidates (treated as if it wasn't promoted)
     // (allow additional candidates as sometimes Bs tx will also show up)
@@ -1276,7 +1276,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .get_storage_tx_header_from_mempool(&a_blk1_tx1.header.id)
         .await?;
 
-    assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height, Some(b_blk3.height));
+    assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height(), Some(b_blk3.height));
 
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);

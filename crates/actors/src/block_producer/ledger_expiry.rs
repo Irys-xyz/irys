@@ -675,7 +675,7 @@ fn aggregate_balance_deltas(
 
         // process refunds of perm fee if the tx was not promoted
         {
-            if data_tx.promoted_height.is_none() {
+            if data_tx.promoted_height().is_none() {
                 // Only process refund if perm_fee exists (should always be present if tx is expected to be promoted)
                 let perm_fee = data_tx
                     .perm_fee
@@ -689,7 +689,7 @@ fn aggregate_balance_deltas(
             } else {
                 tracing::debug!(
                     tx.id = ?data_tx.id,
-                    tx.promoted_height = ?data_tx.promoted_height,
+                    tx.promoted_height = ?data_tx.promoted_height(),
                     "Tx was promoted, no refund needed",
                 );
             }

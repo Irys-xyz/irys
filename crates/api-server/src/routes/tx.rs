@@ -309,7 +309,7 @@ pub async fn get_tx_promotion_status(
     Ok(web::Json(PromotionStatus {
         promotion_height: db_metadata
             .and_then(|m| m.promoted_height)
-            .or(tx_header.promoted_height),
+            .or(tx_header.promoted_height()),
     }))
 }
 

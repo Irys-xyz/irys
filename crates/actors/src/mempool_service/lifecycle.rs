@@ -125,9 +125,8 @@ impl Inner {
                     // Only update DB if the tx was already in DB (to match original behavior)
                     // This prevents writing mempool-only txs to DB which would cause reorg issues
                     if let Some(ref mut db_tx) = db_header.clone() {
-                        if db_tx.promoted_height.is_none() {
-                            // Set both old and new promoted_height fields until migration is complete
-                            db_tx.promoted_height = Some(block.height);
+                        if db_tx.promoted_height().is_none() {
+                            // Set promoted_height in metadata
                             db_tx.metadata_mut().promoted_height = Some(block.height);
                             if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
                                 error!("Failed to update tx header in DB for tx {}: {}", txid, e);
@@ -146,9 +145,8 @@ impl Inner {
                     continue;
                 };
 
-                if header.promoted_height.is_none() {
-                    // Set both old and new promoted_height fields until migration is complete
-                    header.promoted_height = Some(block.height);
+                if header.promoted_height().is_none() {
+                    // Set promoted_height in metadata
                     header.metadata_mut().promoted_height = Some(block.height);
                 }
 
@@ -760,8 +758,7 @@ impl Inner {
                 // Get the ingress proofs for this txid (also performs some validation)
                 let tx_proofs = get_ingress_proofs(publish_ledger, &txid)?;
 
-                // Set both old and new promoted_height fields until migration is complete
-                tx.promoted_height = Some(promoted_in_block.height);
+                // Set promoted_height in metadata
                 tx.metadata_mut().promoted_height = Some(promoted_in_block.height);
                 promoted_height_updates.push((txid, promoted_in_block.height));
                 // update entry
@@ -896,9 +893,8 @@ impl Inner {
 
             self.irys_db.update_eyre(|mut_tx| {
                 for mut header in publish_tx_headers.into_iter().flatten() {
-                    if header.promoted_height.is_none() {
-                        // Set both old and new promoted_height fields until migration is complete
-                        header.promoted_height = Some(event.block.height);
+                    if header.promoted_height().is_none() {
+                        // Set promoted_height in metadata
                         header.metadata_mut().promoted_height = Some(event.block.height);
                         eyre::bail!(
                             "Migrating publish tx with no promoted_height {} at height {}",

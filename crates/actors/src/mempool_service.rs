@@ -1174,13 +1174,13 @@ impl Inner {
                     "Processing publish candidate tx {} {:#?}",
                     &tx_header.id, &tx_header
                 );
-                let is_promoted = tx_header.promoted_height.is_some();
+                let is_promoted = tx_header.promoted_height().is_some();
 
                 if is_promoted {
                     // If it's promoted skip it
                     warn!(
                         tx.id = ?tx_header.id,
-                        tx.promoted_height = ?tx_header.promoted_height,
+                        tx.promoted_height = ?tx_header.promoted_height(),
                         "Publish candidate is already promoted"
                     );
                     continue;
@@ -2288,13 +2288,8 @@ impl AtomicMempoolState {
         let mut cleared = false;
         let mut state = self.write().await;
         if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-            // Clear both old and new promoted_height fields until migration is complete
+            // Clear promoted_height in metadata
             wrapped_header.metadata_mut().promoted_height = None;
-            match wrapped_header {
-                DataTransactionHeader::V1(wrapper) => {
-                    wrapper.tx.promoted_height = None;
-                }
-            }
             state.recent_valid_tx.put(txid, ());
             tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
             cleared = true;
@@ -2312,9 +2307,8 @@ impl AtomicMempoolState {
     ) -> Option<DataTransactionHeader> {
         let mut state = self.write().await;
         let wrapped_header = state.valid_submit_ledger_tx.get_mut(&txid)?;
-        if wrapped_header.promoted_height.is_none() {
-            // Set both old and new promoted_height fields until migration is complete
-            wrapped_header.promoted_height = Some(height);
+        if wrapped_header.promoted_height().is_none() {
+            // Set promoted_height in metadata
             wrapped_header.metadata_mut().promoted_height = Some(height);
         }
         let result = wrapped_header.clone();
@@ -3270,7 +3264,6 @@ mod bounded_mempool_tests {
                 perm_fee: Some(U256::from(100).into()),
                 ledger_id: DataLedger::Publish as u32,
                 bundle_format: Some(0),
-                promoted_height: None,
                 signature: IrysSignature::default(),
                 chain_id: 1,
             },

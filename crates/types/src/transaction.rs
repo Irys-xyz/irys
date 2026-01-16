@@ -224,6 +224,18 @@ impl DataTransactionHeader {
             Self::V1(v1) => v1.metadata = new_metadata,
         }
     }
+
+    /// Convenience method to get promoted_height from metadata
+    #[inline]
+    pub fn promoted_height(&self) -> Option<u64> {
+        self.metadata().promoted_height
+    }
+
+    /// Convenience method to set promoted_height in metadata
+    #[inline]
+    pub fn set_promoted_height(&mut self, height: Option<u64>) {
+        self.metadata_mut().promoted_height = height;
+    }
 }
 
 impl Versioned for DataTransactionHeaderV1 {
@@ -304,12 +316,6 @@ pub struct DataTransactionHeaderV1 {
     /// Funds the storage of the transaction for the next 200+ years (protocol-enforced cost)
     #[serde(default)]
     pub perm_fee: Option<BoundedFee>,
-
-    /// INTERNAL: Tracks what block this transaction was promoted in, can look up ingress proofs there
-    #[rlp(skip)]
-    #[rlp(default)]
-    #[serde(skip)]
-    pub promoted_height: Option<u64>,
 }
 
 /// Ordering for DataTransactionHeader by transaction ID
@@ -404,7 +410,6 @@ impl DataTransactionHeaderV1 {
             bundle_format: None,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
-            promoted_height: None,
         }
     }
 
@@ -869,7 +874,6 @@ mod tests {
             ledger_id: 1,
             bundle_format: None,
             chain_id: 1,
-            promoted_height: None,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
         };
 
@@ -1161,7 +1165,6 @@ mod tests {
                 ledger_id: 1,
                 bundle_format: None,
                 chain_id: config.chain_id,
-                promoted_height: None,
                 signature: Signature::test_signature().into(),
             },
             metadata: DataTransactionMetadata::new(),

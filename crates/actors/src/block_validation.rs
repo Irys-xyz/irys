@@ -2098,7 +2098,7 @@ pub async fn data_txs_are_valid(
 
                         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                         // (they're waiting for proofs to arrive)
-                        if tx.promoted_height.is_some() {
+                        if tx.promoted_height().is_some() {
                             // TODO: This should be a hard error, but the test infrastructure currently
                             // creates transactions with ingress proofs that get placed in Submit ledger.
                             // This needs to be fixed in the block production logic to properly place
@@ -2178,7 +2178,7 @@ pub async fn data_txs_are_valid(
 
         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
         // (they're waiting for proofs to arrive)
-        if tx.promoted_height.is_some() {
+        if tx.promoted_height().is_some() {
             // TODO: This should be a hard error, but the test infrastructure currently
             // creates transactions with ingress proofs that get placed in Submit ledger.
             // This needs to be fixed in the block production logic to properly place

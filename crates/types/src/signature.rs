@@ -244,7 +244,6 @@ mod tests {
                     ledger_id: 0,
                     bundle_format: None,
                     chain_id: testing_config.chain_id,
-                    promoted_height: None,
                     signature: Default::default(),
                 },
                 metadata: crate::DataTransactionMetadata::new(),

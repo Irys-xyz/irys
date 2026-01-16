@@ -512,7 +512,7 @@ impl InnerCacheTask {
             let mut any_unpromoted = false;
             for txid in cached_data_root.txid_set.iter() {
                 if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
-                    if tx_header.promoted_height.is_none() {
+                    if tx_header.promoted_height().is_none() {
                         any_unpromoted = true;
                         debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
                         break;
