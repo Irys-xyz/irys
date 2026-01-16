@@ -38,6 +38,8 @@ use tracing::debug;
 
 pub type BlockHash = H256;
 
+pub type BlockHeight = u64;
+
 pub type EvmBlockHash = B256;
 
 /// Stores the `vdf_limiter_info` in the [`IrysBlockHeaderV1`]
@@ -808,7 +810,7 @@ impl IrysBlockHeaderV1 {
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
                     total_chunks: 0,
-                    expires: Some(1622543200),
+                    expires: Some(5),
                     proofs: None,
                     required_proof_count: None,
                 },
@@ -843,7 +845,18 @@ pub struct CombinedBlockHeader {
 
 /// Names for each of the ledgers as well as their `ledger_id` discriminant
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Compact,
+    PartialOrd,
+    Ord,
+    Hash,
+    Arbitrary,
 )]
 #[repr(u32)]
 #[derive(Default)]
@@ -854,6 +867,8 @@ pub enum DataLedger {
     /// An expiring term ledger used for submitting to the publish ledger
     Submit = 1,
     // Add more term ledgers as they exist
+    OneYear = 10,
+    ThirtyDay = 20,
 }
 
 impl PartialEq<u32> for DataLedger {
@@ -888,7 +903,13 @@ impl Encode for DataLedger {
 
 impl DataLedger {
     /// An array of all the Ledger numbers in order
-    pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
+    pub const ALL: [Self; 2] = [
+        Self::Publish,
+        Self::Submit,
+        // Only add these when ready to populate them with partitions
+        //Self::OneYear,
+        //Self::ThirtyDay
+    ];
 
     /// Make it possible to iterate over all the data ledgers in order
     pub fn iter() -> impl Iterator<Item = Self> {
@@ -903,6 +924,8 @@ impl DataLedger {
         match value {
             0 => Some(Self::Publish),
             1 => Some(Self::Submit),
+            10 => Some(Self::OneYear),
+            20 => Some(Self::ThirtyDay),
             _ => None,
         }
     }
@@ -921,6 +944,8 @@ impl TryFrom<DataLedger> for usize {
         match value {
             DataLedger::Publish => Ok(0),
             DataLedger::Submit => Ok(1),
+            DataLedger::OneYear => Ok(10),
+            DataLedger::ThirtyDay => Ok(20),
         }
     }
 }
@@ -947,6 +972,8 @@ impl std::fmt::Display for DataLedger {
         match self {
             Self::Publish => write!(f, "publish"),
             Self::Submit => write!(f, "submit"),
+            Self::OneYear => write!(f, "one_year"),
+            Self::ThirtyDay => write!(f, "one_month"),
         }
     }
 }
@@ -980,8 +1007,11 @@ pub struct LedgerIndexItem {
     pub total_chunks: u64, // 8 bytes
     /// The merkle root of the TX that apply to this ledger in the current block
     pub tx_root: H256, // 32 bytes
+    pub ledger: DataLedger, // SubKey
 }
 
+// Used exclusively for reading to and from the block_index file, can be removed
+// after all nodes have mdbx based block_index's
 impl LedgerIndexItem {
     fn to_bytes(&self) -> [u8; 40] {
         // Fixed size of 40 bytes

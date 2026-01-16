@@ -38,10 +38,12 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
                 LedgerIndexItem {
                     total_chunks: 0,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 0,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         },
@@ -52,10 +54,12 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
                 LedgerIndexItem {
                     total_chunks: 10,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 10,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         },
@@ -66,10 +70,12 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
                 LedgerIndexItem {
                     total_chunks: 20,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 20,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         },

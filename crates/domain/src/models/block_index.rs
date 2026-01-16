@@ -157,10 +157,12 @@ impl BlockIndex {
                 LedgerIndexItem {
                     total_chunks: max_publish_chunks,
                     tx_root: block.data_ledgers[DataLedger::Publish].tx_root,
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: max_submit_chunks,
                     tx_root: block.data_ledgers[DataLedger::Submit].tx_root,
+                    ledger: DataLedger::Submit,
                 },
             ],
         };
@@ -340,7 +342,7 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
 
         // Read ledger entries
         let mut ledgers = Vec::with_capacity(num_ledgers);
-        for _ in 0..num_ledgers {
+        for i in 0..num_ledgers {
             match reader.read_exact(&mut ledger_buf) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -364,6 +366,7 @@ fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
             ledgers.push(LedgerIndexItem {
                 total_chunks,
                 tx_root,
+                ledger: DataLedger::try_from(i as u32)?,
             });
         }
 
@@ -415,10 +418,12 @@ mod tests {
                     LedgerIndexItem {
                         total_chunks: 100,
                         tx_root: H256::random(),
+                        ledger: DataLedger::Publish,
                     },
                     LedgerIndexItem {
                         total_chunks: 1000,
                         tx_root: H256::random(),
+                        ledger: DataLedger::Submit,
                     },
                 ],
             },
@@ -429,10 +434,12 @@ mod tests {
                     LedgerIndexItem {
                         total_chunks: 200,
                         tx_root: H256::random(),
+                        ledger: DataLedger::Publish,
                     },
                     LedgerIndexItem {
                         total_chunks: 2000,
                         tx_root: H256::random(),
+                        ledger: DataLedger::Submit,
                     },
                 ],
             },
@@ -443,10 +450,12 @@ mod tests {
                     LedgerIndexItem {
                         total_chunks: 300,
                         tx_root: H256::random(),
+                        ledger: DataLedger::Publish,
                     },
                     LedgerIndexItem {
                         total_chunks: 3000,
                         tx_root: H256::random(),
+                        ledger: DataLedger::Submit,
                     },
                 ],
             },
@@ -516,10 +525,12 @@ mod tests {
                 LedgerIndexItem {
                     total_chunks: 0,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 0,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         };

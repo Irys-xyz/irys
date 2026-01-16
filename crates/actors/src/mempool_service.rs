@@ -961,6 +961,14 @@ impl Inner {
                     );
                     continue;
                 }
+                DataLedger::OneYear => {
+                    // todo: add some validation
+                    unreachable!("OneYear Term ledger not supported yet");
+                }
+                DataLedger::ThirtyDay => {
+                    // todo: add some validation
+                    unreachable!("ThirtyDay Term ledger not supported yet");
+                }
             }
 
             if !self

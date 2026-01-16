@@ -6,7 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Base64, DataLedger, IrysAddress, LedgerIndexItem, PeerListItem};
+use irys_types::{Base64, BlockHeight, DataLedger, IrysAddress, LedgerIndexItem, PeerListItem};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
 use reth_codecs::Compact;
@@ -110,14 +110,20 @@ table IrysBlockHeaders {
     type Value = CompactIrysBlockHeader;
 }
 
-// Block index table: DataLedger -> BlockNumber -> LedgerIndexItem
+// Block index table: DataLedger -> BlockHeight -> LedgerIndexItem
 // Stores block metadata for each block by ledger type (Publish/Submit/etc)
 // This indexing scheme is optimized for pruning ledgers by height which is
 // a function of expiring term ledgers.
 table IrysBlockIndexItems {
-    type Key = DataLedger;
+    type Key = BlockHeight;
     type Value = CompactLedgerIndexItem;
-    type SubKey = u64;
+    type SubKey = DataLedger;
+}
+
+// Indexes migrated block hashes by height
+table MigratedBlockHashes {
+    type Key = BlockHeight;
+    type Value = H256;
 }
 
 /// Stores PoA chunks
