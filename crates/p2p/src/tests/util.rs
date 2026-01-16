@@ -35,6 +35,7 @@ use irys_types::{
     TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_types::{BlockTransactions, IrysAddress};
+use irys_utils::circuit_breaker::CircuitBreakerConfig;
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::{HashMap, HashSet};
@@ -1025,9 +1026,10 @@ pub(crate) async fn data_handler_stub(
         mempool: mempool_stub,
         block_pool: block_pool_stub,
         cache: Arc::new(GossipCache::new()),
-        gossip_client: GossipClient::new(
+        gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
+            CircuitBreakerConfig::testing(),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
@@ -1070,9 +1072,10 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         mempool: mempool_stub,
         block_pool,
         cache: Arc::new(GossipCache::new()),
-        gossip_client: GossipClient::new(
+        gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
+            CircuitBreakerConfig::testing(),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

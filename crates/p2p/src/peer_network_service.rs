@@ -345,7 +345,10 @@ impl PeerNetworkService {
             let peer_list = self.inner.peer_list();
             let inner_clone = sender_inner.clone();
             tokio::spawn(async move {
-                match client.check_health(peer.address, &peer_list).await {
+                match client
+                    .check_health(&mining_addr, peer.address, &peer_list)
+                    .await
+                {
                     Ok(true) => {
                         debug!("Peer {:?} is online", mining_addr);
                         inner_clone.increase_peer_score(&mining_addr, ScoreIncreaseReason::Online);
