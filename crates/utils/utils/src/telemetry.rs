@@ -271,13 +271,13 @@ pub fn init_telemetry() -> Result<()> {
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     if LOGGER_PROVIDER.set(logger_provider.clone()).is_err() {
-        tracing::warn!("Logger provider already initialized, skipping duplicate initialization");
+        eprintln!("Warning: Logger provider already initialized, skipping duplicate initialization");
     }
     if TRACER_PROVIDER.set(tracer_provider.clone()).is_err() {
-        tracing::warn!("Tracer provider already initialized, skipping duplicate initialization");
+        eprintln!("Warning: Tracer provider already initialized, skipping duplicate initialization");
     }
     if METER_PROVIDER.set(meter_provider).is_err() {
-        tracing::warn!("Meter provider already initialized, skipping duplicate initialization");
+        eprintln!("Warning: Meter provider already initialized, skipping duplicate initialization");
     }
 
     setup_tracing_subscriber(&tracer_provider, &logger_provider);
