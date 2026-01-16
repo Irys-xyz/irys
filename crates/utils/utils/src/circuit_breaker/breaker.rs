@@ -312,6 +312,11 @@ mod tests {
             fn prop_half_open_single_failure_reopens(
                 failure_threshold in 1_u32..20,
             ) {
+                use super::super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+
+                reset_test_time();
+                set_test_time(1_000_000_000);
+
                 let config = proptest_config(failure_threshold);
                 let breaker = CircuitBreaker::new(&config);
 
@@ -320,13 +325,15 @@ mod tests {
                 }
                 prop_assert_eq!(breaker.state(), CircuitState::Open);
 
-                std::thread::sleep(Duration::from_millis(60));
+                advance_test_time(Duration::from_millis(60));
 
                 let _ = breaker.is_available();
                 prop_assert_eq!(breaker.state(), CircuitState::HalfOpen);
 
                 breaker.record_failure();
                 prop_assert_eq!(breaker.state(), CircuitState::Open);
+
+                reset_test_time();
             }
 
             #[test]
@@ -335,6 +342,11 @@ mod tests {
                 recovery_attempts in 1_u32..10,
                 extra_attempts in 0_u32..20,
             ) {
+                use super::super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+
+                reset_test_time();
+                set_test_time(1_000_000_000);
+
                 let config = proptest_config_with_recovery(failure_threshold, recovery_attempts);
                 let breaker = CircuitBreaker::new(&config);
 
@@ -342,7 +354,7 @@ mod tests {
                     breaker.record_failure();
                 }
 
-                std::thread::sleep(Duration::from_millis(60));
+                advance_test_time(Duration::from_millis(60));
                 let _ = breaker.is_available();
                 prop_assert_eq!(breaker.state(), CircuitState::HalfOpen);
 
@@ -353,6 +365,8 @@ mod tests {
                     }
                 }
                 prop_assert!(successful_attempts <= recovery_attempts);
+
+                reset_test_time();
             }
 
             #[test]
