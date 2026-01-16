@@ -5,7 +5,6 @@ use crate::utils::{
 };
 use irys_actors::{
     async_trait,
-    block_discovery::BlockTransactions,
     block_producer::ledger_expiry::LedgerExpiryBalanceDelta,
     block_validation::{PreValidationError, ValidationError},
     shadow_tx_generator::PublishLedgerWithTxs,
@@ -17,7 +16,7 @@ use irys_domain::ChainState;
 use irys_types::storage_pricing::{
     calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
 };
-use irys_types::IngressProofsList;
+use irys_types::{BlockTransactions, IngressProofsList};
 use irys_types::{
     Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
     UnixTimestamp, U256,
@@ -43,6 +42,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
@@ -165,6 +165,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
@@ -346,7 +347,7 @@ async fn slow_heavy_block_valid_data_tx_after_ema_change_gets_accepted() -> eyre
 // The test deliberately proomotes the tx in a future EMA interval, meaning that
 // future price validations will always be invalid
 #[test_log::test(tokio::test)]
-async fn slow_heavy_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
+async fn heavy3_block_promoted_tx_with_ema_price_change_gets_accepted() -> eyre::Result<()> {
     // Configure network with short EMA interval and ever-increasing mock oracle
     let seconds_to_wait = 20;
     let mut genesis_config = NodeConfig::testing();
@@ -584,6 +585,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],

@@ -1,5 +1,6 @@
-use crate::{BlockHash, ChunkPathHash, Compact, GossipDataRequest, PeerAddress};
+use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress, ProtocolVersion};
 
+use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
 use arbitrary::Arbitrary;
 use bytes::Buf as _;
@@ -82,6 +83,7 @@ pub struct PeerListItem {
     pub address: PeerAddress,
     pub last_seen: u64,
     pub is_online: bool,
+    pub protocol_version: ProtocolVersion,
 }
 
 impl Default for PeerListItem {
@@ -99,6 +101,7 @@ impl Default for PeerListItem {
                 .unwrap_or_default()
                 .as_millis() as u64,
             is_online: true,
+            protocol_version: ProtocolVersion::default(),
         }
     }
 }
@@ -259,6 +262,9 @@ impl Compact for PeerListItem {
         buf.put_u8(if self.is_online { 1 } else { 0 });
         size += 1;
 
+        buf.put_u32(self.protocol_version as u32);
+        size += 4;
+
         size
     }
 
@@ -271,6 +277,9 @@ impl Compact for PeerListItem {
         // - RethPeerInfo (variable size; see its Compact impl)
         // - u64 last_seen (8 bytes, BE)
         // - optional u8 is_online (1 byte). Decoder tolerates it being absent and defaults to false.
+        // - optional u32 protocol_version (4 bytes, BE). Appended after is_online. Decoder tolerates
+        //   it being absent (for backward compatibility with older compact encodings) and defaults
+        //   to ProtocolVersion::default().
         //
         // Decoding strategy:
         // - For the fixed-size prefix (score, response_time) we advance the buf slice in-place.
@@ -304,6 +313,7 @@ impl Compact for PeerListItem {
                     },
                     last_seen: 0,
                     is_online: false,
+                    protocol_version: ProtocolVersion::default(),
                 },
                 &[],
             );
@@ -340,6 +350,18 @@ impl Compact for PeerListItem {
             total_consumed += 1;
         }
 
+        // Read protocol_version (4 bytes) if available. If it's not available, it means that it's a
+        //  v1 record, so we default to ProtocolVersion::V1.
+        let mut protocol_version = ProtocolVersion::V1;
+        if buf.len() >= total_consumed + 4 {
+            let version_bytes: [u8; 4] = buf[total_consumed..total_consumed + 4]
+                .try_into()
+                .expect("slice with incorrect length");
+            let version_u32 = u32::from_be_bytes(version_bytes);
+            protocol_version = ProtocolVersion::from(version_u32);
+            total_consumed += 4;
+        }
+
         (
             Self {
                 reputation_score,
@@ -347,6 +369,7 @@ impl Compact for PeerListItem {
                 address,
                 last_seen,
                 is_online,
+                protocol_version,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
@@ -380,7 +403,7 @@ pub enum PeerNetworkServiceMessage {
     AnnounceYourselfToPeer(PeerListItem),
     AnnouncementFinished(AnnouncementFinishedMessage),
     RequestDataFromNetwork {
-        data_request: GossipDataRequest,
+        data_request: GossipDataRequestV2,
         use_trusted_peers_only: bool,
         response: tokio::sync::oneshot::Sender<Result<(), PeerNetworkError>>,
         retries: u8,
@@ -474,7 +497,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Block(block_hash),
+            data_request: GossipDataRequestV2::BlockHeader(block_hash),
             use_trusted_peers_only,
             response: sender,
             retries,
@@ -495,7 +518,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::ExecutionPayload(evm_payload_hash),
+            data_request: GossipDataRequestV2::ExecutionPayload(evm_payload_hash),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,
@@ -516,7 +539,7 @@ impl PeerNetworkSender {
     ) -> Result<(), PeerNetworkError> {
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let message = PeerNetworkServiceMessage::RequestDataFromNetwork {
-            data_request: GossipDataRequest::Chunk(chunk_path_hash),
+            data_request: GossipDataRequestV2::Chunk(chunk_path_hash),
             use_trusted_peers_only,
             response: sender,
             retries: DATA_REQUEST_RETRIES,
@@ -538,8 +561,25 @@ mod tests {
 
     #[test]
     fn peer_list_item_compact_roundtrip() {
-        let peer_list_item = PeerListItem::default();
-        let mut buf = bytes::BytesMut::with_capacity(30);
+        let peer_list_item = PeerListItem {
+            reputation_score: PeerScore::new(75),
+            response_time: 150,
+            address: PeerAddress {
+                gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 8080)),
+                api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 5), 3000)),
+                execution: RethPeerInfo {
+                    peering_tcp_addr: SocketAddr::V4(SocketAddrV4::new(
+                        Ipv4Addr::new(172, 16, 0, 1),
+                        30303,
+                    )),
+                    peer_id: reth_transaction_pool::PeerId::random(),
+                },
+            },
+            last_seen: 1704067200000, // Jan 1, 2024 timestamp in milliseconds
+            is_online: true,
+            protocol_version: ProtocolVersion::V2,
+        };
+        let mut buf = bytes::BytesMut::with_capacity(100);
         peer_list_item.to_compact(&mut buf);
         let (decoded, _) = PeerListItem::from_compact(&buf[..], buf.len());
         assert_eq!(peer_list_item, decoded);
@@ -785,13 +825,16 @@ mod tests {
     }
 
     #[test]
-    fn peer_list_item_from_compact_missing_is_online() {
-        let item = PeerListItem::default();
+    fn peer_list_item_from_compact_missing_is_online_and_protocol_version() {
+        let item = PeerListItem {
+            protocol_version: ProtocolVersion::V2,
+            ..PeerListItem::default()
+        };
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
-        // Remove the optional is_online byte
+        // Remove the optional is_online byte and protocol version bytes
         assert!(!buf.is_empty());
-        buf.truncate(buf.len() - 1);
+        buf.truncate(buf.len() - 5);
 
         let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
         assert!(
@@ -804,5 +847,8 @@ mod tests {
         assert_eq!(decoded.address, item.address);
         assert_eq!(decoded.last_seen, item.last_seen);
         assert!(!decoded.is_online);
+        assert_ne!(decoded.protocol_version, item.protocol_version);
+        // For the records that don't have a protocol version, it should default to V1
+        assert_eq!(decoded.protocol_version, ProtocolVersion::V1);
     }
 }

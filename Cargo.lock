@@ -5180,7 +5180,6 @@ dependencies = [
  "irys-types",
  "reth",
  "rstest",
- "semver 1.0.27",
  "serde",
  "serde_json",
  "socket2 0.5.10",
@@ -5670,6 +5669,7 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "arbitrary",
+ "assert_matches",
  "async-trait",
  "base58",
  "base64-url",
@@ -6653,6 +6653,19 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "nextest-cpu-monitor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -14548,6 +14561,9 @@ dependencies = [
  "clap",
  "color-eyre",
  "eyre",
+ "serde",
+ "serde_json",
+ "tempfile",
  "xshell",
 ]
 

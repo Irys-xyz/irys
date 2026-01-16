@@ -14,7 +14,7 @@ pkg-config
 ```
 The NVIDIA feature flag/CUDA accelerated matrix packing requires the latest CUDA toolkit (12.6+)\
 and GCC-13 (as well as g++ 13).\
-See .devcontainer/setup.sh for more information.
+See `.devcontainer/setup.sh` for more information.
 
 Local development commands:
 
@@ -40,6 +40,11 @@ Testing code examples in comments
 
 ```cli
 cargo test --doc
+```
+
+re-run only failing tests
+```cli
+cargo xtask test --rereun-failures
 ```
 
 ## Debugging

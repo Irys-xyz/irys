@@ -3,11 +3,11 @@ use alloy_core::primitives::B256;
 use irys_database::reth_db::Database as _;
 use irys_database::tables::PeerListItems;
 use irys_database::walk_all;
-use irys_types::IrysAddress;
 use irys_types::{
     Config, DatabaseProvider, PeerAddress, PeerFilterMode, PeerListItem, PeerNetworkError,
     PeerNetworkSender,
 };
+use irys_types::{IrysAddress, ProtocolVersion};
 use lru::LruCache;
 use std::collections::{HashMap, HashSet};
 use std::iter::Chain;
@@ -814,7 +814,7 @@ impl PeerListDataInner {
         peer: PeerListItem,
         peer_address: PeerAddress,
         cache_getter: F,
-        address_updater: fn(&mut Self, IrysAddress, PeerAddress),
+        address_updater: fn(&mut Self, IrysAddress, PeerAddress, ProtocolVersion),
         cache_name: &str,
     ) -> bool
     where
@@ -825,12 +825,13 @@ impl PeerListDataInner {
                 existing_peer.last_seen + HANDSHAKE_COOLDOWN < peer.last_seen;
             existing_peer.last_seen = peer.last_seen;
             existing_peer.reputation_score = peer.reputation_score;
+            existing_peer.protocol_version = peer.protocol_version;
             if existing_peer.address != peer_address {
                 debug!(
                     "Peer address mismatch, updating from {:?} to {:?}",
                     existing_peer.address, peer_address
                 );
-                address_updater(self, mining_addr, peer_address);
+                address_updater(self, mining_addr, peer_address, peer.protocol_version);
                 if let Some(updated_peer) = self
                     .persistent_peers_cache
                     .get(&mining_addr)
@@ -848,7 +849,7 @@ impl PeerListDataInner {
                     "Peer address {} is the same, but the handshake cooldown has expired, so we need to re-handshake",
                     peer_address.gossip.ip()
                 );
-                address_updater(self, mining_addr, peer_address);
+                address_updater(self, mining_addr, peer_address, peer.protocol_version);
                 if let Some(updated_peer) = self
                     .persistent_peers_cache
                     .get(&mining_addr)
@@ -1025,6 +1026,7 @@ impl PeerListDataInner {
                     let old_address = updated_peer.address;
                     updated_peer.last_seen = peer.last_seen;
                     updated_peer.reputation_score = peer.reputation_score;
+                    updated_peer.protocol_version = peer.protocol_version;
 
                     if old_address != peer_address {
                         updated_peer.address = peer_address;
@@ -1056,18 +1058,26 @@ impl PeerListDataInner {
         &mut self,
         mining_addr: IrysAddress,
         new_address: PeerAddress,
+        new_protocol_version: ProtocolVersion,
     ) {
         if let Some(peer) = self.unstaked_peer_purgatory.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
+            peer.protocol_version = new_protocol_version;
             self.update_address_mappings(mining_addr, old_address, new_address);
         }
     }
 
-    fn update_peer_address(&mut self, mining_addr: IrysAddress, new_address: PeerAddress) {
+    fn update_peer_address(
+        &mut self,
+        mining_addr: IrysAddress,
+        new_address: PeerAddress,
+        new_protocol_version: ProtocolVersion,
+    ) {
         if let Some(peer) = self.persistent_peers_cache.get_mut(&mining_addr) {
             let old_address = peer.address;
             peer.address = new_address;
+            peer.protocol_version = new_protocol_version;
             self.update_address_mappings(mining_addr, old_address, new_address);
         }
     }
@@ -1097,6 +1107,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
+            protocol_version: irys_types::ProtocolVersion::default(),
         };
         (mining_addr, peer)
     }
@@ -1498,6 +1509,115 @@ mod tests {
         //     payload_request_result.is_err(),
         //     "request_payload_from_the_network should work with mock sender (expected to fail)"
         // );
+    }
+
+    #[test]
+    fn test_protocol_version_propagation() {
+        let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
+
+        // Create a peer with protocol version V1
+        let (mining_addr, mut peer) = create_test_peer(1);
+        peer.protocol_version = ProtocolVersion::V1;
+        assert_eq!(peer.protocol_version, ProtocolVersion::V1);
+
+        // Add peer to persistent cache (staked)
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+
+        // Verify initial protocol version
+        let retrieved = peer_list.peer_by_mining_address(&mining_addr).unwrap();
+        assert_eq!(retrieved.protocol_version, ProtocolVersion::V1);
+
+        // Update peer with new protocol version (V2)
+        peer.protocol_version = ProtocolVersion::V2;
+        peer.last_seen += HANDSHAKE_COOLDOWN + 1; // Ensure cooldown expired
+        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+
+        // Verify protocol_version is updated via peer_by_mining_address
+        let updated = peer_list.peer_by_mining_address(&mining_addr).unwrap();
+        assert_eq!(
+            updated.protocol_version,
+            ProtocolVersion::V2,
+            "protocol_version should be updated in persistent cache"
+        );
+
+        // Verify protocol_version is visible via peer_by_gossip_address
+        let by_gossip = peer_list
+            .peer_by_gossip_address(peer.address.gossip)
+            .unwrap();
+        assert_eq!(
+            by_gossip.protocol_version,
+            ProtocolVersion::V2,
+            "protocol_version should be visible via peer_by_gossip_address"
+        );
+
+        // Verify protocol_version is visible via peer_by_api_address
+        let by_api = peer_list.peer_by_api_address(peer.address.api).unwrap();
+        assert_eq!(
+            by_api.protocol_version,
+            ProtocolVersion::V2,
+            "protocol_version should be visible via peer_by_api_address"
+        );
+
+        // Verify protocol_version is visible in all_peers_sorted_by_score
+        let all_peers = peer_list.all_peers_sorted_by_score();
+        let found_peer = all_peers
+            .iter()
+            .find(|(addr, _)| addr == &mining_addr)
+            .unwrap();
+        assert_eq!(
+            found_peer.1.protocol_version,
+            ProtocolVersion::V2,
+            "protocol_version should be visible in all_peers_sorted_by_score"
+        );
+
+        // Test protocol_version propagation in purgatory (unstaked)
+        let (unstaked_addr, mut unstaked_peer) = create_test_peer(2);
+        unstaked_peer.protocol_version = ProtocolVersion::V1;
+        assert_eq!(unstaked_peer.protocol_version, ProtocolVersion::V1);
+
+        // Add to purgatory
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+
+        // Update protocol version for unstaked peer to V2
+        unstaked_peer.protocol_version = ProtocolVersion::V2;
+        unstaked_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
+        peer_list.add_or_update_peer(unstaked_addr, unstaked_peer, false);
+
+        // Verify protocol_version updated in purgatory
+        let unstaked_updated = peer_list.peer_by_mining_address(&unstaked_addr).unwrap();
+        assert_eq!(
+            unstaked_updated.protocol_version,
+            ProtocolVersion::V2,
+            "protocol_version should be updated in purgatory"
+        );
+
+        // Test promotion flow: move unstaked peer to persistent cache with protocol_version preserved
+        let (promo_addr, mut promo_peer) = create_test_peer(3);
+        promo_peer.protocol_version = ProtocolVersion::V2;
+
+        // Add to purgatory first
+        peer_list.add_or_update_peer(promo_addr, promo_peer.clone(), false);
+        let in_purgatory = peer_list.peer_by_mining_address(&promo_addr).unwrap();
+        assert_eq!(in_purgatory.protocol_version, ProtocolVersion::V2);
+
+        // Promote to persistent (staked)
+        promo_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
+        peer_list.add_or_update_peer(promo_addr, promo_peer, true);
+
+        // Verify protocol_version preserved after promotion
+        let promoted = peer_list.peer_by_mining_address(&promo_addr).unwrap();
+        assert_eq!(
+            promoted.protocol_version,
+            ProtocolVersion::V2,
+            "protocol_version should be preserved during promotion from purgatory to persistent"
+        );
+
+        // Verify promoted peer is in persistent cache, not purgatory
+        let persistable = peer_list.persistable_peers();
+        assert!(
+            persistable.contains_key(&promo_addr),
+            "Promoted peer should be in persistent cache"
+        );
     }
 
     #[tokio::test]

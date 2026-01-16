@@ -64,8 +64,10 @@ pub struct NodeConfig {
     pub reward_address: IrysAddress,
 
     // whether we should try to stake & pledge our local drives
+    #[serde(default)]
     pub stake_pledge_drives: bool,
 
+    #[serde(default = "default_genesis_peer_discovery_timeout_millis")]
     pub genesis_peer_discovery_timeout_millis: u64,
 
     /// Default network configuration used by all services unless overridden
@@ -82,23 +84,29 @@ pub struct NodeConfig {
     pub reth: RethConfig,
 
     /// StorageModule configuration
+    #[serde(default)]
     pub storage: StorageSyncConfig,
 
     /// DataSyncService configuration
+    #[serde(default)]
     pub data_sync: DataSyncServiceConfig,
 
     /// Data packing and compression settings
+    #[serde(default)]
     pub packing: PackingConfig,
 
     /// Cache management configuration
+    #[serde(default)]
     pub cache: CacheConfig,
 
     /// Settings for the price oracle system (list).
     #[serde(default)]
     pub oracles: Vec<OracleConfig>,
 
+    #[serde(default)]
     pub vdf: VdfNodeConfig,
 
+    #[serde(default)]
     pub mempool: MempoolNodeConfig,
 
     /// Specifies which consensus rules the node follows
@@ -245,16 +253,24 @@ pub(crate) const fn default_oracle_initial_direction_up() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct StorageSyncConfig {
     /// Number of write operations before forcing a sync to disk
     /// Higher values improve performance but increase data loss risk on crashes
     pub num_writes_before_sync: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
+impl Default for StorageSyncConfig {
+    fn default() -> Self {
+        Self {
+            num_writes_before_sync: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, default)]
 pub struct DataSyncServiceConfig {
     pub max_pending_chunk_requests: u64,
     pub max_storage_throughput_bps: u64,
@@ -268,6 +284,17 @@ pub struct DataSyncServiceConfig {
         serialize_with = "serde_utils::serialize_duration_string"
     )]
     pub chunk_request_timeout: Duration,
+}
+
+impl Default for DataSyncServiceConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_chunk_requests: 1000,
+            max_storage_throughput_bps: 200 * 1024 * 1024, // 200 MB/s
+            bandwidth_adjustment_interval: Duration::from_secs(5),
+            chunk_request_timeout: Duration::from_secs(10),
+        }
+    }
 }
 
 /// # Network Defaults
@@ -378,7 +405,7 @@ impl_network_config_with_defaults!(RethNetworkConfig);
 /// # Data Packing Configuration
 ///
 /// Controls how data is compressed and packed for storage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PackingConfig {
     #[serde(default)]
@@ -387,7 +414,7 @@ pub struct PackingConfig {
     pub remote: Vec<RemotePackingConfig>,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LocalPackingConfig {
     /// Number of CPU threads to use for data packing operations
@@ -396,6 +423,16 @@ pub struct LocalPackingConfig {
     pub cpu_unpacking_concurrency: u16,
     /// Batch size for GPU-accelerated packing operations
     pub gpu_packing_batch_size: u32,
+}
+
+impl Default for LocalPackingConfig {
+    fn default() -> Self {
+        Self {
+            cpu_packing_concurrency: 2, // TODO: default to something like numcpus - 4
+            cpu_unpacking_concurrency: 4,
+            gpu_packing_batch_size: 0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,35 +452,26 @@ pub struct RemotePackingConfig {
 pub struct CacheConfig {
     /// Number of blocks cache cleaning will lag behind block finalization
     /// Higher values keep more data in cache but use more memory
-    #[serde(default)]
     pub cache_clean_lag: u8,
 
-    #[serde(default = "default_max_cache_size_bytes")]
     pub max_cache_size_bytes: u64,
 
     /// Target capacity for chunk cache as a percentage of it's total capacity (0 -> 100%)
     /// Don't set this too low, or you won't be able to promote transactions
-    #[serde(default = "default_prune_at_capacity_percent")]
     pub prune_at_capacity_percent: f64,
 }
 
 /// Default maximum cache size: 10 GiB
 pub const DEFAULT_MAX_CACHE_SIZE_BYTES: u64 = 10_737_418_240;
 
-const fn default_max_cache_size_bytes() -> u64 {
-    DEFAULT_MAX_CACHE_SIZE_BYTES
-}
-
-const fn default_prune_at_capacity_percent() -> f64 {
-    80_f64
-}
+pub const DEFAULT_PRUNE_AT_CAPACITY_PERCENT: f64 = 80_f64;
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             cache_clean_lag: 0,
             max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-            prune_at_capacity_percent: default_prune_at_capacity_percent(),
+            prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
         }
     }
 }
@@ -571,6 +599,11 @@ fn default_peer_filter_mode() -> PeerFilterMode {
     PeerFilterMode::Unrestricted
 }
 
+/// Default genesis peer discovery timeout (20s)
+fn default_genesis_peer_discovery_timeout_millis() -> u64 {
+    20_000
+}
+
 /// Default network configuration when not specified in the config file.
 /// Uses localhost for public_ip and binds to all interfaces.
 fn default_network_defaults() -> NetworkDefaults {
@@ -590,11 +623,20 @@ pub struct VdfNodeConfig {
     pub parallel_verification_thread_limit: usize,
 }
 
+impl Default for VdfNodeConfig {
+    fn default() -> Self {
+        Self {
+            // TODO: default to something like numcpus - 4
+            parallel_verification_thread_limit: 4,
+        }
+    }
+}
+
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(deny_unknown_fields, default)]
 pub struct MempoolNodeConfig {
     /// Maximum number of addresses in the LRU cache for out-of-order stakes and pledges
     /// Controls memory usage for tracking transactions that arrive before their dependencies
@@ -614,12 +656,10 @@ pub struct MempoolNodeConfig {
 
     /// Maximum number of pre-header chunks to keep per data root before the header arrives
     /// Limits speculative storage window for out-of-order chunks
-    #[serde(default)]
     pub max_preheader_chunks_per_item: usize,
 
     /// Maximum allowed pre-header data_path bytes for chunk proofs
     /// Mitigates DoS on speculative chunk storage before header arrival
-    #[serde(default)]
     pub max_preheader_data_path_bytes: usize,
 
     /// Maximum number of valid tx txids to keep track of
@@ -647,12 +687,27 @@ pub struct MempoolNodeConfig {
     pub max_commitments_per_address: usize,
 
     /// Maximum number of concurrent handlers for the mempool messages
-    #[serde(default = "default_max_concurrent_mempool_tasks")]
     pub max_concurrent_mempool_tasks: usize,
 }
 
-pub fn default_max_concurrent_mempool_tasks() -> usize {
-    30
+impl Default for MempoolNodeConfig {
+    fn default() -> Self {
+        Self {
+            max_pending_pledge_items: 1000,
+            max_pledges_per_item: 10,
+            max_pending_chunk_items: 500,
+            max_chunks_per_item: 100,
+            max_preheader_chunks_per_item: 50,
+            max_preheader_data_path_bytes: 4096,
+            max_valid_items: 10_000,
+            max_invalid_items: 5_000,
+            max_valid_chunks: 5_000,
+            max_valid_submit_txs: 3_000,
+            max_valid_commitment_addresses: 1_000,
+            max_commitments_per_address: 5,
+            max_concurrent_mempool_tasks: 30,
+        }
+    }
 }
 
 impl NodeConfig {
@@ -801,7 +856,7 @@ impl NodeConfig {
             cache: CacheConfig {
                 cache_clean_lag: 2,
                 max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-                prune_at_capacity_percent: default_prune_at_capacity_percent(),
+                prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
             },
             http: HttpConfig {
                 public_ip: None,
@@ -946,7 +1001,7 @@ impl NodeConfig {
             cache: CacheConfig {
                 cache_clean_lag: 2,
                 max_cache_size_bytes: DEFAULT_MAX_CACHE_SIZE_BYTES,
-                prune_at_capacity_percent: default_prune_at_capacity_percent(),
+                prune_at_capacity_percent: DEFAULT_PRUNE_AT_CAPACITY_PERCENT,
             },
             http: HttpConfig {
                 public_ip: None,

@@ -42,8 +42,8 @@ use irys_domain::{
 };
 use irys_p2p::{
     spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
-    ChainSyncServiceInner, GossipDataHandler, P2PService, ServiceHandleWithShutdownSignal,
-    SyncChainServiceFacade, SyncChainServiceMessage,
+    ChainSyncServiceInner, GossipDataHandler, GossipServer, P2PService,
+    ServiceHandleWithShutdownSignal, SyncChainServiceFacade, SyncChainServiceMessage,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_price_oracle::SingleOracle;
@@ -121,6 +121,8 @@ pub struct IrysNodeCtx {
     pub sync_state: ChainSyncState,
     pub validation_enabled: Arc<AtomicBool>,
     pub block_pool: Arc<BlockPool<BlockDiscoveryFacadeImpl, MempoolServiceFacadeImpl>>,
+    pub gossip_data_handler:
+        Arc<GossipDataHandler<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl>>,
     pub storage_modules_guard: StorageModulesReadGuard,
     pub mempool_pledge_provider: Arc<MempoolPledgeProvider>,
     pub pd_pricing: Arc<irys_actors::pd_pricing::PdPricing>,
@@ -148,6 +150,12 @@ impl IrysNodeCtx {
             started_at: self.started_at,
             mining_address: self.config.node_config.miner_address(),
         }
+    }
+
+    pub fn get_gossip_server(
+        &self,
+    ) -> GossipServer<MempoolServiceFacadeImpl, BlockDiscoveryFacadeImpl> {
+        GossipServer::new(self.gossip_data_handler.clone(), self.peer_list.clone())
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -1507,7 +1515,7 @@ impl IrysNode {
             block_index_guard.clone(),
             runtime_handle.clone(),
             Arc::clone(&block_pool),
-            gossip_data_handler,
+            Arc::clone(&gossip_data_handler),
             (chain_sync_tx, chain_sync_rx),
             service_senders.reth_service.clone(),
             Arc::clone(&is_vdf_mining_enabled),
@@ -1571,6 +1579,7 @@ impl IrysNode {
             reth_node_adapter,
             block_producer_inner,
             block_pool,
+            gossip_data_handler,
             validation_enabled,
             storage_modules_guard,
             mempool_pledge_provider: mempool_pledge_provider.clone(),

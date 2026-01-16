@@ -19,7 +19,6 @@
 //! After successful validation, tasks wait for parent block validation using
 //! cooperative yielding. Tasks are cancelled if too far behind canonical tip.
 
-use crate::block_discovery::BlockTransactions;
 use crate::block_tree_service::ValidationResult;
 use crate::block_validation::{
     commitment_txs_are_valid, data_txs_are_valid, is_seed_data_valid, poa_is_valid,
@@ -30,7 +29,7 @@ use crate::validation_service::ValidationServiceInner;
 use eyre::Context as _;
 use futures::FutureExt as _;
 use irys_domain::{BlockState, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, IrysBlockHeader};
+use irys_types::{BlockHash, BlockTransactions, IrysBlockHeader};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use tracing::{debug, error, warn, Instrument as _};

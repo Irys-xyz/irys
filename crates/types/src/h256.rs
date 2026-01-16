@@ -72,6 +72,23 @@ impl AsMut<[u8]> for H256 {
         self.as_bytes_mut()
     }
 }
+impl TryFrom<&[u8]> for H256 {
+    type Error = eyre::Report;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        H256::try_from_slice(value)
+    }
+}
+
+impl H256 {
+    pub fn try_from_slice(slice: &[u8]) -> eyre::Result<Self> {
+        if slice.len() != 32 {
+            eyre::bail!("Input length must be 32, got {}", slice.len())
+        }
+        Ok(H256::from_slice(slice))
+    }
+}
+
 impl H256 {
     #[doc = r" Returns a new fixed hash where all bits are set to the given byte."]
     #[inline]

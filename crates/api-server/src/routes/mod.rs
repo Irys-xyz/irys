@@ -13,7 +13,6 @@ pub mod mining;
 pub mod pd_pricing;
 pub mod peer_list;
 pub mod post_chunk;
-pub mod post_version;
 pub mod price;
 pub mod proxy;
 pub mod storage;

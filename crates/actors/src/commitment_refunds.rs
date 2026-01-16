@@ -1,6 +1,6 @@
 use eyre::{bail, Result};
 use irys_domain::CommitmentSnapshot;
-use irys_types::CommitmentType;
+use irys_types::CommitmentTypeV1;
 use irys_types::{CommitmentTransaction, ConsensusConfig};
 
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
@@ -23,11 +23,11 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
     let mut out = Vec::with_capacity(unpledges.len());
     for tx in unpledges {
         let amount = match tx.commitment_type() {
-            CommitmentType::Unpledge {
+            CommitmentTypeV1::Unpledge {
                 pledge_count_before_executing,
                 ..
             } => {
-                if *pledge_count_before_executing == 0 {
+                if pledge_count_before_executing == 0 {
                     bail!(
                         "Invalid unpledge in epoch snapshot: pledge_count_before_executing = 0 (tx: {:?})",
                         tx.id()

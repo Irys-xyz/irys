@@ -593,9 +593,9 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 10,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None, // Disabled on mainnet
-                // Sprite hardfork enables Programmable Data - not yet activated on mainnet
+                next_name_tbd: None,
                 sprite: None,
+                aurora: None,
             },
         }
     }
@@ -638,6 +638,7 @@ impl ConsensusConfig {
                     max_pd_chunks_per_block: 7_500,
                     min_pd_transaction_cost: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
                 }),
+                aurora: None,
             },
             ..base
         }
@@ -754,9 +755,9 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
-                next_name_tbd: None, // Can be enabled for testnet experiments
-                // Sprite hardfork enables Programmable Data - not yet activated on testnet
+                next_name_tbd: None,
                 sprite: None,
+                aurora: None,
             },
         }
     }

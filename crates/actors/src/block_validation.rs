@@ -1,7 +1,6 @@
 use crate::block_tree_service::{BlockTreeServiceMessage, ValidationResult};
 use crate::pd_pricing::base_fee::compute_pd_base_fee_for_block;
 use crate::{
-    block_discovery::BlockTransactions,
     block_producer::ledger_expiry,
     mempool_guard::MempoolReadGuard,
     mempool_service::MempoolServiceMessage,
@@ -28,7 +27,6 @@ use irys_reward_curve::HalvingCurve;
 use irys_storage::{ie, ii};
 use irys_types::storage_pricing::phantoms::{Irys, NetworkFee};
 use irys_types::storage_pricing::{calculate_perm_fee_from_config, Amount};
-use irys_types::UnixTimestampMs;
 use irys_types::{
     app_state::DatabaseProvider,
     calculate_difficulty, next_cumulative_diff,
@@ -40,7 +38,8 @@ use irys_types::{
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
 use irys_types::{BlockHash, LedgerChunkRange};
-use irys_types::{CommitmentType, IrysTransactionCommon};
+use irys_types::{BlockTransactions, UnixTimestampMs};
+use irys_types::{CommitmentTypeV1, IrysTransactionCommon, VersionDiscriminant as _};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -253,6 +252,15 @@ pub enum PreValidationError {
     #[error("Invalid signature for transaction {0}")]
     InvalidTransactionSignature(IrysTransactionId),
 
+    /// Commitment transaction version is below minimum required after hardfork activation
+    #[error("Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}")]
+    CommitmentVersionInvalid {
+        tx_id: H256,
+        position: usize,
+        version: u8,
+        minimum: u8,
+    },
+
     /// Commitment transactions provided but no commitment ledger in block header
     #[error("Commitment transactions provided but no commitment ledger in block header")]
     UnexpectedCommitmentTransactions,
@@ -307,6 +315,15 @@ pub enum ValidationError {
         tx_id: H256,
         position: usize,
         reason: String,
+    },
+
+    /// Commitment transaction version is below minimum required after hardfork activation
+    #[error("Commitment {tx_id} at position {position} has version {version}, minimum required is {minimum}")]
+    CommitmentVersionInvalid {
+        tx_id: H256,
+        position: usize,
+        version: u8,
+        minimum: u8,
     },
 
     /// Commitment ordering validation failed
@@ -672,6 +689,20 @@ pub async fn prevalidate_block(
                     got: commitment_txs.len(),
                 });
             }
+
+            // Validate commitment transaction versions against hardfork rules (cheap check before signatures)
+            if let Some((tx_id, position, version, minimum)) = find_invalid_commitment_version(
+                &config.consensus,
+                commitment_txs,
+                block.timestamp_secs(),
+            ) {
+                return Err(PreValidationError::CommitmentVersionInvalid {
+                    tx_id,
+                    position,
+                    version,
+                    minimum,
+                });
+            }
         }
 
         // Validate commitment transactions: count, IDs, and signatures
@@ -687,6 +718,22 @@ pub async fn prevalidate_block(
     }
 
     Ok(())
+}
+
+/// Finds the first commitment transaction with an invalid version according to hardfork rules.
+/// Returns `Some((tx_id, position, version, minimum))` if an invalid tx is found, `None` if all are valid.
+fn find_invalid_commitment_version(
+    config: &ConsensusConfig,
+    commitment_txs: &[CommitmentTransaction],
+    timestamp: UnixTimestamp,
+) -> Option<(H256, usize, u8, u8)> {
+    let min_version = config.hardforks.minimum_commitment_version_at(timestamp)?;
+    for (idx, tx) in commitment_txs.iter().enumerate() {
+        if tx.version() < min_version {
+            return Some((tx.id(), idx, tx.version(), min_version));
+        }
+    }
+    None
 }
 
 /// Validate transactions against expected IDs from the block header.
@@ -1733,6 +1780,31 @@ pub async fn commitment_txs_are_valid(
     block_tree_guard: &BlockTreeReadGuard,
     commitment_txs: &[CommitmentTransaction],
 ) -> Result<(), ValidationError> {
+    // Validate commitment transaction versions against hardfork rules
+    let block_timestamp = block.timestamp_secs();
+
+    let is_epoch_block = block
+        .height
+        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
+
+    if !is_epoch_block {
+        // only filter txs for non-epoch blocks
+        if let Some((tx_id, position, version, minimum)) =
+            find_invalid_commitment_version(&config.consensus, commitment_txs, block_timestamp)
+        {
+            error!(
+                "Commitment transaction {} at position {} has version {}, minimum is {}",
+                tx_id, position, version, minimum
+            );
+            return Err(ValidationError::CommitmentVersionInvalid {
+                tx_id,
+                position,
+                version,
+                minimum,
+            });
+        }
+    }
+
     // Validate that all commitment transactions have correct values
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
@@ -1765,17 +1837,12 @@ pub async fn commitment_txs_are_valid(
         (commitment_snapshot, epoch_snapshot)
     };
 
-    let is_epoch_block = block
-        .height
-        .is_multiple_of(config.consensus.epoch.num_blocks_in_epoch);
-
     if is_epoch_block {
         debug!(
             "Validating commitment order for epoch block at height {}",
             block.height
         );
 
-        // Get expected commitments from parent's snapshot
         let expected_commitments = parent_commitment_snapshot.get_epoch_commitments();
 
         // Use zip_longest to compare actual vs expected directly
@@ -1821,15 +1888,15 @@ pub async fn commitment_txs_are_valid(
     };
 
     for tx in commitment_txs {
-        if let CommitmentType::Unpledge { partition_hash, .. } = tx.commitment_type() {
+        if let CommitmentTypeV1::Unpledge { partition_hash, .. } = tx.commitment_type() {
             let owner = parent_epoch_snapshot
                 .partition_assignments
-                .get_assignment(*partition_hash)
+                .get_assignment(partition_hash)
                 .map(|assignment| assignment.miner_address);
             if owner != Some(tx.signer()) {
                 return Err(ValidationError::UnpledgePartitionNotOwned {
                     tx_id: tx.id(),
-                    partition_hash: *partition_hash,
+                    partition_hash,
                     signer: tx.signer(),
                 });
             }
@@ -3818,6 +3885,169 @@ mod tests {
             assert_eq!(got, block.previous_cumulative_diff);
         } else {
             panic!("expected PreValidationError::PreviousCumulativeDifficultyMismatch");
+        }
+    }
+}
+
+#[cfg(test)]
+mod commitment_version_tests {
+    use super::*;
+    use irys_types::{
+        hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig},
+        CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1, CommitmentTypeV2,
+    };
+    use proptest::prelude::*;
+    use rstest::rstest;
+
+    fn config_with_aurora(activation_secs: u64, min_version: u8) -> ConsensusConfig {
+        ConsensusConfig {
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                sprite: None,
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+                    minimum_commitment_tx_version: min_version,
+                }),
+            },
+            ..ConsensusConfig::testnet()
+        }
+    }
+
+    fn config_without_aurora() -> ConsensusConfig {
+        ConsensusConfig {
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 1,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                next_name_tbd: None,
+                sprite: None,
+                aurora: None,
+            },
+            ..ConsensusConfig::testnet()
+        }
+    }
+
+    fn make_v1_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
+        CommitmentTransaction::V1(CommitmentTransactionV1 {
+            commitment_type: CommitmentTypeV1::Stake,
+            ..CommitmentTransactionV1::new(consensus)
+        })
+    }
+
+    fn make_v2_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
+        CommitmentTransaction::V2(CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::Stake,
+            ..CommitmentTransactionV2::new(consensus)
+        })
+    }
+
+    #[rstest]
+    #[case::no_hardfork_v1_valid(None, 999, 1, true)]
+    #[case::no_hardfork_v2_valid(None, 999, 2, true)]
+    #[case::before_activation_v1_valid(Some(1000), 999, 1, true)]
+    #[case::before_activation_v2_valid(Some(1000), 999, 2, true)]
+    #[case::at_activation_v1_invalid(Some(1000), 1000, 1, false)]
+    #[case::at_activation_v2_valid(Some(1000), 1000, 2, true)]
+    #[case::after_activation_v1_invalid(Some(1000), 1001, 1, false)]
+    #[case::after_activation_v2_valid(Some(1000), 1001, 2, true)]
+    fn version_validation_scenarios(
+        #[case] activation_secs: Option<u64>,
+        #[case] timestamp_secs: u64,
+        #[case] tx_version: u8,
+        #[case] expect_valid: bool,
+    ) {
+        let config = match activation_secs {
+            Some(ts) => config_with_aurora(ts, 2),
+            None => config_without_aurora(),
+        };
+
+        let tx = match tx_version {
+            1 => make_v1_commitment(&config),
+            _ => make_v2_commitment(&config),
+        };
+        let txs = vec![tx];
+
+        let result = find_invalid_commitment_version(
+            &config,
+            &txs,
+            UnixTimestamp::from_secs(timestamp_secs),
+        );
+
+        if expect_valid {
+            assert!(result.is_none(), "Expected valid, got invalid");
+        } else {
+            assert!(result.is_some(), "Expected invalid, got valid");
+            let (_, _, version, minimum) = result.unwrap();
+            assert_eq!(version, tx_version);
+            assert_eq!(minimum, 2);
+        }
+    }
+
+    #[test]
+    fn mixed_versions_returns_first_invalid() {
+        let config = config_with_aurora(1000, 2);
+        let v2_tx = make_v2_commitment(&config);
+        let v1_tx = make_v1_commitment(&config);
+
+        // V2 first, then V1 - should return position 1 (the V1)
+        let txs = vec![v2_tx, v1_tx.clone()];
+        let result = find_invalid_commitment_version(&config, &txs, UnixTimestamp::from_secs(1001));
+
+        assert!(result.is_some());
+        let (tx_id, position, version, _) = result.unwrap();
+        assert_eq!(tx_id, v1_tx.id());
+        assert_eq!(position, 1);
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn empty_list_returns_none() {
+        let config = config_with_aurora(1000, 2);
+        let txs: Vec<CommitmentTransaction> = vec![];
+
+        let result = find_invalid_commitment_version(&config, &txs, UnixTimestamp::from_secs(1001));
+        assert!(result.is_none());
+    }
+
+    proptest! {
+        #[test]
+        fn version_validation_property(
+            activation_ts in 1000_u64..u64::MAX / 2,
+            time_offset in 0_i64..2000_i64,
+            tx_version in 1_u8..=3_u8,
+        ) {
+            let query_ts = if time_offset >= 0 {
+                activation_ts.saturating_add(time_offset as u64)
+            } else {
+                activation_ts.saturating_sub(time_offset.unsigned_abs())
+            };
+
+            let config = config_with_aurora(activation_ts, 2);
+            let tx = match tx_version {
+                1 => make_v1_commitment(&config),
+                _ => make_v2_commitment(&config),
+            };
+            let txs = vec![tx];
+
+            let result = find_invalid_commitment_version(
+                &config,
+                &txs,
+                UnixTimestamp::from_secs(query_ts),
+            );
+
+            let is_active = query_ts >= activation_ts;
+            let should_be_valid = !is_active || tx_version >= 2;
+
+            if should_be_valid {
+                prop_assert!(result.is_none());
+            } else {
+                prop_assert!(result.is_some());
+            }
         }
     }
 }

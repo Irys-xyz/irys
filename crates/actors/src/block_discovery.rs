@@ -16,10 +16,11 @@ use irys_domain::{
     block_index_guard::BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshotStatus,
 };
 use irys_reward_curve::HalvingCurve;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
-    get_ingress_proofs, BlockHash, CommitmentTransaction, Config, DataLedger,
-    DataTransactionHeader, DatabaseProvider, GossipBroadcastMessage, IrysBlockHeader,
-    IrysTransactionId, TokioServiceHandle, H256,
+    get_ingress_proofs, BlockBody, BlockHash, BlockTransactions, CommitmentTransaction, Config,
+    DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader, IrysTransactionId,
+    TokioServiceHandle, H256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use reth::tasks::shutdown::Shutdown;
@@ -71,31 +72,6 @@ pub enum AnchorItemType {
     DataTransaction { tx_id: H256 },
     IngressProof { promotion_target_id: H256 },
     SystemTransaction { tx_id: H256 },
-}
-
-/// Transactions for a block, organized by ledger type.
-/// Used to pass pre-fetched transactions to block discovery.
-#[derive(Debug, Clone, Default)]
-pub struct BlockTransactions {
-    /// Commitment ledger transactions
-    pub commitment_txs: Vec<CommitmentTransaction>,
-    /// Data transactions organized by ledger type
-    pub data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>>,
-}
-
-impl BlockTransactions {
-    /// Get transactions for a specific data ledger
-    pub fn get_ledger_txs(&self, ledger: DataLedger) -> &[DataTransactionHeader] {
-        self.data_txs
-            .get(&ledger)
-            .map(std::vec::Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    /// Iterate over all data transactions across all ledgers
-    pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
-        self.data_txs.values().flatten()
-    }
 }
 
 impl From<BlockDiscoveryInternalError> for BlockDiscoveryError {
@@ -791,7 +767,7 @@ impl BlockDiscoveryServiceInner {
                 let block_hash_for_log = new_block_header.block_hash;
                 let block_height_for_log = new_block_header.height;
                 if let Err(error) =
-                    gossip_sender.send(GossipBroadcastMessage::from(new_block_header))
+                    gossip_sender.send(GossipBroadcastMessageV2::from(new_block_header))
                 {
                     tracing::error!(
                         "Failed to send gossip message for block {} (height {}): {}",
@@ -912,6 +888,40 @@ pub async fn get_data_tx_in_parallel(
     };
 
     get_data_tx_in_parallel_inner(data_tx_ids, get_data_txs, db).await
+}
+
+pub async fn build_block_body_for_processed_block_header(
+    block_header: &IrysBlockHeader,
+    mempool_read_guard: &MempoolReadGuard,
+    db: &DatabaseProvider,
+) -> eyre::Result<BlockBody> {
+    let data_transaction_ids = block_header
+        .data_ledgers
+        .iter()
+        .flat_map(|data_ledger| &data_ledger.tx_ids.0)
+        .copied()
+        .collect::<Vec<_>>();
+    let commitment_transaction_ids = block_header
+        .system_ledgers
+        .iter()
+        .flat_map(|commitment_ledger| &commitment_ledger.tx_ids.0)
+        .copied()
+        .collect::<Vec<_>>();
+
+    let (data_txs, commitment_txs) = tokio::join!(
+        get_data_tx_in_parallel(data_transaction_ids, mempool_read_guard, db),
+        get_commitment_tx_in_parallel(&commitment_transaction_ids, mempool_read_guard, db)
+    );
+    let data_txs = data_txs?;
+    let commitment_txs = commitment_txs?;
+
+    let block_body = BlockBody {
+        block_hash: block_header.block_hash,
+        data_transactions: data_txs,
+        commitment_transactions: commitment_txs,
+    };
+
+    Ok(block_body)
 }
 
 /// Get all data transactions from the mempool and database

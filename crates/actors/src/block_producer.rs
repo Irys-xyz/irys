@@ -1,7 +1,5 @@
 use crate::{
-    block_discovery::{
-        BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl, BlockTransactions,
-    },
+    block_discovery::{BlockDiscoveryError, BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl},
     mempool_guard::MempoolReadGuard,
     mempool_service::{MempoolServiceMessage, MempoolTxs},
     mining_bus::{BroadcastDifficultyUpdate, MiningBus},
@@ -39,8 +37,8 @@ use irys_types::{
         phantoms::{CostPerChunk, Irys},
         Amount,
     },
-    AdjustmentStats, Base64, CommitmentTransaction, Config, DataLedger, DataTransactionHeader,
-    DataTransactionLedger, GossipBroadcastMessage, H256List, IrysAddress, IrysBlockHeader,
+    AdjustmentStats, Base64, BlockTransactions, CommitmentTransaction, Config, DataLedger,
+    DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader,
     IrysTokenPrice, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp,
     UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
@@ -101,6 +99,7 @@ fn classify_payload_error(err: PayloadBuilderError) -> BlockProductionError {
 mod block_validation_tracker;
 pub mod ledger_expiry;
 pub use block_validation_tracker::BlockValidationTracker;
+use irys_types::v2::GossipBroadcastMessageV2;
 
 /// Result of checking parent validity and solution compatibility
 #[derive(Debug)]
@@ -522,7 +521,9 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
+        let mempool_bundle = self
+            .get_mempool_txs(&prev_block_header, current_timestamp)
+            .await?;
 
         let block_reward = self.block_reward(&prev_block_header)?;
 
@@ -1283,12 +1284,12 @@ pub trait BlockProdStrategy {
             }
             Err(e) => {
                 error!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block.block_hash.0, &block.height, e
+                    "Newly produced block {} ({}) failed pre-validation: {:?}",
+                    &block.block_hash, &block.height, e
                 );
                 Err(eyre!(
-                    "Newly produced block {:?} ({}) failed pre-validation: {:?}",
-                    &block.block_hash.0,
+                    "Newly produced block {} ({}) failed pre-validation: {:?}",
+                    &block.block_hash,
                     &block.height,
                     e
                 ))
@@ -1297,7 +1298,7 @@ pub trait BlockProdStrategy {
 
         // Gossip the EVM payload
         let execution_payload_gossip_data =
-            GossipBroadcastMessage::from(eth_built_payload.block().clone());
+            GossipBroadcastMessageV2::from(eth_built_payload.block().clone());
         if let Err(payload_broadcast_error) = self
             .inner()
             .service_senders
@@ -1403,16 +1404,28 @@ pub trait BlockProdStrategy {
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
+        block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxsBundle> {
         // Fetch mempool once
         let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
         // Sort txs to be of deterministic order
         mempool_txs.submit_tx.sort();
         mempool_txs.commitment_tx.sort();
+
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
         if !is_epoch {
+            // Filter commitments by version using block timestamp
+            self.inner()
+                .config
+                .consensus
+                .hardforks
+                .retain_valid_commitment_versions(
+                    &mut mempool_txs.commitment_tx,
+                    block_timestamp.to_secs(),
+                );
+
             debug!(
                 block.height = block_height,
                 custom.commitment_ids = ?mempool_txs
@@ -1424,6 +1437,10 @@ pub trait BlockProdStrategy {
             );
             return Ok(self.build_non_epoch_bundle(mempool_txs));
         }
+
+        // =====
+        // ONLY EPOCH BLOCK PROCESSING
+        // =====
 
         // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
@@ -1440,9 +1457,12 @@ pub trait BlockProdStrategy {
                 &self.inner().config.consensus,
             )?;
 
+        // note: we do not filter txs by version for epoch blocks
+        let commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
+
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user
-            commitment_txs: parent_commitment_snapshot.get_epoch_commitments(),
+            commitment_txs,
             commitment_txs_to_bill: vec![],
             submit_txs: mempool_txs.submit_tx,
             publish_txs: mempool_txs.publish_tx,

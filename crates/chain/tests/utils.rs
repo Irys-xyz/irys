@@ -17,7 +17,6 @@ use alloy_primitives::Address;
 use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
 use futures::future::select;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_discovery::{BlockDiscoveryFacade as _, BlockDiscoveryFacadeImpl};
 use irys_actors::shadow_tx_generator::PublishLedgerWithTxs;
 use irys_actors::{
@@ -25,8 +24,8 @@ use irys_actors::{
     block_tree_service::ReorgEvent,
     block_validation,
     mempool_service::{MempoolServiceMessage, MempoolTxs, TxIngressError},
+    MempoolServiceFacadeImpl,
 };
-use irys_api_client::ApiClient as _;
 use irys_api_client::{ApiClientExt as _, IrysApiClient};
 use irys_api_server::routes::price::{CommitmentPriceInfo, PriceInfo};
 use irys_api_server::{create_listener, routes};
@@ -42,6 +41,7 @@ use irys_domain::{
     get_canonical_chain, BlockState, BlockTreeEntry, ChainState, ChunkType,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot,
 };
+use irys_p2p::{GossipClient, GossipServer};
 use irys_packing::capacity_single::compute_entropy_chunk;
 use irys_packing::unpack;
 use irys_reth::pd_tx::{build_pd_access_list, prepend_pd_header_v1_to_calldata, PdHeaderV1};
@@ -52,9 +52,10 @@ use irys_testing_utils::chunk_bytes_gen;
 use irys_testing_utils::utils::tempfile::TempDir;
 use irys_testing_utils::utils::temporary_directory;
 use irys_types::range_specifier::ChunkRangeSpecifier;
+use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, DataLedger, EvmBlockHash, GossipBroadcastMessage,
+    partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
     H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
 };
 use irys_types::{
@@ -67,7 +68,7 @@ use irys_types::{
     LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
     UnpackedChunk,
 };
-use irys_types::{Interval, PartitionChunkOffset, VersionRequest};
+use irys_types::{HandshakeRequest, Interval, PartitionChunkOffset};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
@@ -669,6 +670,23 @@ impl IrysNodeTest<IrysNodeCtx> {
                 // Remove the logger middleware
                 .app_data(actix_web::web::Data::new(api_state))
                 .service(routes()),
+        )
+        .await
+    }
+
+    pub async fn start_mock_gossip_server(
+        &self,
+    ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+        let gossip_server = self.node_ctx.get_gossip_server();
+
+        actix_web::test::init_service(
+            App::new()
+                // Remove the logger middleware
+                .app_data(actix_web::web::Data::new(gossip_server))
+                .service(GossipServer::<
+                    MempoolServiceFacadeImpl,
+                    BlockDiscoveryFacadeImpl,
+                >::routes()),
         )
         .await
     }
@@ -1876,7 +1894,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from(Arc::clone(block_header)))?;
+            .send(GossipBroadcastMessageV2::from(Arc::clone(block_header)))?;
 
         Ok(())
     }
@@ -1888,7 +1906,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .service_senders
             .gossip_broadcast
-            .send(GossipBroadcastMessage::from((block).clone()))?;
+            .send(GossipBroadcastMessageV2::from((block).clone()))?;
 
         Ok(())
     }
@@ -2504,31 +2522,42 @@ impl IrysNodeTest<IrysNodeCtx> {
         IrysApiClient::new()
     }
 
+    pub fn get_gossip_client(&self) -> GossipClient {
+        GossipClient::new(
+            Duration::from_secs(5),
+            self.node_ctx.config.node_config.miner_address(),
+        )
+    }
+
     pub fn get_peer_addr(&self) -> SocketAddr {
         self.node_ctx.config.node_config.peer_address().api
     }
 
-    // Build a signed VersionRequest describing this node
-    pub fn build_version_request(&self) -> VersionRequest {
-        let mut vr = VersionRequest {
+    pub fn get_gossip_addr(&self) -> SocketAddr {
+        self.node_ctx.config.node_config.peer_address().gossip
+    }
+
+    // Build a signed HandshakeRequest describing this node
+    pub fn build_handshake_request(&self) -> HandshakeRequest {
+        let mut handshake = HandshakeRequest {
             chain_id: self.node_ctx.config.consensus.chain_id,
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
-            ..VersionRequest::default()
+            ..HandshakeRequest::default()
         };
         self.node_ctx
             .config
             .irys_signer()
-            .sign_p2p_handshake(&mut vr)
+            .sign_p2p_handshake(&mut handshake)
             .expect("sign p2p handshake");
-        vr
+        handshake
     }
 
-    // Announce this node to another node (HTTP POST /v1/version)
+    // Announce this node to another node via gossip handshake (POST /gossip/v2/handshake)
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
-        let vr = self.build_version_request();
-        self.get_api_client()
-            .post_version(dst.get_peer_addr(), vr)
+        let vr = self.build_handshake_request();
+        self.get_gossip_client()
+            .post_handshake(dst.get_gossip_addr(), vr)
             .await?;
         Ok(())
     }

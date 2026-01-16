@@ -110,6 +110,9 @@ impl From<TxIngressError> for GossipError {
             TxIngressError::FundMisalignment(reason) => {
                 Self::Internal(InternalGossipError::FundMisalignment(reason))
             }
+            TxIngressError::InvalidVersion { version, minimum } => {
+                Self::InvalidData(InvalidDataError::TransactionInvalidVersion { version, minimum })
+            }
         }
     }
 }
@@ -173,6 +176,10 @@ pub enum InvalidDataError {
     IngressProofSignature,
     #[error("Invalid ingress proof anchor: {0}")]
     IngressProofAnchor(irys_types::BlockHash),
+    #[error("Block body transactions do not match the header")]
+    BlockBodyTransactionsMismatch,
+    #[error("Invalid transaction version {version}, minimum required is {minimum}")]
+    TransactionInvalidVersion { version: u8, minimum: u8 },
 }
 
 #[derive(Debug, Error, Clone)]
@@ -239,4 +246,57 @@ pub enum RejectionReason {
     UnableToVerifyOrigin,
     InvalidCredentials,
     ProtocolMismatch,
+    UnsupportedProtocolVersion(u32),
+    UnsupportedFeature,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum GossipRoutes {
+    Transaction,
+    CommitmentTx,
+    Chunk,
+    Block,
+    BlockBody,
+    IngressProof,
+    ExecutionPayload,
+    GetData,
+    PullData,
+    Handshake,
+    Health,
+    StakeAndPledgeWhitelist,
+    Info,
+    PeerList,
+    BlockIndex,
+    Version,
+    ProtocolVersion,
+}
+
+impl GossipRoutes {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Transaction => "/transaction",
+            Self::CommitmentTx => "/commitment_tx",
+            Self::Chunk => "/chunk",
+            Self::Block => "/block",
+            Self::BlockBody => "/block_body",
+            Self::IngressProof => "/ingress_proof",
+            Self::ExecutionPayload => "/execution_payload",
+            Self::GetData => "/get_data",
+            Self::PullData => "/pull_data",
+            Self::Handshake => "/handshake",
+            Self::Health => "/health",
+            Self::StakeAndPledgeWhitelist => "/stake_and_pledge_whitelist",
+            Self::Info => "/info",
+            Self::PeerList => "/peer-list",
+            Self::BlockIndex => "/block-index",
+            Self::Version => "/version",
+            Self::ProtocolVersion => "/protocol_version",
+        }
+    }
+}
+
+impl std::fmt::Display for GossipRoutes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }

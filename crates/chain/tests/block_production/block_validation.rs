@@ -1,6 +1,5 @@
 use crate::utils::{solution_context, IrysNodeTest};
 use eyre::Result;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::{prevalidate_block, PreValidationError};
 use irys_actors::{
     async_trait, reth_ethereum_primitives, BlockProdStrategy, BlockProducerInner,
@@ -11,7 +10,7 @@ use irys_database::SystemLedger;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_reth::IrysBuiltPayload;
 use irys_types::{
-    block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats,
+    block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats, BlockTransactions,
     CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     UnixTimestampMs, H256, U256,
 };

@@ -5,7 +5,6 @@ use crate::utils::{
 };
 use crate::validation::send_block_to_block_tree;
 use eyre::WrapErr as _;
-use irys_actors::block_discovery::BlockTransactions;
 use irys_actors::block_validation::ValidationError;
 use irys_actors::mempool_service::MempoolServiceMessage;
 use irys_actors::{
@@ -13,7 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
+use irys_types::{BlockTransactions, CommitmentTransaction, NodeConfig, PledgeDataProvider as _};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
 use tracing::debug;
@@ -67,6 +66,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -225,6 +225,7 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_unstake = self.invalid_unstake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {

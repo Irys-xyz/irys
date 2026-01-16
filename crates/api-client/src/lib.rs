@@ -1,7 +1,7 @@
 use eyre::Result;
 use irys_types::{
     BlockIndexItem, BlockIndexQuery, CombinedBlockHeader, CommitmentTransaction,
-    DataTransactionHeader, IrysTransactionResponse, NodeInfo, PeerResponse, VersionRequest, H256,
+    DataTransactionHeader, IrysTransactionResponse, NodeInfo, H256,
 };
 pub use reqwest::{Client, StatusCode};
 use serde::{de::DeserializeOwned, Serialize};
@@ -49,11 +49,6 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         peer: SocketAddr,
         tx_ids: &[H256],
     ) -> Result<Vec<IrysTransactionResponse>>;
-
-    /// Post a version request to a peer. Version request contains protocol version and peer
-    /// information.
-    async fn post_version(&self, peer: SocketAddr, version: VersionRequest)
-        -> Result<PeerResponse>;
 
     /// Gets block by hash
     async fn get_block_by_hash(
@@ -216,22 +211,6 @@ impl ApiClient for IrysApiClient {
         Ok(results)
     }
 
-    async fn post_version(
-        &self,
-        peer: SocketAddr,
-        version: VersionRequest,
-    ) -> Result<PeerResponse> {
-        let path = "/version";
-        let response = self
-            .make_request::<PeerResponse, _>(peer, Method::POST, path, Some(&version))
-            .await;
-        match response {
-            Ok(Some(peer_response)) => Ok(peer_response),
-            Ok(None) => Err(eyre::eyre!("No response from peer")),
-            Err(e) => Err(e),
-        }
-    }
-
     async fn get_block_by_hash(
         &self,
         peer: SocketAddr,
@@ -322,15 +301,9 @@ pub mod test_utils {
     use super::*;
     use async_trait::async_trait;
     use eyre::eyre;
-    use irys_types::AcceptedResponse;
-    use std::sync::Arc;
-    use tokio::sync::Mutex;
-    use tracing::debug;
 
     #[derive(Default, Clone)]
-    pub struct CountingMockClient {
-        pub post_version_calls: Arc<Mutex<Vec<std::net::SocketAddr>>>,
-    }
+    pub struct CountingMockClient {}
 
     #[async_trait]
     impl ApiClient for CountingMockClient {
@@ -341,24 +314,6 @@ pub mod test_utils {
         ) -> eyre::Result<IrysTransactionResponse> {
             Err(eyre!("No transactions found"))
         }
-        async fn get_transactions(
-            &self,
-            _peer: std::net::SocketAddr,
-            _tx_ids: &[H256],
-        ) -> eyre::Result<Vec<IrysTransactionResponse>> {
-            Ok(vec![])
-        }
-        async fn post_version(
-            &self,
-            peer: std::net::SocketAddr,
-            _version: VersionRequest,
-        ) -> eyre::Result<PeerResponse> {
-            debug!("post_version called with peer: {}", peer);
-            let mut calls = self.post_version_calls.lock().await;
-            calls.push(peer);
-            Ok(PeerResponse::Accepted(AcceptedResponse::default()))
-        }
-
         async fn post_transaction(
             &self,
             _peer: std::net::SocketAddr,
@@ -367,12 +322,37 @@ pub mod test_utils {
             Ok(())
         }
 
+        async fn post_commitment_transaction(
+            &self,
+            _peer: SocketAddr,
+            _transaction: CommitmentTransaction,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_transactions(
+            &self,
+            _peer: std::net::SocketAddr,
+            _tx_ids: &[H256],
+        ) -> eyre::Result<Vec<IrysTransactionResponse>> {
+            Ok(vec![])
+        }
+
         async fn get_block_by_hash(
             &self,
             _peer: std::net::SocketAddr,
             _block_hash: H256,
             _with_poa: bool,
         ) -> eyre::Result<Option<CombinedBlockHeader>> {
+            Ok(None)
+        }
+
+        async fn get_block_by_height(
+            &self,
+            _peer: SocketAddr,
+            _block_height: u64,
+            _with_poa: bool,
+        ) -> Result<Option<CombinedBlockHeader>> {
             Ok(None)
         }
 
@@ -395,30 +375,12 @@ pub mod test_utils {
         async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
             Ok(NodeInfo::default())
         }
-
-        async fn post_commitment_transaction(
-            &self,
-            _peer: SocketAddr,
-            _transaction: CommitmentTransaction,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn get_block_by_height(
-            &self,
-            _peer: SocketAddr,
-            _block_height: u64,
-            _with_poa: bool,
-        ) -> Result<Option<CombinedBlockHeader>> {
-            Ok(None)
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::AcceptedResponse;
 
     /// Mock implementation of the API client for testing
     #[derive(Default, Clone)]
@@ -453,14 +415,6 @@ mod tests {
             }
 
             Ok(results)
-        }
-
-        async fn post_version(
-            &self,
-            _peer: SocketAddr,
-            _version: VersionRequest,
-        ) -> Result<PeerResponse> {
-            Ok(PeerResponse::Accepted(AcceptedResponse::default())) // Mock response
         }
 
         async fn post_transaction(

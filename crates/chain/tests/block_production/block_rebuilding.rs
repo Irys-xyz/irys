@@ -15,7 +15,9 @@
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_reth::IrysBuiltPayload;
-use irys_types::{block_production::SolutionContext, IrysBlockHeader, NodeConfig, H256};
+use irys_types::{
+    block_production::SolutionContext, BlockTransactions, IrysBlockHeader, NodeConfig, H256,
+};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
@@ -46,13 +48,7 @@ impl BlockProdStrategy for TrackingStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<
-        Option<(
-            Arc<IrysBlockHeader>,
-            IrysBuiltPayload,
-            irys_actors::block_discovery::BlockTransactions,
-        )>,
-    > {
+    ) -> eyre::Result<Option<(Arc<IrysBlockHeader>, IrysBuiltPayload, BlockTransactions)>> {
         // Track the solution hash and VDF step
         *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
         *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);

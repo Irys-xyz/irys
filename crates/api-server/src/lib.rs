@@ -18,7 +18,7 @@ use irys_reth_node_bridge::node::RethNodeProvider;
 use irys_types::{app_state::DatabaseProvider, Config, IrysAddress, PeerAddress};
 use routes::{
     balance, block, block_index, block_tree, commitment, config, get_chunk, index, ledger, mempool,
-    mining, pd_pricing, peer_list, post_chunk, post_version, price, proxy::proxy, storage, tx,
+    mining, pd_pricing, peer_list, post_chunk, price, proxy::proxy, storage, tx,
 };
 use std::{
     net::{SocketAddr, TcpListener},
@@ -129,7 +129,6 @@ pub fn routes() -> impl HttpServiceFactory {
             "/tx/{tx_id}/local/data-start-offset",
             web::get().to(tx::get_tx_local_start_offset),
         )
-        .route("/version", web::post().to(post_version::post_version))
         .route("/anchor", web::get().to(anchor::anchor_route))
         .route("/balance/{address}", web::get().to(balance::get_balance))
         // Ledger endpoints
