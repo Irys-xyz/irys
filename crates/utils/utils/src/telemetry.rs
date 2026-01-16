@@ -1,51 +1,31 @@
 //! OpenTelemetry integration for observability stack (Grafana/Tempo/Prometheus/Elasticsearch)
 
 use eyre::Result;
-#[cfg(feature = "telemetry")]
-use {
-    opentelemetry::{trace::TracerProvider as _, KeyValue},
-    opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge,
-    opentelemetry_otlp::WithExportConfig as _,
-    opentelemetry_sdk::{
-        logs::SdkLoggerProvider, metrics::SdkMeterProvider, resource::Resource,
-        trace::SdkTracerProvider,
-    },
-    std::sync::OnceLock,
-    tracing::level_filters::LevelFilter,
-    tracing_error::ErrorLayer,
-    tracing_subscriber::{
-        layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
-    },
+use opentelemetry::{trace::TracerProvider as _, KeyValue};
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::{
+    logs::SdkLoggerProvider, metrics::SdkMeterProvider, resource::Resource,
+    trace::SdkTracerProvider,
+};
+use std::sync::OnceLock;
+use tracing::level_filters::LevelFilter;
+use tracing_error::ErrorLayer;
+use tracing_subscriber::{
+    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
 };
 
-#[cfg(feature = "telemetry")]
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
-
-#[cfg(feature = "telemetry")]
 static TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
-
-#[cfg(feature = "telemetry")]
 static METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
-
-#[cfg(feature = "telemetry")]
 static INIT_GUARD: OnceLock<()> = OnceLock::new();
 
-#[cfg(feature = "telemetry")]
 const EXPORTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-#[cfg(feature = "telemetry")]
 const METRICS_EXPORT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-
-#[cfg(feature = "telemetry")]
 const DEFAULT_OTLP_ENDPOINT: &str = "http://localhost:4317";
-
-#[cfg(feature = "telemetry")]
 const DEFAULT_LOGS_ENDPOINT: &str = "http://localhost:4318/v1/logs";
-
-#[cfg(feature = "telemetry")]
 const DEFAULT_SERVICE_NAME: &str = "irys-node";
 
-#[cfg(feature = "telemetry")]
 struct TelemetryConfig {
     service_name: String,
     traces_endpoint: String,
@@ -54,7 +34,6 @@ struct TelemetryConfig {
     metrics_endpoint: String,
 }
 
-#[cfg(feature = "telemetry")]
 impl TelemetryConfig {
     fn from_env() -> Self {
         let otlp_endpoint_env = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok();
@@ -84,7 +63,6 @@ impl TelemetryConfig {
     }
 }
 
-#[cfg(feature = "telemetry")]
 fn build_resource(service_name: &str) -> Resource {
     Resource::builder_empty()
         .with_service_name(service_name.to_string())
@@ -95,7 +73,6 @@ fn build_resource(service_name: &str) -> Resource {
         .build()
 }
 
-#[cfg(feature = "telemetry")]
 fn build_trace_exporter(
     endpoint: &str,
 ) -> Result<opentelemetry_otlp::SpanExporter, opentelemetry_otlp::ExporterBuildError> {
@@ -110,7 +87,6 @@ fn build_trace_exporter(
         })
 }
 
-#[cfg(feature = "telemetry")]
 fn build_log_exporter(
     endpoint: &str,
 ) -> Result<opentelemetry_otlp::LogExporter, opentelemetry_otlp::ExporterBuildError> {
@@ -125,7 +101,6 @@ fn build_log_exporter(
         })
 }
 
-#[cfg(feature = "telemetry")]
 fn build_metrics_exporter(
     endpoint: &str,
 ) -> Result<opentelemetry_otlp::MetricExporter, opentelemetry_otlp::ExporterBuildError> {
@@ -140,7 +115,6 @@ fn build_metrics_exporter(
         })
 }
 
-#[cfg(feature = "telemetry")]
 fn build_tracer_provider(
     trace_exporter: opentelemetry_otlp::SpanExporter,
     resource: Resource,
@@ -154,7 +128,6 @@ fn build_tracer_provider(
         .build()
 }
 
-#[cfg(feature = "telemetry")]
 fn build_logger_provider(
     log_exporters: Vec<opentelemetry_otlp::LogExporter>,
     resource: Resource,
@@ -169,7 +142,6 @@ fn build_logger_provider(
     builder.build()
 }
 
-#[cfg(feature = "telemetry")]
 fn build_meter_provider(
     metrics_exporter: opentelemetry_otlp::MetricExporter,
     resource: Resource,
@@ -184,7 +156,6 @@ fn build_meter_provider(
         .build()
 }
 
-#[cfg(feature = "telemetry")]
 fn setup_tracing_subscriber(
     tracer_provider: &SdkTracerProvider,
     logger_provider: &SdkLoggerProvider,
@@ -213,7 +184,6 @@ fn setup_tracing_subscriber(
     subscriber.init();
 }
 
-#[cfg(feature = "telemetry")]
 fn install_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -254,7 +224,6 @@ fn install_panic_hook() {
 ///
 /// Returns an error if any OTLP exporter fails to build.
 #[must_use = "telemetry initialization result should be checked"]
-#[cfg(feature = "telemetry")]
 pub fn init_telemetry() -> Result<()> {
     // Use a guard to ensure atomic initialization and prevent race conditions
     if INIT_GUARD.set(()).is_err() {
@@ -318,56 +287,26 @@ pub fn init_telemetry() -> Result<()> {
 ///
 /// This is a blocking call. When using tokio, call from `spawn_blocking`.
 ///
-/// # Returns
-///
-/// - `Ok(true)` - At least one provider (logger, tracer, or meter) flushed successfully
-/// - `Ok(false)` - No providers were flushed. This occurs when either:
-///   - No providers were initialized (telemetry was never started)
-///   - All initialized providers failed to flush (errors are printed to stderr)
-///
 /// Individual flush failures are logged to stderr but do not cause the function
 /// to return an error, allowing remaining providers to attempt flushing.
-#[must_use = "flush result indicates whether telemetry was exported"]
-#[cfg(feature = "telemetry")]
-pub fn flush_telemetry() -> Result<bool> {
-    let mut flushed = false;
-
+pub fn flush_telemetry() -> Result<()> {
     if let Some(logger) = LOGGER_PROVIDER.get() {
         if let Err(e) = logger.force_flush() {
             eprintln!("Logger provider force flush error: {e:?}");
-        } else {
-            flushed = true;
         }
     }
 
     if let Some(tracer) = TRACER_PROVIDER.get() {
         if let Err(e) = tracer.force_flush() {
             eprintln!("Tracer provider force flush error: {e:?}");
-        } else {
-            flushed = true;
         }
     }
 
     if let Some(meter) = METER_PROVIDER.get() {
         if let Err(e) = meter.force_flush() {
             eprintln!("Meter provider force flush error: {e:?}");
-        } else {
-            flushed = true;
         }
     }
 
-    Ok(flushed)
-}
-
-#[must_use = "telemetry initialization result should be checked"]
-#[cfg(not(feature = "telemetry"))]
-pub fn init_telemetry() -> Result<()> {
-    eprintln!("Telemetry feature is not enabled, skipping OpenTelemetry initialization");
     Ok(())
-}
-
-#[must_use = "flush result indicates whether telemetry was exported"]
-#[cfg(not(feature = "telemetry"))]
-pub fn flush_telemetry() -> Result<bool> {
-    Ok(false)
 }
