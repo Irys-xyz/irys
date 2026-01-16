@@ -3,8 +3,7 @@ use irys_database::{
     open_or_create_db, prune_ledger_range, tables::IrysTables,
 };
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-use irys_types::{DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, H256};
-use openssl::sha;
+use irys_types::{hash_sha256, DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, H256};
 use tracing::info;
 
 #[test_log::test(test)]
@@ -24,13 +23,13 @@ fn index_and_prune_block_index() -> eyre::Result<()> {
             header.height = (i + 1) as u64;
 
             // Generate an artificial block hash
-            header.block_hash = H256(hash_sha256(&header.height.to_le_bytes()).unwrap());
+            header.block_hash = H256(hash_sha256(&header.height.to_le_bytes()));
 
             // Add the new term ledgers to the block (mock header includes publish & submit)
             let total_chunks = (i * 20) as u64;
             header.data_ledgers.push(DataTransactionLedger {
                 ledger_id: DataLedger::OneYear.into(),
-                tx_root: H256(hash_sha256(&total_chunks.to_le_bytes()).unwrap()),
+                tx_root: H256(hash_sha256(&total_chunks.to_le_bytes())),
                 tx_ids: tx_ids.clone(),
                 total_chunks,
                 expires: Some(365),
@@ -41,7 +40,7 @@ fn index_and_prune_block_index() -> eyre::Result<()> {
             let total_chunks = (i * 11) as u64;
             header.data_ledgers.push(DataTransactionLedger {
                 ledger_id: DataLedger::ThirtyDay.into(),
-                tx_root: H256(hash_sha256(&total_chunks.to_le_bytes()).unwrap()),
+                tx_root: H256(hash_sha256(&total_chunks.to_le_bytes())),
                 tx_ids: tx_ids.clone(),
                 total_chunks,
                 expires: Some(30),
@@ -166,12 +165,4 @@ fn index_and_prune_block_index() -> eyre::Result<()> {
     })?;
 
     Ok(())
-}
-
-/// SHA256 hash the message parameter
-fn hash_sha256(message: &[u8]) -> Result<[u8; 32], eyre::Error> {
-    let mut hasher = sha::Sha256::new();
-    hasher.update(message);
-    let result = hasher.finish();
-    Ok(result)
 }
