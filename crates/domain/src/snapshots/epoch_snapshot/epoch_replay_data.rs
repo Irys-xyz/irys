@@ -1,7 +1,7 @@
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{block_header_by_hash, commitment_tx_by_txid, SystemLedger};
+use irys_database::{block_header_by_hash, commitment_tx_by_txid};
 use irys_storage::RecoveredMempoolState;
-use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader};
+use irys_types::{CommitmentTransaction, Config, DatabaseProvider, IrysBlockHeader, SystemLedger};
 use reth_db::Database as _;
 use std::collections::VecDeque;
 

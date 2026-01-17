@@ -10,7 +10,138 @@ use std::fmt::Debug;
 use tracing::debug;
 
 /// Bump this every time you need to migrate data
-const CURRENT_DB_VERSION: u32 = 1;
+const CURRENT_DB_VERSION: u32 = 2;
+
+// Old DataTransactionHeaderV1 structure used in migration modules
+// This is kept for historical migration purposes only
+mod old_structures {
+    use irys_types::{transaction::BoundedFee, Arbitrary, IrysAddress, IrysSignature, H256};
+    use reth_codecs::Compact;
+    use serde::{Deserialize, Serialize};
+
+    /// Old DataTransactionHeaderV1 WITH promoted_height field
+    /// Used for v1_to_v2 migration - mirrors the structure before promoted_height was removed
+    #[derive(
+        Clone, Default, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Arbitrary, Compact,
+    )]
+    pub(super) struct DataTransactionHeaderV1WithPromotedHeight {
+        pub id: H256,
+        pub anchor: H256,
+        pub signer: IrysAddress,
+        pub data_root: H256,
+        #[serde(with = "irys_types::string_u64")]
+        pub data_size: u64,
+        #[serde(with = "irys_types::string_u64")]
+        pub header_size: u64,
+        pub term_fee: BoundedFee,
+        pub ledger_id: u32,
+        #[serde(with = "irys_types::string_u64")]
+        pub chain_id: u64,
+        pub signature: IrysSignature,
+        #[serde(default, with = "irys_types::optional_string_u64")]
+        pub bundle_format: Option<u64>,
+        #[serde(default)]
+        pub perm_fee: Option<BoundedFee>,
+        #[serde(default, with = "irys_types::optional_string_u64")]
+        pub promoted_height: Option<u64>,
+    }
+
+    /// Old DataTransactionHeader enum (with discriminant)
+    #[derive(Clone, Debug, PartialEq, Eq, Arbitrary)]
+    pub(super) enum DataTransactionHeaderOld {
+        V1(DataTransactionHeaderV1WithPromotedHeight),
+    }
+
+    impl Compact for DataTransactionHeaderOld {
+        fn to_compact<B>(&self, buf: &mut B) -> usize
+        where
+            B: bytes::BufMut + AsMut<[u8]>,
+        {
+            match self {
+                Self::V1(h) => irys_types::compact_with_discriminant(1, h, buf),
+            }
+        }
+
+        fn from_compact(buf: &[u8], _len: usize) -> (Self, &[u8]) {
+            let (disc, rest) = irys_types::split_discriminant(buf);
+            match disc {
+                1 => {
+                    let (h, rest2) =
+                        DataTransactionHeaderV1WithPromotedHeight::from_compact(rest, rest.len());
+                    (Self::V1(h), rest2)
+                }
+                other => panic!("Unsupported DataTransactionHeaderOld version: {}", other),
+            }
+        }
+    }
+
+    /// Wrapper for old format matching CompactTxHeader structure
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(super) struct CompactTxHeaderOld(pub DataTransactionHeaderOld);
+
+    impl Compact for CompactTxHeaderOld {
+        fn to_compact<B>(&self, buf: &mut B) -> usize
+        where
+            B: bytes::BufMut + AsMut<[u8]>,
+        {
+            self.0.to_compact(buf)
+        }
+
+        fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+            let (h, rest) = DataTransactionHeaderOld::from_compact(buf, len);
+            (Self(h), rest)
+        }
+    }
+
+    // Manual Serialize/Deserialize via Compact encoding (since Compact doesn't automatically derive serde)
+    impl serde::Serialize for CompactTxHeaderOld {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut buf = Vec::new();
+            self.to_compact(&mut buf);
+            serializer.serialize_bytes(&buf)
+        }
+    }
+
+    impl<'de> serde::Deserialize<'de> for CompactTxHeaderOld {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let bytes = <Vec<u8>>::deserialize(deserializer)?;
+            let (value, _) = Self::from_compact(&bytes, bytes.len());
+            Ok(value)
+        }
+    }
+
+    impl reth_db_api::table::Compress for CompactTxHeaderOld {
+        type Compressed = Vec<u8>;
+
+        fn compress_to_buf<B: bytes::BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+            let _ = Compact::to_compact(&self, buf);
+        }
+    }
+
+    impl reth_db_api::table::Decompress for CompactTxHeaderOld {
+        fn decompress(value: &[u8]) -> Result<Self, super::DatabaseError> {
+            let (obj, _) = Compact::from_compact(value, value.len());
+            Ok(obj)
+        }
+    }
+
+    /// Old table definition for IrysDataTxHeaders (v1 format with promoted_height)
+    #[derive(Clone, Copy, Debug, Default)]
+    pub(super) struct IrysDataTxHeadersOld;
+
+    impl reth_db::table::Table for IrysDataTxHeadersOld {
+        const NAME: &'static str = "IrysDataTxHeaders";
+        const DUPSORT: bool = false;
+        type Key = H256;
+        type Value = CompactTxHeaderOld;
+    }
+}
 
 mod v0_to_v1 {
     use super::*;
@@ -60,6 +191,107 @@ mod v0_to_v1 {
     }
 }
 
+mod v1_to_v2 {
+    use super::*;
+    use crate::tables::{IrysDataTxHeaders, IrysDataTxMetadata};
+    use irys_types::{
+        DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
+        DataTransactionMetadata,
+    };
+    use reth_db::cursor::DbCursorRO as _;
+
+    fn migrate_batch<TX>(
+        tx: &TX,
+        entries: &[(
+            irys_types::H256,
+            old_structures::DataTransactionHeaderV1WithPromotedHeight,
+        )],
+    ) -> Result<(), DatabaseError>
+    where
+        TX: DbTxMut + DbTx + Debug,
+    {
+        for (tx_id, old_header) in entries {
+            // Create a new header without promoted_height
+            let new_header_v1 = DataTransactionHeaderV1 {
+                id: old_header.id,
+                anchor: old_header.anchor,
+                signer: old_header.signer,
+                data_root: old_header.data_root,
+                data_size: old_header.data_size,
+                header_size: old_header.header_size,
+                term_fee: old_header.term_fee,
+                ledger_id: old_header.ledger_id,
+                chain_id: old_header.chain_id,
+                signature: old_header.signature,
+                bundle_format: old_header.bundle_format,
+                perm_fee: old_header.perm_fee,
+            };
+
+            let new_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: new_header_v1,
+                metadata: DataTransactionMetadata::new(),
+            });
+
+            // Write to a new table format (overwrites old data)
+            tx.put::<IrysDataTxHeaders>(*tx_id, new_header.into())?;
+
+            // If promoted_height existed, create a metadata entry in IrysDataTxMetadata
+            // Only set promoted_height; included_height remains None as v1 didn't track original Submit inclusion height
+            if let Some(promoted_height) = old_header.promoted_height {
+                let metadata = DataTransactionMetadata {
+                    included_height: None,
+                    promoted_height: Some(promoted_height),
+                };
+                tx.put::<IrysDataTxMetadata>(*tx_id, metadata.into())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn migrate<TX>(tx: &TX) -> Result<(), DatabaseError>
+    where
+        TX: DbTxMut + DbTx + Debug,
+    {
+        debug!("Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata");
+
+        // Read from the old table format using bounded batching to avoid OOM
+        let mut old_cursor = tx.cursor_read::<old_structures::IrysDataTxHeadersOld>()?;
+        let mut entries_to_migrate = Vec::new();
+        const BATCH_SIZE: usize = 10000;
+        let mut total_migrated = 0;
+
+        // Process records in fixed-size chunks to keep memory bounded
+        for result in old_cursor.walk(None)? {
+            let (tx_id, old_compact_header) = result?;
+
+            // Extract the old header with promoted_height
+            let old_structures::DataTransactionHeaderOld::V1(old_header) = old_compact_header.0;
+
+            entries_to_migrate.push((tx_id, old_header));
+
+            // Process and clear batch when it reaches BATCH_SIZE
+            if entries_to_migrate.len() >= BATCH_SIZE {
+                migrate_batch(tx, &entries_to_migrate)?;
+                total_migrated += entries_to_migrate.len();
+                entries_to_migrate.clear();
+            }
+        }
+
+        // Process any remaining entries in the final batch
+        if !entries_to_migrate.is_empty() {
+            migrate_batch(tx, &entries_to_migrate)?;
+            total_migrated += entries_to_migrate.len();
+        }
+
+        crate::set_database_schema_version(tx, 2)?;
+        debug!(
+            "Migration from v1 to v2 completed: migrated {} headers",
+            total_migrated
+        );
+        Ok(())
+    }
+}
+
 /// This function migrates data from an old DB instance to a new DB instance.
 pub fn check_db_version_and_run_migrations_if_needed(
     old_db: &RethDbWrapper,
@@ -76,6 +308,15 @@ pub fn check_db_version_and_run_migrations_if_needed(
                 "Applying sequential migrations from {:?} to {:?}",
                 v, CURRENT_DB_VERSION
             );
+
+            // Apply migrations sequentially
+            if v < 2 {
+                debug!("Applying migration from v1 to v2");
+                new_db.update_eyre(|tx| {
+                    v1_to_v2::migrate(tx)?;
+                    Ok(())
+                })?;
+            }
         }
     } else {
         debug!("No DB schema version information found in the new database. Applying initial migration from v0 to v1.");
@@ -84,6 +325,13 @@ pub fn check_db_version_and_run_migrations_if_needed(
                 v0_to_v1::migrate(tx_old, tx_new)?;
                 Ok(())
             })
+        })?;
+
+        // After v0->v1, apply v1->v2
+        debug!("Applying migration from v1 to v2 after initial migration");
+        new_db.update_eyre(|tx| {
+            v1_to_v2::migrate(tx)?;
+            Ok(())
         })?;
     }
 
@@ -110,7 +358,9 @@ mod tests {
         TxChunkOffset, UnixTimestamp, H256,
     };
     use reth_db_api::transaction::{DbTx as _, DbTxMut as _};
-    use reth_db_api::Database as _;
+    use reth_db_api::{Database as _, DatabaseError};
+
+    use super::CURRENT_DB_VERSION;
 
     // test ensures v0→v1 migration moves representative records to the new DB, clears old DB tables, and sets the schema version.
     #[test]
@@ -250,9 +500,148 @@ mod tests {
         )??;
         assert_eq!(old_counts_post, (0, 0, 0, 0, 0, 0));
 
-        // Schema version should be set to CURRENT_DB_VERSION (1)
+        // Schema version should be set to CURRENT_DB_VERSION (2)
+        // Note: migration runs v0->v1, then v1->v2, so a final version is 2
         let new_version = new_db.view(|tx| crate::database_schema_version(tx).unwrap())?;
-        assert_eq!(new_version.unwrap(), 1);
+        assert_eq!(new_version.unwrap(), CURRENT_DB_VERSION);
+
+        Ok(())
+    }
+
+    // Test ensures v1→v2 migration correctly moves promoted_height to IrysDataTxMetadata
+    #[test]
+    fn should_migrate_from_v1_to_v2() -> eyre::Result<()> {
+        use crate::tables::IrysDataTxMetadata;
+
+        let db_path = temporary_directory(None, false);
+        let db = open_or_create_db(db_path, IrysTables::ALL, None)?;
+
+        // Set schema version to 1
+        let _ = db.update(|tx| -> Result<(), DatabaseError> {
+            crate::set_database_schema_version(tx, 1)?;
+            Ok(())
+        })?;
+
+        let version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
+        assert_eq!(version, Some(1));
+
+        // Create test data in OLD format (with promoted_height field)
+        let tx_id_1: H256 = H256::random();
+        let tx_id_2: H256 = H256::random();
+        let tx_id_3: H256 = H256::random();
+
+        {
+            let write_tx = db.tx_mut()?;
+
+            // Write using old table type
+            let old_header_1 = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: tx_id_1,
+                    promoted_height: Some(100),
+                    ..Default::default()
+                },
+            );
+            write_tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                tx_id_1,
+                super::old_structures::CompactTxHeaderOld(old_header_1),
+            )?;
+
+            let old_header_2 = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: tx_id_2,
+                    promoted_height: Some(200),
+                    ..Default::default()
+                },
+            );
+            write_tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                tx_id_2,
+                super::old_structures::CompactTxHeaderOld(old_header_2),
+            )?;
+
+            let old_header_3 = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: tx_id_3,
+                    promoted_height: None, // No promoted_height for this one
+                    ..Default::default()
+                },
+            );
+            write_tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                tx_id_3,
+                super::old_structures::CompactTxHeaderOld(old_header_3),
+            )?;
+
+            write_tx.commit()?;
+        }
+
+        // Run migration
+        let _ = db.update(|tx| -> Result<(), DatabaseError> {
+            super::v1_to_v2::migrate(tx)?;
+            Ok(())
+        })?;
+
+        // Verify that a schema version is updated to 2
+        let new_version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
+        assert_eq!(new_version.unwrap(), 2);
+
+        // Verify headers were migrated correctly
+        // Note: promoted_height() reads from the metadata field which is not auto-loaded
+        // In real usage, code must load metadata separately and attach it
+
+        // Read header and metadata, then verify
+        let (header_1, metadata_1) = db.view(|tx| -> eyre::Result<_> {
+            let h = tx.get::<IrysDataTxHeaders>(tx_id_1)?.unwrap();
+            let m = tx.get::<IrysDataTxMetadata>(tx_id_1)?;
+            Ok((h, m))
+        })??;
+
+        let mut h1 = header_1.0;
+        if let Some(meta) = metadata_1 {
+            h1.set_metadata(meta.0);
+        }
+        assert_eq!(h1.promoted_height(), Some(100));
+
+        let (header_2, metadata_2) = db.view(|tx| -> eyre::Result<_> {
+            let h = tx.get::<IrysDataTxHeaders>(tx_id_2)?.unwrap();
+            let m = tx.get::<IrysDataTxMetadata>(tx_id_2)?;
+            Ok((h, m))
+        })??;
+
+        let mut h2 = header_2.0;
+        if let Some(meta) = metadata_2 {
+            h2.set_metadata(meta.0);
+        }
+        assert_eq!(h2.promoted_height(), Some(200));
+
+        let (header_3, metadata_3) = db.view(|tx| -> eyre::Result<_> {
+            let h = tx.get::<IrysDataTxHeaders>(tx_id_3)?.unwrap();
+            let m = tx.get::<IrysDataTxMetadata>(tx_id_3)?;
+            Ok((h, m))
+        })??;
+
+        let mut h3 = header_3.0;
+        if let Some(meta) = metadata_3 {
+            h3.set_metadata(meta.0);
+        }
+        assert_eq!(h3.promoted_height(), None);
+
+        // Verify metadata table has the correct entries
+        let metadata_1_check = db.view(|tx| tx.get::<IrysDataTxMetadata>(tx_id_1))??;
+        assert!(metadata_1_check.is_some());
+        let metadata_1_inner = metadata_1_check.unwrap().0;
+        assert_eq!(metadata_1_inner.promoted_height, Some(100));
+        // Verify included_height is None after migration
+        assert_eq!(metadata_1_inner.included_height, None);
+
+        let metadata_2_check = db.view(|tx| tx.get::<IrysDataTxMetadata>(tx_id_2))??;
+        assert!(metadata_2_check.is_some());
+        let metadata_2_inner = metadata_2_check.unwrap().0;
+        assert_eq!(metadata_2_inner.promoted_height, Some(200));
+        // Verify included_height is None after migration
+        assert_eq!(metadata_2_inner.included_height, None);
+
+        // tx_id_3 should NOT have a metadata entry (promoted_height was None)
+        let metadata_3_check = db.view(|tx| tx.get::<IrysDataTxMetadata>(tx_id_3))??;
+        assert!(metadata_3_check.is_none());
 
         Ok(())
     }

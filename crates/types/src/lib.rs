@@ -33,6 +33,7 @@ pub mod storage;
 pub mod storage_pricing;
 pub mod time;
 pub mod transaction;
+pub mod transaction_metadata;
 pub mod tx_known_status;
 pub mod tx_source;
 pub mod version;
@@ -63,6 +64,7 @@ pub use signature::*;
 pub use storage::*;
 pub use time::*;
 pub use transaction::*;
+pub use transaction_metadata::*;
 pub use tx_source::*;
 
 pub use alloy_primitives::{/* Address, */ Signature};

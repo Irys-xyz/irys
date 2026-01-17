@@ -2345,10 +2345,13 @@ mod tests {
         storage_module.pack_with_zeros();
 
         // Create a dummy data tx header to provide the data_size and data_root
-        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_root,
-            data_size,
-            ..Default::default()
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
         let _ = storage_module.index_transaction_data(

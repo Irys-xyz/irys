@@ -5,7 +5,7 @@ use alloy_genesis::GenesisAccount;
 use alloy_signer_local::LocalSigner;
 use irys_actors::mempool_service::{MempoolServiceMessage, TxIngressError};
 use irys_chain::IrysNodeCtx;
-use irys_database::{tables::IngressProofs, SystemLedger};
+use irys_database::tables::IngressProofs;
 use irys_reth_node_bridge::{
     ext::IrysRethRpcTestContextExt as _, reth_e2e_test_utils::transaction::TransactionTestContext,
     IrysRethNodeAdapter,
@@ -14,7 +14,7 @@ use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentTypeV1;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
-    IngressProofsList, IrysBlockHeader, NodeConfig, H256,
+    IngressProofsList, IrysBlockHeader, NodeConfig, SystemLedger, H256,
 };
 use k256::ecdsa::SigningKey;
 use rand::Rng as _;
@@ -1137,10 +1137,14 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
 
     // assert that a_blk1_tx1 is back in a's mempool
     assert_eq!(
-        a1_b2_reorg_mempool_txs.submit_tx,
-        vec![a_blk1_tx1.header.clone()],
-        "We expected 1 submit tx from the mempool shape and for it to be {:?}",
-        a_blk1_tx1.header.clone()
+        a1_b2_reorg_mempool_txs.submit_tx.len(),
+        1,
+        "We expected 1 submit tx from the mempool shape"
+    );
+    assert_eq!(
+        a1_b2_reorg_mempool_txs.submit_tx[0].id, a_blk1_tx1.header.id,
+        "Expected submit tx to be {:?}",
+        a_blk1_tx1.header.id
     );
 
     assert_eq!(
@@ -1157,7 +1161,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     };
 
     let mut a_blk1_tx1_published = a_blk1_tx1.header.clone();
-    a_blk1_tx1_published.promoted_height = None; // <- mark this tx as unpublished
+    a_blk1_tx1_published.set_promoted_height(None); // <- mark this tx as unpublished
 
     // assert that A’s tx is among publish candidates (treated as if it wasn't promoted)
     // (allow additional candidates as sometimes Bs tx will also show up)
@@ -1194,7 +1198,10 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
     // ensure a_blk1_tx1 was orphaned back into the mempool, *without* an ingress proof
     // note: as [`get_publish_txs_and_proofs`] resolves ingress proofs, calling get_best_mempool_txs will return the header with an ingress proof.
     // so we have a separate path & assert to ensure the ingress proof is being removed when the tx is orphaned
-    assert_eq!(a_blk1_tx1_mempool, a_blk1_tx1.header);
+    assert_eq!(
+        a_blk1_tx1_mempool.id, a_blk1_tx1.header.id,
+        "Transaction ID should match after reorg"
+    );
 
     // gossip A's orphaned tx to B
     // get it ready for promotion, and then mine a block on B to include it
@@ -1269,7 +1276,7 @@ async fn slow_heavy_mempool_publish_fork_recovery_test(
         .get_storage_tx_header_from_mempool(&a_blk1_tx1.header.id)
         .await?;
 
-    assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height, Some(b_blk3.height));
+    assert_eq!(a_blk1_tx1_b_blk3_tx1.promoted_height(), Some(b_blk3.height));
 
     // gracefully shutdown nodes
     tokio::join!(a_node.stop(), b_node.stop(), c_node.stop(),);
