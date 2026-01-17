@@ -25,7 +25,7 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_database::SystemLedger;
+use irys_types::SystemLedger;
 use irys_types::{
     BlockTransactions, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
     H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger,

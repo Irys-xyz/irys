@@ -10,9 +10,7 @@ use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
 use irys_database::db::IrysDatabaseExt as _;
-use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -30,7 +28,7 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, UnixTimestamp, H256, U256,
+    IrysBlockHeader, PoaData, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};

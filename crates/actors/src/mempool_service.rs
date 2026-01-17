@@ -27,7 +27,7 @@ use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
+    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
     get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
@@ -39,7 +39,7 @@ use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, UnixTimestamp, H256, U256,
+    IrysTransactionId, NodeConfig, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
