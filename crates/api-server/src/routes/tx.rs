@@ -293,10 +293,18 @@ pub async fn get_tx_promotion_status(
     } else {
         // No DB metadata - fall back to mempool header
         let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-        state
+        if let Err(err) = state
             .mempool_service
             .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
-            .unwrap();
+        {
+            tracing::error!(
+                "API Failed to deliver MempoolServiceMessage::GetDataTxs: {}",
+                err
+            );
+            return Err(ApiError::Internal {
+                err: format!("Failed to query mempool for transaction: {}", err),
+            });
+        }
 
         let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
             err: "Unable to read result from oneshot".to_owned(),

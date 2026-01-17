@@ -200,33 +200,17 @@ mod v1_to_v2 {
     };
     use reth_db::cursor::DbCursorRO as _;
 
-    pub(crate) fn migrate<TX>(tx: &TX) -> Result<(), DatabaseError>
+    fn migrate_batch<TX>(
+        tx: &TX,
+        entries: &[(
+            irys_types::H256,
+            old_structures::DataTransactionHeaderV1WithPromotedHeight,
+        )],
+    ) -> Result<(), DatabaseError>
     where
         TX: DbTxMut + DbTx + Debug,
     {
-        debug!("Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata");
-
-        // Read from the old table format
-        let mut old_cursor = tx.cursor_read::<old_structures::IrysDataTxHeadersOld>()?;
-        let mut entries_to_migrate = Vec::new();
-
-        // Collect all entries from the old table
-        for result in old_cursor.walk(None)? {
-            let (tx_id, old_compact_header) = result?;
-
-            // Extract the old header with promoted_height
-            let old_structures::DataTransactionHeaderOld::V1(old_header) = old_compact_header.0;
-
-            entries_to_migrate.push((tx_id, old_header));
-        }
-
-        debug!(
-            "Found {} data transaction headers to migrate",
-            entries_to_migrate.len()
-        );
-
-        // Now write the migrated data atomically
-        for (tx_id, old_header) in &entries_to_migrate {
+        for (tx_id, old_header) in entries {
             // Create a new header without promoted_height
             let new_header_v1 = DataTransactionHeaderV1 {
                 id: old_header.id,
@@ -252,21 +236,57 @@ mod v1_to_v2 {
             tx.put::<IrysDataTxHeaders>(*tx_id, new_header.into())?;
 
             // If promoted_height existed, create a metadata entry in IrysDataTxMetadata
+            // Only set promoted_height; included_height remains None as v1 didn't track original Submit inclusion height
             if let Some(promoted_height) = old_header.promoted_height {
                 let metadata = DataTransactionMetadata {
-                    // This field didn't exist before, so we'll just set it like that for the
-                    //  sake of simplicity
-                    included_height: Some(promoted_height),
+                    included_height: None,
                     promoted_height: Some(promoted_height),
                 };
                 tx.put::<IrysDataTxMetadata>(*tx_id, metadata.into())?;
             }
         }
+        Ok(())
+    }
+
+    pub(crate) fn migrate<TX>(tx: &TX) -> Result<(), DatabaseError>
+    where
+        TX: DbTxMut + DbTx + Debug,
+    {
+        debug!("Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata");
+
+        // Read from the old table format using bounded batching to avoid OOM
+        let mut old_cursor = tx.cursor_read::<old_structures::IrysDataTxHeadersOld>()?;
+        let mut entries_to_migrate = Vec::new();
+        const BATCH_SIZE: usize = 10000;
+        let mut total_migrated = 0;
+
+        // Process records in fixed-size chunks to keep memory bounded
+        for result in old_cursor.walk(None)? {
+            let (tx_id, old_compact_header) = result?;
+
+            // Extract the old header with promoted_height
+            let old_structures::DataTransactionHeaderOld::V1(old_header) = old_compact_header.0;
+
+            entries_to_migrate.push((tx_id, old_header));
+
+            // Process and clear batch when it reaches BATCH_SIZE
+            if entries_to_migrate.len() >= BATCH_SIZE {
+                migrate_batch(tx, &entries_to_migrate)?;
+                total_migrated += entries_to_migrate.len();
+                entries_to_migrate.clear();
+            }
+        }
+
+        // Process any remaining entries in the final batch
+        if !entries_to_migrate.is_empty() {
+            migrate_batch(tx, &entries_to_migrate)?;
+            total_migrated += entries_to_migrate.len();
+        }
 
         crate::set_database_schema_version(tx, 2)?;
         debug!(
             "Migration from v1 to v2 completed: migrated {} headers",
-            entries_to_migrate.len()
+            total_migrated
         );
         Ok(())
     }
@@ -607,11 +627,17 @@ mod tests {
         // Verify metadata table has the correct entries
         let metadata_1_check = db.view(|tx| tx.get::<IrysDataTxMetadata>(tx_id_1))??;
         assert!(metadata_1_check.is_some());
-        assert_eq!(metadata_1_check.unwrap().0.promoted_height, Some(100));
+        let metadata_1_inner = metadata_1_check.unwrap().0;
+        assert_eq!(metadata_1_inner.promoted_height, Some(100));
+        // Verify included_height is None after migration
+        assert_eq!(metadata_1_inner.included_height, None);
 
         let metadata_2_check = db.view(|tx| tx.get::<IrysDataTxMetadata>(tx_id_2))??;
         assert!(metadata_2_check.is_some());
-        assert_eq!(metadata_2_check.unwrap().0.promoted_height, Some(200));
+        let metadata_2_inner = metadata_2_check.unwrap().0;
+        assert_eq!(metadata_2_inner.promoted_height, Some(200));
+        // Verify included_height is None after migration
+        assert_eq!(metadata_2_inner.included_height, None);
 
         // tx_id_3 should NOT have a metadata entry (promoted_height was None)
         let metadata_3_check = db.view(|tx| tx.get::<IrysDataTxMetadata>(tx_id_3))??;

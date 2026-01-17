@@ -116,9 +116,18 @@ pub fn tx_header_by_txid<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
-    Ok(tx
+    if let Some(mut header) = tx
         .get::<IrysDataTxHeaders>(*txid)?
-        .map(DataTransactionHeader::from))
+        .map(DataTransactionHeader::from)
+    {
+        // Load metadata from separate table if it exists
+        if let Some(metadata) = crate::get_data_tx_metadata(tx, txid)? {
+            *header.metadata_mut() = metadata;
+        }
+        Ok(Some(header))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
