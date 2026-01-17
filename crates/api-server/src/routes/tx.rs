@@ -313,9 +313,7 @@ pub async fn get_tx_promotion_status(
         tx_header.promoted_height()
     };
 
-    Ok(web::Json(PromotionStatus {
-        promotion_height,
-    }))
+    Ok(web::Json(PromotionStatus { promotion_height }))
 }
 
 /// GET /v1/tx/{tx_id}/status

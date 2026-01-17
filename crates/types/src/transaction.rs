@@ -62,14 +62,34 @@ pub enum CommitmentValidationError {
 
 // Wrapper struct to hold transaction + metadata
 // This is a transparent wrapper that delegates serde to the inner transaction
-#[derive(
-    Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Arbitrary, Serialize, Deserialize,
-)]
+#[derive(Clone, Debug, Default, Arbitrary, Serialize, Deserialize)]
 pub struct DataTransactionHeaderV1WithMetadata {
     #[serde(flatten)]
     pub tx: DataTransactionHeaderV1,
     #[serde(skip)]
     pub metadata: DataTransactionMetadata,
+}
+
+// Manual trait implementations to exclude metadata from comparisons
+impl PartialEq for DataTransactionHeaderV1WithMetadata {
+    fn eq(&self, other: &Self) -> bool {
+        self.tx == other.tx
+    }
+}
+
+impl Eq for DataTransactionHeaderV1WithMetadata {}
+
+#[expect(clippy::non_canonical_partial_ord_impl)]
+impl PartialOrd for DataTransactionHeaderV1WithMetadata {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.tx.partial_cmp(&other.tx)
+    }
+}
+
+impl Ord for DataTransactionHeaderV1WithMetadata {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.tx.cmp(&other.tx)
+    }
 }
 
 #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]

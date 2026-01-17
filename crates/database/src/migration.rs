@@ -215,8 +215,7 @@ mod v1_to_v2 {
             let (tx_id, old_compact_header) = result?;
 
             // Extract the old header with promoted_height
-            let old_structures::DataTransactionHeaderOld::V1(old_header) =
-                old_compact_header.0;
+            let old_structures::DataTransactionHeaderOld::V1(old_header) = old_compact_header.0;
 
             entries_to_migrate.push((tx_id, old_header));
         }
