@@ -51,7 +51,7 @@ use irys_types::{
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{BlockHash, CommitmentType};
+use irys_types::{BlockHash, CommitmentTypeV1};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -655,6 +655,14 @@ impl Inner {
         // Sort all commitments according to our priority rules
         sorted_commitments.sort();
 
+        // Filter out commitment transactions with versions below the hardfork minimum
+        // Use current time (not parent block timestamp) because the new block will have
+        // a timestamp of approximately now(), and validators check versions against block timestamp
+        self.config
+            .consensus
+            .hardforks
+            .retain_valid_commitment_versions(&mut sorted_commitments, UnixTimestamp::now()?);
+
         balances.extend(
             fetch_balances_for_transactions(
                 &self.reth_node_adapter,
@@ -708,7 +716,7 @@ impl Inner {
             }
 
             // signer stake status check
-            if matches!(tx.commitment_type(), CommitmentType::Stake) {
+            if matches!(tx.commitment_type(), CommitmentTypeV1::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer());
                 debug!(
                     tx.id = ?tx.id(),
@@ -800,8 +808,8 @@ impl Inner {
                     .iter()
                     .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
                         match tx.commitment_type() {
-                            CommitmentType::Stake => (stakes + 1, pledges),
-                            CommitmentType::Pledge { .. } => (stakes, pledges + 1),
+                            CommitmentTypeV1::Stake => (stakes + 1, pledges),
+                            CommitmentTypeV1::Pledge { .. } => (stakes, pledges + 1),
                             _ => (stakes, pledges),
                         }
                     });
@@ -1959,7 +1967,7 @@ impl AtomicMempoolState {
     pub async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
-        commitment_type_filter: impl Fn(&CommitmentType) -> bool,
+        commitment_type_filter: impl Fn(CommitmentTypeV1) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
         let mempool = self.read().await;
@@ -2329,7 +2337,7 @@ impl AtomicMempoolState {
             // Check if there's at least one pending stake transaction
             if pending
                 .iter()
-                .any(|c| *c.commitment_type() == CommitmentType::Stake)
+                .any(|c| c.commitment_type() == CommitmentTypeV1::Stake)
             {
                 return true;
             }
@@ -2631,6 +2639,11 @@ pub enum TxIngressError {
     /// The transaction's signature is invalid
     #[error("Transaction signature is invalid for address {0}")]
     InvalidSignature(IrysAddress),
+    /// The commitment transaction version is below minimum required after hardfork activation
+    #[error(
+        "Commitment transaction version {version} is below minimum required version {minimum}"
+    )]
+    InvalidVersion { version: u8, minimum: u8 },
     /// The account does not have enough tokens to fund this transaction
     #[error("Account has insufficient funds for transaction {0}")]
     Unfunded(H256),
@@ -3055,7 +3068,8 @@ where
 mod bounded_mempool_tests {
     use super::*;
     use irys_types::{
-        CommitmentTransactionV1, CommitmentType, DataLedger, DataTransactionHeaderV1, IrysSignature,
+        CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
+        IrysSignature,
     };
 
     // ========================================================================
@@ -3083,14 +3097,14 @@ mod bounded_mempool_tests {
 
     /// Creates a test commitment transaction with specified signer and value
     fn create_test_commitment_tx(signer: IrysAddress, value: u64) -> CommitmentTransaction {
-        CommitmentTransaction::V1(CommitmentTransactionV1 {
+        CommitmentTransaction::V2(CommitmentTransactionV2 {
             id: H256::random(), // Random ID for testing
             anchor: H256::zero(),
             signer,
             signature: IrysSignature::default(),
             fee: 100,
             value: U256::from(value),
-            commitment_type: CommitmentType::Stake,
+            commitment_type: CommitmentTypeV2::Stake,
             chain_id: 1,
         })
     }

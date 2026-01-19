@@ -13,6 +13,7 @@ use irys_reth_node_bridge::{
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentType;
 use irys_types::SystemLedger;
+use irys_types::CommitmentTypeV1;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
     IngressProofsList, IrysBlockHeader, NodeConfig, H256,
@@ -2450,15 +2451,15 @@ async fn pledge_tx_fee_validation_test(
 
 /// Test mempool accepts stake and pledge transactions with valid higher fees
 #[rstest::rstest]
-#[case::stake_double_fee(CommitmentType::Stake, 2)] // 200 instead of 100
-#[case::stake_triple_fee(CommitmentType::Stake, 3)] // 300 instead of 100
-#[case::stake_exact_fee(CommitmentType::Stake, 1)] // 100 (exact required fee)
-#[case::pledge_double_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 2)] // First pledge, 200 instead of 100
-#[case::pledge_triple_fee(CommitmentType::Pledge {pledge_count_before_executing: 1 }, 3)] // Second pledge, 300 instead of 100
-#[case::pledge_exact_fee(CommitmentType::Pledge {pledge_count_before_executing: 0 }, 1)] // First pledge, 100 (exact required fee)
+#[case::stake_double_fee(CommitmentTypeV1::Stake, 2)] // 200 instead of 100
+#[case::stake_triple_fee(CommitmentTypeV1::Stake, 3)] // 300 instead of 100
+#[case::stake_exact_fee(CommitmentTypeV1::Stake, 1)] // 100 (exact required fee)
+#[case::pledge_double_fee(CommitmentTypeV1::Pledge {pledge_count_before_executing: 0 }, 2)] // First pledge, 200 instead of 100
+#[case::pledge_triple_fee(CommitmentTypeV1::Pledge {pledge_count_before_executing: 1 }, 3)] // Second pledge, 300 instead of 100
+#[case::pledge_exact_fee(CommitmentTypeV1::Pledge {pledge_count_before_executing: 0 }, 1)] // First pledge, 100 (exact required fee)
 #[test_log::test(tokio::test)]
 async fn commitment_tx_valid_higher_fee_test(
-    #[case] commitment_type: CommitmentType,
+    #[case] commitment_type: CommitmentTypeV1,
     #[case] fee_multiplier: u64,
 ) -> eyre::Result<()> {
     let mut genesis_config = NodeConfig::testing();
@@ -2474,10 +2475,10 @@ async fn commitment_tx_valid_higher_fee_test(
 
     // Create the appropriate transaction type with higher fee
     let mut commitment_tx = match commitment_type {
-        CommitmentType::Stake => {
+        CommitmentTypeV1::Stake => {
             CommitmentTransaction::new_stake(config, genesis_node.get_anchor().await?)
         }
-        CommitmentType::Pledge {
+        CommitmentTypeV1::Pledge {
             pledge_count_before_executing: count,
         } => {
             CommitmentTransaction::new_pledge(

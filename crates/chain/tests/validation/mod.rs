@@ -72,7 +72,7 @@ fn send_block_to_block_validation(
 // from the consensus config.
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
-    use irys_types::CommitmentType;
+    use irys_types::CommitmentTypeV1;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -88,6 +88,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_stake = self.invalid_stake.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -124,7 +125,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     // Create a pledge commitment with invalid value
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentType::Stake);
+    invalid_pledge.set_commitment_type(CommitmentTypeV1::Stake);
     invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
     invalid_pledge.set_signer(genesis_config.signer().address());
     invalid_pledge.set_fee(consensus_config.mempool.commitment_fee);
@@ -170,7 +171,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
-    use irys_types::CommitmentType;
+    use irys_types::CommitmentTypeV1;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -186,6 +187,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_pledge = self.invalid_pledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -221,7 +223,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let pledge_count = 0;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentType::Pledge {
+    invalid_pledge.set_commitment_type(CommitmentTypeV1::Pledge {
         pledge_count_before_executing: pledge_count,
     });
     invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
@@ -282,6 +284,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -399,6 +402,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let commitments = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -557,6 +561,7 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![self.wrong_commitment.clone()],
@@ -795,6 +800,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Create publish ledger with duplicate proofs from the same signer for one transaction
             // This tests that each transaction must have unique signers
@@ -991,6 +997,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],

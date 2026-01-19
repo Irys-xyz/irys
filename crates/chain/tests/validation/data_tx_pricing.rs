@@ -42,6 +42,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
@@ -158,6 +159,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],
@@ -571,6 +573,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             Ok(irys_actors::block_producer::MempoolTxsBundle {
                 commitment_txs: vec![],

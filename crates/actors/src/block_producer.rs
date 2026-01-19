@@ -503,7 +503,9 @@ pub trait BlockProdStrategy {
         let prev_evm_block = self.get_evm_block(&prev_block_header).await?;
         let current_timestamp = current_timestamp(&prev_block_header).await;
 
-        let mempool_bundle = self.get_mempool_txs(&prev_block_header).await?;
+        let mempool_bundle = self
+            .get_mempool_txs(&prev_block_header, current_timestamp)
+            .await?;
 
         let block_reward = self.block_reward(&prev_block_header)?;
 
@@ -1320,16 +1322,28 @@ pub trait BlockProdStrategy {
     async fn get_mempool_txs(
         &self,
         prev_block_header: &IrysBlockHeader,
+        block_timestamp: UnixTimestampMs,
     ) -> eyre::Result<MempoolTxsBundle> {
         // Fetch mempool once
         let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
         // Sort txs to be of deterministic order
         mempool_txs.submit_tx.sort();
         mempool_txs.commitment_tx.sort();
+
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
         if !is_epoch {
+            // Filter commitments by version using block timestamp
+            self.inner()
+                .config
+                .consensus
+                .hardforks
+                .retain_valid_commitment_versions(
+                    &mut mempool_txs.commitment_tx,
+                    block_timestamp.to_secs(),
+                );
+
             debug!(
                 block.height = block_height,
                 custom.commitment_ids = ?mempool_txs
@@ -1341,6 +1355,10 @@ pub trait BlockProdStrategy {
             );
             return Ok(self.build_non_epoch_bundle(mempool_txs));
         }
+
+        // =====
+        // ONLY EPOCH BLOCK PROCESSING
+        // =====
 
         // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
@@ -1357,9 +1375,12 @@ pub trait BlockProdStrategy {
                 &self.inner().config.consensus,
             )?;
 
+        // note: we do not filter txs by version for epoch blocks
+        let commitment_txs = parent_commitment_snapshot.get_epoch_commitments();
+
         Ok(MempoolTxsBundle {
             // on epoch blocks we don't bill the end-user
-            commitment_txs: parent_commitment_snapshot.get_epoch_commitments(),
+            commitment_txs,
             commitment_txs_to_bill: vec![],
             submit_txs: mempool_txs.submit_tx,
             publish_txs: mempool_txs.publish_tx,

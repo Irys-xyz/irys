@@ -12,7 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::CommitmentType;
+use irys_types::{BlockTransactions, CommitmentTypeV1};
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
@@ -31,6 +31,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let invalid_unpledge = self.invalid_unpledge.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -168,6 +169,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let commitment_txs = self.commitments.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -219,7 +221,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         .await;
 
         let count = target_counts[idx];
-        tx.set_commitment_type(CommitmentType::Unpledge {
+        tx.set_commitment_type(CommitmentTypeV1::Unpledge {
             pledge_count_before_executing: count,
             partition_hash: assignment.partition_hash,
         });
@@ -288,6 +290,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let commitment = self.commitment.clone();
             Ok(irys_actors::block_producer::MempoolTxsBundle {
@@ -383,6 +386,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &irys_types::IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             let mut commitments = self.commitments.clone();
             commitments.sort(); // mimic canonical ordering

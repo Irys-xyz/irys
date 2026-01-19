@@ -1224,6 +1224,7 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
         async fn get_mempool_txs(
             &self,
             _prev_block_header: &IrysBlockHeader,
+            _block_timestamp: irys_types::UnixTimestampMs,
         ) -> eyre::Result<irys_actors::block_producer::MempoolTxsBundle> {
             // Force inclusion of malicious tx in Submit ledger, bypassing mempool validation
             Ok(irys_actors::block_producer::MempoolTxsBundle {

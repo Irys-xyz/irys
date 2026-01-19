@@ -48,5 +48,5 @@ fn commitment_tx_uses_new_constructor() {
     // Prefer using the public constructor for normal usage
     let config = ConsensusConfig::testing();
     let versioned = CommitmentTransaction::new_stake(&config, irys_types::H256::zero());
-    assert_eq!(versioned.version(), 1);
+    assert_eq!(versioned.version(), 2);
 }

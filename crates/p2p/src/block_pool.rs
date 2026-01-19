@@ -1212,7 +1212,7 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{DataTransactionHeader, IrysBlockHeaderV1};
+    use irys_types::{CommitmentTransactionV2, DataTransactionHeader, IrysBlockHeaderV1};
     use std::sync::Arc;
 
     fn make_sealed_block(
@@ -1413,10 +1413,7 @@ mod tests {
 
     #[test]
     fn order_transactions_matching_header_body() {
-        use irys_types::{
-            CommitmentTransaction, CommitmentTransactionV1, DataTransactionHeaderV1,
-            SystemTransactionLedger,
-        };
+        use irys_types::{CommitmentTransaction, DataTransactionHeaderV1, SystemTransactionLedger};
 
         // Create test transaction IDs
         let submit_tx_id1 = H256::repeat_byte(0x11);
@@ -1473,11 +1470,11 @@ mod tests {
             }),
         ];
 
-        let commitment_tx = CommitmentTransactionV1 {
+        let commitment_tx = CommitmentTransactionV2 {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V1(commitment_tx)];
+        let commitment_txs = vec![CommitmentTransaction::V2(commitment_tx)];
 
         // Create BlockBody
         let body = BlockBody {
@@ -1650,7 +1647,7 @@ mod tests {
     }
     #[test]
     fn order_transactions_commitment_mismatch() {
-        use irys_types::{CommitmentTransaction, CommitmentTransactionV1, SystemTransactionLedger};
+        use irys_types::{CommitmentTransaction, CommitmentTransactionV2, SystemTransactionLedger};
 
         // Create test commitment transaction IDs
         let commitment_tx_id1 = H256::repeat_byte(0x41);
@@ -1673,11 +1670,11 @@ mod tests {
         // Create body with only ONE commitment transaction
         let data_txs = vec![];
 
-        let commitment_tx = CommitmentTransactionV1 {
+        let commitment_tx = CommitmentTransactionV2 {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V1(commitment_tx)];
+        let commitment_txs = vec![CommitmentTransaction::V2(commitment_tx)];
 
         // Execute ordering function - should return error
 
