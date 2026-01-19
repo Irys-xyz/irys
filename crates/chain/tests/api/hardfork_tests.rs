@@ -496,7 +496,7 @@ mod edge_cases {
 #[cfg(test)]
 mod epoch_block_filtering {
     use super::*;
-    use irys_database::SystemLedger;
+    use irys_types::SystemLedger;
 
     const NUM_BLOCKS_IN_EPOCH: usize = 2;
 
