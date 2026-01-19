@@ -2070,12 +2070,13 @@ impl AtomicMempoolState {
     /// - `height`: Block height to set
     /// - `overwrite`: If false, only sets height if currently None; if true, sets unconditionally
     ///
-    /// Returns true if the transaction was found and updated, false otherwise.
+    /// Returns true if the included_height was actually changed, false otherwise.
     /// Also updates the recent_valid_tx cache when the transaction is found.
     pub async fn set_tx_included_height(&self, tx_id: H256, height: u64, overwrite: bool) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
-            if overwrite || wrapped_tx.metadata().included_height.is_none() {
+            let updated = overwrite || wrapped_tx.metadata().included_height.is_none();
+            if updated {
                 wrapped_tx.metadata_mut().included_height = Some(height);
                 tracing::debug!(
                     tx.id = %tx_id,
@@ -2086,7 +2087,7 @@ impl AtomicMempoolState {
             }
             // Always update recent_valid_tx cache when tx is found
             state.recent_valid_tx.put(tx_id, ());
-            true
+            updated
         } else {
             false
         }
@@ -2323,6 +2324,13 @@ impl AtomicMempoolState {
     pub async fn set_data_tx_included_height(&self, txid: H256, height: u64) -> bool {
         // Use the consolidated method with overwrite=false to maintain backward compatibility
         self.set_tx_included_height(txid, height, false).await
+    }
+
+    /// Set included_height for a data transaction with overwrite enabled
+    /// This is used when processing canonical confirmations to ensure the height
+    /// is updated even if previously set (e.g., after a reorg)
+    pub async fn set_data_tx_included_height_overwrite(&self, txid: H256, height: u64) -> bool {
+        self.set_tx_included_height(txid, height, true).await
     }
 
     /// Atomically clears the included_height on a data transaction in the mempool.
