@@ -2130,7 +2130,7 @@ impl AtomicMempoolState {
     }
 
     /// Clear included_height for a commitment transaction
-    /// Returns true if the transaction was found and the height was cleared
+    /// Returns true if the transaction was found
     pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
 

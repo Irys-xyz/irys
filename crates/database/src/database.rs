@@ -546,7 +546,11 @@ mod tests {
 
         // Read a Tx
         let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
-        assert_eq!(result, Some(tx_header));
+        let result_as_v1 = result
+            .as_ref()
+            .and_then(|h| h.try_as_header_v1().cloned())
+            .unwrap();
+        assert_eq!(result_as_v1, tx_header.try_as_header_v1().cloned().unwrap());
 
         // Write a commitment tx
         let commitment_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {

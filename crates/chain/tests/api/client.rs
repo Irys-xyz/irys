@@ -67,10 +67,12 @@ async fn check_transaction_endpoints(
         .await
         .expect("valid get transaction response");
 
-    assert_eq!(
-        retrieved_tx,
-        IrysTransactionResponse::Storage(tx.header.clone())
-    );
+    let storage_header = match retrieved_tx {
+        IrysTransactionResponse::Storage(header) => header,
+        _ => panic!("expected storage transaction response"),
+    };
+
+    assert!(storage_header.eq_tx(&tx.header));
 
     let txs = api_client
         .get_transactions(api_address, &[tx_id, tx_2_id])

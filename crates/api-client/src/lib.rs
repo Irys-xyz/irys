@@ -526,6 +526,11 @@ mod tests {
             .get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id)
             .await
             .unwrap();
-        assert_eq!(result, IrysTransactionResponse::Storage(tx_header));
+
+        let result_header = match &result {
+            IrysTransactionResponse::Storage(header) => header,
+            _ => panic!("Expected storage transaction"),
+        };
+        assert!(result_header.eq_tx(&tx_header));
     }
 }

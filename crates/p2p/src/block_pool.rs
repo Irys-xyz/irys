@@ -1627,8 +1627,7 @@ mod tests {
     fn order_transactions_matching_header_body() {
         use irys_types::{
             CommitmentTransaction, CommitmentV2WithMetadata, DataTransactionHeaderV1,
-            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-            SystemTransactionLedger,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, SystemTransactionLedger,
         };
 
         // Create test transaction IDs

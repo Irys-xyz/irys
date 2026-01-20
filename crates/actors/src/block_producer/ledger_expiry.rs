@@ -215,7 +215,7 @@ pub async fn calculate_expired_ledger_fees(
 
     // Step 6: Fetch transactions
     let mut transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
-    transactions.sort();
+    transactions.sort_by(irys_types::DataTransactionHeader::compare_tx);
 
     // Step 7: Calculate fees
     tracing::debug!(
@@ -637,7 +637,7 @@ fn aggregate_balance_deltas(
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     let mut balance_delta = LedgerExpiryBalanceDelta::default();
-    transactions.sort(); // This ensures refunds will be sorted by tx_id
+    transactions.sort_by(irys_types::DataTransactionHeader::compare_tx); // This ensures refunds will be sorted by tx_id
 
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners

@@ -26,7 +26,7 @@ macro_rules! add_wrapper_struct {
 	($(($name:tt, $wrapper:tt)),+) => {
         $(
             /// Wrapper struct enabling `Compact` derivation so it can be used directly as a table value.
-            #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
+            #[derive(Debug, Clone, Default, Serialize, Deserialize, Compact)]
             #[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
             pub struct $wrapper(pub $name);
 

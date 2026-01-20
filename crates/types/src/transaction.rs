@@ -70,29 +70,7 @@ pub struct DataTransactionHeaderV1WithMetadata {
     pub metadata: DataTransactionMetadata,
 }
 
-// Manual trait implementations to exclude metadata from comparisons
-impl PartialEq for DataTransactionHeaderV1WithMetadata {
-    fn eq(&self, other: &Self) -> bool {
-        self.tx == other.tx
-    }
-}
-
-impl Eq for DataTransactionHeaderV1WithMetadata {}
-
-#[expect(clippy::non_canonical_partial_ord_impl)]
-impl PartialOrd for DataTransactionHeaderV1WithMetadata {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.tx.partial_cmp(&other.tx)
-    }
-}
-
-impl Ord for DataTransactionHeaderV1WithMetadata {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.tx.cmp(&other.tx)
-    }
-}
-
-#[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary)]
+#[derive(Clone, Debug, IntegerTagged, Arbitrary)]
 #[repr(u8)]
 #[integer_tagged(tag = "version")]
 pub enum DataTransactionHeader {
@@ -114,20 +92,6 @@ impl Default for DataTransactionHeader {
             tx: DataTransactionHeaderV1::default(),
             metadata: DataTransactionMetadata::new(),
         })
-    }
-}
-
-impl Ord for DataTransactionHeader {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::V1(a), Self::V1(b)) => a.cmp(b),
-        }
-    }
-}
-
-impl PartialOrd for DataTransactionHeader {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -219,6 +183,24 @@ impl DataTransactionHeader {
             tx: DataTransactionHeaderV1::new(config),
             metadata: DataTransactionMetadata::new(),
         })
+    }
+
+    pub fn try_as_header_v1(&self) -> Option<&DataTransactionHeaderV1> {
+        match self {
+            Self::V1(v1) => Some(&v1.tx),
+        }
+    }
+
+    pub fn eq_tx(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::V1(v1_self), Self::V1(v1_other)) => v1_self.tx == v1_other.tx,
+        }
+    }
+
+    pub fn compare_tx(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::V1(v1_self), Self::V1(v1_other)) => v1_self.tx.cmp(&v1_other.tx),
+        }
     }
 
     /// Get the metadata
@@ -378,7 +360,7 @@ impl DataTransactionHeaderV1 {
 /// Wrapper for the underlying DataTransactionHeader fields, this wrapper
 /// contains the data/chunk/proof info that is necessary for clients to seed
 /// a transactions data to the network.
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct DataTransaction {
     pub header: DataTransactionHeader,
     // TODO: make this compatible with stream/iterator data sources
@@ -634,7 +616,7 @@ impl IrysTransactionCommon for CommitmentTransaction {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum IrysTransaction {
     Data(DataTransactionHeader),
     Commitment(CommitmentTransaction),
@@ -744,7 +726,7 @@ impl From<CommitmentTransaction> for IrysTransaction {
 }
 
 // API variant (extra serialisation logic)
-#[derive(Serialize, Deserialize, Debug, PartialEq, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum IrysTransactionResponse {
     #[serde(rename = "commitment")]
@@ -753,6 +735,18 @@ pub enum IrysTransactionResponse {
     #[serde(rename = "storage")]
     Storage(DataTransactionHeader),
 }
+
+impl PartialEq for IrysTransactionResponse {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Commitment(tx1), Self::Commitment(tx2)) => tx1 == tx2,
+            (Self::Storage(tx1), Self::Storage(tx2)) => tx1.eq_tx(tx2),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for IrysTransactionResponse {}
 
 impl From<CommitmentTransaction> for IrysTransactionResponse {
     fn from(tx: CommitmentTransaction) -> Self {
@@ -969,7 +963,8 @@ mod tests {
         header.id = H256::zero();
         header.signature = IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap());
 
-        assert_eq!(header, decoded);
+        assert!(header.try_as_header_v1().is_some());
+        assert_eq!(header.try_as_header_v1(), decoded.try_as_header_v1());
         // Verify version discriminant is preserved in RLP encoding
         assert_eq!(decoded.version(), 1);
     }
@@ -1007,8 +1002,12 @@ mod tests {
         original_header.to_compact(&mut buffer);
         let (decoded_header, rest) = DataTransactionHeader::from_compact(&buffer, buffer.len());
 
+        assert!(original_header.try_as_header_v1().is_some());
         // Assert - Compact encodes ALL fields including id and signature (unlike RLP)
-        assert_eq!(original_header, decoded_header);
+        assert_eq!(
+            original_header.try_as_header_v1(),
+            decoded_header.try_as_header_v1()
+        );
         // Verify version discriminant is preserved in Compact encoding
         assert_eq!(decoded_header.version(), 1);
         assert_eq!(buffer[0], 1); // First byte should be the version discriminant
@@ -1049,8 +1048,12 @@ mod tests {
         let deserialized: DataTransactionHeader =
             serde_json::from_str(&serialized).expect("Failed to deserialize");
 
+        assert!(original_header.try_as_header_v1().is_some());
         // Ensure the deserialized struct matches the original
-        assert_eq!(original_header, deserialized);
+        assert_eq!(
+            original_header.try_as_header_v1(),
+            deserialized.try_as_header_v1()
+        );
     }
 
     #[test]
