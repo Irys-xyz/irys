@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
 };
+use tokio::sync::Notify;
 use tracing::warn;
 
 const FILE_NAME: &str = "supply_state.dat";
@@ -89,6 +90,7 @@ pub struct SupplyStateData {
 pub struct SupplyState {
     inner: RwLock<SupplyStateData>,
     ready: AtomicBool,
+    first_migration_notify: Notify,
     persisted_backfill_height: Option<u64>,
     persisted_backfill_value: U256,
     state_file: PathBuf,
@@ -116,6 +118,7 @@ impl SupplyState {
         Ok(Self {
             inner: RwLock::new(SupplyStateData::default()),
             ready: AtomicBool::new(false),
+            first_migration_notify: Notify::new(),
             persisted_backfill_height: persisted.backfill_height,
             persisted_backfill_value: persisted.backfill_value,
             state_file,
@@ -142,6 +145,19 @@ impl SupplyState {
         self.get().first_migration_height
     }
 
+    /// Waits until `first_migration_height` is set and returns it.
+    ///
+    /// If already set, returns immediately. Otherwise waits for notification
+    /// from `add_block_reward` when the first block is processed.
+    pub async fn wait_for_first_migration(&self) -> u64 {
+        loop {
+            if let Some(height) = self.first_migration_height() {
+                return height;
+            }
+            self.first_migration_notify.notified().await;
+        }
+    }
+
     pub fn height(&self) -> u64 {
         self.get().height
     }
@@ -151,31 +167,40 @@ impl SupplyState {
     }
 
     pub fn add_block_reward(&self, height: u64, reward_amount: U256) -> Result<()> {
-        let mut data = self
-            .inner
-            .write()
-            .expect("supply state write lock poisoned");
+        let is_first_migration = {
+            let mut data = self
+                .inner
+                .write()
+                .expect("supply state write lock poisoned");
 
-        let first_migration = if data.first_migration_height.is_none() {
-            Some(height)
-        } else {
-            let expected = data.height.saturating_add(1);
-            if height != expected {
-                eyre::bail!(
-                    "Supply state height mismatch: expected {}, got {}",
-                    expected,
-                    height
-                );
-            }
-            data.first_migration_height
+            let is_first = data.first_migration_height.is_none();
+            let first_migration = if is_first {
+                Some(height)
+            } else {
+                let expected = data.height.saturating_add(1);
+                if height != expected {
+                    eyre::bail!(
+                        "Supply state height mismatch: expected {}, got {}",
+                        expected,
+                        height
+                    );
+                }
+                data.first_migration_height
+            };
+
+            // Update runtime state only - no persistence needed here
+            *data = SupplyStateData {
+                height,
+                cumulative_emitted: data.cumulative_emitted.saturating_add(reward_amount),
+                first_migration_height: first_migration,
+            };
+            is_first
         };
 
-        // Update runtime state only - no persistence needed here
-        *data = SupplyStateData {
-            height,
-            cumulative_emitted: data.cumulative_emitted.saturating_add(reward_amount),
-            first_migration_height: first_migration,
-        };
+        if is_first_migration {
+            self.first_migration_notify.notify_waiters();
+        }
+
         Ok(())
     }
 
@@ -303,6 +328,7 @@ mod tests {
         SupplyState {
             inner: RwLock::new(SupplyStateData::default()),
             ready: AtomicBool::new(false),
+            first_migration_notify: Notify::new(),
             persisted_backfill_height: backfill_height,
             persisted_backfill_value: backfill_value,
             state_file,
@@ -439,6 +465,7 @@ mod tests {
             let state = SupplyState {
                 inner: RwLock::new(SupplyStateData::default()),
                 ready: AtomicBool::new(false),
+                first_migration_notify: Notify::new(),
                 persisted_backfill_height: None,
                 persisted_backfill_value: U256::zero(),
                 state_file: state_file.clone(),
@@ -464,6 +491,7 @@ mod tests {
         let state = SupplyState {
             inner: RwLock::new(SupplyStateData::default()), // Reset runtime
             ready: AtomicBool::new(false),                  // Reset ready
+            first_migration_notify: Notify::new(),
             persisted_backfill_height: persisted.backfill_height,
             persisted_backfill_value: persisted.backfill_value,
             state_file,

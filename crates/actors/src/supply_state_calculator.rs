@@ -6,8 +6,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-const WAIT_POLL_INTERVAL_MS: u64 = 100;
-
 /// Waits for the first block migration to set `first_migration_height`.
 ///
 /// We use this rather than block_index to determine backfill range because the migrate_block
@@ -18,21 +16,17 @@ async fn wait_for_first_migration(
     supply_state: &SupplyState,
     cancel: &CancellationToken,
 ) -> Option<u64> {
-    loop {
-        if let Some(height) = supply_state.first_migration_height() {
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            info!("Backfill cancelled while waiting for first migration");
+            None
+        }
+        height = supply_state.wait_for_first_migration() => {
             info!(
                 "First migration detected at height {}, starting backfill",
                 height
             );
-            return Some(height);
-        }
-
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                info!("Backfill cancelled while waiting for first migration");
-                return None;
-            }
-            _ = tokio::time::sleep(tokio::time::Duration::from_millis(WAIT_POLL_INTERVAL_MS)) => {}
+            Some(height)
         }
     }
 }
