@@ -99,8 +99,17 @@ impl SupplyState {
         std::fs::create_dir_all(&state_dir)?;
         let state_file = state_dir.join(FILE_NAME);
 
-        // Load persisted backfill point (if any)
-        let persisted = load_from_file(&state_file).unwrap_or_default();
+        // Load persisted backfill point (if any), defaulting only if file doesn't exist
+        let persisted = match load_from_file(&state_file) {
+            Ok(state) => state,
+            Err(e) => {
+                if is_not_found(&e) {
+                    PersistedSupplyState::default()
+                } else {
+                    return Err(e);
+                }
+            }
+        };
 
         // Runtime state starts fresh - will be reconstructed
         Ok(Self {
@@ -225,6 +234,12 @@ impl SupplyStateReadGuard {
     pub fn get(&self) -> SupplyStateData {
         self.inner.get()
     }
+}
+
+fn is_not_found(err: &eyre::Report) -> bool {
+    err.chain()
+        .filter_map(|e| e.downcast_ref::<std::io::Error>())
+        .any(|io_err| io_err.kind() == std::io::ErrorKind::NotFound)
 }
 
 fn load_from_file(path: &Path) -> Result<PersistedSupplyState> {

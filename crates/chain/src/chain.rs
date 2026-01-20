@@ -131,6 +131,7 @@ pub struct IrysNodeCtx {
     pub started_at: Instant,
     pub supply_state_guard: Option<SupplyStateReadGuard>,
     backfill_cancel: CancellationToken,
+    backfill_complete: Arc<tokio::sync::Notify>,
 }
 
 impl IrysNodeCtx {
@@ -166,6 +167,21 @@ impl IrysNodeCtx {
 
         // Cancel the backfill task for graceful shutdown
         self.backfill_cancel.cancel();
+
+        // Wait for backfill task to complete (with timeout)
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.backfill_complete.notified(),
+        )
+        .await
+        {
+            Ok(()) => {
+                debug!("Backfill task stopped cleanly");
+            }
+            Err(_) => {
+                warn!("Backfill task did not stop within 5 second timeout");
+            }
+        }
 
         if let Err(e) = self.stop_mining() {
             error!("Failed to stop mining during shutdown: {:#}", e);
@@ -1230,12 +1246,16 @@ impl IrysNode {
         // Create cancellation token for graceful shutdown of backfill task
         let backfill_cancel = CancellationToken::new();
 
+        // Notify to signal backfill completion for clean shutdown
+        let backfill_complete = Arc::new(tokio::sync::Notify::new());
+
         // Spawn async task to backfill historical supply state
         {
             let supply_state_for_backfill = supply_state.clone();
             let block_index_for_backfill = block_index_guard.clone();
             let db_for_backfill = irys_db.clone();
             let cancel_for_task = backfill_cancel.clone();
+            let backfill_complete_signal = backfill_complete.clone();
             let backfill_handle = runtime_handle.spawn(async move {
                 irys_actors::supply_state_calculator::backfill_supply_state(
                     supply_state_for_backfill,
@@ -1250,7 +1270,10 @@ impl IrysNode {
             // Backfill errors indicate data integrity issues (missing blocks, database corruption)
             // that require investigation and won't self-resolve.
             runtime_handle.spawn(async move {
-                match backfill_handle.await {
+                let result = backfill_handle.await;
+                // Signal completion before potential panic to allow clean shutdown path
+                backfill_complete_signal.notify_one();
+                match result {
                     Ok(Ok(())) => {
                         tracing::info!("Supply state backfill completed successfully");
                     }
@@ -1614,6 +1637,7 @@ impl IrysNode {
             started_at: Instant::now(),
             supply_state_guard: Some(supply_state_guard.clone()),
             backfill_cancel,
+            backfill_complete,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules

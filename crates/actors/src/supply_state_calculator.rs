@@ -76,6 +76,19 @@ async fn do_backfill(
         return Ok(false);
     };
 
+    // Validate persisted state is not ahead of current migration boundary
+    if let Some(persisted_height) = supply_state.persisted_backfill_height() {
+        if persisted_height >= first_migration_height {
+            return Err(eyre::eyre!(
+                "Persisted backfill height {} is >= first migration height {}. \
+                 Refusing to continue with potentially stale supply state. \
+                 This may indicate a chain reset, corrupted state file, or mismatched data directory.",
+                persisted_height,
+                first_migration_height
+            ));
+        }
+    }
+
     // Start from persisted backfill height + 1, or 0 if no previous backfill
     let backfill_start = supply_state
         .persisted_backfill_height()
