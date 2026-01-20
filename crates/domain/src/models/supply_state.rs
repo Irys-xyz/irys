@@ -151,10 +151,17 @@ impl SupplyState {
     /// from `add_block_reward` when the first block is processed.
     pub async fn wait_for_first_migration(&self) -> u64 {
         loop {
+            // Create the notified future BEFORE checking condition to avoid TOCTOU race.
+            // Using enable() ensures the permit isn't lost if notification arrives
+            // between checking the condition and awaiting.
+            let notified = self.first_migration_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             if let Some(height) = self.first_migration_height() {
                 return height;
             }
-            self.first_migration_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -198,7 +205,7 @@ impl SupplyState {
         };
 
         if is_first_migration {
-            self.first_migration_notify.notify_waiters();
+            self.first_migration_notify.notify_one();
         }
 
         Ok(())
