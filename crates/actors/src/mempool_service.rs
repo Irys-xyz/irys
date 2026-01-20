@@ -2336,15 +2336,7 @@ impl AtomicMempoolState {
     /// Atomically clears the included_height on a data transaction in the mempool.
     /// Returns true if the tx was found and updated, false otherwise.
     pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
-        let mut state = self.write().await;
-        if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-            wrapped_header.metadata_mut().included_height = None;
-            tracing::debug!(tx.id = %txid, "Cleared included_height in mempool");
-            state.recent_valid_tx.put(txid, ());
-            true
-        } else {
-            false
-        }
+        self.clear_tx_included_height(txid).await
     }
 
     pub async fn put_recent_invalid(&self, tx_id: H256) {
