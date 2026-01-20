@@ -8,6 +8,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, RwLock,
 };
+use tracing::warn;
 
 const FILE_NAME: &str = "supply_state.dat";
 const STATE_SIZE: usize = 50;
@@ -252,6 +253,11 @@ fn load_from_file(path: &Path) -> Result<PersistedSupplyState> {
         .context("Failed to read supply state file")?;
 
     if bytes.is_empty() {
+        warn!(
+            path = %path.display(),
+            "Supply state file exists but is empty, using defaults. \
+             This may indicate a previous incomplete write."
+        );
         return Ok(PersistedSupplyState::default());
     }
 
