@@ -209,7 +209,7 @@ impl SupplyState {
             return Ok(());
         }
 
-        // Calculate values under read lock, then release before file I/O
+        // Calculate values under read lock
         let (persisted, new_backfill_value) = {
             let data = self.inner.read().expect("supply state read lock poisoned");
             let new_backfill_value = self.persisted_backfill_value.saturating_add(historical_sum);
@@ -223,15 +223,17 @@ impl SupplyState {
             (persisted, new_backfill_value)
         };
 
-        save_to_file(&self.state_file, &persisted)?;
-
         {
             let mut data = self
                 .inner
                 .write()
                 .expect("supply state write lock poisoned");
-            // Double-check: another thread may have called this concurrently
+            // Double-check: another thread may have called this concurrently.
+            // Persist only when we're the winning thread to ensure consistency
+            // between persisted and runtime state. Holds write lock during I/O,
+            // acceptable for rare backfill completion.
             if !self.ready.load(Ordering::Acquire) {
+                save_to_file(&self.state_file, &persisted)?;
                 data.cumulative_emitted =
                     data.cumulative_emitted.saturating_add(new_backfill_value);
                 self.ready.store(true, Ordering::Release);
