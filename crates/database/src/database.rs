@@ -508,7 +508,9 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 
 #[cfg(test)]
 mod tests {
+    use arbitrary::Arbitrary as _;
     use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+    use rand::Rng as _;
     use reth_db::Database as _;
     use tempfile::tempdir;
 
@@ -524,11 +526,19 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
+        // TODO: we should use Arbitrary & proper fuzzing for these tests
+        let mut rng = rand::thread_rng();
+        let bytes: Vec<u8> = (0..irys_types::DataTransactionMetadata::size_hint(0).0)
+            .map(|_| rng.gen())
+            .collect();
+        let mut u = arbitrary::Unstructured::new(&bytes);
+
         let tx_header =
             DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
                 tx: irys_types::DataTransactionHeaderV1::default(),
-                metadata: irys_types::DataTransactionMetadata::new(),
+                metadata: irys_types::DataTransactionMetadata::arbitrary(&mut u)?,
             });
+
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
