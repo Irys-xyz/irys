@@ -193,12 +193,16 @@ mod v0_to_v1 {
 
 mod v1_to_v2 {
     use super::*;
-    use crate::tables::{IrysDataTxHeaders, IrysDataTxMetadata};
+    use crate::tables::{
+        IrysBlockHeaders, IrysCommitmentTxMetadata, IrysDataTxHeaders, IrysDataTxMetadata,
+    };
     use irys_types::{
-        DataTransactionHeader, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-        DataTransactionMetadata,
+        CommitmentTransactionMetadata, DataLedger, DataTransactionHeader, DataTransactionHeaderV1,
+        DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, IrysBlockHeader,
+        SystemLedger, H256,
     };
     use reth_db::cursor::DbCursorRO as _;
+    use std::collections::HashMap;
 
     fn migrate_batch<TX>(
         tx: &TX,
@@ -252,9 +256,9 @@ mod v1_to_v2 {
     where
         TX: DbTxMut + DbTx + Debug,
     {
-        debug!("Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata");
+        debug!("Migrating from v1 to v2: Moving promoted_height from DataTransactionHeaderV1 to IrysDataTxMetadata and filling metadata from block headers");
 
-        // Read from the old table format using bounded batching to avoid OOM
+        // Step 1: Migrate existing transaction headers (promoted_height from old format)
         let mut old_cursor = tx.cursor_read::<old_structures::IrysDataTxHeadersOld>()?;
         let mut entries_to_migrate = Vec::new();
         const BATCH_SIZE: usize = 10000;
@@ -283,10 +287,103 @@ mod v1_to_v2 {
             total_migrated += entries_to_migrate.len();
         }
 
+        debug!(
+            "Migrated {} transaction headers from old format",
+            total_migrated
+        );
+
+        // Step 2: Iterate over all block headers and fill metadata based on ledgers
+        // This mirrors the logic in handle_block_confirmed_message
+        let mut block_cursor = tx.cursor_read::<IrysBlockHeaders>()?;
+        let mut blocks_processed = 0;
+        let mut data_tx_metadata_updates = 0;
+        let mut commitment_tx_metadata_updates = 0;
+
+        // Collect all metadata updates to avoid cursor conflicts
+        let mut data_tx_metadata_map: HashMap<H256, DataTransactionMetadata> = HashMap::new();
+        let mut commitment_tx_metadata_map: HashMap<H256, CommitmentTransactionMetadata> =
+            HashMap::new();
+
+        for result in block_cursor.walk(None)? {
+            let (_block_hash, compact_header) = result?;
+            let block_header: IrysBlockHeader = compact_header.into();
+            let block_height = block_header.height();
+
+            blocks_processed += 1;
+
+            // Process Submit ledger transactions - set included_height
+            // Use Index trait which finds the ledger or panics if not present
+            let submit_ledger = &block_header.data_ledgers[DataLedger::Submit];
+            for tx_id in &submit_ledger.tx_ids.0 {
+                let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
+
+                // Set included_height (only if not already set to preserve earliest inclusion)
+                if metadata.included_height.is_none() {
+                    metadata.included_height = Some(block_height);
+                }
+            }
+
+            // Process Publish ledger transactions - set included_height and promoted_height
+            // Use Index trait which finds the ledger or panics if not present
+            let publish_ledger = &block_header.data_ledgers[DataLedger::Publish];
+            for tx_id in &publish_ledger.tx_ids.0 {
+                let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
+
+                // Set included_height (only if not already set to preserve earliest inclusion)
+                if metadata.included_height.is_none() {
+                    metadata.included_height = Some(block_height);
+                }
+
+                // Set promoted_height (only if not already set to preserve earliest promotion)
+                if metadata.promoted_height.is_none() {
+                    metadata.promoted_height = Some(block_height);
+                }
+            }
+
+            // Process Commitment ledger transactions - set included_height
+            // Use Index trait which finds the ledger or panics if not present
+            for ledger in SystemLedger::ALL {
+                let tx_ids = &block_header.system_ledgers[ledger];
+                for tx_id in &tx_ids.tx_ids.0 {
+                    let metadata = commitment_tx_metadata_map.entry(*tx_id).or_default();
+
+                    // Set included_height (only if not already set to preserve earliest inclusion)
+                    if metadata.included_height.is_none() {
+                        metadata.included_height = Some(block_height);
+                    }
+                }
+            }
+        }
+
+        // Write all collected metadata to the database
+        for (tx_id, metadata) in data_tx_metadata_map {
+            // Only write if there's actual metadata to store
+            if metadata.included_height.is_some() || metadata.promoted_height.is_some() {
+                tx.put::<IrysDataTxMetadata>(tx_id, metadata.into())?;
+                data_tx_metadata_updates += 1;
+            }
+        }
+
+        for (tx_id, metadata) in commitment_tx_metadata_map {
+            // Only write if there's actual metadata to store
+            if metadata.included_height.is_some() {
+                tx.put::<IrysCommitmentTxMetadata>(tx_id, metadata.into())?;
+                commitment_tx_metadata_updates += 1;
+            }
+        }
+
+        debug!(
+            "Processed {} blocks, created {} data tx metadata entries, {} commitment tx metadata entries",
+            blocks_processed,
+            data_tx_metadata_updates,
+            commitment_tx_metadata_updates
+        );
+
         crate::set_database_schema_version(tx, 2)?;
         debug!(
-            "Migration from v1 to v2 completed: migrated {} headers",
-            total_migrated
+            "Migration from v1 to v2 completed: migrated {} transaction headers, processed {} blocks",
+            total_migrated,
+            blocks_processed
         );
         Ok(())
     }
