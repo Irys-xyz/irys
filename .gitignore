@@ -13,3 +13,4 @@ config.toml
 emission_simulation.csv
 .local/
 .idea/
+ecosystem.config.js
