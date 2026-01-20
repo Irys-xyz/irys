@@ -1626,8 +1626,9 @@ mod tests {
     #[test]
     fn order_transactions_matching_header_body() {
         use irys_types::{
-            CommitmentTransaction, DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata,
-            DataTransactionMetadata, SystemTransactionLedger,
+            CommitmentTransaction, CommitmentV2WithMetadata, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            SystemTransactionLedger,
         };
 
         // Create test transaction IDs
@@ -1698,12 +1699,10 @@ mod tests {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(
-            irys_types::CommitmentV2WithMetadata {
-                tx: commitment_tx,
-                metadata: Default::default(),
-            },
-        )];
+        let commitment_txs = vec![CommitmentTransaction::V2(CommitmentV2WithMetadata {
+            tx: commitment_tx,
+            metadata: Default::default(),
+        })];
 
         // Execute ordering function
         let result = order_transactions_for_block(&header, data_txs, commitment_txs)
