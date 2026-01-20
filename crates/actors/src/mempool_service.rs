@@ -2072,7 +2072,12 @@ impl AtomicMempoolState {
     ///
     /// Returns true if the included_height was actually changed, false otherwise.
     /// Also updates the recent_valid_tx cache when the transaction is found.
-    pub async fn set_tx_included_height(&self, tx_id: H256, height: u64, overwrite: bool) -> bool {
+    async fn set_data_tx_included_height_inner(
+        &self,
+        tx_id: H256,
+        height: u64,
+        overwrite: bool,
+    ) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
             let updated = overwrite || wrapped_tx.metadata().included_height.is_none();
@@ -2095,7 +2100,7 @@ impl AtomicMempoolState {
 
     /// Clear included_height for a data transaction (re-org handling)
     /// Returns true if the transaction was found and the height was cleared
-    pub async fn clear_tx_included_height(&self, tx_id: H256) -> bool {
+    async fn clear_data_tx_included_height_inner(&self, tx_id: H256) -> bool {
         let mut state = self.write().await;
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
             wrapped_tx.metadata_mut().included_height = None;
@@ -2323,20 +2328,22 @@ impl AtomicMempoolState {
     /// Returns true if the tx was found and updated, false otherwise.
     pub async fn set_data_tx_included_height(&self, txid: H256, height: u64) -> bool {
         // Use the consolidated method with overwrite=false to maintain backward compatibility
-        self.set_tx_included_height(txid, height, false).await
+        self.set_data_tx_included_height_inner(txid, height, false)
+            .await
     }
 
     /// Set included_height for a data transaction with overwrite enabled
     /// This is used when processing canonical confirmations to ensure the height
     /// is updated even if previously set (e.g., after a reorg)
     pub async fn set_data_tx_included_height_overwrite(&self, txid: H256, height: u64) -> bool {
-        self.set_tx_included_height(txid, height, true).await
+        self.set_data_tx_included_height_inner(txid, height, true)
+            .await
     }
 
     /// Atomically clears the included_height on a data transaction in the mempool.
     /// Returns true if the tx was found and updated, false otherwise.
     pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
-        self.clear_tx_included_height(txid).await
+        self.clear_data_tx_included_height_inner(txid).await
     }
 
     pub async fn put_recent_invalid(&self, tx_id: H256) {

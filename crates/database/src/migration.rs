@@ -312,44 +312,58 @@ mod v1_to_v2 {
             blocks_processed += 1;
 
             // Process Submit ledger transactions - set included_height
-            // Use Index trait which finds the ledger or panics if not present
-            let submit_ledger = &block_header.data_ledgers[DataLedger::Submit];
-            for tx_id in &submit_ledger.tx_ids.0 {
-                let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
-
-                // Set included_height (only if not already set to preserve earliest inclusion)
-                if metadata.included_height.is_none() {
-                    metadata.included_height = Some(block_height);
-                }
-            }
-
-            // Process Publish ledger transactions - set included_height and promoted_height
-            // Use Index trait which finds the ledger or panics if not present
-            let publish_ledger = &block_header.data_ledgers[DataLedger::Publish];
-            for tx_id in &publish_ledger.tx_ids.0 {
-                let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
-
-                // Set included_height (only if not already set to preserve earliest inclusion)
-                if metadata.included_height.is_none() {
-                    metadata.included_height = Some(block_height);
-                }
-
-                // Set promoted_height (only if not already set to preserve earliest promotion)
-                if metadata.promoted_height.is_none() {
-                    metadata.promoted_height = Some(block_height);
-                }
-            }
-
-            // Process Commitment ledger transactions - set included_height
-            // Use Index trait which finds the ledger or panics if not present
-            for ledger in SystemLedger::ALL {
-                let tx_ids = &block_header.system_ledgers[ledger];
-                for tx_id in &tx_ids.tx_ids.0 {
-                    let metadata = commitment_tx_metadata_map.entry(*tx_id).or_default();
+            // Use iter().find() to safely handle blocks that may not have this ledger
+            if let Some(submit_ledger) = block_header
+                .data_ledgers
+                .iter()
+                .find(|l| l.ledger_id == DataLedger::Submit as u32)
+            {
+                for tx_id in &submit_ledger.tx_ids.0 {
+                    let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
 
                     // Set included_height (only if not already set to preserve earliest inclusion)
                     if metadata.included_height.is_none() {
                         metadata.included_height = Some(block_height);
+                    }
+                }
+            }
+
+            // Process Publish ledger transactions - set included_height and promoted_height
+            // Use iter().find() to safely handle blocks that may not have this ledger
+            if let Some(publish_ledger) = block_header
+                .data_ledgers
+                .iter()
+                .find(|l| l.ledger_id == DataLedger::Publish as u32)
+            {
+                for tx_id in &publish_ledger.tx_ids.0 {
+                    let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
+
+                    // Set included_height (only if not already set to preserve earliest inclusion)
+                    if metadata.included_height.is_none() {
+                        metadata.included_height = Some(block_height);
+                    }
+
+                    // Set promoted_height (only if not already set to preserve earliest promotion)
+                    if metadata.promoted_height.is_none() {
+                        metadata.promoted_height = Some(block_height);
+                    }
+                }
+            }
+
+            // Process Commitment ledger transactions - set included_height
+            for ledger in SystemLedger::ALL {
+                if let Some(tx_ledger) = block_header
+                    .system_ledgers
+                    .iter()
+                    .find(|l| l.ledger_id == ledger as u32)
+                {
+                    for tx_id in &tx_ledger.tx_ids.0 {
+                        let metadata = commitment_tx_metadata_map.entry(*tx_id).or_default();
+
+                        // Set included_height (only if not already set to preserve earliest inclusion)
+                        if metadata.included_height.is_none() {
+                            metadata.included_height = Some(block_height);
+                        }
                     }
                 }
             }
