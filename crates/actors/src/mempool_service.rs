@@ -2232,20 +2232,20 @@ impl AtomicMempoolState {
 
         // Check data transactions - metadata is embedded
         if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get(tx_id) {
-            return Some(TxMetadata::Data(wrapped_tx.metadata().clone()));
+            return Some(TxMetadata::Data(*wrapped_tx.metadata()));
         }
 
         // Check commitment transactions - metadata is embedded
         for txs in state.valid_commitment_tx.values() {
             if let Some(tx) = txs.iter().find(|t| t.id() == *tx_id) {
-                return Some(TxMetadata::Commitment(tx.metadata().clone()));
+                return Some(TxMetadata::Commitment(*tx.metadata()));
             }
         }
 
         // Check pending pledges - they also have metadata
         for (_, pledges_cache) in state.pending_pledges.iter() {
             if let Some(tx) = pledges_cache.peek(tx_id) {
-                return Some(TxMetadata::Commitment(tx.metadata().clone()));
+                return Some(TxMetadata::Commitment(*tx.metadata()));
             }
         }
 
@@ -2268,8 +2268,8 @@ impl AtomicMempoolState {
             .entry(tx.id)
             .and_modify(|existing| {
                 // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
-                let existing_metadata = existing.metadata().clone();
-                let incoming_metadata = tx.metadata().clone();
+                let existing_metadata = *existing.metadata();
+                let incoming_metadata = *tx.metadata();
 
                 let merged_metadata = DataTransactionMetadata {
                     included_height: incoming_metadata
@@ -2637,7 +2637,7 @@ impl MempoolState {
         // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
         // Preserve metadata when updating
         if let Entry::Occupied(mut entry) = self.valid_submit_ledger_tx.entry(tx.id) {
-            let old_metadata = entry.get().metadata().clone();
+            let old_metadata = *entry.get().metadata();
             // Update the metadata on the new transaction
             let mut new_tx = tx;
             new_tx.set_metadata(old_metadata);

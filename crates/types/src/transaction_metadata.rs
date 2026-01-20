@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 /// This is NEVER serialized with the transaction - it's internal state only
 #[derive(
     Clone,
+    Copy,
     Debug,
     Default,
     PartialEq,
@@ -46,6 +47,7 @@ impl CommitmentTransactionMetadata {
 /// This is NEVER serialized with the transaction - it's internal state only
 #[derive(
     Clone,
+    Copy,
     Debug,
     Default,
     PartialEq,
