@@ -44,7 +44,7 @@ impl CommitmentTransactionMetadata {
 
 /// Metadata tracked for data transactions
 /// Stored separately from transaction headers to enable easier future migrations
-/// This is NEVER serialized with the transaction - it's internal state only
+/// This is NEVER externally serialized with the transaction - it's internal state only
 #[derive(
     Clone,
     Copy,
