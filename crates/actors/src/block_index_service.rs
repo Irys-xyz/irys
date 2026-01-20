@@ -8,6 +8,8 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, info, instrument, warn, Instrument as _};
 
+const BLOCK_LOG_LEN: usize = 20;
+
 /// Messages supported by the BlockIndex Tokio service
 #[derive(Debug)]
 pub enum BlockIndexServiceMessage {
@@ -204,8 +206,9 @@ impl BlockIndexServiceInner {
             difficulty: block.diff,
         });
 
-        if self.block_log.len() > 20 {
-            self.block_log.drain(0..self.block_log.len() - 20);
+        if self.block_log.len() > BLOCK_LOG_LEN {
+            self.block_log
+                .drain(0..self.block_log.len() - BLOCK_LOG_LEN);
         }
 
         self.num_blocks += 1;

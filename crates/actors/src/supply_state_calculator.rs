@@ -118,6 +118,17 @@ async fn do_backfill(
             .min(backfill_end);
         let batch_rewards = get_block_rewards_batch(block_index, db, height, batch_end)?;
 
+        let expected_count = (batch_end - height + 1) as usize;
+        assert_eq!(
+            batch_rewards.len(),
+            expected_count,
+            "Batch returned {} rewards but expected {} for heights {}-{}",
+            batch_rewards.len(),
+            expected_count,
+            height,
+            batch_end
+        );
+
         for reward in batch_rewards {
             historical_sum = historical_sum.saturating_add(reward);
         }
