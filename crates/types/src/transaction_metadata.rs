@@ -105,12 +105,12 @@ impl DataTransactionMetadata {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum TransactionStatus {
-    /// Transaction is in mempool but not yet in any block
+    /// Transaction is in the mempool but not yet in any block
     Pending,
-    /// Transaction is included in a block but the block hasn't been migrated to index yet
-    Included,
+    /// Transaction is included in a block, but the block hasn't been migrated to index yet
+    Mined,
     /// Transaction's block has been migrated to the block index (finalized)
-    Confirmed,
+    Finalized,
 }
 
 /// API response for transaction status queries
@@ -118,14 +118,14 @@ pub enum TransactionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TransactionStatusResponse {
     pub status: TransactionStatus,
-    /// Only present if status is INCLUDED or CONFIRMED
+    /// Only present if status is MINED or FINALIZED
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "crate::serialization::optional_string_u64"
     )]
     pub block_height: Option<u64>,
-    /// Only present if status is INCLUDED or CONFIRMED
+    /// Only present if status is MINED or FINALIZED
     /// Calculated as: current_head_height - block_height
     #[serde(
         default,
@@ -146,7 +146,7 @@ impl TransactionStatusResponse {
 
     pub fn included(block_height: u64, current_head_height: u64) -> Self {
         Self {
-            status: TransactionStatus::Included,
+            status: TransactionStatus::Mined,
             block_height: Some(block_height),
             confirmations: Some(current_head_height.saturating_sub(block_height)),
         }
@@ -154,7 +154,7 @@ impl TransactionStatusResponse {
 
     pub fn confirmed(block_height: u64, current_head_height: u64) -> Self {
         Self {
-            status: TransactionStatus::Confirmed,
+            status: TransactionStatus::Finalized,
             block_height: Some(block_height),
             confirmations: Some(current_head_height.saturating_sub(block_height)),
         }
@@ -200,12 +200,12 @@ mod tests {
         assert!(pending.confirmations.is_none());
 
         let included = TransactionStatusResponse::included(100, 110);
-        assert_eq!(included.status, TransactionStatus::Included);
+        assert_eq!(included.status, TransactionStatus::Mined);
         assert_eq!(included.block_height, Some(100));
         assert_eq!(included.confirmations, Some(10));
 
         let confirmed = TransactionStatusResponse::confirmed(100, 110);
-        assert_eq!(confirmed.status, TransactionStatus::Confirmed);
+        assert_eq!(confirmed.status, TransactionStatus::Finalized);
         assert_eq!(confirmed.block_height, Some(100));
         assert_eq!(confirmed.confirmations, Some(10));
     }

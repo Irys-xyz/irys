@@ -260,7 +260,7 @@ async fn api_tx_status_lifecycle() {
         .await
         .expect("get_transaction_status should succeed");
 
-    assert!(matches!(status.status, TransactionStatus::Included));
+    assert!(matches!(status.status, TransactionStatus::Mined));
     assert!(status.block_height.is_some());
     assert!(status.confirmations.is_some());
 
@@ -284,7 +284,7 @@ async fn api_tx_status_lifecycle() {
         .await
         .expect("get_transaction_status should succeed");
 
-    assert!(matches!(status.status, TransactionStatus::Confirmed));
+    assert!(matches!(status.status, TransactionStatus::Finalized));
     assert!(status.block_height.is_some());
     assert!(status.confirmations.is_some());
 
@@ -357,7 +357,7 @@ async fn api_tx_status_commitment_tx() {
     assert!(
         matches!(
             status.status,
-            TransactionStatus::Included | TransactionStatus::Confirmed
+            TransactionStatus::Mined | TransactionStatus::Finalized
         ),
         "unexpected status: {:?}",
         status
