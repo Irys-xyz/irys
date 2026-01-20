@@ -260,7 +260,8 @@ impl alloy_rlp::Decodable for IrysBlockHeader {
 impl IrysBlockHeader {
     /// Create a new mock header wrapped in the versioned wrapper
     pub fn new_mock_header() -> Self {
-        Self::V1(IrysBlockHeaderV1::new_mock_header())
+        let mock_header = Self::V1(IrysBlockHeaderV1::new_mock_header());
+        mock_header
     }
 
     /// Get the block hash (convenience method for `Arc<IrysBlockHeader>`)

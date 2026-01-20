@@ -300,6 +300,8 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
         .expect("Submit ledger should exist");
     ledger.tx_ids = tx_ids;
 
+    ctx.config.signer().sign_block_header(&mut header)?;
+
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
     let result = ctx.prevalidate(&bad_block).await;
