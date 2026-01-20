@@ -25,7 +25,7 @@ pub mod tables;
 
 pub use data_ledger::*;
 pub use database::*;
-pub use db_index::{
+pub use db_index::*;
     batch_clear_commitment_tx_included_height, batch_clear_data_tx_included_height,
     batch_clear_data_tx_promoted_height, batch_set_commitment_tx_included_height,
     batch_set_data_tx_included_height, batch_set_data_tx_promoted_height,
