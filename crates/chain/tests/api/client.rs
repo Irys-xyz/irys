@@ -300,9 +300,11 @@ async fn api_tx_status_lifecycle() {
         }
     }
 
-    ctx.wait_until_block_index_height(included_height, 15)
+    // Wait for indexer to process migration depth to ensure Finalized status
+    let target_height = included_height + migration_depth;
+    ctx.wait_until_block_index_height(target_height, 15)
         .await
-        .expect("block index should reach included tx height");
+        .expect("block index should reach target height for finalization");
 
     // Check status - should be CONFIRMED
     let status = api_client
