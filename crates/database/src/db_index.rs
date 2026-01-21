@@ -25,6 +25,11 @@ pub fn put_commitment_tx_metadata(
     tx_id: &H256,
     metadata: CommitmentTransactionMetadata,
 ) -> Result<(), reth_db::DatabaseError> {
+    if !metadata.is_included() {
+        return Err(reth_db::DatabaseError::Other(
+            "Cannot store commitment transaction metadata without inclusion height".to_string(),
+        ));
+    }
     tx.put::<IrysCommitmentTxMetadata>(*tx_id, metadata.into())
 }
 
@@ -89,6 +94,11 @@ pub fn put_data_tx_metadata(
     tx_id: &H256,
     metadata: DataTransactionMetadata,
 ) -> Result<(), reth_db::DatabaseError> {
+    if !metadata.is_included() {
+        return Err(reth_db::DatabaseError::Other(
+            "Cannot store data transaction metadata without inclusion height".to_string(),
+        ));
+    }
     tx.put::<IrysDataTxMetadata>(*tx_id, metadata.into())
 }
 
