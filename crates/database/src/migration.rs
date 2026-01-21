@@ -321,10 +321,10 @@ mod v1_to_v2 {
                 for tx_id in &submit_ledger.tx_ids.0 {
                     let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
 
-                    // Set included_height (only if not already set to preserve earliest inclusion)
-                    if metadata.included_height.is_none() {
-                        metadata.included_height = Some(block_height);
-                    }
+                    // Set included_height to the minimum (earliest) height
+                    metadata.included_height = Some(
+                        metadata.included_height.map_or(block_height, |existing| existing.min(block_height))
+                    );
                 }
             }
 
@@ -338,15 +338,15 @@ mod v1_to_v2 {
                 for tx_id in &publish_ledger.tx_ids.0 {
                     let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
 
-                    // Set included_height (only if not already set to preserve earliest inclusion)
-                    if metadata.included_height.is_none() {
-                        metadata.included_height = Some(block_height);
-                    }
+                    // Set included_height to the minimum (earliest) height
+                    metadata.included_height = Some(
+                        metadata.included_height.map_or(block_height, |existing| existing.min(block_height))
+                    );
 
-                    // Set promoted_height (only if not already set to preserve earliest promotion)
-                    if metadata.promoted_height.is_none() {
-                        metadata.promoted_height = Some(block_height);
-                    }
+                    // Set promoted_height to the minimum (earliest) height
+                    metadata.promoted_height = Some(
+                        metadata.promoted_height.map_or(block_height, |existing| existing.min(block_height))
+                    );
                 }
             }
 
@@ -360,10 +360,10 @@ mod v1_to_v2 {
                     for tx_id in &tx_ledger.tx_ids.0 {
                         let metadata = commitment_tx_metadata_map.entry(*tx_id).or_default();
 
-                        // Set included_height (only if not already set to preserve earliest inclusion)
-                        if metadata.included_height.is_none() {
-                            metadata.included_height = Some(block_height);
-                        }
+                        // Set included_height to the minimum (earliest) height
+                        metadata.included_height = Some(
+                            metadata.included_height.map_or(block_height, |existing| existing.min(block_height))
+                        );
                     }
                 }
             }
