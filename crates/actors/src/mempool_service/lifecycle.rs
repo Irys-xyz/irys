@@ -34,8 +34,8 @@ impl Inner {
             .collect();
 
         if !all_tx_ids.is_empty() {
-            // Best-effort: attempt to persist included_height to database
-            if let Err(e) = self.irys_db.update_eyre(|tx| {
+            // Persist included_height to database - this is critical for transaction status
+            self.irys_db.update_eyre(|tx| {
                 // Set included_height for data transactions
                 let data_tx_ids: Vec<_> = submit_txids
                     .iter()
@@ -43,42 +43,24 @@ impl Inner {
                     .copied()
                     .collect();
                 if !data_tx_ids.is_empty() {
-                    if let Err(db_err) = irys_database::batch_set_data_tx_included_height(
+                    irys_database::batch_set_data_tx_included_height(
                         tx,
                         &data_tx_ids,
                         block.height,
-                    ) {
-                        warn!(
-                            "Failed to batch set data tx included_height for {} txs at block {}: {:?}",
-                            data_tx_ids.len(),
-                            block.height,
-                            db_err
-                        );
-                    }
+                    )
+                    .map_err(|e| eyre::eyre!("Failed to batch set data tx included_height for {} txs at block {}: {:?}", data_tx_ids.len(), block.height, e))?;
                 }
                 // Set included_height for commitment transactions
                 if !commitment_txids.is_empty() {
-                    if let Err(db_err) = irys_database::batch_set_commitment_tx_included_height(
+                    irys_database::batch_set_commitment_tx_included_height(
                         tx,
                         &commitment_txids,
                         block.height,
-                    ) {
-                        warn!(
-                            "Failed to batch set commitment tx included_height for {} txs at block {}: {:?}",
-                            commitment_txids.len(),
-                            block.height,
-                            db_err
-                        );
-                    }
+                    )
+                    .map_err(|e| eyre::eyre!("Failed to batch set commitment tx included_height for {} txs at block {}: {:?}", commitment_txids.len(), block.height, e))?;
                 }
                 Ok(())
-            }) {
-                warn!(
-                    "Failed to open database transaction for setting included_height at block {}: {}",
-                    block.height,
-                    e
-                );
-            }
+            }).map_err(|e| TxIngressError::DatabaseError(format!("Failed to persist included_height to database: {}", e)))?;
 
             // Also update mempool metadata for data transactions (with overwrite for canonical blocks)
             for txid in submit_txids.iter().chain(publish_txids.iter()) {
