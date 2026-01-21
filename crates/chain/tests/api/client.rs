@@ -297,8 +297,6 @@ async fn api_tx_status_lifecycle() {
 /// Tests transaction status for commitment transactions
 #[test_log::test(tokio::test)]
 async fn api_tx_status_commitment_tx() {
-    use irys_api_client::TransactionStatus;
-
     let config = NodeConfig::testing();
     let ctx = IrysNodeTest::new_genesis(config).start().await;
     ctx.wait_for_packing(20).await;

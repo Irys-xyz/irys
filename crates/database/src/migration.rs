@@ -323,7 +323,9 @@ mod v1_to_v2 {
 
                     // Set included_height to the minimum (earliest) height
                     metadata.included_height = Some(
-                        metadata.included_height.map_or(block_height, |existing| existing.min(block_height))
+                        metadata
+                            .included_height
+                            .map_or(block_height, |existing| existing.min(block_height)),
                     );
                 }
             }
@@ -340,12 +342,16 @@ mod v1_to_v2 {
 
                     // Set included_height to the minimum (earliest) height
                     metadata.included_height = Some(
-                        metadata.included_height.map_or(block_height, |existing| existing.min(block_height))
+                        metadata
+                            .included_height
+                            .map_or(block_height, |existing| existing.min(block_height)),
                     );
 
                     // Set promoted_height to the minimum (earliest) height
                     metadata.promoted_height = Some(
-                        metadata.promoted_height.map_or(block_height, |existing| existing.min(block_height))
+                        metadata
+                            .promoted_height
+                            .map_or(block_height, |existing| existing.min(block_height)),
                     );
                 }
             }
@@ -362,7 +368,9 @@ mod v1_to_v2 {
 
                         // Set included_height to the minimum (earliest) height
                         metadata.included_height = Some(
-                            metadata.included_height.map_or(block_height, |existing| existing.min(block_height))
+                            metadata
+                                .included_height
+                                .map_or(block_height, |existing| existing.min(block_height)),
                         );
                     }
                 }

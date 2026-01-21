@@ -530,9 +530,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let (min, max) = irys_types::DataTransactionMetadata::size_hint(0);
         let length = max.unwrap_or(min.saturating_mul(4).max(256));
-        let bytes: Vec<u8> = (0..length)
-            .map(|_| rng.gen())
-            .collect();
+        let bytes: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
         let mut u = arbitrary::Unstructured::new(&bytes);
 
         let tx_header =
