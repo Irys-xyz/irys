@@ -28,6 +28,13 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Fast-fail if this tx targets an unsupported term ledger
+        match DataLedger::try_from(tx.ledger_id) {
+            Ok(DataLedger::Publish | DataLedger::Submit) => {
+                // Valid ledgers - continue
+            }
+            _ => return Err(TxIngressError::InvalidLedger(tx.ledger_id)),
+        }
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
             // Compute composite fingerprint: keccak(signature + prehash + id)
