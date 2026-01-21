@@ -197,12 +197,11 @@ mod v1_to_v2 {
         IrysBlockHeaders, IrysCommitmentTxMetadata, IrysDataTxHeaders, IrysDataTxMetadata,
     };
     use irys_types::{
-        CommitmentTransactionMetadata, DataLedger, DataTransactionHeader, DataTransactionHeaderV1,
+        DataLedger, DataTransactionHeader, DataTransactionHeaderV1,
         DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, IrysBlockHeader,
         SystemLedger, H256,
     };
     use reth_db::cursor::DbCursorRO as _;
-    use std::collections::HashMap;
 
     fn migrate_batch<TX>(
         tx: &TX,
@@ -294,15 +293,66 @@ mod v1_to_v2 {
 
         // Step 2: Iterate over all block headers and fill metadata based on ledgers
         // This mirrors the logic in handle_block_confirmed_message
+        // Stream metadata writes directly to DB to avoid OOM on large chains
         let mut block_cursor = tx.cursor_read::<IrysBlockHeaders>()?;
         let mut blocks_processed = 0;
         let mut data_tx_metadata_updates = 0;
         let mut commitment_tx_metadata_updates = 0;
 
-        // Collect all metadata updates to avoid cursor conflicts
-        let mut data_tx_metadata_map: HashMap<H256, DataTransactionMetadata> = HashMap::new();
-        let mut commitment_tx_metadata_map: HashMap<H256, CommitmentTransactionMetadata> =
-            HashMap::new();
+        // Helper function to update data tx metadata in DB with min height semantics
+        let update_data_tx_metadata = |tx: &TX,
+                                       tx_id: &H256,
+                                       block_height: u64,
+                                       set_included: bool,
+                                       set_promoted: bool|
+         -> Result<(), DatabaseError> {
+            // Read existing metadata from DB
+            let existing = tx.get::<IrysDataTxMetadata>(*tx_id)?;
+            let mut metadata = existing.map(|w| w.0).unwrap_or_default();
+
+            // Update with min height semantics
+            if set_included {
+                metadata.included_height = Some(
+                    metadata
+                        .included_height
+                        .map_or(block_height, |existing| existing.min(block_height)),
+                );
+            }
+            if set_promoted {
+                metadata.promoted_height = Some(
+                    metadata
+                        .promoted_height
+                        .map_or(block_height, |existing| existing.min(block_height)),
+                );
+            }
+
+            // Write back to DB if there's actual metadata
+            if metadata.included_height.is_some() || metadata.promoted_height.is_some() {
+                tx.put::<IrysDataTxMetadata>(*tx_id, metadata.into())?;
+            }
+            Ok(())
+        };
+
+        // Helper function to update commitment tx metadata in DB with min height semantics
+        let update_commitment_tx_metadata =
+            |tx: &TX, tx_id: &H256, block_height: u64| -> Result<(), DatabaseError> {
+                // Read existing metadata from DB
+                let existing = tx.get::<IrysCommitmentTxMetadata>(*tx_id)?;
+                let mut metadata = existing.map(|w| w.0).unwrap_or_default();
+
+                // Update with min height semantics
+                metadata.included_height = Some(
+                    metadata
+                        .included_height
+                        .map_or(block_height, |existing| existing.min(block_height)),
+                );
+
+                // Write back to DB if there's actual metadata
+                if metadata.included_height.is_some() {
+                    tx.put::<IrysCommitmentTxMetadata>(*tx_id, metadata.into())?;
+                }
+                Ok(())
+            };
 
         for result in block_cursor.walk(None)? {
             let (_block_hash, compact_header) = result?;
@@ -319,14 +369,8 @@ mod v1_to_v2 {
                 .find(|l| l.ledger_id == DataLedger::Submit as u32)
             {
                 for tx_id in &submit_ledger.tx_ids.0 {
-                    let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
-
-                    // Set included_height to the minimum (earliest) height
-                    metadata.included_height = Some(
-                        metadata
-                            .included_height
-                            .map_or(block_height, |existing| existing.min(block_height)),
-                    );
+                    update_data_tx_metadata(tx, tx_id, block_height, true, false)?;
+                    data_tx_metadata_updates += 1;
                 }
             }
 
@@ -338,21 +382,8 @@ mod v1_to_v2 {
                 .find(|l| l.ledger_id == DataLedger::Publish as u32)
             {
                 for tx_id in &publish_ledger.tx_ids.0 {
-                    let metadata = data_tx_metadata_map.entry(*tx_id).or_default();
-
-                    // Set included_height to the minimum (earliest) height
-                    metadata.included_height = Some(
-                        metadata
-                            .included_height
-                            .map_or(block_height, |existing| existing.min(block_height)),
-                    );
-
-                    // Set promoted_height to the minimum (earliest) height
-                    metadata.promoted_height = Some(
-                        metadata
-                            .promoted_height
-                            .map_or(block_height, |existing| existing.min(block_height)),
-                    );
+                    update_data_tx_metadata(tx, tx_id, block_height, true, true)?;
+                    data_tx_metadata_updates += 1;
                 }
             }
 
@@ -364,33 +395,10 @@ mod v1_to_v2 {
                     .find(|l| l.ledger_id == ledger as u32)
                 {
                     for tx_id in &tx_ledger.tx_ids.0 {
-                        let metadata = commitment_tx_metadata_map.entry(*tx_id).or_default();
-
-                        // Set included_height to the minimum (earliest) height
-                        metadata.included_height = Some(
-                            metadata
-                                .included_height
-                                .map_or(block_height, |existing| existing.min(block_height)),
-                        );
+                        update_commitment_tx_metadata(tx, tx_id, block_height)?;
+                        commitment_tx_metadata_updates += 1;
                     }
                 }
-            }
-        }
-
-        // Write all collected metadata to the database
-        for (tx_id, metadata) in data_tx_metadata_map {
-            // Only write if there's actual metadata to store
-            if metadata.included_height.is_some() || metadata.promoted_height.is_some() {
-                tx.put::<IrysDataTxMetadata>(tx_id, metadata.into())?;
-                data_tx_metadata_updates += 1;
-            }
-        }
-
-        for (tx_id, metadata) in commitment_tx_metadata_map {
-            // Only write if there's actual metadata to store
-            if metadata.included_height.is_some() {
-                tx.put::<IrysCommitmentTxMetadata>(tx_id, metadata.into())?;
-                commitment_tx_metadata_updates += 1;
             }
         }
 
