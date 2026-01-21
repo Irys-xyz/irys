@@ -48,8 +48,7 @@ use irys_types::{
         Amount,
     },
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
-    DataTransactionHeader, DataTransactionMetadata, IrysAddress, MempoolConfig, TxChunkOffset,
-    UnpackedChunk,
+    DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{BlockHash, CommitmentTypeV1};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
@@ -2283,17 +2282,7 @@ impl AtomicMempoolState {
             .entry(tx.id)
             .and_modify(|existing| {
                 // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
-                let existing_metadata = *existing.metadata();
-                let incoming_metadata = *tx.metadata();
-
-                let merged_metadata = DataTransactionMetadata {
-                    included_height: incoming_metadata
-                        .included_height
-                        .or(existing_metadata.included_height),
-                    promoted_height: incoming_metadata
-                        .promoted_height
-                        .or(existing_metadata.promoted_height),
-                };
+                let merged_metadata = existing.metadata().merge(tx.metadata());
 
                 *existing = tx;
                 existing.set_metadata(merged_metadata);
@@ -2646,10 +2635,10 @@ impl MempoolState {
         // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
         // Preserve metadata when updating
         if let Entry::Occupied(mut entry) = self.valid_submit_ledger_tx.entry(tx.id) {
-            let old_metadata = *entry.get().metadata();
-            // Update the metadata on the new transaction
+            // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
+            let merged_metadata = entry.get().metadata().merge(tx.metadata());
             let mut new_tx = tx;
-            new_tx.set_metadata(old_metadata);
+            new_tx.set_metadata(merged_metadata);
             entry.insert(new_tx);
             return Ok(());
         }
@@ -3260,7 +3249,7 @@ mod bounded_mempool_tests {
     use super::*;
     use irys_types::{
         CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
-        IrysSignature,
+        DataTransactionMetadata, IrysSignature,
     };
 
     // ========================================================================

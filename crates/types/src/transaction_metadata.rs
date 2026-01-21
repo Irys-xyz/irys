@@ -40,6 +40,13 @@ impl CommitmentTransactionMetadata {
     pub fn is_included(&self) -> bool {
         self.included_height.is_some()
     }
+
+    /// Merge metadata, preferring incoming fields when set, preserving existing otherwise
+    pub fn merge(&self, incoming: &Self) -> Self {
+        Self {
+            included_height: incoming.included_height.or(self.included_height),
+        }
+    }
 }
 
 /// Metadata tracked for data transactions
@@ -98,6 +105,14 @@ impl DataTransactionMetadata {
 
     pub fn is_promoted(&self) -> bool {
         self.promoted_height.is_some()
+    }
+
+    /// Merge metadata, preferring incoming fields when set, preserving existing otherwise
+    pub fn merge(&self, incoming: &Self) -> Self {
+        Self {
+            included_height: incoming.included_height.or(self.included_height),
+            promoted_height: incoming.promoted_height.or(self.promoted_height),
+        }
     }
 }
 
@@ -305,5 +320,103 @@ mod tests {
         // Same height
         let response = TransactionStatusResponse::included(100, 100);
         assert_eq!(response.confirmations, Some(0));
+    }
+
+    #[test]
+    fn test_commitment_metadata_merge() {
+        // Test 1: Merge with incoming having data
+        let existing = CommitmentTransactionMetadata {
+            included_height: None,
+        };
+        let incoming = CommitmentTransactionMetadata {
+            included_height: Some(100),
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(100));
+
+        // Test 2: Merge preserves existing when incoming is None
+        let existing = CommitmentTransactionMetadata {
+            included_height: Some(100),
+        };
+        let incoming = CommitmentTransactionMetadata {
+            included_height: None,
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(100));
+
+        // Test 3: Incoming overrides existing when both have values
+        let existing = CommitmentTransactionMetadata {
+            included_height: Some(100),
+        };
+        let incoming = CommitmentTransactionMetadata {
+            included_height: Some(200),
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(200));
+
+        // Test 4: Both None stays None
+        let existing = CommitmentTransactionMetadata {
+            included_height: None,
+        };
+        let incoming = CommitmentTransactionMetadata {
+            included_height: None,
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, None);
+    }
+
+    #[test]
+    fn test_data_metadata_merge() {
+        // Test 1: Merge with incoming having both fields
+        let existing = DataTransactionMetadata {
+            included_height: None,
+            promoted_height: None,
+        };
+        let incoming = DataTransactionMetadata {
+            included_height: Some(100),
+            promoted_height: Some(200),
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(100));
+        assert_eq!(merged.promoted_height, Some(200));
+
+        // Test 2: Merge preserves existing when incoming has None
+        let existing = DataTransactionMetadata {
+            included_height: Some(100),
+            promoted_height: Some(200),
+        };
+        let incoming = DataTransactionMetadata {
+            included_height: None,
+            promoted_height: None,
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(100));
+        assert_eq!(merged.promoted_height, Some(200));
+
+        // Test 3: Mixed scenario - incoming has included, existing has promoted
+        let existing = DataTransactionMetadata {
+            included_height: None,
+            promoted_height: Some(200),
+        };
+        let incoming = DataTransactionMetadata {
+            included_height: Some(100),
+            promoted_height: None,
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(100));
+        assert_eq!(merged.promoted_height, Some(200));
+
+        // Test 4: Incoming overrides existing when both have values
+        let existing = DataTransactionMetadata {
+            included_height: Some(100),
+            promoted_height: Some(200),
+        };
+        let incoming = DataTransactionMetadata {
+            included_height: Some(150),
+            promoted_height: Some(250),
+        };
+        let merged = existing.merge(&incoming);
+        assert_eq!(merged.included_height, Some(150));
+        assert_eq!(merged.promoted_height, Some(250));
     }
 }
