@@ -216,7 +216,7 @@ async fn api_client_wait_for_promotion_happy_path() {
     ctx.stop().await;
 }
 
-/// Tests the transaction status API lifecycle: PENDING -> INCLUDED -> CONFIRMED
+/// Tests the transaction status API lifecycle: PENDING -> MINED -> FINALIZED
 #[test_log::test(tokio::test)]
 async fn api_tx_status_lifecycle() {
     let config = NodeConfig::testing();
