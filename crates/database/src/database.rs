@@ -526,9 +526,11 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        // TODO: we should use Arbitrary & proper fuzzing for these tests
+        // Generate arbitrary metadata using Arbitrary trait with properly sized buffer
         let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..irys_types::DataTransactionMetadata::size_hint(0).0)
+        let (min, max) = irys_types::DataTransactionMetadata::size_hint(0);
+        let length = max.unwrap_or(min.saturating_mul(4).max(256));
+        let bytes: Vec<u8> = (0..length)
             .map(|_| rng.gen())
             .collect();
         let mut u = arbitrary::Unstructured::new(&bytes);
