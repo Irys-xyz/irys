@@ -512,7 +512,7 @@ impl Inner {
 
             // Also clear the persisted included_height in the database
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::clear_commitment_tx_included_height(tx, id)
+                irys_database::clear_commitment_tx_metadata(tx, id)
                     .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 tracing::warn!(tx.id = %id, error = %e, "Failed to clear included_height in DB for orphaned commitment tx");
@@ -801,7 +801,7 @@ impl Inner {
 
         if !all_orphaned_tx_ids.is_empty() {
             if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_clear_data_tx_included_height(tx, &all_orphaned_tx_ids)
+                irys_database::batch_clear_data_tx_metadata(tx, &all_orphaned_tx_ids)
                     .map_err(|e| eyre::eyre!("{:?}", e))
             }) {
                 error!(
