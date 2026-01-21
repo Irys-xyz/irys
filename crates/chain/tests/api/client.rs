@@ -255,13 +255,25 @@ async fn api_tx_status_lifecycle() {
     // Mine a block to include the transaction
     ctx.mine_block().await.expect("expected mined block");
 
-    // Check status - should be INCLUDED
-    let status = api_client
-        .get_transaction_status(api_address, tx_id)
-        .await
-        .expect("get_transaction_status should succeed")
-        .expect("status should exist");
+    // Poll until transaction is MINED (similar to a commitment test to avoid flakiness)
+    let mut status = None;
+    for _ in 0..25 {
+        let s = api_client
+            .get_transaction_status(api_address, tx_id)
+            .await
+            .expect("get_transaction_status should succeed")
+            .expect("status should exist");
 
+        if matches!(s.status, TransactionStatus::Pending) {
+            ctx.mine_block().await.expect("expected mined block");
+            continue;
+        }
+
+        status = Some(s);
+        break;
+    }
+
+    let status = status.expect("transaction should eventually be mined");
     assert!(matches!(status.status, TransactionStatus::Mined));
     assert!(status.block_height.is_some());
     assert!(status.confirmations.is_some());

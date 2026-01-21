@@ -772,4 +772,166 @@ mod tests {
 
         Ok(())
     }
+
+    // Test ensures v1→v2 migration Step 2 correctly fills included_height from block headers
+    #[test]
+    fn should_migrate_v1_to_v2_with_block_header_metadata_filling() -> eyre::Result<()> {
+        use crate::tables::{IrysCommitmentTxMetadata, IrysDataTxMetadata};
+        use irys_types::{
+            DataLedger, DataTransactionLedger, H256List, IrysBlockHeaderV1, SystemLedger,
+            SystemTransactionLedger,
+        };
+
+        let db_path = temporary_directory(None, false);
+        let db = open_or_create_db(db_path, IrysTables::ALL, None)?;
+
+        // Set schema version to 1
+        let _ = db.update(|tx| -> Result<(), DatabaseError> {
+            crate::set_database_schema_version(tx, 1)?;
+            Ok(())
+        })?;
+
+        let version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
+        assert_eq!(version, Some(1));
+
+        // Create test data: transaction IDs
+        let submit_tx_id: H256 = H256::random();
+        let publish_tx_id: H256 = H256::random();
+        let commitment_tx_id: H256 = H256::random();
+
+        // Create old-format headers with promoted_height for data transactions
+        {
+            let write_tx = db.tx_mut()?;
+
+            // Insert old format headers (with promoted_height field)
+            let old_header_submit = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: submit_tx_id,
+                    promoted_height: None, // Submit tx has no promoted_height initially
+                    ..Default::default()
+                },
+            );
+            write_tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                submit_tx_id,
+                super::old_structures::CompactTxHeaderOld(old_header_submit),
+            )?;
+
+            let old_header_publish = super::old_structures::DataTransactionHeaderOld::V1(
+                super::old_structures::DataTransactionHeaderV1WithPromotedHeight {
+                    id: publish_tx_id,
+                    promoted_height: Some(150), // Publish tx has promoted_height set
+                    ..Default::default()
+                },
+            );
+            write_tx.put::<super::old_structures::IrysDataTxHeadersOld>(
+                publish_tx_id,
+                super::old_structures::CompactTxHeaderOld(old_header_publish),
+            )?;
+
+            write_tx.commit()?;
+        }
+
+        // Create block headers that include these transaction IDs in their ledgers
+        {
+            let write_tx = db.tx_mut()?;
+
+            // Block at height 100 with Submit ledger containing submit_tx_id
+            let block_hash_100 = H256::random();
+            let header_100 = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                block_hash: block_hash_100,
+                height: 100,
+                data_ledgers: vec![DataTransactionLedger {
+                    ledger_id: DataLedger::Submit as u32,
+                    tx_ids: H256List(vec![submit_tx_id]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            write_tx.put::<IrysBlockHeaders>(block_hash_100, header_100.into())?;
+
+            // Block at height 200 with Publish ledger containing publish_tx_id
+            let block_hash_200 = H256::random();
+            let header_200 = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                block_hash: block_hash_200,
+                height: 200,
+                data_ledgers: vec![DataTransactionLedger {
+                    ledger_id: DataLedger::Publish as u32,
+                    tx_ids: H256List(vec![publish_tx_id]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            write_tx.put::<IrysBlockHeaders>(block_hash_200, header_200.into())?;
+
+            // Block at height 300 with Commitment ledger containing commitment_tx_id
+            let block_hash_300 = H256::random();
+            let header_300 = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+                block_hash: block_hash_300,
+                height: 300,
+                system_ledgers: vec![SystemTransactionLedger {
+                    ledger_id: SystemLedger::Commitment as u32,
+                    tx_ids: H256List(vec![commitment_tx_id]),
+                }],
+                ..Default::default()
+            });
+            write_tx.put::<IrysBlockHeaders>(block_hash_300, header_300.into())?;
+
+            write_tx.commit()?;
+        }
+
+        // Run migration from v1 to v2
+        let _ = db.update(|tx| -> Result<(), DatabaseError> {
+            super::v1_to_v2::migrate(tx)?;
+            Ok(())
+        })?;
+
+        // Verify schema version is updated to 2
+        let new_version = db.view(|tx| crate::database_schema_version(tx).unwrap())?;
+        assert_eq!(new_version.unwrap(), 2);
+
+        // Verify IrysDataTxMetadata was created/updated correctly
+
+        // submit_tx_id: should have included_height=100 from Submit ledger
+        let submit_metadata = db
+            .view(|tx| tx.get::<IrysDataTxMetadata>(submit_tx_id))??
+            .expect("submit_tx should have metadata");
+        assert_eq!(
+            submit_metadata.0.included_height,
+            Some(100),
+            "submit_tx should have included_height=100 from Submit ledger"
+        );
+        assert_eq!(
+            submit_metadata.0.promoted_height, None,
+            "submit_tx should not have promoted_height"
+        );
+
+        // publish_tx_id: should have included_height=200 from Publish ledger AND promoted_height=150 from old header
+        let publish_metadata = db
+            .view(|tx| tx.get::<IrysDataTxMetadata>(publish_tx_id))??
+            .expect("publish_tx should have metadata");
+        assert_eq!(
+            publish_metadata.0.included_height,
+            Some(200),
+            "publish_tx should have included_height=200 from Publish ledger"
+        );
+        // Note: Migration preserves old promoted_height and also sets it from Publish ledger
+        // Min semantics apply: min(150 from old format, 200 from Publish) = 150
+        assert_eq!(
+            publish_metadata.0.promoted_height,
+            Some(150),
+            "publish_tx should have promoted_height=150 (min of old value and Publish block)"
+        );
+
+        // commitment_tx_id: should have included_height=300 from Commitment ledger
+        let commitment_metadata = db
+            .view(|tx| tx.get::<IrysCommitmentTxMetadata>(commitment_tx_id))??
+            .expect("commitment_tx should have metadata");
+        assert_eq!(
+            commitment_metadata.0.included_height,
+            Some(300),
+            "commitment_tx should have included_height=300 from Commitment ledger"
+        );
+
+        Ok(())
+    }
 }
