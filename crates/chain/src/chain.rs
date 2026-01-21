@@ -38,7 +38,7 @@ use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
     reth_provider, BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, ChunkProvider, ChunkType,
     EpochReplayData, ExecutionPayloadCache, IrysRethProvider, IrysRethProviderInner, PeerList,
-    StorageModule, StorageModuleInfo, StorageModulesReadGuard,
+    StorageModule, StorageModuleInfo, StorageModulesReadGuard, SupplyState, SupplyStateReadGuard,
 };
 use irys_p2p::{
     spawn_peer_network_service, BlockPool, BlockStatusProvider, ChainSyncService,
@@ -90,6 +90,7 @@ use tokio::{
     },
     time::sleep,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
 #[derive(Debug, Clone)]
@@ -128,6 +129,9 @@ pub struct IrysNodeCtx {
     pub sync_service_facade: SyncChainServiceFacade,
     pub is_vdf_mining_enabled: Arc<AtomicBool>,
     pub started_at: Instant,
+    pub supply_state_guard: Option<SupplyStateReadGuard>,
+    backfill_cancel: CancellationToken,
+    backfill_complete: Arc<tokio::sync::Notify>,
 }
 
 impl IrysNodeCtx {
@@ -143,6 +147,7 @@ impl IrysNodeCtx {
             reth_http_url: self.reth_handle.rpc_server_handle().http_url().unwrap(),
             block_tree: self.block_tree_guard.clone(),
             block_index: self.block_index_guard.clone(),
+            supply_state: self.supply_state_guard.clone(),
             sync_state: self.sync_state.clone(),
             mempool_pledge_provider: self.mempool_pledge_provider.clone(),
             started_at: self.started_at,
@@ -159,6 +164,25 @@ impl IrysNodeCtx {
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self, reason: ShutdownReason) {
         info!("stop function called, shutting down due to: {}", reason);
+
+        // Cancel the backfill task for graceful shutdown
+        self.backfill_cancel.cancel();
+
+        // Wait for backfill task to complete (with timeout)
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.backfill_complete.notified(),
+        )
+        .await
+        {
+            Ok(()) => {
+                debug!("Backfill task stopped cleanly");
+            }
+            Err(_) => {
+                warn!("Backfill task did not stop within 5 second timeout");
+            }
+        }
+
         if let Err(e) = self.stop_mining() {
             error!("Failed to stop mining during shutdown: {:#}", e);
         }
@@ -1163,10 +1187,15 @@ impl IrysNode {
             service_senders.packing_sender.clone(),
         );
 
+        // Initialize supply state for tracking cumulative emissions
+        let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
+        let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
+
         // start block index service (tokio)
         let block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
             receivers.block_index,
             block_index.clone(),
+            Some(supply_state.clone()),
             &config.consensus,
             runtime_handle.clone(),
         );
@@ -1213,6 +1242,58 @@ impl IrysNode {
         let block_index_guard = block_index_rx
             .await
             .expect("to receive BlockIndexReadGuard from BlockIndex service");
+
+        // Create cancellation token for graceful shutdown of backfill task
+        let backfill_cancel = CancellationToken::new();
+
+        // Notify to signal backfill completion for clean shutdown
+        let backfill_complete = Arc::new(tokio::sync::Notify::new());
+
+        // Spawn async task to backfill historical supply state
+        {
+            let supply_state_for_backfill = supply_state.clone();
+            let block_index_for_backfill = block_index_guard.clone();
+            let db_for_backfill = irys_db.clone();
+            let cancel_for_task = backfill_cancel.clone();
+            let backfill_complete_signal = backfill_complete.clone();
+            let backfill_handle = runtime_handle.spawn(async move {
+                irys_actors::supply_state_calculator::backfill_supply_state(
+                    supply_state_for_backfill,
+                    block_index_for_backfill,
+                    db_for_backfill,
+                    cancel_for_task,
+                )
+                .await
+            });
+
+            // Monitor backfill task - panic the node on failure.
+            // Backfill errors indicate data integrity issues (missing blocks, database corruption)
+            // that require investigation and won't self-resolve.
+            runtime_handle.spawn(async move {
+                let result = backfill_handle.await;
+                // Signal completion before potential panic to allow clean shutdown path
+                backfill_complete_signal.notify_one();
+                match result {
+                    Ok(Ok(())) => {
+                        tracing::info!("Supply state backfill completed successfully");
+                    }
+                    Ok(Err(e)) => {
+                        panic!(
+                            "FATAL: Supply state backfill failed: {}. \
+                            This indicates data integrity issues that require investigation.",
+                            e
+                        );
+                    }
+                    Err(join_error) => {
+                        panic!(
+                            "FATAL: Supply state backfill task panicked: {}. \
+                            This indicates data integrity issues that require investigation.",
+                            join_error
+                        );
+                    }
+                }
+            });
+        }
 
         // use the Tokio-native mining bus from ServiceSenders
         let mining_bus = service_senders.mining_bus();
@@ -1554,6 +1635,9 @@ impl IrysNode {
             sync_service_facade,
             is_vdf_mining_enabled,
             started_at: Instant::now(),
+            supply_state_guard: Some(supply_state_guard.clone()),
+            backfill_cancel,
+            backfill_complete,
         };
 
         // Spawn the StorageModuleService to manage the life-cycle of storage modules
@@ -1635,6 +1719,7 @@ impl IrysNode {
                 reth_provider: reth_node.clone(),
                 block_tree: block_tree_guard.clone(),
                 block_index: block_index_guard.clone(),
+                supply_state: Some(supply_state_guard),
                 config: config.clone(),
                 reth_http_url: reth_node
                     .rpc_server_handle()
