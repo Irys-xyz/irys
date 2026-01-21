@@ -245,7 +245,8 @@ async fn api_tx_status_lifecycle() {
     let status = api_client
         .get_transaction_status(api_address, tx_id)
         .await
-        .expect("get_transaction_status should succeed");
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
 
     assert!(matches!(status.status, TransactionStatus::Pending));
     assert!(status.block_height.is_none());
@@ -258,7 +259,8 @@ async fn api_tx_status_lifecycle() {
     let status = api_client
         .get_transaction_status(api_address, tx_id)
         .await
-        .expect("get_transaction_status should succeed");
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
 
     assert!(matches!(status.status, TransactionStatus::Mined));
     assert!(status.block_height.is_some());
@@ -282,7 +284,8 @@ async fn api_tx_status_lifecycle() {
     let status = api_client
         .get_transaction_status(api_address, tx_id)
         .await
-        .expect("get_transaction_status should succeed");
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
 
     assert!(matches!(status.status, TransactionStatus::Finalized));
     assert!(status.block_height.is_some());
@@ -332,7 +335,8 @@ async fn api_tx_status_commitment_tx() {
     let status = api_client
         .get_transaction_status(api_address, tx_id)
         .await
-        .expect("get_transaction_status should succeed");
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
 
     assert!(matches!(status.status, TransactionStatus::Pending));
 
@@ -342,7 +346,8 @@ async fn api_tx_status_commitment_tx() {
         let s = api_client
             .get_transaction_status(api_address, tx_id)
             .await
-            .expect("get_transaction_status should succeed");
+            .expect("get_transaction_status should succeed")
+            .expect("status should exist");
 
         if matches!(s.status, TransactionStatus::Pending) {
             ctx.mine_block().await.expect("expected mined block");

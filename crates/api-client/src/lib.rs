@@ -85,7 +85,7 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
         &self,
         peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<TransactionStatusResponse>;
+    ) -> Result<Option<TransactionStatusResponse>>;
 }
 
 pub use irys_types::{TransactionStatus, TransactionStatusResponse};
@@ -308,17 +308,11 @@ impl ApiClient for IrysApiClient {
         &self,
         peer: SocketAddr,
         tx_id: H256,
-    ) -> Result<TransactionStatusResponse> {
+    ) -> Result<Option<TransactionStatusResponse>> {
         // H256 Display prints full base58; using Display here is correct.
         let path = format!("/tx/{}/status", tx_id);
         self.make_request::<TransactionStatusResponse, _>(peer, Method::GET, &path, None::<&()>)
-            .await?
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "Expected transaction status response to have a body: {}",
-                    tx_id
-                )
-            })
+            .await
     }
 }
 
@@ -406,8 +400,8 @@ pub mod test_utils {
             &self,
             _peer: SocketAddr,
             _tx_id: H256,
-        ) -> Result<TransactionStatusResponse> {
-            Err(eyre!("Transaction not found"))
+        ) -> Result<Option<TransactionStatusResponse>> {
+            Ok(None)
         }
     }
 }
@@ -509,8 +503,8 @@ mod tests {
             &self,
             _peer: SocketAddr,
             _tx_id: H256,
-        ) -> Result<TransactionStatusResponse> {
-            Err(eyre::eyre!("Transaction not found"))
+        ) -> Result<Option<TransactionStatusResponse>> {
+            Ok(None)
         }
     }
 
