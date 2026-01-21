@@ -742,7 +742,7 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_from_assignees: 0,
                 },
                 aurora: Some(Aurora {
-                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(1768476600),
+                    activation_timestamp: UnixTimestamp::from_secs(1768476600),
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,

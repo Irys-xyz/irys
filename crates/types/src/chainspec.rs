@@ -55,7 +55,7 @@ impl IrysChainHardforks {
         if let Some(ref fork) = config.aurora {
             forks.push((
                 IrysHardfork::Aurora,
-                ForkCondition::Timestamp(fork.activation_timestamp_unix_secs.as_secs()),
+                ForkCondition::Timestamp(fork.activation_timestamp.as_secs()),
             ));
         }
 

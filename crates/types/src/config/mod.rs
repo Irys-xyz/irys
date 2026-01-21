@@ -565,7 +565,7 @@ mod tests {
 
         [hardforks.aurora]
         minimum_commitment_tx_version = 2
-        activation_timestamp = 1768476600000
+        activation_timestamp = "2026-01-15T11:30:00+00:00"
         "#;
 
         // Create the expected config

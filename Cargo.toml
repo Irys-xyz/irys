@@ -147,6 +147,7 @@ priority-queue = "2.5"
 moka = "0.12.10"
 socket2 = "0.5"
 async-stream = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
 
 
 # Reth & Alloy deps

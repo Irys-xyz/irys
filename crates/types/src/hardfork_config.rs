@@ -1,6 +1,6 @@
 //! Configurable hardfork parameters.
 
-use crate::{UnixTimestamp, VersionDiscriminant};
+use crate::{serialization::unix_timestamp_string_serde, UnixTimestamp, VersionDiscriminant};
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
@@ -35,7 +35,8 @@ pub struct FrontierParams {
 /// When this fork activates, the contained parameters take effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NextNameTBD {
-    /// Timestamp (seconds since epoch) at which this hardfork activates
+    /// Times (seconds since epoch) at which this hardfork activates
+    #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
 
     /// Number of total ingress proofs required
@@ -47,7 +48,8 @@ pub struct NextNameTBD {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Aurora {
-    pub activation_timestamp_unix_secs: UnixTimestamp,
+    #[serde(with = "unix_timestamp_string_serde")]
+    pub activation_timestamp: UnixTimestamp,
     pub minimum_commitment_tx_version: u8,
 }
 
@@ -88,7 +90,7 @@ impl IrysHardforkConfig {
     pub fn aurora_at(&self, timestamp: UnixTimestamp) -> Option<&Aurora> {
         self.aurora
             .as_ref()
-            .filter(|f| timestamp >= f.activation_timestamp_unix_secs)
+            .filter(|f| timestamp >= f.activation_timestamp)
     }
 
     /// Check if a commitment transaction version is valid at a given timestamp.
@@ -162,7 +164,7 @@ mod tests {
             },
             next_name_tbd: None,
             aurora: Some(Aurora {
-                activation_timestamp_unix_secs: UnixTimestamp::from_secs(1500),
+                activation_timestamp: UnixTimestamp::from_secs(1500),
                 minimum_commitment_tx_version: 2,
             }),
         };
@@ -282,7 +284,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_ts),
+                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
             };
@@ -306,7 +308,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_ts),
+                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
             };
@@ -353,7 +355,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_ts),
+                    activation_timestamp: UnixTimestamp::from_secs(activation_ts),
                     minimum_commitment_tx_version: min_version,
                 }),
             };
@@ -383,7 +385,7 @@ mod tests {
                 },
                 next_name_tbd: None,
                 aurora: Some(Aurora {
-                    activation_timestamp_unix_secs: UnixTimestamp::from_secs(activation_secs),
+                    activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
                 }),
             }

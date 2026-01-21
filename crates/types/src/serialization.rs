@@ -912,6 +912,36 @@ where
     }
 }
 
+pub mod unix_timestamp_string_serde {
+    use chrono::{DateTime, Utc};
+    use serde::{self, Deserialize as _, Deserializer, Serializer};
+
+    use crate::UnixTimestamp;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<UnixTimestamp, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        Ok(UnixTimestamp::from_secs(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {}", &e)))?
+                .timestamp() as u64,
+        ))
+    }
+
+    pub fn serialize<S>(timestamp: &UnixTimestamp, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let dt = DateTime::<Utc>::from_timestamp(timestamp.as_secs() as i64, 0)
+            .ok_or_else(|| serde::ser::Error::custom("invalid timestamp"))?;
+
+        serializer.serialize_str(&dt.to_rfc3339())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
