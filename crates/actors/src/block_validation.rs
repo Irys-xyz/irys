@@ -2994,6 +2994,7 @@ mod tests {
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
+            None, // No supply state needed for tests
             &consensus_config,
             tokio::runtime::Handle::current(),
         );
