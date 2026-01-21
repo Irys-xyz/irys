@@ -762,6 +762,7 @@ async fn epoch_blocks_reinitialization_test() {
         Arc::new(RwLock::new(
             BlockIndex::new(&config.node_config).await.unwrap(),
         )),
+        None, // No supply state needed for tests
         &config.consensus,
         tokio::runtime::Handle::current(),
     );

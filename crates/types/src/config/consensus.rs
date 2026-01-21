@@ -1,5 +1,5 @@
-use crate::hardfork_config::{FrontierParams, IrysHardforkConfig};
-use crate::serde_utils;
+use crate::hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig};
+use crate::{serde_utils, UnixTimestamp};
 use crate::{
     storage_pricing::{
         phantoms::{
@@ -741,8 +741,11 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(1768476600),
+                    minimum_commitment_tx_version: 2,
+                }),
                 next_name_tbd: None,
-                aurora: None,
             },
         }
     }
