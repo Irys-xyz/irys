@@ -181,6 +181,17 @@ impl SupplyState {
                 .expect("supply state write lock poisoned");
 
             let is_first = data.first_migration_height.is_none();
+            if is_first {
+                if let Some(persisted_height) = self.persisted_backfill_height {
+                    if height <= persisted_height {
+                        eyre::bail!(
+                            "First migration height {} overlaps persisted backfill height {}",
+                            height,
+                            persisted_height
+                        );
+                    }
+                }
+            }
             let first_migration = if is_first {
                 Some(height)
             } else {
@@ -406,6 +417,25 @@ mod tests {
 
         let result = state.add_block_reward(0, U256::from(100));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_block_reward_rejects_overlap_with_persisted_backfill() {
+        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+
+        // First migration at height 49 (equal to persisted backfill) should fail
+        let result = state.add_block_reward(49, U256::from(100));
+        assert!(result.is_err());
+
+        // First migration at height 48 (below persisted backfill) should fail
+        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+        let result = state.add_block_reward(48, U256::from(100));
+        assert!(result.is_err());
+
+        // First migration at height 50 (above persisted backfill) should succeed
+        let state = create_test_supply_state_with_backfill(Some(49), U256::from(5000));
+        let result = state.add_block_reward(50, U256::from(100));
+        assert!(result.is_ok());
     }
 
     #[test]
