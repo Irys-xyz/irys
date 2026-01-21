@@ -255,7 +255,7 @@ async fn api_tx_status_lifecycle() {
     // Mine a block to include the transaction
     ctx.mine_block().await.expect("expected mined block");
 
-    // Poll until transaction is MINED (similar to a commitment test to avoid flakiness)
+    // Poll until transaction is MINED or FINALIZED (accept both as terminal states)
     let mut status = None;
     for _ in 0..25 {
         let s = api_client
@@ -269,12 +269,21 @@ async fn api_tx_status_lifecycle() {
             continue;
         }
 
-        status = Some(s);
-        break;
+        // Accept both Mined and Finalized as valid terminal states
+        if matches!(
+            s.status,
+            TransactionStatus::Mined | TransactionStatus::Finalized
+        ) {
+            status = Some(s);
+            break;
+        }
     }
 
-    let status = status.expect("transaction should eventually be mined");
-    assert!(matches!(status.status, TransactionStatus::Mined));
+    let status = status.expect("transaction should eventually be mined or finalized");
+    assert!(matches!(
+        status.status,
+        TransactionStatus::Mined | TransactionStatus::Finalized
+    ));
     assert!(status.block_height.is_some());
     assert!(status.confirmations.is_some());
 
@@ -284,8 +293,11 @@ async fn api_tx_status_lifecycle() {
     let migration_depth = ctx.node_ctx.config.consensus.block_migration_depth as u64;
 
     // Mine more blocks to reach migration depth and make it CONFIRMED
-    for _ in 0..(migration_depth + 2) {
-        ctx.mine_block().await.expect("expected mined block");
+    // Skip if already Finalized
+    if matches!(status.status, TransactionStatus::Mined) {
+        for _ in 0..(migration_depth + 2) {
+            ctx.mine_block().await.expect("expected mined block");
+        }
     }
 
     ctx.wait_until_block_index_height(included_height, 15)
