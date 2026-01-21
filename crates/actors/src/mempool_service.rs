@@ -2231,7 +2231,17 @@ impl AtomicMempoolState {
         self.read().await.recent_valid_tx.contains(tx_id)
     }
 
-    /// Get transaction metadata from mempool (returns None if not found or no metadata)
+    /// Get transaction metadata from the mempool.
+    ///
+    /// Returns `Some(TxMetadata)` when a transaction with metadata is found in
+    /// [`valid_submit_ledger_tx`], [`valid_commitment_tx`], or [`pending_pledges`].
+    /// Returns `None` only when the transaction ID is not present in the mempool.
+    ///
+    /// [`get_tx_metadata`]: Self::get_tx_metadata
+    /// [`TxMetadata`]: TxMetadata
+    /// [`valid_submit_ledger_tx`]: MempoolState::valid_submit_ledger_tx
+    /// [`valid_commitment_tx`]: MempoolState::valid_commitment_tx
+    /// [`pending_pledges`]: MempoolState::pending_pledges
     pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TxMetadata> {
         let state = self.read().await;
 
