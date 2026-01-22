@@ -1304,8 +1304,8 @@ mod tests {
 
         #[test]
         fn test_term_fee_single_chunk() -> Result<()> {
-            // Setup: Use testnet config as baseline
-            let mut config = ConsensusConfig::testnet();
+            // Setup: Use testing config as baseline
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
@@ -1342,11 +1342,16 @@ mod tests {
         #[test]
         fn test_term_fee_16tb() -> Result<()> {
             // Setup: 16TB = 16 * 1024^4 bytes
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes; // 16TB
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
@@ -1362,7 +1367,7 @@ mod tests {
             // Convert to decimal for verification
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
-            // Golden data calculation for 16TB with testnet config:
+            // Golden data calculation for 16TB with testing config:
             // - 16TB = 17,592,186,044,416 bytes = 67,108,864 chunks (at 256KB/chunk)
             // - Annual cost: $0.01/GB/year
             // - Cost per chunk per epoch: ~$0.0000000000929
@@ -1391,12 +1396,16 @@ mod tests {
         #[test]
         fn test_term_fee_below_minimum() -> Result<()> {
             // Setup: Create a config with very low cost to trigger minimum fee
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             config.annual_cost_per_gb = Amount::token(dec!(0.0000001))?; // Very low cost
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
 
             let bytes_to_store = 1; // Just 1 byte
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
@@ -1425,12 +1434,16 @@ mod tests {
 
         #[test]
         fn test_term_fee_with_different_prices() -> Result<()> {
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
             let bytes_to_store = config.chunk_size; // 1 chunk
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
 
             // Test with different IRYS prices
             let prices = vec![
@@ -1465,8 +1478,13 @@ mod tests {
         #[test]
         fn test_term_fee_1tb() -> Result<()> {
             // Setup: 1TB - common user scenario that's above minimum fee
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
@@ -1484,7 +1502,7 @@ mod tests {
             let term_fee_dec = Amount::<Irys>::new(term_fee).token_to_decimal()?;
 
             // Golden data: 1TB = 4,194,304 chunks
-            // With testnet config: 12s blocks, 100 blocks/epoch = 1200s/epoch
+            // With testing config: 12s blocks, 100 blocks/epoch = 1200s/epoch
             // Epochs per year = 365*24*60*60 / 1200 = 26280
             // Cost per chunk per epoch = 0.01 / 4096 / 26280 = 9.292532e-11
             // Term cost = 4194304 * 9.292532e-11 * 5 * 10 = 0.0194824961523712
@@ -1505,8 +1523,13 @@ mod tests {
         #[test]
         fn test_term_fee_1pb_extreme() -> Result<()> {
             // Setup: 1PB - extreme case to test large numbers
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
@@ -1548,8 +1571,13 @@ mod tests {
 
         #[test]
         fn test_term_fee_chunk_boundaries() -> Result<()> {
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
@@ -1601,8 +1629,13 @@ mod tests {
 
         #[test]
         fn test_extreme_token_prices() -> Result<()> {
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
@@ -1671,14 +1704,18 @@ mod tests {
             // This means $0.00753 per TB per epoch per replica
 
             // Create custom config matching spreadsheet economics
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
 
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             // Calculate the required annual_cost_per_gb to achieve $0.0753/TB/epoch
-            // With testnet config: 26280 epochs/year
+            // With testing config: 26280 epochs/year
             // $0.00753 per TB per epoch per replica = $197.9064 per TB per year per replica
             // $197.9064 per TB per year = $0.193245 per GB per year
             config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
@@ -1727,11 +1764,15 @@ mod tests {
             // - 1TB @ 5 epochs = $0.3767
 
             // Create custom config matching spreadsheet economics
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
 
             // Use the same annual cost that achieves $0.0753/TB/epoch
             config.annual_cost_per_gb = Amount::token(dec!(0.193245))?;
@@ -1772,11 +1813,15 @@ mod tests {
             // - Per GB pricing should be $0.00007358 per epoch
 
             // Create custom config matching spreadsheet economics
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
 
             // Use annual cost that gives us the target per-GB price
             // $0.00007358 per GB per epoch with 10 replicas
@@ -1829,7 +1874,11 @@ mod tests {
             // - This translates to specific epoch costs based on epoch duration
 
             // Create custom config matching spreadsheet economics
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
 
             // Daily cost per TB (single replica) = $0.0075
             // Annual cost = $0.0075 * 365 = $2.7375 per TB
@@ -1884,11 +1933,16 @@ mod tests {
         #[test]
         fn test_dynamic_epoch_count() -> Result<()> {
             // Test that the new calculate_term_fee function correctly uses different epoch counts
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let bytes_to_store = 1024_u64.pow(4) * 100; // 100TB - large enough to avoid minimum fee
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
 
@@ -1964,11 +2018,16 @@ mod tests {
         #[test]
         fn test_dynamic_epoch_vs_config() -> Result<()> {
             // Verify that calculate_term_fee with config epochs matches calculate_term_fee_from_config
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let bytes_to_store = 1024_u64.pow(3) * 500; // 500GB
             let irys_price = Amount::token(dec!(2.5))?; // $2.50 per IRYS token
 
@@ -2001,11 +2060,16 @@ mod tests {
         #[test]
         fn test_zero_epochs() -> Result<()> {
             // Test edge case: 0 epochs should still charge minimum fee
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let bytes_to_store = config.chunk_size; // 1 chunk
             let irys_price = Amount::token(dec!(1.0))?;
 
@@ -2031,11 +2095,16 @@ mod tests {
         #[test]
         fn test_very_large_epoch_count() -> Result<()> {
             // Test that large epoch counts don't cause overflow
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+
+            config.difficulty_adjustment.block_time = 12;
+            config.chunk_size = 262144;
+            config.num_chunks_in_partition = 51872000;
+
             let bytes_to_store = 1024_u64.pow(3); // 1GB
             let irys_price = Amount::token(dec!(1.0))?;
 
@@ -2076,15 +2145,20 @@ mod tests {
         #[test]
         fn test_perm_fee_16tb() -> Result<()> {
             // Setup: 16TB - same as term test for comparison
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
+            config.difficulty_adjustment.block_time = 12;
+            // config.difficulty_adjustment.difficulty_adjustment_interval = 100800000;
+            config.chunk_size = 262144;
+            // config.num_chunks_in_partition = 51872000;
+
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
-
+            dbg!(&config);
             // First calculate term fee (needed for perm fee calculation)
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
@@ -2133,7 +2207,7 @@ mod tests {
         #[test]
         fn test_perm_fee_1tb() -> Result<()> {
             // Setup: 1TB - reasonable size for permanent storage
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
@@ -2184,7 +2258,7 @@ mod tests {
         #[test]
         fn test_perm_fee_decay_calculation() -> Result<()> {
             // Test the decay formula explicitly
-            let mut config = ConsensusConfig::testnet();
+            let mut config = ConsensusConfig::testing();
             config.hardforks.frontier.number_of_ingress_proofs_total = 10;
             let number_of_ingress_proofs_total = config
                 .hardforks
