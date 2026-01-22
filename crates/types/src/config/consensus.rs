@@ -726,11 +726,8 @@ impl ConsensusConfig {
 
     pub fn testnet() -> Self {
         const BLOCK_TIME: u64 = 10;
-
-        // block reward params
-        const HALF_LIFE_YEARS: u128 = 4;
-        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
         const INFLATION_CAP: u128 = 100_000_000;
+
         Self {
             chain_id: 1270,
             annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
