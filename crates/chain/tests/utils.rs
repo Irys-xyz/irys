@@ -56,7 +56,7 @@ use irys_types::{
     LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
     UnpackedChunk,
 };
-use irys_types::{HandshakeRequest, Interval, PartitionChunkOffset};
+use irys_types::{HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
@@ -2375,7 +2375,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx.config.node_config.peer_address().gossip
     }
 
-    // Build a signed HandshakeRequest describing this node
+    // Build a signed HandshakeRequest describing this node (V1 version for compatibility)
     pub fn build_handshake_request(&self) -> HandshakeRequest {
         let mut handshake = HandshakeRequest {
             chain_id: self.node_ctx.config.consensus.chain_id,
@@ -2391,12 +2391,40 @@ impl IrysNodeTest<IrysNodeCtx> {
         handshake
     }
 
-    // Announce this node to another node via gossip handshake (POST /gossip/handshake)
+    // Build a signed HandshakeRequestV2 describing this node
+    pub fn build_handshake_request_v2(&self) -> HandshakeRequestV2 {
+        let mut handshake = HandshakeRequestV2 {
+            chain_id: self.node_ctx.config.consensus.chain_id,
+            address: self.node_ctx.config.node_config.peer_address(),
+            mining_address: self.node_ctx.config.node_config.reward_address,
+            peer_id: self.node_ctx.config.node_config.peer_id(),
+            ..HandshakeRequestV2::default()
+        };
+        self.node_ctx
+            .config
+            .irys_signer()
+            .sign_p2p_handshake_v2(&mut handshake)
+            .expect("sign p2p handshake v2");
+        handshake
+    }
+
+    // Announce this node to another node via gossip handshake
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
-        let vr = self.build_handshake_request();
-        self.get_gossip_client()
-            .post_handshake_v1(dst.get_gossip_addr(), vr)
-            .await?;
+        let protocol_version = ProtocolVersion::current();
+        match protocol_version {
+            ProtocolVersion::V1 => {
+                let vr = self.build_handshake_request();
+                self.get_gossip_client()
+                    .post_handshake_v1(dst.get_gossip_addr(), vr)
+                    .await?;
+            }
+            ProtocolVersion::V2 => {
+                let vr = self.build_handshake_request_v2();
+                self.get_gossip_client()
+                    .post_handshake_v2(dst.get_gossip_addr(), vr)
+                    .await?;
+            }
+        }
         Ok(())
     }
 

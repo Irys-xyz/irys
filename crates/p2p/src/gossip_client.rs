@@ -339,8 +339,8 @@ impl GossipClient {
         peer: SocketAddr,
         version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
-        // V1 uses /handshake endpoint (without v2 prefix)
-        let path = format!("gossip{}", GossipRoutes::Handshake);
+        // V1 uses /version endpoint
+        let path = format!("gossip{}", GossipRoutes::Version);
         let url = format!("http://{}/{}", peer, path);
         debug!("Posting V1 handshake to {}: {:?}", url, version);
         let response = self
