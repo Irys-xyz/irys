@@ -1439,11 +1439,11 @@ mod tests {
             let number_of_ingress_proofs_total = config
                 .hardforks
                 .number_of_ingress_proofs_total_at(UnixTimestamp::from_secs(0));
-            let bytes_to_store = config.chunk_size; // 1 chunk
-
             config.difficulty_adjustment.block_time = 12;
             config.chunk_size = 262144;
             config.num_chunks_in_partition = 51872000;
+
+            let bytes_to_store = config.chunk_size; // 1 chunk
 
             // Test with different IRYS prices
             let prices = vec![
@@ -2158,8 +2158,7 @@ mod tests {
             let tb_in_bytes = 1024_u64.pow(4);
             let bytes_to_store = 16 * tb_in_bytes;
             let irys_price = Amount::token(dec!(1.0))?; // $1 per IRYS token
-            dbg!(&config);
-            // First calculate term fee (needed for perm fee calculation)
+                                                        // First calculate term fee (needed for perm fee calculation)
             let term_fee = calculate_term_fee_from_config(
                 bytes_to_store,
                 &config,

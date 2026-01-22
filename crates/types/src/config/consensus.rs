@@ -727,6 +727,8 @@ impl ConsensusConfig {
     pub fn testnet() -> Self {
         const BLOCK_TIME: u64 = 10;
         const INFLATION_CAP: u128 = 100_000_000;
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
 
         Self {
             chain_id: 1270,
@@ -802,10 +804,10 @@ impl ConsensusConfig {
             },
             block_reward_config: BlockRewardConfig {
                 inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
-                half_life_secs: 126144000, /*  (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(), */
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
             },
 
-            // Hardfork configuration - testnet uses 1 proof for easier testing
+            // Hardfork configuration
             hardforks: IrysHardforkConfig {
                 frontier: FrontierParams {
                     number_of_ingress_proofs_total: 3,
