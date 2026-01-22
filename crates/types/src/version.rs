@@ -1,6 +1,6 @@
 use crate::{
     decode_address, encode_address, serialization::string_u64, serialization::string_usize,
-    Arbitrary, IrysSignature, RethPeerInfo, H256,
+    Arbitrary, IrysPeerId, IrysSignature, RethPeerInfo, H256,
 };
 use crate::{IrysAddress, U256};
 use alloy_primitives::keccak256;
@@ -147,7 +147,7 @@ pub fn parse_user_agent(user_agent: &str) -> Option<(String, String, String, Str
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandshakeRequest {
+pub struct HandshakeRequestV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     pub mining_address: IrysAddress,
@@ -158,11 +158,47 @@ pub struct HandshakeRequest {
     pub signature: IrysSignature,
 }
 
-impl Default for HandshakeRequest {
+/// V2 HandshakeRequest - includes peer_id for P2P identification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakeRequestV2 {
+    pub version: Version,
+    pub protocol_version: ProtocolVersion,
+    pub mining_address: IrysAddress, // Still used for signing/staking
+    pub peer_id: IrysPeerId,         // NEW: Required for V2
+    pub chain_id: u64,
+    pub address: PeerAddress,
+    pub timestamp: u64,
+    pub user_agent: Option<String>,
+    pub signature: IrysSignature,
+}
+
+/// Legacy type alias for backward compatibility - maps to V1
+pub type HandshakeRequest = HandshakeRequestV1;
+
+impl Default for HandshakeRequestV1 {
+    fn default() -> Self {
+        Self {
+            version: Version::new(0, 1, 0),
+            mining_address: IrysAddress::ZERO,
+            protocol_version: ProtocolVersion::V1,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            chain_id: 0,
+            address: PeerAddress::default(),
+            user_agent: None,
+            signature: IrysSignature::default(),
+        }
+    }
+}
+
+impl Default for HandshakeRequestV2 {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
             mining_address: IrysAddress::ZERO,
+            peer_id: IrysPeerId::ZERO,
             protocol_version: ProtocolVersion::current(),
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -176,7 +212,7 @@ impl Default for HandshakeRequest {
     }
 }
 
-impl HandshakeRequest {
+impl HandshakeRequestV1 {
     fn encode_for_signing<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -195,7 +231,35 @@ impl HandshakeRequest {
     pub fn signature_hash(&self) -> [u8; 32] {
         let mut bytes = Vec::new();
         self.encode_for_signing(&mut bytes);
+        keccak256(&bytes).0
+    }
 
+    pub fn verify_signature(&self) -> bool {
+        self.signature
+            .validate_signature(self.signature_hash(), self.mining_address)
+    }
+}
+
+impl HandshakeRequestV2 {
+    fn encode_for_signing<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        let mut size = 0;
+        size += encode_version_for_signing(&self.version, buf);
+        size += (self.protocol_version as u32).to_compact(buf);
+        size += self.mining_address.to_compact(buf);
+        size += self.peer_id.to_compact(buf); // Include peer_id in V2 signature
+        size += self.chain_id.to_compact(buf);
+        size += self.address.to_compact(buf);
+        size += self.timestamp.to_compact(buf);
+        size += self.user_agent.to_compact(buf);
+        size
+    }
+
+    pub fn signature_hash(&self) -> [u8; 32] {
+        let mut bytes = Vec::new();
+        self.encode_for_signing(&mut bytes);
         keccak256(&bytes).0
     }
 
@@ -382,7 +446,7 @@ pub struct NodeInfo {
 #[cfg(test)]
 mod tests {
     use super::NodeInfo;
-    use crate::{Config, HandshakeRequest, IrysSignature, NodeConfig, H256};
+    use crate::{Config, HandshakeRequest, HandshakeRequestV2, IrysSignature, NodeConfig, H256};
     use crate::{IrysAddress, U256};
     use serde_json;
 
@@ -393,7 +457,27 @@ mod tests {
         let config = Config::new(testing_config);
         let signer = config.irys_signer();
 
-        signer.sign_p2p_handshake(&mut version_request).unwrap();
+        signer.sign_p2p_handshake_v1(&mut version_request).unwrap();
+        assert!(
+            version_request.verify_signature(),
+            "Signature should be valid"
+        );
+
+        version_request.signature = IrysSignature::default();
+        assert!(
+            !version_request.verify_signature(),
+            "Signature should be invalid after reset"
+        );
+    }
+
+    #[test]
+    fn should_sign_and_verify_signature_v2() {
+        let mut version_request = HandshakeRequestV2::default();
+        let testing_config = NodeConfig::testing();
+        let config = Config::new(testing_config);
+        let signer = config.irys_signer();
+
+        signer.sign_p2p_handshake_v2(&mut version_request).unwrap();
         assert!(
             version_request.verify_signature(),
             "Signature should be valid"

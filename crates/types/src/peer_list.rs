@@ -1,4 +1,4 @@
-use crate::{BlockHash, ChunkPathHash, Compact, PeerAddress, ProtocolVersion};
+use crate::{BlockHash, ChunkPathHash, Compact, IrysPeerId, PeerAddress, ProtocolVersion};
 
 use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
@@ -84,6 +84,10 @@ pub struct PeerListItem {
     pub last_seen: u64,
     pub is_online: bool,
     pub protocol_version: ProtocolVersion,
+    /// Peer network identifier (separate from mining address)
+    /// None means: (1) old record from DB, or (2) v1 peer
+    /// On load, None records get peer_id = miner_address until handshake updates it
+    pub peer_id: Option<IrysPeerId>,
 }
 
 impl Default for PeerListItem {
@@ -102,6 +106,7 @@ impl Default for PeerListItem {
                 .as_millis() as u64,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
+            peer_id: None,
         }
     }
 }
@@ -265,6 +270,13 @@ impl Compact for PeerListItem {
         buf.put_u32(self.protocol_version as u32);
         size += 4;
 
+        // Append peer_id (20 bytes) at the end for backward compatibility
+        // Old records won't have this field, will decode as None
+        if let Some(peer_id) = &self.peer_id {
+            buf.put_slice(peer_id.as_ref());
+            size += 20;
+        }
+
         size
     }
 
@@ -314,6 +326,7 @@ impl Compact for PeerListItem {
                     last_seen: 0,
                     is_online: false,
                     protocol_version: ProtocolVersion::default(),
+                    peer_id: None,
                 },
                 &[],
             );
@@ -362,6 +375,18 @@ impl Compact for PeerListItem {
             total_consumed += 4;
         }
 
+        // Read peer_id (20 bytes) if available
+        // This field was added after protocol_version, so older records won't have it
+        let peer_id = if buf.len() >= total_consumed + 20 {
+            let peer_id_bytes: [u8; 20] = buf[total_consumed..total_consumed + 20]
+                .try_into()
+                .expect("slice with incorrect length");
+            total_consumed += 20;
+            Some(IrysPeerId::from(peer_id_bytes))
+        } else {
+            None // Old record without peer_id
+        };
+
         (
             Self {
                 reputation_score,
@@ -370,6 +395,7 @@ impl Compact for PeerListItem {
                 last_seen,
                 is_online,
                 protocol_version,
+                peer_id,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
@@ -578,6 +604,7 @@ mod tests {
             last_seen: 1704067200000, // Jan 1, 2024 timestamp in milliseconds
             is_online: true,
             protocol_version: ProtocolVersion::V2,
+            peer_id: None,
         };
         let mut buf = bytes::BytesMut::with_capacity(100);
         peer_list_item.to_compact(&mut buf);

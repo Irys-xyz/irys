@@ -1307,6 +1307,7 @@ impl IrysNode {
 
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
+            config.node_config.peer_id(),
             receivers.gossip_broadcast,
         );
         let sync_state = p2p_service.sync_state.clone();

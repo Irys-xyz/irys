@@ -1108,6 +1108,7 @@ mod tests {
                 .unwrap()
                 .as_secs(),
             protocol_version: irys_types::ProtocolVersion::default(),
+            peer_id: None,
         };
         (mining_addr, peer)
     }

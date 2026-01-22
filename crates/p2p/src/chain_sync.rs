@@ -1618,6 +1618,7 @@ mod tests {
                     last_seen: 0,
                     is_online: true,
                     protocol_version: Default::default(),
+                    peer_id: None,
                 },
                 true,
             );
@@ -1722,6 +1723,7 @@ mod tests {
                     last_seen: 0,
                     is_online: true,
                     protocol_version: Default::default(),
+                    peer_id: None,
                 },
                 true,
             );
@@ -1853,6 +1855,7 @@ mod tests {
                 },
                 last_seen: 0,
                 is_online: true,
+                peer_id: None,
                 protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
@@ -1864,6 +1867,7 @@ mod tests {
                     execution: Default::default(),
                 },
                 last_seen: 0,
+                peer_id: None,
                 is_online: true,
                 protocol_version: Default::default(),
             };
@@ -1978,6 +1982,7 @@ mod tests {
                     execution: Default::default(),
                 },
                 last_seen: 0,
+                peer_id: None,
                 is_online: true,
                 protocol_version: Default::default(),
             };
@@ -1992,6 +1997,7 @@ mod tests {
                 last_seen: 0,
                 is_online: true,
                 protocol_version: Default::default(),
+                peer_id: None,
             };
             let addr_a = IrysAddress::repeat_byte(0xA1);
             let addr_b = IrysAddress::repeat_byte(0xB1);

@@ -9,10 +9,10 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipRequest,
-    HandshakeRequest, HandshakeResponse, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
-    NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion,
-    DATA_REQUEST_RETRIES, H256,
+    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
+    HandshakeRequestV2, HandshakeResponse, IrysAddress, IrysBlockHeader, IrysPeerId,
+    IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
+    ProtocolVersion, DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -48,6 +48,7 @@ pub enum GossipClientError {
 #[derive(Debug, Clone)]
 pub struct GossipClient {
     pub mining_address: IrysAddress,
+    pub peer_id: IrysPeerId,
     client: Client,
 }
 
@@ -55,9 +56,10 @@ impl GossipClient {
     pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
     #[must_use]
-    pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
+    pub fn new(timeout: Duration, mining_address: IrysAddress, peer_id: IrysPeerId) -> Self {
         Self {
             mining_address,
+            peer_id,
             client: Client::builder()
                 .timeout(timeout)
                 .build()
@@ -105,25 +107,27 @@ impl GossipClient {
                 ));
             }
 
-            let url = format!(
-                "http://{}/gossip{}",
-                peer.1.address.gossip,
-                GossipRoutes::GetData
-            );
             if let Some(req_v1) = requested_data.to_v1() {
-                self.send_data_internal(url, &req_v1).await
+                self.send_data_internal(
+                    &peer.1.address.gossip,
+                    GossipRoutes::GetData,
+                    &req_v1,
+                    ProtocolVersion::V1,
+                )
+                .await
             } else {
                 Ok(GossipResponse::Rejected(
                     RejectionReason::UnsupportedFeature,
                 ))
             }
         } else {
-            let url = format!(
-                "http://{}/gossip/v2{}",
-                peer.1.address.gossip,
-                GossipRoutes::GetData
-            );
-            self.send_data_internal(url, &requested_data).await
+            self.send_data_internal(
+                &peer.1.address.gossip,
+                GossipRoutes::GetData,
+                &requested_data,
+                ProtocolVersion::V2,
+            )
+            .await
         };
 
         let response_time = start_time.elapsed();
@@ -203,14 +207,15 @@ impl GossipClient {
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
             if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
-                let url = format!(
-                    "http://{}/gossip{}",
-                    peer.1.address.gossip,
-                    GossipRoutes::PullData
-                );
                 if let Some(req_v1) = requested_data.to_v1() {
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
-                        self.send_data_internal(url, &req_v1).await;
+                        self.send_data_internal(
+                            &peer.1.address.gossip,
+                            GossipRoutes::PullData,
+                            &req_v1,
+                            ProtocolVersion::V1,
+                        )
+                        .await;
 
                     res_v1.map(|response| match response {
                         GossipResponse::Accepted(maybe_data) => {
@@ -224,12 +229,13 @@ impl GossipClient {
                     ))
                 }
             } else {
-                let url = format!(
-                    "http://{}/gossip/v2{}",
-                    peer.1.address.gossip,
-                    GossipRoutes::PullData
-                );
-                self.send_data_internal(url, &requested_data).await
+                self.send_data_internal(
+                    &peer.1.address.gossip,
+                    GossipRoutes::PullData,
+                    &requested_data,
+                    ProtocolVersion::V2,
+                )
+                .await
             };
 
         let response_time = start_time.elapsed();
@@ -328,18 +334,71 @@ impl GossipClient {
         }
     }
 
-    pub async fn post_handshake(
+    pub async fn post_handshake_v1(
         &self,
         peer: SocketAddr,
         version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
-        let path = if version.protocol_version == ProtocolVersion::V1 {
-            format!("gossip{}", GossipRoutes::Version)
-        } else {
-            format!("gossip/v2{}", GossipRoutes::Handshake)
-        };
+        // V1 uses /handshake endpoint (without v2 prefix)
+        let path = format!("gossip{}", GossipRoutes::Handshake);
         let url = format!("http://{}/{}", peer, path);
-        debug!("Posting handshake to {}: {:?}", url, version);
+        debug!("Posting V1 handshake to {}: {:?}", url, version);
+        let response = self
+            .internal_client()
+            .post(&url)
+            .json(&version)
+            .send()
+            .await
+            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        let response: GossipResponse<HandshakeResponse> =
+            response.json().await.map_err(|error| {
+                GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+            })?;
+
+        match response {
+            GossipResponse::Accepted(version_response) => {
+                Ok(PeerResponse::Accepted(version_response))
+            }
+            GossipResponse::Rejected(reason) => match reason {
+                RejectionReason::InvalidCredentials => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::InvalidCredentials,
+                        message: Some("Invalid credentials provided".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                RejectionReason::ProtocolMismatch => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::ProtocolMismatch,
+                        message: Some("Protocol mismatch".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                _ => Err(GossipClientError::GetRequest(
+                    peer.to_string(),
+                    format!("Unexpected rejection reason: {:?}", reason),
+                )),
+            },
+        }
+    }
+
+    pub async fn post_handshake_v2(
+        &self,
+        peer: SocketAddr,
+        version: HandshakeRequestV2,
+    ) -> Result<PeerResponse, GossipClientError> {
+        // V2 uses /v2/handshake endpoint
+        let path = format!("gossip/v2{}", GossipRoutes::Handshake);
+        let url = format!("http://{}/{}", peer, path);
+        debug!("Posting V2 handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
             .post(&url)
@@ -558,34 +617,28 @@ impl GossipClient {
         match data {
             GossipDataV2::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::Chunk
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Chunk,
                     unpacked_chunk,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::Transaction
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Transaction,
                     irys_transaction_header,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::CommitmentTx
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::CommitmentTx,
                     commitment_tx,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
@@ -598,45 +651,37 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::Block
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Block,
                     &irys_block_header,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::BlockBody(block_body) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::BlockBody
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::BlockBody,
                     &block_body,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::ExecutionPayload
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::ExecutionPayload,
                     &execution_payload,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::IngressProof
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::IngressProof,
                     ingress_proof,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
@@ -652,34 +697,28 @@ impl GossipClient {
         match data {
             GossipDataV1::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::Chunk
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Chunk,
                     unpacked_chunk,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::Transaction
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Transaction,
                     irys_transaction_header,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::CommitmentTx
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::CommitmentTx,
                     commitment_tx,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
@@ -692,34 +731,28 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::Block
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Block,
                     irys_block_header,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::ExecutionPayload
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::ExecutionPayload,
                     execution_payload,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::IngressProof
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::IngressProof,
                     ingress_proof,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
@@ -728,28 +761,40 @@ impl GossipClient {
 
     async fn send_data_internal<T, R>(
         &self,
-        url: String,
+        gossip_address: &SocketAddr,
+        route: GossipRoutes,
         data: &T,
+        protocol_version: ProtocolVersion,
     ) -> GossipResult<GossipResponse<R>>
     where
-        T: Serialize + ?Sized,
+        T: Serialize + Clone,
         for<'de> R: Deserialize<'de>,
     {
-        debug!("Sending data to {}", url);
+        // Construct URL based on protocol version
+        let url = match protocol_version {
+            ProtocolVersion::V1 => format!("http://{}/gossip{}", gossip_address, route),
+            ProtocolVersion::V2 => format!("http://{}/gossip/v2{}", gossip_address, route),
+        };
 
-        let req = self.create_request(data);
-        let response =
-            self.client
-                .post(&url)
-                .json(&req)
-                .send()
-                .await
-                .map_err(|response_error| {
-                    GossipError::Network(format!(
-                        "Failed to send data to {}: {}",
-                        url, response_error
-                    ))
-                })?;
+        debug!("Sending data to {} using {:?}", url, protocol_version);
+
+        let response = match protocol_version {
+            ProtocolVersion::V1 => {
+                let req = self.create_request_v1(data.clone());
+                self.client.post(&url).json(&req).send().await
+            }
+            ProtocolVersion::V2 => {
+                let req = self.create_request_v2(data.clone());
+                self.client.post(&url).json(&req).send().await
+            }
+        };
+
+        let response = response.map_err(|response_error| {
+            GossipError::Network(format!(
+                "Failed to send data to {}: {}",
+                url, response_error
+            ))
+        })?;
 
         let status = response.status();
 
@@ -926,8 +971,16 @@ impl GossipClient {
         });
     }
 
-    fn create_request<T>(&self, data: T) -> GossipRequest<T> {
-        GossipRequest {
+    fn create_request_v1<T>(&self, data: T) -> irys_types::GossipRequestV1<T> {
+        irys_types::GossipRequestV1 {
+            miner_address: self.mining_address,
+            data,
+        }
+    }
+
+    fn create_request_v2<T>(&self, data: T) -> irys_types::GossipRequestV2<T> {
+        irys_types::GossipRequestV2 {
+            peer_id: self.peer_id,
             miner_address: self.mining_address,
             data,
         }
@@ -1651,13 +1704,21 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             Self {
-                client: GossipClient::new(Duration::from_secs(1), IrysAddress::from([1_u8; 20])),
+                client: GossipClient::new(
+                    Duration::from_secs(1),
+                    IrysAddress::from([1_u8; 20]),
+                    IrysPeerId::from([1_u8; 20]),
+                ),
             }
         }
 
         fn with_timeout(timeout: Duration) -> Self {
             Self {
-                client: GossipClient::new(timeout, IrysAddress::from([1_u8; 20])),
+                client: GossipClient::new(
+                    timeout,
+                    IrysAddress::from([1_u8; 20]),
+                    IrysPeerId::from([1_u8; 20]),
+                ),
             }
         }
     }
@@ -1935,6 +1996,7 @@ mod tests {
                     .unwrap()
                     .as_secs(),
                 protocol_version: Default::default(),
+                peer_id: None,
             };
             (mining_addr, peer)
         }

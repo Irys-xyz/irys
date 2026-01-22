@@ -2363,6 +2363,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         GossipClient::new(
             Duration::from_secs(5),
             self.node_ctx.config.node_config.miner_address(),
+            self.node_ctx.config.node_config.peer_id(),
         )
     }
 
@@ -2385,16 +2386,16 @@ impl IrysNodeTest<IrysNodeCtx> {
         self.node_ctx
             .config
             .irys_signer()
-            .sign_p2p_handshake(&mut handshake)
+            .sign_p2p_handshake_v1(&mut handshake)
             .expect("sign p2p handshake");
         handshake
     }
 
-    // Announce this node to another node via gossip handshake (POST /gossip/v2/handshake)
+    // Announce this node to another node via gossip handshake (POST /gossip/handshake)
     pub async fn announce_to(&self, dst: &Self) -> eyre::Result<()> {
         let vr = self.build_handshake_request();
         self.get_gossip_client()
-            .post_handshake(dst.get_gossip_addr(), vr)
+            .post_handshake_v1(dst.get_gossip_addr(), vr)
             .await?;
         Ok(())
     }

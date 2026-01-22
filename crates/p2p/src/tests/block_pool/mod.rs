@@ -272,6 +272,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
+            peer_id: None,
         },
         true,
     );
@@ -453,6 +454,7 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
+            peer_id: None,
         },
         true,
     );
@@ -709,6 +711,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
+            peer_id: None,
         },
         true,
     );

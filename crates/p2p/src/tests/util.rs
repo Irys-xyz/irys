@@ -30,7 +30,7 @@ use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
     DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
-    IrysBlockHeader, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
     TxKnownStatus, UnpackedChunk, H256,
 };
@@ -453,6 +453,7 @@ impl GossipServiceTestFixture {
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
+            self.config.node_config.peer_id(),
             self.gossip_receiver.take().expect("to take receiver"),
         );
         info!("Starting gossip service on port {}", self.gossip_port);
@@ -529,6 +530,7 @@ impl GossipServiceTestFixture {
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
+            peer_id: None,
         }
     }
 
@@ -1028,6 +1030,7 @@ pub(crate) async fn data_handler_stub(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
+            IrysPeerId::repeat_byte(2),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
@@ -1073,6 +1076,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
+            IrysPeerId::repeat_byte(2),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

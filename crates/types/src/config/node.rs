@@ -4,7 +4,8 @@ use crate::{
         phantoms::{IrysPrice, Usd},
         Amount,
     },
-    ConsensusConfig, IrysAddress, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig, H256,
+    ConsensusConfig, IrysAddress, IrysPeerId, MempoolConfig, PeerAddress, RethPeerInfo, VdfConfig,
+    H256,
 };
 use crate::{serde_utils, ConsensusOptions};
 #[cfg(any(test, feature = "test-utils"))]
@@ -40,6 +41,13 @@ pub struct NodeConfig {
         serialize_with = "serde_utils::serializes_signing_key"
     )]
     pub mining_key: k256::ecdsa::SigningKey,
+
+    /// Peer network identifier (generated if not provided)
+    /// This is the node's identity in the P2P network, separate from mining address.
+    /// If not specified in config, a random peer_id will be generated on startup
+    /// and persisted back to the config file.
+    #[serde(default)]
+    pub peer_id: Option<IrysPeerId>,
 
     /// The initial list of peers to contact for block sync
     pub trusted_peers: Vec<PeerAddress>,
@@ -744,6 +752,21 @@ impl NodeConfig {
         IrysAddress::from_private_key(&self.mining_key)
     }
 
+    /// Get the peer_id, generating one if not present (without persisting)
+    pub fn peer_id(&self) -> IrysPeerId {
+        self.peer_id.unwrap_or_else(|| {
+            // Generate from random 20 bytes
+            IrysPeerId::from(rand::random::<[u8; 20]>())
+        })
+    }
+
+    /// Generate and set peer_id if not present
+    pub fn ensure_peer_id(&mut self) {
+        if self.peer_id.is_none() {
+            self.peer_id = Some(IrysPeerId::from(rand::random::<[u8; 20]>()));
+        }
+    }
+
     pub fn new_random_signer(&self) -> IrysSigner {
         IrysSigner::random_signer(&self.consensus_config())
     }
@@ -885,6 +908,7 @@ impl NodeConfig {
             p2p_gossip: P2PGossipConfig::default(),
             p2p_pull: P2PPullConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
+            peer_id: None,
             stake_pledge_drives: false,
             sync: SyncConfig::default(),
         }
@@ -1031,6 +1055,7 @@ impl NodeConfig {
             p2p_pull: P2PPullConfig::default(),
 
             genesis_peer_discovery_timeout_millis: 10000,
+            peer_id: None,
             stake_pledge_drives: false,
 
             sync: SyncConfig::default(),

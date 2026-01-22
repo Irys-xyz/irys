@@ -26,7 +26,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{Config, DatabaseProvider, IrysAddress, P2PGossipConfig};
+use irys_types::{Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -124,12 +124,13 @@ impl P2PService {
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
         mining_address: IrysAddress,
+        peer_id: IrysPeerId,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
         let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(client_timeout, mining_address);
+        let client = GossipClient::new(client_timeout, mining_address, peer_id);
 
         Self {
             client,

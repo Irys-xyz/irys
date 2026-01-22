@@ -48,6 +48,11 @@ pub mod rlp;
 pub mod address;
 pub use address::IrysAddress;
 
+/// Type alias for peer network identifier.
+/// Uses the same underlying type as IrysAddress (20 bytes) but represents
+/// a separate identity for P2P networking, distinct from mining/staking address.
+pub type IrysPeerId = IrysAddress;
+
 use std::sync::{atomic::AtomicU64, Arc};
 
 pub use block::*;
