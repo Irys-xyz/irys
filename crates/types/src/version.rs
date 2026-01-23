@@ -4,6 +4,7 @@ use crate::{
 };
 use crate::{IrysAddress, U256};
 use alloy_primitives::keccak256;
+use alloy_rlp::Encodable as _;
 use bytes::Buf as _;
 use reth_codecs::Compact;
 use semver::Version;
@@ -58,6 +59,24 @@ impl ProtocolVersion {
 
     pub fn supported_versions_u32() -> &'static [u32] {
         &[Self::V1 as u32, Self::V2 as u32]
+    }
+}
+
+/// We can't derive these impls directly due to the RLP not supporting repr structs/enums
+impl alloy_rlp::Encodable for ProtocolVersion {
+    fn encode(&self, out: &mut dyn bytes::BufMut) {
+        (*self as u32).encode(out);
+    }
+
+    fn length(&self) -> usize {
+        (*self as u32).length()
+    }
+}
+
+impl alloy_rlp::Decodable for ProtocolVersion {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let value = u32::decode(buf)?;
+        Ok(Self::from(value))
     }
 }
 
@@ -241,20 +260,35 @@ impl HandshakeRequestV1 {
 }
 
 impl HandshakeRequestV2 {
-    fn encode_for_signing<B>(&self, buf: &mut B) -> usize
-    where
-        B: bytes::BufMut + AsMut<[u8]>,
-    {
-        let mut size = 0;
-        size += encode_version_for_signing(&self.version, buf);
-        size += (self.protocol_version as u32).to_compact(buf);
-        size += self.mining_address.to_compact(buf);
-        size += self.peer_id.to_compact(buf); // Include peer_id in V2 signature
-        size += self.chain_id.to_compact(buf);
-        size += self.address.to_compact(buf);
-        size += self.timestamp.to_compact(buf);
-        size += self.user_agent.to_compact(buf);
-        size
+    /// Rely on RLP encoding for signing
+    fn encode_for_signing(&self, out: &mut dyn bytes::BufMut) {
+        // Manually encode using RLP, excluding the signature field
+        let payload_length = encode_version_rlp_length(&self.version)
+            + encode_protocol_version_rlp_length(&self.protocol_version)
+            + self.mining_address.length()
+            + self.peer_id.length()
+            + self.chain_id.length()
+            + encode_peer_address_rlp_length(&self.address)
+            + self.timestamp.length()
+            + self.user_agent.as_ref().map_or(1, alloy_rlp::Encodable::length); // empty string for None
+
+        alloy_rlp::Header {
+            list: true,
+            payload_length,
+        }
+        .encode(out);
+        encode_version_rlp(&self.version, out);
+        encode_protocol_version_rlp(&self.protocol_version, out);
+        self.mining_address.encode(out);
+        self.peer_id.encode(out);
+        self.chain_id.encode(out);
+        encode_peer_address_rlp(&self.address, out);
+        self.timestamp.encode(out);
+        if let Some(ua) = &self.user_agent {
+            ua.encode(out);
+        } else {
+            "".encode(out);
+        }
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
@@ -441,6 +475,120 @@ pub struct NodeInfo {
     // #[serde(with = "address_base58_stringify")]
     pub mining_address: IrysAddress,
     pub cumulative_difficulty: U256,
+}
+
+// RLP encoding implementations for HandshakeRequestV2 types
+
+// Helper functions for RLP encoding (avoiding orphan rule violations)
+fn encode_version_rlp(version: &Version, out: &mut dyn bytes::BufMut) {
+    alloy_rlp::Header {
+        list: true,
+        payload_length: version.major.length() + version.minor.length() + version.patch.length(),
+    }
+    .encode(out);
+    version.major.encode(out);
+    version.minor.encode(out);
+    version.patch.encode(out);
+}
+
+fn encode_version_rlp_length(version: &Version) -> usize {
+    let payload_length = version.major.length() + version.minor.length() + version.patch.length();
+    payload_length + alloy_rlp::length_of_length(payload_length)
+}
+
+fn encode_protocol_version_rlp(pv: &ProtocolVersion, out: &mut dyn bytes::BufMut) {
+    (*pv as u32).encode(out);
+}
+
+fn encode_protocol_version_rlp_length(pv: &ProtocolVersion) -> usize {
+    (*pv as u32).length()
+}
+
+fn encode_socket_addr_rlp(addr: &SocketAddr, out: &mut dyn bytes::BufMut) {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let ip_bytes = v4.ip().octets();
+            let port = v4.port();
+            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            alloy_rlp::Header {
+                list: true,
+                payload_length,
+            }
+            .encode(out);
+            4_u8.encode(out); // IPv4 tag
+            ip_bytes.as_slice().encode(out);
+            port.encode(out);
+        }
+        SocketAddr::V6(v6) => {
+            let ip_bytes = v6.ip().octets();
+            let port = v6.port();
+            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            alloy_rlp::Header {
+                list: true,
+                payload_length,
+            }
+            .encode(out);
+            6_u8.encode(out); // IPv6 tag
+            ip_bytes.as_slice().encode(out);
+            port.encode(out);
+        }
+    }
+}
+
+fn encode_socket_addr_rlp_length(addr: &SocketAddr) -> usize {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let ip_bytes = v4.ip().octets();
+            let port = v4.port();
+            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            payload_length + alloy_rlp::length_of_length(payload_length)
+        }
+        SocketAddr::V6(v6) => {
+            let ip_bytes = v6.ip().octets();
+            let port = v6.port();
+            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            payload_length + alloy_rlp::length_of_length(payload_length)
+        }
+    }
+}
+
+fn encode_peer_address_rlp(addr: &PeerAddress, out: &mut dyn bytes::BufMut) {
+    let payload_length = encode_socket_addr_rlp_length(&addr.gossip)
+        + encode_socket_addr_rlp_length(&addr.api)
+        + encode_reth_peer_info_rlp_length(&addr.execution);
+    alloy_rlp::Header {
+        list: true,
+        payload_length,
+    }
+    .encode(out);
+    encode_socket_addr_rlp(&addr.gossip, out);
+    encode_socket_addr_rlp(&addr.api, out);
+    encode_reth_peer_info_rlp(&addr.execution, out);
+}
+
+fn encode_peer_address_rlp_length(addr: &PeerAddress) -> usize {
+    let payload_length = encode_socket_addr_rlp_length(&addr.gossip)
+        + encode_socket_addr_rlp_length(&addr.api)
+        + encode_reth_peer_info_rlp_length(&addr.execution);
+    payload_length + alloy_rlp::length_of_length(payload_length)
+}
+
+fn encode_reth_peer_info_rlp(info: &RethPeerInfo, out: &mut dyn bytes::BufMut) {
+    let payload_length =
+        encode_socket_addr_rlp_length(&info.peering_tcp_addr) + info.peer_id.0.as_slice().length();
+    alloy_rlp::Header {
+        list: true,
+        payload_length,
+    }
+    .encode(out);
+    encode_socket_addr_rlp(&info.peering_tcp_addr, out);
+    info.peer_id.0.as_slice().encode(out);
+}
+
+fn encode_reth_peer_info_rlp_length(info: &RethPeerInfo) -> usize {
+    let payload_length =
+        encode_socket_addr_rlp_length(&info.peering_tcp_addr) + info.peer_id.0.as_slice().length();
+    payload_length + alloy_rlp::length_of_length(payload_length)
 }
 
 #[cfg(test)]
