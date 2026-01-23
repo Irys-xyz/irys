@@ -167,9 +167,12 @@ where
             )));
         };
 
-        // For now, we still look up by miner_address since PeerList hasn't been updated yet
-        // TODO: Update PeerList to use peer_id as primary key
-        if let Some(peer) = peer_list.peer_by_mining_address(&miner_address) {
+        // Try to look up by peer_id first, fallback to miner_address for V1 peers
+        let peer = peer_list
+            .peer_by_id(&peer_id)
+            .or_else(|| peer_list.peer_by_mining_address(&miner_address));
+
+        if let Some(peer) = peer {
             // Verify IP address matches
             if peer.address.gossip.ip() != peer_address.ip() {
                 debug!(
@@ -186,16 +189,20 @@ where
                 )));
             }
 
-            // TODO: Also verify peer_id matches when PeerList is updated
-            // For now, we just log if peer_id is different from what we expect
+            // Verify peer_id matches if we have one stored
             if let Some(stored_peer_id) = peer.peer_id {
                 if stored_peer_id != peer_id {
                     warn!(
                         stored_peer_id = %stored_peer_id,
                         received_peer_id = %peer_id,
                         miner_address = %miner_address,
-                        "Peer ID mismatch - peer may have changed their peer_id"
+                        "Peer ID mismatch - peer may have changed their peer_id, requires handshake"
                     );
+                    return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                        RejectionReason::HandshakeRequired(Some(
+                            HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+                        )),
+                    )));
                 }
             }
 
@@ -1067,6 +1074,7 @@ where
         let peer_list_entry = PeerListItem {
             address: peer_address,
             protocol_version: version_request.protocol_version,
+            peer_id: Some(mining_addr), // V1 FALLBACK: Set peer_id to mining_address
             ..Default::default()
         };
 

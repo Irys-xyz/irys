@@ -1147,7 +1147,7 @@ mod tests {
             last_seen: 123,
             is_online,
             protocol_version: Default::default(),
-            peer_id: None,
+            peer_id: Some(mining_addr), // V1 FALLBACK: Set peer_id to mining_addr
         };
         (mining_addr, peer)
     }

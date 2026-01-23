@@ -131,6 +131,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // spellchecker:off
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V2",
@@ -149,6 +150,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         "user_agent": "miner2/0.1.0 (macos/aarch64)",
         "signature": "E63bB6yPmiAS4JahXorbq8YYaFY8ncdvBa666hkz8jUeXHBmMJR8hJMH8CHitL9c2MJhUTH74trdFk5w8rufC1dYN"
     });
+    // spellchecker:on
 
     let req = TestRequest::post()
         .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))

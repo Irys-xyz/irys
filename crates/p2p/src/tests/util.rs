@@ -324,7 +324,10 @@ impl GossipServiceTestFixture {
         node_config.http.public_port = gossip_port;
         node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
+        let peer_id = random_signer.address();
         node_config.mining_key = random_signer.signer;
+        // Update peer_id to match the random mining key
+        node_config.peer_id = Some(peer_id);
         let config = Config::new(node_config);
 
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
@@ -530,7 +533,7 @@ impl GossipServiceTestFixture {
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
-            peer_id: None,
+            peer_id: Some(self.mining_address), // V1 FALLBACK: Set peer_id to mining_addr
         }
     }
 

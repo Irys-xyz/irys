@@ -48,7 +48,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
-    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    H256List, IrysAddress, IrysPeerId, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
@@ -56,7 +56,9 @@ use irys_types::{
     LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
     UnpackedChunk,
 };
-use irys_types::{HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion};
+use irys_types::{
+    HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
+};
 use irys_vdf::state::VdfStateReadonly;
 use irys_vdf::{step_number_to_salt_number, vdf_sha};
 use itertools::Itertools as _;
@@ -462,6 +464,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut peer_config = node_config.clone();
         peer_config.mining_key = peer_signer.signer.clone();
         peer_config.reward_address = peer_signer.address();
+        peer_config.peer_id = Some(IrysPeerId::from(peer_signer.address())); // V1 FALLBACK: set unique peer_id
 
         // Set peer mode and expected genesis hash via consensus config
         peer_config.node_mode = NodeMode::Peer;
