@@ -270,7 +270,10 @@ impl HandshakeRequestV2 {
             + self.chain_id.length()
             + encode_peer_address_rlp_length(&self.address)
             + self.timestamp.length()
-            + self.user_agent.as_ref().map_or(1, alloy_rlp::Encodable::length); // empty string for None
+            + self
+                .user_agent
+                .as_ref()
+                .map_or(1, alloy_rlp::Encodable::length); // empty string for None
 
         alloy_rlp::Header {
             list: true,
