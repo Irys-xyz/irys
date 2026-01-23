@@ -188,11 +188,13 @@ pub enum PreValidationError {
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
-    InvalidLedgerId {
+    InvalidLedgerIdForTx {
         tx_id: H256,
         expected: u32,
         actual: u32,
     },
+    #[error("Ledger id :{ledger_id} is invalid at block height: {block_height}")]
+    InvalidLedgerId { ledger_id: u32, block_height: u64 },
     #[error("Failed to calculate fees: {0}")]
     FeeCalculationFailed(String),
     #[error("Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}")]
@@ -591,6 +593,24 @@ pub async fn prevalidate_block(
     // TODO: add validation for the term ledger 'expires' field,
     // ensuring it gets properly updated on epoch boundaries, and it's
     // consistent with the block's height and parent block's height
+
+    // ========================================
+    // Data Ledger Validation
+    // ========================================
+    // Ensure only active data ledgers are present in the block
+    for ledger in &block.data_ledgers {
+        match DataLedger::try_from(ledger.ledger_id) {
+            Ok(DataLedger::Publish | DataLedger::Submit) => {
+                // Valid ledgers - continue
+            }
+            _ => {
+                return Err(PreValidationError::InvalidLedgerId {
+                    ledger_id: ledger.ledger_id,
+                    block_height: block.height,
+                })
+            }
+        }
+    }
 
     // ========================================
     // Transaction validation
@@ -2201,7 +2221,7 @@ pub async fn data_txs_are_valid(
         // All data transactions must have ledger_id set to Publish
         // TODO: support other term ledgers here
         if tx.ledger_id != DataLedger::Publish as u32 {
-            return Err(PreValidationError::InvalidLedgerId {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
                 tx_id: tx.id,
                 expected: DataLedger::Publish as u32,
                 actual: tx.ledger_id,
