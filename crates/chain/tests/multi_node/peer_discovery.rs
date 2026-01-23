@@ -135,7 +135,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     let version_json = serde_json::json!({
         "version": "0.1.0",
         "protocol_version": "V2",
-        "mining_address": "4JaNfJ1tQ2TCLREq6opq6pWGmCJW",
+        "mining_address": "4AV9BV6viDGKWW88TZ65qT1bZDMy",
         "peer_id": "4JaNfJ1tQ2TCLREq6opq6pWGmCJW",
         "chain_id": 1270,
         "address": {
@@ -148,7 +148,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         },
         "timestamp": 0,
         "user_agent": "miner2/0.1.0 (macos/aarch64)",
-        "signature": "E63bB6yPmiAS4JahXorbq8YYaFY8ncdvBa666hkz8jUeXHBmMJR8hJMH8CHitL9c2MJhUTH74trdFk5w8rufC1dYN"
+        "signature": "7Z8g7rpyjRFjQky3kHLGr6YU5Er44a1MfUH8LWqLL4FDjsdMwmeoCHbcDNQz8Y44RKo2biebghZ5qcmVQ1ioBvr2N"
     });
     // spellchecker:on
 
@@ -203,8 +203,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         "peer_id": miner_signer_2.address(),
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp,
-        // Signature from another signer, should fail verification
-        "signature": "7vAD7AoznW7zzFuyxnT4ghhX3i7jAZbR3i2tt8Pe8L6nCdNpDJHFA4N5qEvRMNyvkUHEDZShiXzjLniBet6rrPwtN"
+        // Signature from another signer (0xaabb...), should fail verification
+        "signature": "BGhPXuxCGZAomzoNKMZAr9ZrNEfcTWJgx5ag3N2fCDTVWgjTdc5SQhqQt4PHh6YZTYDnCURVGbuQL7vhEMjt4dhUo"
     });
 
     let req = TestRequest::post()
