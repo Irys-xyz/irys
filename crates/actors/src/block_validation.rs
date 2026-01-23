@@ -2991,6 +2991,7 @@ mod tests {
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
+            None, // No supply state needed for tests
             &consensus_config,
             tokio::runtime::Handle::current(),
         );
@@ -3830,7 +3831,7 @@ mod commitment_version_tests {
                     minimum_commitment_tx_version: min_version,
                 }),
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         }
     }
 
@@ -3844,7 +3845,7 @@ mod commitment_version_tests {
                 next_name_tbd: None,
                 aurora: None,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         }
     }
 

@@ -59,6 +59,7 @@ thiserror.workspace = true
 async-trait.workspace = true
 irys-macros-integer-tagged.workspace = true
 proptest.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 test-fuzz.workspace = true
