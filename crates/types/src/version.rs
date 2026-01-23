@@ -76,7 +76,11 @@ impl alloy_rlp::Encodable for ProtocolVersion {
 impl alloy_rlp::Decodable for ProtocolVersion {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let value = u32::decode(buf)?;
-        Ok(Self::from(value))
+        match value {
+            1 => Ok(Self::V1),
+            2 => Ok(Self::V2),
+            _ => Err(alloy_rlp::Error::Custom("unknown protocol version".into())),
+        }
     }
 }
 
