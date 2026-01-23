@@ -3833,7 +3833,7 @@ mod commitment_version_tests {
                     minimum_commitment_tx_version: min_version,
                 }),
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         }
     }
 
@@ -3847,7 +3847,7 @@ mod commitment_version_tests {
                 next_name_tbd: None,
                 aurora: None,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         }
     }
 
