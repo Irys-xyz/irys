@@ -295,7 +295,7 @@ async fn api_tx_status_lifecycle() {
     // Mine more blocks to reach migration depth and make it CONFIRMED
     // Skip if already Finalized
     if matches!(status.status, TransactionStatus::Mined) {
-        for _ in 0..(migration_depth + 2) {
+        for _ in 0..(migration_depth * 2) {
             ctx.mine_block().await.expect("expected mined block");
         }
     }
