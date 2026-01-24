@@ -216,7 +216,7 @@ async fn api_client_wait_for_promotion_happy_path() {
     ctx.stop().await;
 }
 
-/// Tests the transaction status API lifecycle: PENDING -> MINED -> FINALIZED
+/// Tests the transaction status API lifecycle: PENDING -> CONFIRMED -> FINALIZED
 #[test_log::test(tokio::test)]
 async fn api_tx_status_lifecycle() {
     let config = NodeConfig::testing();
@@ -255,7 +255,7 @@ async fn api_tx_status_lifecycle() {
     // Mine a block to include the transaction
     ctx.mine_block().await.expect("expected mined block");
 
-    // Poll until transaction is MINED or FINALIZED (accept both as terminal states)
+    // Poll until transaction is CONFIRMED or FINALIZED (accept both as terminal states)
     let mut status = None;
     for _ in 0..25 {
         let s = api_client

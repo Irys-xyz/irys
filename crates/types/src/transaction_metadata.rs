@@ -133,14 +133,14 @@ pub enum TransactionStatus {
 #[serde(rename_all = "camelCase")]
 pub struct TransactionStatusResponse {
     pub status: TransactionStatus,
-    /// Only present if status is MINED or FINALIZED
+    /// Only present if status is CONFIRMED or FINALIZED
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "crate::serialization::optional_string_u64"
     )]
     pub block_height: Option<u64>,
-    /// Only present if status is MINED or FINALIZED
+    /// Only present if status is CONFIRMED or FINALIZED
     /// Calculated as: current_head_height - block_height
     #[serde(
         default,
