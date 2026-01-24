@@ -79,7 +79,7 @@ impl alloy_rlp::Decodable for ProtocolVersion {
         match value {
             1 => Ok(Self::V1),
             2 => Ok(Self::V2),
-            _ => Err(alloy_rlp::Error::Custom("unknown protocol version".into())),
+            _ => Err(alloy_rlp::Error::Custom("unknown protocol version")),
         }
     }
 }
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_handshake_v2_rlp_encoding() {
-        use alloy_rlp::{Decodable, Encodable};
+        use alloy_rlp::{Decodable as _, Encodable as _};
         use semver::Version;
 
         // Create a test handshake request with all fields populated
@@ -761,7 +761,10 @@ mod tests {
             + handshake.chain_id.length()
             + encode_peer_address_rlp_length(&handshake.address)
             + handshake.timestamp.length()
-            + handshake.user_agent.as_ref().map_or(1, |ua| ua.length());
+            + handshake
+                .user_agent
+                .as_ref()
+                .map_or(1, alloy_rlp::Encodable::length);
 
         assert_eq!(
             calculated_length, header.payload_length,
@@ -790,7 +793,7 @@ mod tests {
 
         // Test 4: Verify Some("") and None produce identical encodings
         let mut handshake_empty_ua = handshake.clone();
-        handshake_empty_ua.user_agent = Some("".to_string());
+        handshake_empty_ua.user_agent = Some(String::new());
 
         let mut encoded_empty_ua = Vec::new();
         handshake_empty_ua.encode_for_signing(&mut encoded_empty_ua);
@@ -868,7 +871,7 @@ mod tests {
         assert_eq!(hash1, hash2, "Signature hash should be deterministic");
 
         // Verify that the hash changes when a field changes
-        let mut handshake_modified = handshake.clone();
+        let mut handshake_modified = handshake;
         handshake_modified.timestamp = 1000000001;
 
         let hash_modified = handshake_modified.signature_hash();
