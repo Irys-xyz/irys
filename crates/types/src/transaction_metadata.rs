@@ -123,7 +123,7 @@ pub enum TransactionStatus {
     /// Transaction is in the mempool but not yet in any block
     Pending,
     /// Transaction is included in a block, but the block hasn't been migrated to index yet
-    Mined,
+    Confirmed,
     /// Transaction's block has been migrated to the block index (finalized)
     Finalized,
 }
@@ -159,15 +159,15 @@ impl TransactionStatusResponse {
         }
     }
 
-    pub fn included(block_height: u64, current_head_height: u64) -> Self {
+    pub fn confirmed(block_height: u64, current_head_height: u64) -> Self {
         Self {
-            status: TransactionStatus::Mined,
+            status: TransactionStatus::Confirmed,
             block_height: Some(block_height),
             confirmations: Some(current_head_height.saturating_sub(block_height)),
         }
     }
 
-    pub fn confirmed(block_height: u64, current_head_height: u64) -> Self {
+    pub fn finalized(block_height: u64, current_head_height: u64) -> Self {
         Self {
             status: TransactionStatus::Finalized,
             block_height: Some(block_height),
@@ -214,12 +214,12 @@ mod tests {
         assert!(pending.block_height.is_none());
         assert!(pending.confirmations.is_none());
 
-        let included = TransactionStatusResponse::included(100, 110);
-        assert_eq!(included.status, TransactionStatus::Mined);
+        let included = TransactionStatusResponse::confirmed(100, 110);
+        assert_eq!(included.status, TransactionStatus::Confirmed);
         assert_eq!(included.block_height, Some(100));
         assert_eq!(included.confirmations, Some(10));
 
-        let confirmed = TransactionStatusResponse::confirmed(100, 110);
+        let confirmed = TransactionStatusResponse::finalized(100, 110);
         assert_eq!(confirmed.status, TransactionStatus::Finalized);
         assert_eq!(confirmed.block_height, Some(100));
         assert_eq!(confirmed.confirmations, Some(10));
@@ -310,15 +310,15 @@ mod tests {
     #[test]
     fn test_confirmations_saturating() {
         // Test edge case where block_height > current_head_height
-        let response = TransactionStatusResponse::included(110, 100);
+        let response = TransactionStatusResponse::confirmed(110, 100);
         assert_eq!(response.confirmations, Some(0));
 
         // Normal case
-        let response = TransactionStatusResponse::included(100, 110);
+        let response = TransactionStatusResponse::confirmed(100, 110);
         assert_eq!(response.confirmations, Some(10));
 
         // Same height
-        let response = TransactionStatusResponse::included(100, 100);
+        let response = TransactionStatusResponse::confirmed(100, 100);
         assert_eq!(response.confirmations, Some(0));
     }
 

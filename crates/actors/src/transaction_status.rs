@@ -29,15 +29,15 @@ pub async fn compute_transaction_status(
 
             let block_index = block_index_guard.read();
             // Check if the block has been migrated to index
-            let is_confirmed = block_index.get_item(included_height).is_some();
+            let is_finalized = block_index.get_item(included_height).is_some();
 
-            if is_confirmed {
-                Ok(Some(TransactionStatusResponse::confirmed(
+            if is_finalized {
+                Ok(Some(TransactionStatusResponse::finalized(
                     included_height,
                     current_head_height,
                 )))
             } else {
-                Ok(Some(TransactionStatusResponse::included(
+                Ok(Some(TransactionStatusResponse::confirmed(
                     included_height,
                     current_head_height,
                 )))

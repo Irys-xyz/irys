@@ -272,7 +272,7 @@ async fn api_tx_status_lifecycle() {
         // Accept both Mined and Finalized as valid terminal states
         if matches!(
             s.status,
-            TransactionStatus::Mined | TransactionStatus::Finalized
+            TransactionStatus::Confirmed | TransactionStatus::Finalized
         ) {
             status = Some(s);
             break;
@@ -282,7 +282,7 @@ async fn api_tx_status_lifecycle() {
     let status = status.expect("transaction should eventually be mined or finalized");
     assert!(matches!(
         status.status,
-        TransactionStatus::Mined | TransactionStatus::Finalized
+        TransactionStatus::Confirmed | TransactionStatus::Finalized
     ));
     assert!(status.block_height.is_some());
     assert!(status.confirmations.is_some());
@@ -294,7 +294,7 @@ async fn api_tx_status_lifecycle() {
 
     // Mine more blocks to reach migration depth and make it CONFIRMED
     // Skip if already Finalized
-    if matches!(status.status, TransactionStatus::Mined) {
+    if matches!(status.status, TransactionStatus::Confirmed) {
         for _ in 0..(migration_depth * 2) {
             ctx.mine_block().await.expect("expected mined block");
         }
@@ -386,7 +386,7 @@ async fn api_tx_status_commitment_tx() {
     assert!(
         matches!(
             status.status,
-            TransactionStatus::Mined | TransactionStatus::Finalized
+            TransactionStatus::Confirmed | TransactionStatus::Finalized
         ),
         "unexpected status: {:?}",
         status
