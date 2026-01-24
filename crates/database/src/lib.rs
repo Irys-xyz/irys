@@ -25,6 +25,7 @@ pub mod tables;
 
 pub use data_ledger::*;
 pub use database::*;
+pub use db_index::*;
 pub use system_ledger::*;
 
 pub mod reth_db {

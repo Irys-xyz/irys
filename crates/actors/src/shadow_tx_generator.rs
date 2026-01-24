@@ -768,15 +768,18 @@ mod tests {
     ) -> CommitmentTransaction {
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
-        CommitmentTransaction::V2(CommitmentTransactionV2 {
-            id: H256::from([7_u8; 32]),
-            commitment_type: commitment_type.into(),
-            anchor: H256::from([8_u8; 32]),
-            signer: signer.address(),
-            value,
-            fee,
-            signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
-            chain_id: config.chain_id,
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id: H256::from([7_u8; 32]),
+                commitment_type: commitment_type.into(),
+                anchor: H256::from([8_u8; 32]),
+                signer: signer.address(),
+                value,
+                fee,
+                signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
+                chain_id: config.chain_id,
+            },
+            metadata: Default::default(),
         })
     }
 

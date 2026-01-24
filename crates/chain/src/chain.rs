@@ -32,7 +32,7 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::{add_genesis_commitments, database, get_genesis_commitments, SystemLedger};
+use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::{
@@ -58,7 +58,7 @@ use irys_types::{
     app_state::DatabaseProvider, calculate_initial_difficulty, CloneableJoinHandle,
     CommitmentTransaction, Config, IrysBlockHeader, NodeConfig, NodeMode, OracleConfig,
     PartitionChunkRange, PeerNetworkSender, PeerNetworkServiceMessage, RethPeerInfo, ServiceSet,
-    TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
+    SystemLedger, TokioServiceHandle, UnixTimestamp, UnixTimestampMs, H256, U256,
 };
 use irys_types::{NetworkConfigWithDefaults as _, ShutdownReason};
 use irys_utils::signal::run_until_ctrl_c_or_channel_message;
