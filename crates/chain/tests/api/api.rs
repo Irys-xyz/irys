@@ -138,7 +138,7 @@ async fn api_end_to_end_test(chunk_size: usize) -> eyre::Result<()> {
 
         if resp.status() == StatusCode::OK {
             let result: DataTransactionHeader = test::read_body_json(resp).await;
-            assert_eq!(tx.header, result);
+            assert!(tx.header.eq_tx(&result));
             info!("Transaction was retrieved ok after {} attempts", attempts);
             break;
         }

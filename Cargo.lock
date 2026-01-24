@@ -5326,6 +5326,7 @@ dependencies = [
  "irys-types",
  "modular-bitfield",
  "paste",
+ "rand 0.8.5",
  "reth-codecs",
  "reth-db",
  "reth-db-api",

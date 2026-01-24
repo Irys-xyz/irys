@@ -215,7 +215,7 @@ pub async fn calculate_expired_ledger_fees(
 
     // Step 6: Fetch transactions
     let mut transactions = get_data_tx_in_parallel(all_tx_ids, mempool_guard, db).await?;
-    transactions.sort();
+    transactions.sort_by(irys_types::DataTransactionHeader::compare_tx);
 
     // Step 7: Calculate fees
     tracing::debug!(
@@ -637,7 +637,7 @@ fn aggregate_balance_deltas(
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
     let mut balance_delta = LedgerExpiryBalanceDelta::default();
-    transactions.sort(); // This ensures refunds will be sorted by tx_id
+    transactions.sort_by(irys_types::DataTransactionHeader::compare_tx); // This ensures refunds will be sorted by tx_id
 
     for data_tx in transactions.iter() {
         let miners_that_stored_this_tx = tx_to_miners
@@ -675,7 +675,7 @@ fn aggregate_balance_deltas(
 
         // process refunds of perm fee if the tx was not promoted
         {
-            if data_tx.promoted_height.is_none() {
+            if data_tx.promoted_height().is_none() {
                 // Only process refund if perm_fee exists (should always be present if tx is expected to be promoted)
                 let perm_fee = data_tx
                     .perm_fee
@@ -689,7 +689,7 @@ fn aggregate_balance_deltas(
             } else {
                 tracing::debug!(
                     tx.id = ?data_tx.id,
-                    tx.promoted_height = ?data_tx.promoted_height,
+                    tx.promoted_height = ?data_tx.promoted_height(),
                     "Tx was promoted, no refund needed",
                 );
             }
@@ -752,18 +752,24 @@ mod tests {
         let config = Config::new(node_config);
 
         // Create test transactions
-        let tx1 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::random(),
-            term_fee: U256::from(1000).into(),
-            data_size: 100,
-            ..Default::default()
+        let tx1 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                term_fee: U256::from(1000).into(),
+                data_size: 100,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
-        let tx2 = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::random(),
-            term_fee: U256::from(2000).into(),
-            data_size: 200,
-            ..Default::default()
+        let tx2 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                term_fee: U256::from(2000).into(),
+                data_size: 200,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
         // Create miners with duplicates

@@ -277,28 +277,109 @@ pub async fn get_tx_promotion_status(
     let tx_id: H256 = path.into_inner();
     debug!("Get tx_is_promoted by tx_id: {}", tx_id);
 
-    // Retrieve the transaction header from mempool or database
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-    state
-        .mempool_service
-        .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
-        .unwrap();
-
-    let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
-        err: "Unable to read result from oneshot".to_owned(),
-    })?;
-
-    let tx_header = oneshot_res
-        .first()
-        .and_then(|opt| opt.as_ref())
-        .ok_or_else(|| ApiError::ErrNoId {
-            id: tx_id.to_string(),
-            err: "Unable to find tx".to_owned(),
+    // DB metadata is authoritative; fetch it first
+    let db_metadata = state
+        .db
+        .view_eyre(|db_tx| {
+            irys_database::get_data_tx_metadata(db_tx, &tx_id).map_err(|e| eyre::eyre!("{:?}", e))
+        })
+        .map_err(|e| ApiError::Internal {
+            err: format!("Database error: {}", e),
         })?;
 
-    // Report its promoted status
+    let promotion_height = if let Some(metadata) = db_metadata {
+        // DB metadata exists - use it unconditionally
+        metadata.promoted_height
+    } else {
+        // No DB metadata - fall back to mempool header
+        let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
+        if let Err(err) = state
+            .mempool_service
+            .send(MempoolServiceMessage::GetDataTxs(vec![tx_id], oneshot_tx))
+        {
+            tracing::error!(
+                "API Failed to deliver MempoolServiceMessage::GetDataTxs: {}",
+                err
+            );
+            return Err(ApiError::Internal {
+                err: format!("Failed to query mempool for transaction: {}", err),
+            });
+        }
 
-    Ok(web::Json(PromotionStatus {
-        promotion_height: tx_header.promoted_height,
-    }))
+        let oneshot_res = oneshot_rx.await.map_err(|_| ApiError::Internal {
+            err: "Unable to read result from oneshot".to_owned(),
+        })?;
+
+        let tx_header = oneshot_res
+            .first()
+            .and_then(|opt| opt.as_ref())
+            .ok_or_else(|| ApiError::ErrNoId {
+                id: tx_id.to_string(),
+                err: "Unable to find tx".to_owned(),
+            })?;
+
+        tx_header.promoted_height()
+    };
+
+    Ok(web::Json(PromotionStatus { promotion_height }))
+}
+
+/// GET /v1/tx/{tx_id}/status
+/// Returns the current status of a transaction
+pub async fn get_tx_status(
+    state: web::Data<ApiState>,
+    path: web::Path<H256>,
+) -> Result<Json<irys_types::TransactionStatusResponse>, ApiError> {
+    let tx_id: H256 = path.into_inner();
+    info!("Get tx status by tx_id: {}", tx_id);
+
+    let current_head_height = {
+        // Get current head height from the block tree
+        let block_tree = state.block_tree.read();
+        let tip_block =
+            block_tree
+                .get_block(&block_tree.tip)
+                .ok_or_else(|| ApiError::Internal {
+                    err: "Unable to get block tree tip".to_owned(),
+                })?;
+        tip_block.height
+    };
+
+    // Load metadata from DB (if present) - check both data and commitment transactions metadata
+    let db_metadata = state
+        .db
+        .view_eyre(|db_tx| {
+            let data_metadata = irys_database::get_data_tx_metadata(db_tx, &tx_id)
+                .map_err(|e| eyre::eyre!("{:?}", e))?;
+            let commitment_metadata = irys_database::get_commitment_tx_metadata(db_tx, &tx_id)
+                .map_err(|e| eyre::eyre!("{:?}", e))?;
+            Ok(irys_actors::db_metadata_to_tx_metadata(
+                commitment_metadata,
+                data_metadata,
+            ))
+        })
+        .map_err(|e| ApiError::Internal {
+            err: format!("Database error: {}", e),
+        })?;
+
+    // Compute status (async mempool reads)
+    let status = irys_actors::compute_transaction_status(
+        db_metadata,
+        &tx_id,
+        &state.block_index,
+        current_head_height,
+        &state.mempool_guard,
+    )
+    .await
+    .map_err(|e| ApiError::Internal {
+        err: format!("Status computation error: {}", e),
+    })?;
+
+    match status {
+        Some(status) => Ok(Json(status)),
+        None => Err(ApiError::ErrNoId {
+            id: tx_id.to_string(),
+            err: "Transaction not found".to_owned(),
+        }),
+    }
 }

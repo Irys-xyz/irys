@@ -452,12 +452,15 @@ async fn create_stake_tx(
         .expect("Failed to get stake price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut stake_tx = CommitmentTransaction::V2(CommitmentTransactionV2 {
-        commitment_type: CommitmentTypeV2::Stake,
-        anchor,
-        fee: price_info.fee.try_into().expect("fee should fit in u64"),
-        value: price_info.value,
-        ..CommitmentTransactionV2::new(consensus)
+    let mut stake_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+        tx: CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::Stake,
+            anchor,
+            fee: price_info.fee.try_into().expect("fee should fit in u64"),
+            value: price_info.value,
+            ..CommitmentTransactionV2::new(consensus)
+        },
+        metadata: Default::default(),
     });
 
     info!("Created stake_tx with value: {:?}", stake_tx.value());

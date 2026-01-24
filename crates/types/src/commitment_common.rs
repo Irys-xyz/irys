@@ -7,13 +7,14 @@ pub use crate::{
         compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
         VersioningError,
     },
-    Arbitrary, Base64, CommitmentTransactionV1, CommitmentTransactionV2, CommitmentTypeV1,
-    CommitmentValidationError, Compact, ConsensusConfig, IrysAddress, IrysSignature, Node,
-    PledgeDataProvider, Proof, Signature, H256, U256,
+    Arbitrary, Base64, CommitmentTransactionMetadata, CommitmentTransactionV1,
+    CommitmentTransactionV2, CommitmentTypeV1, CommitmentValidationError, Compact, ConsensusConfig,
+    IrysAddress, IrysSignature, Node, PledgeDataProvider, Proof, Signature, H256, U256,
 };
 
 use alloy_rlp::Encodable as _;
 use irys_macros_integer_tagged::IntegerTagged;
+use serde::{Deserialize, Serialize};
 
 #[derive(
     PartialEq,
@@ -62,20 +63,41 @@ impl TryFrom<u8> for CommitmentStatus {
     }
 }
 
-// Commitment Transaction versioned wrapper
+// Wrapper structs to hold transaction + metadata for each version
+// These are transparent wrappers that delegate serde to the inner transaction
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary, Serialize, Deserialize)]
+pub struct CommitmentV1WithMetadata {
+    #[serde(flatten)]
+    pub tx: CommitmentTransactionV1,
+    #[serde(skip)]
+    pub metadata: CommitmentTransactionMetadata,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Arbitrary, Serialize, Deserialize)]
+pub struct CommitmentV2WithMetadata {
+    #[serde(flatten)]
+    pub tx: CommitmentTransactionV2,
+    #[serde(skip)]
+    pub metadata: CommitmentTransactionMetadata,
+}
+
+// Commitment Transaction versioned wrapper with metadata
 #[derive(Clone, Debug, Eq, IntegerTagged, PartialEq, Arbitrary, Hash)]
 #[repr(u8)]
 #[integer_tagged(tag = "version")]
 pub enum CommitmentTransaction {
     #[integer_tagged(version = 1)]
-    V1(CommitmentTransactionV1) = 1,
+    V1(CommitmentV1WithMetadata) = 1,
     #[integer_tagged(version = 2)]
-    V2(CommitmentTransactionV2) = 2,
+    V2(CommitmentV2WithMetadata) = 2,
 }
 
 impl Default for CommitmentTransaction {
     fn default() -> Self {
-        Self::V2(CommitmentTransactionV2::default())
+        Self::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2::default(),
+            metadata: CommitmentTransactionMetadata::new(),
+        })
     }
 }
 
@@ -120,8 +142,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn commitment_type(&self) -> CommitmentTypeV1 {
         match self {
-            Self::V1(v1) => v1.commitment_type,
-            Self::V2(v2) => v2.commitment_type.into(),
+            Self::V1(v1) => v1.tx.commitment_type,
+            Self::V2(v2) => v2.tx.commitment_type.into(),
         }
     }
 
@@ -130,7 +152,7 @@ impl CommitmentTransaction {
     pub fn commitment_type_v2(&self) -> Option<CommitmentTypeV2> {
         match self {
             Self::V1(_v1) => None,
-            Self::V2(v2) => Some(v2.commitment_type),
+            Self::V2(v2) => Some(v2.tx.commitment_type),
         }
     }
 
@@ -138,8 +160,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn id(&self) -> H256 {
         match self {
-            Self::V1(v1) => v1.id,
-            Self::V2(v2) => v2.id,
+            Self::V1(v1) => v1.tx.id,
+            Self::V2(v2) => v2.tx.id,
         }
     }
 
@@ -147,8 +169,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn fee(&self) -> u64 {
         match self {
-            Self::V1(v1) => v1.fee,
-            Self::V2(v2) => v2.fee,
+            Self::V1(v1) => v1.tx.fee,
+            Self::V2(v2) => v2.tx.fee,
         }
     }
 
@@ -156,8 +178,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn value(&self) -> U256 {
         match self {
-            Self::V1(v1) => v1.value,
-            Self::V2(v2) => v2.value,
+            Self::V1(v1) => v1.tx.value,
+            Self::V2(v2) => v2.tx.value,
         }
     }
 
@@ -165,8 +187,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn signer(&self) -> IrysAddress {
         match self {
-            Self::V1(v1) => v1.signer,
-            Self::V2(v2) => v2.signer,
+            Self::V1(v1) => v1.tx.signer,
+            Self::V2(v2) => v2.tx.signer,
         }
     }
 
@@ -174,8 +196,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn anchor(&self) -> H256 {
         match self {
-            Self::V1(v1) => v1.anchor,
-            Self::V2(v2) => v2.anchor,
+            Self::V1(v1) => v1.tx.anchor,
+            Self::V2(v2) => v2.tx.anchor,
         }
     }
 
@@ -183,8 +205,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn signature(&self) -> &IrysSignature {
         match self {
-            Self::V1(v1) => &v1.signature,
-            Self::V2(v2) => &v2.signature,
+            Self::V1(v1) => &v1.tx.signature,
+            Self::V2(v2) => &v2.tx.signature,
         }
     }
 
@@ -192,8 +214,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_signer(&mut self, signer: IrysAddress) {
         match self {
-            Self::V1(v1) => v1.signer = signer,
-            Self::V2(v2) => v2.signer = signer,
+            Self::V1(v1) => v1.tx.signer = signer,
+            Self::V2(v2) => v2.tx.signer = signer,
         }
     }
 
@@ -201,8 +223,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_signature(&mut self, signature: IrysSignature) {
         match self {
-            Self::V1(v1) => v1.signature = signature,
-            Self::V2(v2) => v2.signature = signature,
+            Self::V1(v1) => v1.tx.signature = signature,
+            Self::V2(v2) => v2.tx.signature = signature,
         }
     }
 
@@ -210,8 +232,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_id(&mut self, id: H256) {
         match self {
-            Self::V1(v1) => v1.id = id,
-            Self::V2(v2) => v2.id = id,
+            Self::V1(v1) => v1.tx.id = id,
+            Self::V2(v2) => v2.tx.id = id,
         }
     }
 
@@ -219,8 +241,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_anchor(&mut self, anchor: H256) {
         match self {
-            Self::V1(v1) => v1.anchor = anchor,
-            Self::V2(v2) => v2.anchor = anchor,
+            Self::V1(v1) => v1.tx.anchor = anchor,
+            Self::V2(v2) => v2.tx.anchor = anchor,
         }
     }
 
@@ -228,8 +250,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_fee(&mut self, fee: u64) {
         match self {
-            Self::V1(v1) => v1.fee = fee,
-            Self::V2(v2) => v2.fee = fee,
+            Self::V1(v1) => v1.tx.fee = fee,
+            Self::V2(v2) => v2.tx.fee = fee,
         }
     }
 
@@ -237,8 +259,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_value(&mut self, value: U256) {
         match self {
-            Self::V1(v1) => v1.value = value,
-            Self::V2(v2) => v2.value = value,
+            Self::V1(v1) => v1.tx.value = value,
+            Self::V2(v2) => v2.tx.value = value,
         }
     }
 
@@ -247,8 +269,8 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_commitment_type(&mut self, commitment_type: CommitmentTypeV1) {
         match self {
-            Self::V1(v1) => v1.commitment_type = commitment_type,
-            Self::V2(v2) => v2.commitment_type = commitment_type.into(),
+            Self::V1(v1) => v1.tx.commitment_type = commitment_type,
+            Self::V2(v2) => v2.tx.commitment_type = commitment_type.into(),
         }
     }
 
@@ -256,8 +278,35 @@ impl CommitmentTransaction {
     #[inline]
     pub fn set_chain_id(&mut self, chain_id: u64) {
         match self {
-            Self::V1(v1) => v1.chain_id = chain_id,
-            Self::V2(v2) => v2.chain_id = chain_id,
+            Self::V1(v1) => v1.tx.chain_id = chain_id,
+            Self::V2(v2) => v2.tx.chain_id = chain_id,
+        }
+    }
+
+    /// Get the metadata
+    #[inline]
+    pub fn metadata(&self) -> &CommitmentTransactionMetadata {
+        match self {
+            Self::V1(v1) => &v1.metadata,
+            Self::V2(v2) => &v2.metadata,
+        }
+    }
+
+    /// Get mutable metadata
+    #[inline]
+    pub fn metadata_mut(&mut self) -> &mut CommitmentTransactionMetadata {
+        match self {
+            Self::V1(v1) => &mut v1.metadata,
+            Self::V2(v2) => &mut v2.metadata,
+        }
+    }
+
+    /// Set the metadata
+    #[inline]
+    pub fn set_metadata(&mut self, new_metadata: CommitmentTransactionMetadata) {
+        match self {
+            Self::V1(v1) => v1.metadata = new_metadata,
+            Self::V2(v2) => v2.metadata = new_metadata,
         }
     }
 }
@@ -269,10 +318,10 @@ impl Compact for CommitmentTransaction {
     {
         match self {
             Self::V1(inner) => {
-                compact_with_discriminant(CommitmentTransactionV1::VERSION, inner, buf)
+                compact_with_discriminant(CommitmentTransactionV1::VERSION, &inner.tx, buf)
             }
             Self::V2(inner) => {
-                compact_with_discriminant(CommitmentTransactionV2::VERSION, inner, buf)
+                compact_with_discriminant(CommitmentTransactionV2::VERSION, &inner.tx, buf)
             }
         }
     }
@@ -281,11 +330,23 @@ impl Compact for CommitmentTransaction {
         match disc {
             CommitmentTransactionV1::VERSION => {
                 let (inner, rest2) = CommitmentTransactionV1::from_compact(rest, rest.len());
-                (Self::V1(inner), rest2)
+                (
+                    Self::V1(CommitmentV1WithMetadata {
+                        tx: inner,
+                        metadata: CommitmentTransactionMetadata::new(),
+                    }),
+                    rest2,
+                )
             }
             CommitmentTransactionV2::VERSION => {
                 let (inner, rest2) = CommitmentTransactionV2::from_compact(rest, rest.len());
-                (Self::V2(inner), rest2)
+                (
+                    Self::V2(CommitmentV2WithMetadata {
+                        tx: inner,
+                        metadata: CommitmentTransactionMetadata::new(),
+                    }),
+                    rest2,
+                )
             }
             other => panic!("{:?}", VersioningError::UnsupportedVersion(other)),
         }
@@ -302,8 +363,8 @@ impl alloy_rlp::Encodable for CommitmentTransaction {
     fn encode(&self, out: &mut dyn bytes::BufMut) {
         let mut buf = Vec::new();
         match self {
-            Self::V1(inner) => inner.encode(&mut buf),
-            Self::V2(inner) => inner.encode(&mut buf),
+            Self::V1(inner) => inner.tx.encode(&mut buf),
+            Self::V2(inner) => inner.tx.encode(&mut buf),
         }
         encode_rlp_version(buf, self.version(), out);
     }
@@ -317,11 +378,17 @@ impl alloy_rlp::Decodable for CommitmentTransaction {
         match version {
             CommitmentTransactionV1::VERSION => {
                 let inner = CommitmentTransactionV1::decode(buf)?;
-                Ok(Self::V1(inner))
+                Ok(Self::V1(CommitmentV1WithMetadata {
+                    tx: inner,
+                    metadata: CommitmentTransactionMetadata::new(),
+                }))
             }
             CommitmentTransactionV2::VERSION => {
                 let inner = CommitmentTransactionV2::decode(buf)?;
-                Ok(Self::V2(inner))
+                Ok(Self::V2(CommitmentV2WithMetadata {
+                    tx: inner,
+                    metadata: CommitmentTransactionMetadata::new(),
+                }))
             }
             _ => Err(alloy_rlp::Error::Custom("Unsupported version")),
         }
@@ -331,17 +398,26 @@ impl alloy_rlp::Decodable for CommitmentTransaction {
 impl CommitmentTransaction {
     /// Create a new CommitmentTransaction wrapped in the versioned wrapper
     pub fn new(config: &ConsensusConfig) -> Self {
-        Self::V2(CommitmentTransactionV2::new(config))
+        Self::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2::new(config),
+            metadata: CommitmentTransactionMetadata::new(),
+        })
     }
 
     /// Create a new stake transaction with the configured stake fee as value
     pub fn new_stake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self::V2(CommitmentTransactionV2::new_stake(config, anchor))
+        Self::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2::new_stake(config, anchor),
+            metadata: CommitmentTransactionMetadata::new(),
+        })
     }
 
     /// Create a new unstake transaction with the configured stake fee as value
     pub fn new_unstake(config: &ConsensusConfig, anchor: H256) -> Self {
-        Self::V2(CommitmentTransactionV2::new_unstake(config, anchor))
+        Self::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2::new_unstake(config, anchor),
+            metadata: CommitmentTransactionMetadata::new(),
+        })
     }
 
     /// Create a new pledge transaction with decreasing cost per pledge
@@ -351,9 +427,10 @@ impl CommitmentTransaction {
         provider: &impl PledgeDataProvider,
         signer_address: IrysAddress,
     ) -> Self {
-        Self::V2(
-            CommitmentTransactionV2::new_pledge(config, anchor, provider, signer_address).await,
-        )
+        Self::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2::new_pledge(config, anchor, provider, signer_address).await,
+            metadata: CommitmentTransactionMetadata::new(),
+        })
     }
 
     /// Create a new unpledge transaction that refunds the most recent pledge's cost
@@ -364,8 +441,8 @@ impl CommitmentTransaction {
         signer_address: IrysAddress,
         partition_hash: H256,
     ) -> Self {
-        Self::V2(
-            CommitmentTransactionV2::new_unpledge(
+        Self::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2::new_unpledge(
                 config,
                 anchor,
                 provider,
@@ -373,14 +450,15 @@ impl CommitmentTransaction {
                 partition_hash,
             )
             .await,
-        )
+            metadata: CommitmentTransactionMetadata::new(),
+        })
     }
 
     /// Validates that the commitment transaction has a sufficient fee
     pub fn validate_fee(&self, config: &ConsensusConfig) -> Result<(), CommitmentValidationError> {
         match self {
-            Self::V1(v1) => v1.validate_fee(config),
-            Self::V2(v2) => v2.validate_fee(config),
+            Self::V1(v1) => v1.tx.validate_fee(config),
+            Self::V2(v2) => v2.tx.validate_fee(config),
         }
     }
 
@@ -390,8 +468,8 @@ impl CommitmentTransaction {
         config: &ConsensusConfig,
     ) -> Result<(), CommitmentValidationError> {
         match self {
-            Self::V1(v1) => v1.validate_value(config),
-            Self::V2(v2) => v2.validate_value(config),
+            Self::V1(v1) => v1.tx.validate_value(config),
+            Self::V2(v2) => v2.tx.validate_value(config),
         }
     }
 }
