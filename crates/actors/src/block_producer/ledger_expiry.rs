@@ -65,8 +65,8 @@ use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{BlockIndex, BlockTreeReadGuard, EpochSnapshot};
 use irys_types::{
     app_state::DatabaseProvider, fee_distribution::TermFeeCharges, ledger_chunk_offset_ii,
-    BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysAddress, IrysBlockHeader,
-    IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, H256, U256,
+    BlockHeight, BlockIndexItem, Config, DataLedger, DataTransactionHeader, IrysAddress,
+    IrysBlockHeader, IrysTransactionId, LedgerChunkOffset, LedgerChunkRange, H256, U256,
 };
 use nodit::{interval::ii, InclusiveInterval as _};
 use std::collections::BTreeMap;
@@ -719,9 +719,6 @@ impl SlotIndex {
         LedgerChunkRange(ledger_chunk_offset_ii!(start, end))
     }
 }
-
-/// Type alias for block height/index position
-type BlockHeight = u64;
 
 /// Encapsulates information about a boundary block
 #[derive(Debug, Clone)]

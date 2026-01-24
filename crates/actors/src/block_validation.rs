@@ -157,6 +157,12 @@ pub enum PreValidationError {
         "Transaction {tx_id} already included in previous Publish ledger in block {block_hash:?}"
     )]
     PublishTxAlreadyIncluded { tx_id: H256, block_hash: BlockHash },
+    #[error("Transaction {tx_id} cannot be promoted from {from:?} to {to:?}")]
+    InvalidPromotionPath {
+        tx_id: H256,
+        from: DataLedger,
+        to: DataLedger,
+    },
 
     #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}")]
     SubmitTxAlreadyIncluded {
@@ -182,11 +188,13 @@ pub enum PreValidationError {
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
-    InvalidLedgerId {
+    InvalidLedgerIdForTx {
         tx_id: H256,
         expected: u32,
         actual: u32,
     },
+    #[error("Ledger id :{ledger_id} is invalid at block height: {block_height}")]
+    InvalidLedgerId { ledger_id: u32, block_height: u64 },
     #[error("Failed to calculate fees: {0}")]
     FeeCalculationFailed(String),
     #[error("Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}")]
@@ -585,6 +593,24 @@ pub async fn prevalidate_block(
     // TODO: add validation for the term ledger 'expires' field,
     // ensuring it gets properly updated on epoch boundaries, and it's
     // consistent with the block's height and parent block's height
+
+    // ========================================
+    // Data Ledger Validation
+    // ========================================
+    // Ensure only active data ledgers are present in the block
+    for ledger in &block.data_ledgers {
+        match DataLedger::try_from(ledger.ledger_id) {
+            Ok(DataLedger::Publish | DataLedger::Submit) => {
+                // Valid ledgers - continue
+            }
+            _ => {
+                return Err(PreValidationError::InvalidLedgerId {
+                    ledger_id: ledger.ledger_id,
+                    block_height: block.height,
+                })
+            }
+        }
+    }
 
     // ========================================
     // Transaction validation
@@ -2111,40 +2137,66 @@ pub async fn data_txs_are_valid(
 
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
+                    DataLedger::OneYear => {
+                        // TODO some validation
+                    }
+                    DataLedger::ThirtyDay => {
+                        // TODO some validation
+                    }
                 }
             }
             TxInclusionState::Found {
                 ledger_current: (ledger_current, current_block_hash),
                 ledger_historical: (ledger_historical, historical_block_hash),
             } => {
-                match (ledger_current, ledger_historical) {
-                    (DataLedger::Publish, DataLedger::Submit) => {
-                        if current_block_hash == historical_block_hash
-                            && current_block_hash == &block.block_hash
-                        {
-                            // tx was included & promoted within the same block
-                            validate_price(tx)?;
-                        }
+                match ledger_current {
+                    DataLedger::Publish => {
+                        match ledger_historical {
+                            DataLedger::Submit => {
+                                if current_block_hash == historical_block_hash
+                                    && current_block_hash == &block.block_hash
+                                {
+                                    // tx was included & promoted within the same block
+                                    validate_price(tx)?;
+                                }
 
-                        // OK: Transaction promoted from past Submit to current Publish
-                        debug!(
-                            "Transaction {} promoted from past Submit to current Publish ledger",
-                            tx.id
-                        );
+                                // OK: Transaction promoted from past Submit to current Publish
+                                debug!(
+                        "Transaction {} promoted from past Submit to current Publish ledger",
+                        tx.id
+                    );
+                            }
+                            DataLedger::Publish => {
+                                return Err(PreValidationError::PublishTxAlreadyIncluded {
+                                    tx_id: tx.id,
+                                    block_hash: *historical_block_hash,
+                                });
+                            }
+                            _ => {
+                                // Unexpected historical ledger for Publish
+                                return Err(PreValidationError::InvalidPromotionPath {
+                                    tx_id: tx.id,
+                                    from: *ledger_historical,
+                                    to: DataLedger::Publish,
+                                });
+                            }
+                        }
                     }
-                    (DataLedger::Publish, DataLedger::Publish) => {
-                        return Err(PreValidationError::PublishTxAlreadyIncluded {
-                            tx_id: tx.id,
-                            block_hash: *historical_block_hash,
-                        });
-                    }
-                    (DataLedger::Submit, _) => {
+                    DataLedger::Submit => {
                         // Submit tx should not have any past inclusion
                         return Err(PreValidationError::SubmitTxAlreadyIncluded {
                             tx_id: tx.id,
                             ledger: *ledger_historical,
                             block_hash: *historical_block_hash,
                         });
+                    }
+                    DataLedger::OneYear => {
+                        // TODO: Validate OneYear term ledger data tx
+                        // For now, accept any historical state
+                    }
+                    DataLedger::ThirtyDay => {
+                        // TODO: Validate ThirtyDay term ledger data tx
+                        // For now, accept any historical state
                     }
                 }
             }
@@ -2169,7 +2221,7 @@ pub async fn data_txs_are_valid(
         // All data transactions must have ledger_id set to Publish
         // TODO: support other term ledgers here
         if tx.ledger_id != DataLedger::Publish as u32 {
-            return Err(PreValidationError::InvalidLedgerId {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
                 tx_id: tx.id,
                 expected: DataLedger::Publish as u32,
                 actual: tx.ledger_id,
