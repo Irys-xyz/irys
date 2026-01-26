@@ -908,7 +908,7 @@ impl NodeConfig {
             p2p_gossip: P2PGossipConfig::default(),
             p2p_pull: P2PPullConfig::default(),
             genesis_peer_discovery_timeout_millis: 10000,
-            peer_id: Some(IrysPeerId::from(reward_address)), // V1 FALLBACK for tests
+            peer_id: Some(IrysPeerId::random()),
             stake_pledge_drives: false,
             sync: SyncConfig::default(),
         }

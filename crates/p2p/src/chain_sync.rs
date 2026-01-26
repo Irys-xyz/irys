@@ -7,7 +7,7 @@ use irys_actors::MempoolFacade;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysAddress, NodeMode,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle, U256,
 };
 use rand::prelude::SliceRandom as _;
@@ -1010,9 +1010,9 @@ async fn pull_highest_blocks(
     gossip_client: &GossipClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
-) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)>> {
+) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysPeerId, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
-    let peers: Vec<(IrysAddress, irys_types::PeerListItem)> = if use_trusted_peers_only {
+    let peers: Vec<(IrysPeerId, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Post-sync: Collecting the highest blocks from trusted peers");
         peer_list.online_trusted_peers()
     } else {
@@ -1031,7 +1031,7 @@ async fn pull_highest_blocks(
         ));
     }
 
-    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)> =
+    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysPeerId, PeerListItem)>)> =
         HashMap::new();
 
     for (miner_address, peer) in peers {
@@ -1428,7 +1428,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
     peer_list: &PeerList,
     gossip_client: &GossipClient,
     trusted_peers_only: bool,
-) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysAddress, PeerListItem)>>> {
+) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem)>>> {
     let peers = if trusted_peers_only {
         peer_list.online_trusted_peers()
     } else {

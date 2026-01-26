@@ -12,7 +12,7 @@ use irys_domain::ScoreDecreaseReason;
 use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
     build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequestV2, HandshakeResponse,
-    NodeConfig, PeerAddress, RethPeerInfo,
+    IrysPeerId, NodeConfig, PeerAddress, RethPeerInfo,
 };
 use tracing::{debug, error, info};
 
@@ -71,7 +71,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
             },
         },
-        peer_id: miner_signer_1.address(), // Use miner address as peer_id for test
+        peer_id: IrysPeerId::random(),
         mining_address: miner_signer_1.address(),
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
@@ -239,7 +239,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
             },
         },
-        peer_id: miner_signer_3.address(), // Use miner address as peer_id for test
+        peer_id: IrysPeerId::random(),
         mining_address: miner_signer_3.address(),
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()

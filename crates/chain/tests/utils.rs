@@ -464,7 +464,8 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut peer_config = node_config.clone();
         peer_config.mining_key = peer_signer.signer.clone();
         peer_config.reward_address = peer_signer.address();
-        peer_config.peer_id = Some(IrysPeerId::from(peer_signer.address())); // V1 FALLBACK: set unique peer_id
+        // Generate a distinct peer_id (separate from mining address) for test isolation
+        peer_config.peer_id = Some(IrysPeerId::random());
 
         // Set peer mode and expected genesis hash via consensus config
         peer_config.node_mode = NodeMode::Peer;

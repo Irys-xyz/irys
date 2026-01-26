@@ -19,10 +19,10 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress};
+use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipRequest, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -85,9 +85,9 @@ where
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_chunk(
         &self,
-        chunk_request: GossipRequest<UnpackedChunk>,
+        chunk_request: GossipRequestV2<UnpackedChunk>,
     ) -> GossipResult<()> {
-        let source_miner_address = chunk_request.miner_address;
+        let source_peer_id = chunk_request.peer_id;
         let chunk = chunk_request.data;
         let chunk_path_hash = chunk.chunk_path_hash();
         match self.mempool.handle_chunk_ingress(chunk).await {
@@ -95,7 +95,7 @@ where
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
                 self.cache
-                    .record_seen(source_miner_address, GossipCacheKey::Chunk(chunk_path_hash))
+                    .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
                 match error {
@@ -170,16 +170,15 @@ where
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_transaction(
         &self,
-        transaction_request: GossipRequest<DataTransactionHeader>,
+        transaction_request: GossipRequestV2<DataTransactionHeader>,
     ) -> GossipResult<()> {
+        let source_peer_id = transaction_request.peer_id;
+        let source_miner_address = transaction_request.miner_address;
         debug!(
             "Node {}: Gossip transaction received from peer {}: {:?}",
-            self.gossip_client.mining_address,
-            transaction_request.miner_address,
-            transaction_request.data.id
+            self.gossip_client.mining_address, source_miner_address, transaction_request.data.id
         );
         let tx = transaction_request.data;
-        let source_miner_address = transaction_request.miner_address;
         let tx_id = tx.id;
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
@@ -221,7 +220,7 @@ where
                 debug!("Transaction sent to mempool");
                 // Only record as seen after successful validation
                 self.cache
-                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
+                    .record_seen(source_peer_id, GossipCacheKey::Transaction(tx_id))?;
                 Ok(())
             }
             Err(error) => {
@@ -234,17 +233,16 @@ where
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_ingress_proof(
         &self,
-        proof_request: GossipRequest<IngressProof>,
+        proof_request: GossipRequestV2<IngressProof>,
     ) -> GossipResult<()> {
+        let source_peer_id = proof_request.peer_id;
+        let source_miner_address = proof_request.miner_address;
         debug!(
             "Node {}: Gossip ingress_proof received from peer {}: {:?}",
-            self.gossip_client.mining_address,
-            proof_request.miner_address,
-            proof_request.data.proof
+            self.gossip_client.mining_address, source_miner_address, proof_request.data.proof
         );
 
         let proof = proof_request.data;
-        let source_miner_address = proof_request.miner_address;
         let proof_hash = proof.proof;
 
         let already_seen = self.cache.seen_ingress_proof_from_any_peer(&proof_hash)?;
@@ -268,10 +266,8 @@ where
             Ok(()) | Err(GossipError::TransactionIsAlreadyHandled) => {
                 debug!("Ingress Proof sent to mempool");
                 // Only record as seen after successful validation
-                self.cache.record_seen(
-                    source_miner_address,
-                    GossipCacheKey::IngressProof(proof_hash),
-                )?;
+                self.cache
+                    .record_seen(source_peer_id, GossipCacheKey::IngressProof(proof_hash))?;
                 Ok(())
             }
             Err(error) => {
@@ -284,16 +280,17 @@ where
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_commitment_tx(
         &self,
-        transaction_request: GossipRequest<CommitmentTransaction>,
+        transaction_request: GossipRequestV2<CommitmentTransaction>,
     ) -> GossipResult<()> {
+        let source_peer_id = transaction_request.peer_id;
+        let source_miner_address = transaction_request.miner_address;
         debug!(
             "Node {}: Gossip commitment transaction received from peer {}: {:?}",
             self.gossip_client.mining_address,
-            transaction_request.miner_address,
+            source_miner_address,
             transaction_request.data.id()
         );
         let tx = transaction_request.data;
-        let source_miner_address = transaction_request.miner_address;
         let tx_id = tx.id();
 
         let already_seen = self.cache.seen_transaction_from_any_peer(&tx_id)?;
@@ -335,7 +332,7 @@ where
                 debug!("Commitment Transaction sent to mempool");
                 // Only record as seen after successful validation
                 self.cache
-                    .record_seen(source_miner_address, GossipCacheKey::Transaction(tx_id))?;
+                    .record_seen(source_peer_id, GossipCacheKey::Transaction(tx_id))?;
                 Ok(())
             }
             Err(error) => {
@@ -361,7 +358,7 @@ where
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
             .await?;
 
-        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+        let Some(peer_info) = self.peer_list.get_peer(&source_address) else {
             // This shouldn't happen, but we still should have a safeguard just in case
             error!(
                 "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
@@ -374,9 +371,12 @@ where
             "Pulled block {} from peer {}, sending for processing",
             block_hash, source_address
         );
+        // Use peer_id directly, and extract miner_address from peer_id
+        // (In the current model, peer_id.0 contains the miner_address equivalent)
         self.handle_block_header(
-            GossipRequest {
-                miner_address: source_address,
+            GossipRequestV2 {
+                peer_id: source_address,
+                miner_address: source_address.0,
                 data: (*irys_block).clone(),
             },
             peer_info.address.gossip,
@@ -390,24 +390,27 @@ where
     pub async fn pull_and_process_block_from_peer(
         &self,
         block_hash: BlockHash,
-        peer: &(irys_types::IrysAddress, PeerListItem),
+        peer: &(irys_types::IrysPeerId, PeerListItem),
     ) -> GossipResult<()> {
-        let (source_address, irys_block) = self
+        let (source_peer_id, irys_block) = self
             .gossip_client
             .pull_block_header_from_peer(block_hash, peer, &self.peer_list)
             .await?;
 
-        let Some(peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+        let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             error!(
                 "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
-                source_address
+                source_peer_id
             );
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
+        // Use peer_id directly, and extract miner_address from peer_id
+        // (In the current model, peer_id.0 contains the miner_address equivalent)
         self.handle_block_header(
-            GossipRequest {
-                miner_address: source_address,
+            GossipRequestV2 {
+                peer_id: source_peer_id,
+                miner_address: source_peer_id.0,
                 data: (*irys_block).clone(),
             },
             peer_info.address.gossip,
@@ -419,12 +422,13 @@ where
     #[instrument(skip_all, fields(block.hash = ?block_header_request.data.block_hash))]
     pub(crate) async fn handle_block_header(
         &self,
-        block_header_request: GossipRequest<IrysBlockHeader>,
+        block_header_request: GossipRequestV2<IrysBlockHeader>,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
         if block_header_request.data.poa.chunk.is_none() {
             error!("received a block without a POA chunk");
         }
+        let source_peer_id = block_header_request.peer_id;
         let source_miner_address = block_header_request.miner_address;
         let block_header = block_header_request.data;
         let block_hash = block_header.block_hash;
@@ -476,8 +480,8 @@ where
                 ))
             );
 
-            self.peer_list.decrease_peer_score(
-                &source_miner_address,
+            self.peer_list.decrease_peer_score_by_peer_id(
+                &source_peer_id,
                 ScoreDecreaseReason::BogusData("Invalid block signature".into()),
             );
 
@@ -488,7 +492,7 @@ where
 
         // Record block in cache
         self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
+            .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
         let has_block_already_been_processed = self
             .block_pool
@@ -537,9 +541,10 @@ where
 
     pub async fn handle_block_body(
         &self,
-        block_body_request: GossipRequest<BlockBody>,
+        block_body_request: GossipRequestV2<BlockBody>,
         data_source_ip: SocketAddr,
     ) -> GossipResult<()> {
+        let source_peer_id = block_body_request.peer_id;
         let source_miner_address = block_body_request.miner_address;
         let block_body = block_body_request.data;
         let block_hash = block_body.block_hash;
@@ -566,23 +571,23 @@ where
             header
         } else {
             let mut fetched_header = None;
-            let mut failed_attempts: Vec<(Option<IrysAddress>, GossipError)> = Vec::new();
+            let mut failed_attempts: Vec<(Option<IrysPeerId>, GossipError)> = Vec::new();
 
             for attempt in 1..=HEADER_AND_BODY_RETRIES {
                 match self.pull_block_header(block_hash, false).await {
-                    Ok((source, header)) => {
+                    Ok((source_peer_id, header)) => {
                         if !header.is_signature_valid() {
                             warn!(
                                 "Node: {}: Block {} fetched from {} has an invalid signature (attempt {}/{})",
-                                self.gossip_client.mining_address, header.block_hash, source, attempt, HEADER_AND_BODY_RETRIES
+                                self.gossip_client.mining_address, header.block_hash, source_peer_id, attempt, HEADER_AND_BODY_RETRIES
                             );
                             let error =
                                 GossipError::InvalidData(InvalidDataError::InvalidBlockSignature);
-                            self.peer_list.decrease_peer_score(
-                                &source,
+                            self.peer_list.decrease_peer_score_by_peer_id(
+                                &source_peer_id,
                                 ScoreDecreaseReason::BogusData("Invalid block signature".into()),
                             );
-                            failed_attempts.push((Some(source), error));
+                            failed_attempts.push((Some(source_peer_id), error));
                             continue;
                         }
                         fetched_header = Some(header);
@@ -615,8 +620,8 @@ where
                             failed_attempts.len()
                         );
                         for (idx, (source, err)) in failed_attempts.iter().enumerate() {
-                            if let Some(addr) = source {
-                                summary.push_str(&format!("[Peer {}: {}]", addr, err));
+                            if let Some(peer_id) = source {
+                                summary.push_str(&format!("[Peer {}: {}]", peer_id, err));
                             } else {
                                 summary.push_str(&format!("[Unknown peer: {}]", err));
                             }
@@ -670,15 +675,11 @@ where
             data_source_ip.ip(),
         );
 
-        self.validate_block_body_transaction_ids(
-            &block_body,
-            &block_header,
-            &source_miner_address,
-        )?;
+        self.validate_block_body_transaction_ids(&block_body, &block_header, &source_peer_id)?;
 
         // Record block in cache
         self.cache
-            .record_seen(source_miner_address, GossipCacheKey::Block(block_hash))?;
+            .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
         self.block_pool
             .process_block(block_header, Arc::new(block_body), skip_block_validation)
@@ -690,31 +691,31 @@ where
         &self,
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
-    ) -> GossipResult<(IrysAddress, Arc<IrysBlockHeader>)> {
+    ) -> GossipResult<(IrysPeerId, Arc<IrysBlockHeader>)> {
         debug!(
             "Fetching block header for block {} from the network",
             block_hash
         );
 
-        let (source_address, irys_block_header) = self
+        let (source_peer_id, irys_block_header) = self
             .gossip_client
             .pull_block_header_from_network(block_hash, use_trusted_peers_only, &self.peer_list)
             .await?;
 
-        let Some(_peer_info) = self.peer_list.peer_by_mining_address(&source_address) else {
+        let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
             error!(
                 "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_address
+                source_peer_id
             );
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block header from it, but it was not found".into()));
         };
 
         debug!(
             "Fetched block header for block {} from peer {}",
-            block_hash, source_address
+            block_hash, source_peer_id
         );
 
-        Ok((source_address, irys_block_header))
+        Ok((source_peer_id, irys_block_header))
     }
 
     #[tracing::instrument(level = "trace", skip_all, err)]
@@ -730,10 +731,13 @@ where
                 .pull_payload_from_network(evm_block_hash, use_trusted_peers_only, &self.peer_list)
                 .await
             {
-                Ok((source_address, execution_payload)) => {
+                Ok((source_peer_id, execution_payload)) => {
+                    // Use peer_id directly, and extract miner_address from peer_id
+                    // (In the current model, peer_id.0 contains the miner_address equivalent)
                     if let Err(e) = self
-                        .handle_execution_payload(GossipRequest {
-                            miner_address: source_address,
+                        .handle_execution_payload(GossipRequestV2 {
+                            peer_id: source_peer_id,
+                            miner_address: source_peer_id.0,
                             data: execution_payload,
                         })
                         .await
@@ -759,9 +763,9 @@ where
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_execution_payload(
         &self,
-        execution_payload_request: GossipRequest<Block>,
+        execution_payload_request: GossipRequestV2<Block>,
     ) -> GossipResult<()> {
-        let source_miner_address = execution_payload_request.miner_address;
+        let source_peer_id = execution_payload_request.peer_id;
         let evm_block = execution_payload_request.data;
 
         // Basic validation: ensure the block can be sealed (structure validation)
@@ -808,7 +812,7 @@ where
 
         // Only record as seen after validation and successful cache addition
         self.cache.record_seen(
-            source_miner_address,
+            source_peer_id,
             GossipCacheKey::ExecutionPayload(evm_block_hash),
         )?;
 
@@ -824,13 +828,13 @@ where
     pub(crate) async fn handle_get_data(
         &self,
         peer_info: &PeerListItem,
-        request: GossipRequest<GossipDataRequestV2>,
+        request: GossipRequestV2<GossipDataRequestV2>,
         duplicate_request_milliseconds: u128,
     ) -> GossipResult<bool> {
         // Check rate limiting and score cap
         let check_result = self
             .data_request_tracker
-            .check_request(&request.miner_address, duplicate_request_milliseconds);
+            .check_request(&request.peer_id, duplicate_request_milliseconds);
 
         // If rate limited, don't serve data
         if !check_result.should_serve() {
@@ -965,7 +969,7 @@ where
     #[tracing::instrument(level = "trace", skip_all, err)]
     pub(crate) async fn handle_get_data_sync(
         &self,
-        request: GossipRequest<GossipDataRequestV2>,
+        request: GossipRequestV2<GossipDataRequestV2>,
     ) -> GossipResult<Option<GossipDataV2>> {
         match request.data {
             GossipDataRequestV2::BlockHeader(block_hash) => {
@@ -1097,7 +1101,7 @@ where
         &self,
         block_body: &BlockBody,
         block_header: &IrysBlockHeader,
-        source_miner_address: &IrysAddress,
+        source_peer_id: &IrysPeerId,
     ) -> GossipResult<()> {
         match block_body.tx_ids_match_the_header(block_header) {
             Ok(true) => Ok(()),
@@ -1107,8 +1111,8 @@ where
                     self.gossip_client.mining_address, block_header.block_hash, block_header.height
                 );
 
-                self.peer_list.decrease_peer_score(
-                    source_miner_address,
+                self.peer_list.decrease_peer_score_by_peer_id(
+                    source_peer_id,
                     ScoreDecreaseReason::BogusData(
                         "Mismatching transactions between header and body".into(),
                     ),
@@ -1140,7 +1144,7 @@ where
 
         // Pre-compute Arc once to avoid cloning header on each retry
         let header_arc = Arc::new(header.clone());
-        let mut failed_attempts: Vec<(Option<IrysAddress>, GossipError)> = Vec::new();
+        let mut failed_attempts: Vec<(Option<IrysPeerId>, GossipError)> = Vec::new();
 
         for attempt in 1..=HEADER_AND_BODY_RETRIES {
             match self
@@ -1152,12 +1156,12 @@ where
                 )
                 .await
             {
-                Ok((source_address, irys_block_body)) => {
+                Ok((source_peer_id, irys_block_body)) => {
                     match irys_block_body.tx_ids_match_the_header(header) {
                         Ok(true) => {
                             debug!(
                                 "Fetched block body for block {} height {} from peer {:?}",
-                                block_hash, header.height, source_address
+                                block_hash, header.height, source_peer_id
                             );
                             return Ok(irys_block_body);
                         }
@@ -1170,18 +1174,18 @@ where
                             let error = GossipError::InvalidData(
                                 InvalidDataError::BlockBodyTransactionsMismatch,
                             );
-                            self.peer_list.decrease_peer_score(
-                                &source_address,
+                            self.peer_list.decrease_peer_score_by_peer_id(
+                                &source_peer_id,
                                 ScoreDecreaseReason::BogusData(
                                     "Mismatching transactions between header and body".into(),
                                 ),
                             );
                             debug!(
                                 "Penalized peer {} for serving bad block body",
-                                source_address
+                                source_peer_id
                             );
 
-                            failed_attempts.push((Some(source_address), error));
+                            failed_attempts.push((Some(source_peer_id), error));
                         }
                         Err(e) => {
                             warn!(
@@ -1191,8 +1195,7 @@ where
                             let error = GossipError::Internal(InternalGossipError::Unknown(
                                 format!("Error checking block body match: {}", e),
                             ));
-                            // The source_address is available here, so record it
-                            failed_attempts.push((Some(source_address), error));
+                            failed_attempts.push((Some(source_peer_id), error));
                         }
                     }
                 }
@@ -1220,8 +1223,8 @@ where
                 failed_attempts.len()
             );
             for (idx, (source, err)) in failed_attempts.iter().enumerate() {
-                if let Some(addr) = source {
-                    summary.push_str(&format!("[Peer {}: {}]", addr, err));
+                if let Some(peer_id) = source {
+                    summary.push_str(&format!("[Peer {}: {}]", peer_id, err));
                 } else {
                     summary.push_str(&format!("[Unknown peer: {}]", err));
                 }

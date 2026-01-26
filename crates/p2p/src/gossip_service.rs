@@ -277,9 +277,7 @@ impl P2PService {
         while !peers.is_empty() {
             // Remove peers that have seen the data since the last iteration
             let peers_that_seen_data = self.cache.peers_that_have_seen(&key)?;
-            peers.retain(|(peer_miner_address, _peer)| {
-                !peers_that_seen_data.contains(peer_miner_address)
-            });
+            peers.retain(|(peer_id, _peer)| !peers_that_seen_data.contains(peer_id));
 
             if peers.is_empty() {
                 debug!(

@@ -76,7 +76,7 @@ where
         }
     }
 
-    async fn handle_chunk(
+    async fn handle_chunk_v1(
         server: Data<Self>,
         unpacked_chunk_json: web::Json<GossipRequest<UnpackedChunk>>,
         req: actix_web::HttpRequest,
@@ -92,16 +92,25 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = unpacked_chunk_json.0;
-        let source_miner_address = gossip_request.miner_address;
+        let v1_request = unpacked_chunk_json.0;
+        let source_miner_address = v1_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, source_miner_address) {
-            Ok(peer_address) => peer_address,
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
+            Ok(peer) => peer,
             Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server.data_handler.handle_chunk(gossip_request).await {
+        // Convert V1 → V2 for internal processing
+        // For V1 peers, peer_id defaults to miner_address
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
+        if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
@@ -111,7 +120,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    fn check_peer(
+    fn check_peer_v1(
         peer_list: &PeerList,
         req: &actix_web::HttpRequest,
         miner_address: IrysAddress,
@@ -223,7 +232,7 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_block_header(
+    async fn handle_block_header_v1(
         server: Data<Self>,
         irys_block_header_json: web::Json<GossipRequest<IrysBlockHeader>>,
         req: actix_web::HttpRequest,
@@ -239,38 +248,46 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = irys_block_header_json.0;
-        let source_miner_address = gossip_request.miner_address;
+        let v1_request = irys_block_header_json.0;
+        let source_miner_address = v1_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::UnableToVerifyOrigin,
             ));
         };
 
-        if let Err(error_response) =
-            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
-        {
-            return error_response;
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
+            Ok(peer) => peer,
+            Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        // Convert V1 → V2 for internal processing
+        // For V1 peers, peer_id defaults to miner_address
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
         let this_node_id = server.data_handler.gossip_client.mining_address;
-        let block_hash = gossip_request.data.block_hash;
-        let block_height = gossip_request.data.height;
-        if gossip_request.data.poa.chunk.is_none() {
+        let block_hash = v2_request.data.block_hash;
+        let block_height = v2_request.data.height;
+        if v2_request.data.poa.chunk.is_none() {
             error!(
                 target = "p2p::server",
-                block.hash = ?gossip_request.data.block_hash,
+                block.hash = ?v2_request.data.block_hash,
                 "received a block without a POA chunk"
             );
         }
 
         tokio::spawn(
             async move {
-                let block_hash_string = gossip_request.data.block_hash;
+                let block_hash_string = v2_request.data.block_hash;
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(gossip_request, source_socket_addr)
+                    .handle_block_header(v2_request, source_socket_addr)
                     .in_current_span()
                     .await
                 {
@@ -299,7 +316,7 @@ where
     }
 
     #[tracing::instrument(skip_all)]
-    async fn handle_block_body(
+    async fn handle_block_body_v1(
         server: Data<Self>,
         block_body_request_json: web::Json<GossipRequest<BlockBody>>,
         req: actix_web::HttpRequest,
@@ -315,30 +332,37 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = block_body_request_json.0;
-        let source_miner_address = gossip_request.miner_address;
+        let v1_request = block_body_request_json.0;
+        let source_miner_address = v1_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::UnableToVerifyOrigin,
             ));
         };
 
-        if let Err(error_response) =
-            Self::check_peer(&server.peer_list, &req, gossip_request.miner_address)
-        {
-            return error_response;
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
+            Ok(peer) => peer,
+            Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
         let this_node_id = server.data_handler.gossip_client.mining_address;
-        let block_hash = gossip_request.data.block_hash;
+        let block_hash = v2_request.data.block_hash;
 
         let handler = server.data_handler.clone();
 
         tokio::spawn(
             async move {
                 if let Err(e) = handler
-                    .handle_block_body(gossip_request, source_socket_addr)
+                    .handle_block_body(v2_request, source_socket_addr)
                     .await
                 {
                     Self::handle_invalid_data(&source_miner_address, &e, &server.peer_list);
@@ -363,7 +387,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    async fn handle_execution_payload(
+    async fn handle_execution_payload_v1(
         server: Data<Self>,
         irys_execution_payload_json: web::Json<GossipRequest<Block>>,
         req: actix_web::HttpRequest,
@@ -379,19 +403,26 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let evm_block_request = irys_execution_payload_json.0;
-        let source_miner_address = evm_block_request.miner_address;
+        let v1_request = irys_execution_payload_json.0;
+        let source_miner_address = v1_request.miner_address;
 
-        if let Err(error_response) =
-            Self::check_peer(&server.peer_list, &req, evm_block_request.miner_address)
-        {
-            return error_response;
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
+            Ok(peer) => peer,
+            Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
         if let Err(error) = server
             .data_handler
-            .handle_execution_payload(evm_block_request)
+            .handle_execution_payload(v2_request)
             .await
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -404,7 +435,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    async fn handle_transaction(
+    async fn handle_transaction_v1(
         server: Data<Self>,
         irys_transaction_header_json: web::Json<GossipRequest<DataTransactionHeader>>,
         req: actix_web::HttpRequest,
@@ -420,16 +451,24 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = irys_transaction_header_json.0;
-        let source_miner_address = gossip_request.miner_address;
+        let v1_request = irys_transaction_header_json.0;
+        let source_miner_address = v1_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
+            Ok(peer) => peer,
             Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server.data_handler.handle_transaction(gossip_request).await {
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
+        if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
             return HttpResponse::Ok()
@@ -440,7 +479,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    async fn handle_commitment_tx(
+    async fn handle_commitment_tx_v1(
         server: Data<Self>,
         commitment_tx_json: web::Json<GossipRequest<CommitmentTransaction>>,
         req: actix_web::HttpRequest,
@@ -456,20 +495,24 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = commitment_tx_json.0;
-        let source_miner_address = gossip_request.miner_address;
+        let v1_request = commitment_tx_json.0;
+        let source_miner_address = v1_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
+            Ok(peer) => peer,
             Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server
-            .data_handler
-            .handle_commitment_tx(gossip_request)
-            .await
-        {
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
+        if let Err(error) = server.data_handler.handle_commitment_tx(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send transaction: {}", error);
             return HttpResponse::Ok()
@@ -480,7 +523,7 @@ where
         HttpResponse::Ok().json(GossipResponse::Accepted(()))
     }
 
-    async fn handle_ingress_proof(
+    async fn handle_ingress_proof_v1(
         server: Data<Self>,
         proof_json: web::Json<GossipRequest<IngressProof>>,
         req: actix_web::HttpRequest,
@@ -496,20 +539,24 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request = proof_json.0;
-        let source_miner_address = gossip_request.miner_address;
+        let v1_request = proof_json.0;
+        let source_miner_address = v1_request.miner_address;
 
-        match Self::check_peer(&server.peer_list, &req, gossip_request.miner_address) {
-            Ok(peer_address) => peer_address,
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, v1_request.miner_address) {
+            Ok(peer) => peer,
             Err(error_response) => return error_response,
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        if let Err(error) = server
-            .data_handler
-            .handle_ingress_proof(gossip_request)
-            .await
-        {
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
+        };
+
+        if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send ingress proof: {}", error);
             return HttpResponse::Ok()
@@ -540,9 +587,9 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let gossip_request_v2 = unpacked_chunk_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = unpacked_chunk_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
 
         match Self::check_peer_v2(
             &server.peer_list,
@@ -555,13 +602,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
-        if let Err(error) = server.data_handler.handle_chunk(gossip_request_v1).await {
+        if let Err(error) = server.data_handler.handle_chunk(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send chunk: {}", error);
             return HttpResponse::Ok()
@@ -593,9 +634,9 @@ where
             ));
         }
 
-        let gossip_request_v2 = irys_block_header_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = irys_block_header_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::UnableToVerifyOrigin,
@@ -612,21 +653,15 @@ where
         }
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
         let this_node_id = server.data_handler.gossip_client.mining_address;
-        let block_hash = gossip_request_v1.data.block_hash;
-        let block_height = gossip_request_v1.data.height;
+        let block_hash = v2_request.data.block_hash;
+        let block_height = v2_request.data.height;
 
         tokio::spawn(
             async move {
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_header(gossip_request_v1, source_socket_addr)
+                    .handle_block_header(v2_request, source_socket_addr)
                     .in_current_span()
                     .await
                 {
@@ -666,9 +701,9 @@ where
             ));
         }
 
-        let gossip_request_v2 = block_body_request_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = block_body_request_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
         let Some(source_socket_addr) = req.peer_addr() else {
             return HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
                 RejectionReason::UnableToVerifyOrigin,
@@ -685,20 +720,14 @@ where
         }
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
         let this_node_id = server.data_handler.gossip_client.mining_address;
-        let block_hash = gossip_request_v1.data.block_hash;
+        let block_hash = v2_request.data.block_hash;
 
         tokio::spawn(
             async move {
                 if let Err(error) = server
                     .data_handler
-                    .handle_block_body(gossip_request_v1, source_socket_addr)
+                    .handle_block_body(v2_request, source_socket_addr)
                     .in_current_span()
                     .await
                 {
@@ -734,9 +763,9 @@ where
             ));
         }
 
-        let gossip_request_v2 = irys_execution_payload_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = irys_execution_payload_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
 
         match Self::check_peer_v2(
             &server.peer_list,
@@ -749,15 +778,9 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
         if let Err(error) = server
             .data_handler
-            .handle_execution_payload(gossip_request_v1)
+            .handle_execution_payload(v2_request)
             .await
         {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
@@ -787,9 +810,9 @@ where
             ));
         }
 
-        let gossip_request_v2 = irys_transaction_header_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = irys_transaction_header_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
 
         match Self::check_peer_v2(
             &server.peer_list,
@@ -802,17 +825,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
-        if let Err(error) = server
-            .data_handler
-            .handle_transaction(gossip_request_v1)
-            .await
-        {
+        if let Err(error) = server.data_handler.handle_transaction(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send data transaction header: {}", error);
             return HttpResponse::Ok()
@@ -844,9 +857,9 @@ where
             ));
         }
 
-        let gossip_request_v2 = commitment_tx_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = commitment_tx_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
 
         match Self::check_peer_v2(
             &server.peer_list,
@@ -859,17 +872,11 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
         tokio::spawn(
             async move {
                 if let Err(error) = server
                     .data_handler
-                    .handle_commitment_tx(gossip_request_v1)
+                    .handle_commitment_tx(v2_request)
                     .in_current_span()
                     .await
                 {
@@ -899,9 +906,9 @@ where
             ));
         }
 
-        let gossip_request_v2 = proof_json.0;
-        let source_peer_id = gossip_request_v2.peer_id;
-        let source_miner_address = gossip_request_v2.miner_address;
+        let v2_request = proof_json.0;
+        let source_peer_id = v2_request.peer_id;
+        let source_miner_address = v2_request.miner_address;
 
         match Self::check_peer_v2(
             &server.peer_list,
@@ -914,17 +921,7 @@ where
         };
         server.peer_list.set_is_online(&source_miner_address, true);
 
-        // Convert V2 to V1 for internal processing
-        let gossip_request_v1 = GossipRequest {
-            miner_address: gossip_request_v2.miner_address,
-            data: gossip_request_v2.data,
-        };
-
-        if let Err(error) = server
-            .data_handler
-            .handle_ingress_proof(gossip_request_v1)
-            .await
-        {
+        if let Err(error) = server.data_handler.handle_ingress_proof(v2_request).await {
             Self::handle_invalid_data(&source_miner_address, &error, &server.peer_list);
             error!("Failed to send ingress proof: {}", error);
             return HttpResponse::Ok()
@@ -1074,7 +1071,7 @@ where
         let peer_list_entry = PeerListItem {
             address: peer_address,
             protocol_version: version_request.protocol_version,
-            peer_id: Some(mining_addr), // V1 FALLBACK: Set peer_id to mining_address
+            peer_id: Some(IrysPeerId::from(mining_addr)), // V1 compatibility: V1 peers don't have separate peer_id
             ..Default::default()
         };
 
@@ -1306,16 +1303,20 @@ where
     ) -> HttpResponse {
         let v1_request = data_request.0;
         let request_for_logging = v1_request.clone();
+        let source_miner_address = v1_request.miner_address;
         let v2_data_request: GossipDataRequestV2 = v1_request.data.into();
-        let v2_request = GossipRequest {
-            miner_address: v1_request.miner_address,
-            data: v2_data_request,
+
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
+            Ok(peer) => peer,
+            Err(error_response) => return error_response,
         };
 
-        if let Err(error_response) =
-            Self::check_peer(&server.peer_list, &req, v2_request.miner_address)
-        {
-            return error_response;
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v2_data_request,
         };
 
         match server
@@ -1379,18 +1380,24 @@ where
                 RejectionReason::GossipDisabled,
             ));
         }
-        let peer = match Self::check_peer(&server.peer_list, &req, data_request.miner_address) {
-            Ok(peer_address) => peer_address,
+        let v1_request = data_request.0;
+        let source_miner_address = v1_request.miner_address;
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
+            Ok(peer) => peer,
             Err(error_response) => return error_response,
+        };
+
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
         };
 
         match server
             .data_handler
-            .handle_get_data(
-                &peer,
-                data_request.0,
-                DEFAULT_DUPLICATE_REQUEST_MILLISECONDS,
-            )
+            .handle_get_data(&peer, v2_request, DEFAULT_DUPLICATE_REQUEST_MILLISECONDS)
             .await
         {
             Ok(has_data) => HttpResponse::Ok().json(GossipResponse::Accepted(has_data)),
@@ -1413,15 +1420,25 @@ where
         data_request: web::Json<GossipRequest<GossipDataRequestV2>>,
         req: actix_web::HttpRequest,
     ) -> HttpResponse {
-        if let Err(error_response) =
-            Self::check_peer(&server.peer_list, &req, data_request.miner_address)
-        {
-            return error_response;
+        let v1_request = data_request.0;
+        let source_miner_address = v1_request.miner_address;
+
+        let peer = match Self::check_peer_v1(&server.peer_list, &req, source_miner_address) {
+            Ok(peer) => peer,
+            Err(error_response) => return error_response,
+        };
+
+        // Convert V1 → V2 for internal processing
+        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let v2_request = GossipRequestV2 {
+            peer_id,
+            miner_address: source_miner_address,
+            data: v1_request.data,
         };
 
         match server
             .data_handler
-            .handle_get_data_sync(data_request.0)
+            .handle_get_data_sync(v2_request)
             .in_current_span()
             .await
         {
@@ -1501,31 +1518,31 @@ where
             )
             .route(
                 GossipRoutes::Transaction.as_str(),
-                web::post().to(Self::handle_transaction),
+                web::post().to(Self::handle_transaction_v1),
             )
             .route(
                 GossipRoutes::CommitmentTx.as_str(),
-                web::post().to(Self::handle_commitment_tx),
+                web::post().to(Self::handle_commitment_tx_v1),
             )
             .route(
                 GossipRoutes::Chunk.as_str(),
-                web::post().to(Self::handle_chunk),
+                web::post().to(Self::handle_chunk_v1),
             )
             .route(
                 GossipRoutes::Block.as_str(),
-                web::post().to(Self::handle_block_header),
+                web::post().to(Self::handle_block_header_v1),
             )
             .route(
                 GossipRoutes::BlockBody.as_str(),
-                web::post().to(Self::handle_block_body),
+                web::post().to(Self::handle_block_body_v1),
             )
             .route(
                 GossipRoutes::IngressProof.as_str(),
-                web::post().to(Self::handle_ingress_proof),
+                web::post().to(Self::handle_ingress_proof_v1),
             )
             .route(
                 GossipRoutes::ExecutionPayload.as_str(),
-                web::post().to(Self::handle_execution_payload),
+                web::post().to(Self::handle_execution_payload_v1),
             )
             .route(
                 GossipRoutes::GetData.as_str(),

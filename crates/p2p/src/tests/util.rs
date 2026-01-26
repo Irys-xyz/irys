@@ -324,10 +324,12 @@ impl GossipServiceTestFixture {
         node_config.http.public_port = gossip_port;
         node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
-        let peer_id = random_signer.address();
         node_config.mining_key = random_signer.signer;
-        // Update peer_id to match the random mining key
-        node_config.peer_id = Some(peer_id);
+        // Generate a distinct peer_id for this test fixture
+        // peer_id is separate from mining_address in V2
+        // Must clear the preset peer_id from testing() before ensure_peer_id() will generate a new one
+        node_config.peer_id = None;
+        node_config.ensure_peer_id();
         let config = Config::new(node_config);
 
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
@@ -533,7 +535,7 @@ impl GossipServiceTestFixture {
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
-            peer_id: Some(self.mining_address), // V1 FALLBACK: Set peer_id to mining_addr
+            peer_id: Some(self.config.node_config.peer_id()),
         }
     }
 
@@ -778,6 +780,11 @@ impl FakeGossipServer {
                 .service(
                     web::resource("/gossip/block-index").route(web::get().to(handle_block_index)),
                 )
+                .service(
+                    web::resource("/gossip/protocol_version")
+                        .route(web::get().to(handle_protocol_version)),
+                )
+                .service(web::resource("/gossip/health").route(web::get().to(handle_health)))
                 .default_service(web::to(|| async {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
@@ -953,6 +960,19 @@ async fn handle_info(
     }
 }
 
+async fn handle_protocol_version() -> HttpResponse {
+    // Return both V1 and V2 support
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(vec![1_u32, 2_u32])
+}
+
+async fn handle_health() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(GossipResponse::Accepted(true))
+}
+
 async fn handle_block_index(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
     query: web::Query<BlockIndexQuery>,
@@ -1033,7 +1053,7 @@ pub(crate) async fn data_handler_stub(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId::repeat_byte(2),
+            IrysPeerId(IrysAddress::repeat_byte(2)),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
@@ -1079,7 +1099,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId::repeat_byte(2),
+            IrysPeerId(IrysAddress::repeat_byte(2)),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

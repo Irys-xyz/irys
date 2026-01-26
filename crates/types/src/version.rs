@@ -516,7 +516,7 @@ fn encode_socket_addr_rlp(addr: &SocketAddr, out: &mut dyn bytes::BufMut) {
         SocketAddr::V4(v4) => {
             let ip_bytes = v4.ip().octets();
             let port = v4.port();
-            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            let payload_length = 4_u8.length() + ip_bytes.as_slice().length() + port.length();
             alloy_rlp::Header {
                 list: true,
                 payload_length,
@@ -529,7 +529,7 @@ fn encode_socket_addr_rlp(addr: &SocketAddr, out: &mut dyn bytes::BufMut) {
         SocketAddr::V6(v6) => {
             let ip_bytes = v6.ip().octets();
             let port = v6.port();
-            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            let payload_length = 6_u8.length() + ip_bytes.as_slice().length() + port.length();
             alloy_rlp::Header {
                 list: true,
                 payload_length,
@@ -547,13 +547,13 @@ fn encode_socket_addr_rlp_length(addr: &SocketAddr) -> usize {
         SocketAddr::V4(v4) => {
             let ip_bytes = v4.ip().octets();
             let port = v4.port();
-            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            let payload_length = 4_u8.length() + ip_bytes.as_slice().length() + port.length();
             payload_length + alloy_rlp::length_of_length(payload_length)
         }
         SocketAddr::V6(v6) => {
             let ip_bytes = v6.ip().octets();
             let port = v6.port();
-            let payload_length = 1_u8.length() + ip_bytes.as_slice().length() + port.length();
+            let payload_length = 6_u8.length() + ip_bytes.as_slice().length() + port.length();
             payload_length + alloy_rlp::length_of_length(payload_length)
         }
     }
@@ -902,10 +902,9 @@ mod tests {
         handshake.encode_for_signing(&mut encoded);
 
         // Verify it's a valid RLP list that starts with list marker
-        assert!(
-            encoded[0] >= 0xc0 || encoded[0] >= 0xf7,
-            "Should start with list marker"
-        );
+        // Short list: 0xc0..=0xf6, Long list: 0xf7..=0xff
+        // Both ranges combine to >= 0xc0 (since u8 max is 0xff)
+        assert!(encoded[0] >= 0xc0, "Should start with list marker");
 
         // Verify basic RLP structure by checking we can decode the header
         let mut buf = &encoded[..];

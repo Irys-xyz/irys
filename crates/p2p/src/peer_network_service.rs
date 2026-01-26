@@ -8,7 +8,7 @@ use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason}
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
-    HandshakeRequest, HandshakeRequestV2, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress,
+    HandshakeRequest, HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress,
     PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
     PeerResponse, ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle,
 };
@@ -225,8 +225,10 @@ impl PeerNetworkServiceInner {
         let persistable_peers = self.peer_list.persistable_peers();
         let _ = db
             .update(|tx| {
-                for (addr, peer) in persistable_peers.iter() {
-                    insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
+                for (peer_id, peer) in persistable_peers.iter() {
+                    // TODO: Database still uses miner_address as key. Once updated to use peer_id, remove .0 extraction.
+                    insert_peer_list_item(tx, &peer_id.0, peer)
+                        .map_err(PeerListServiceError::from)?;
                 }
                 Ok::<(), PeerListServiceError>(())
             })
@@ -235,12 +237,14 @@ impl PeerNetworkServiceInner {
         Ok(())
     }
 
-    fn increase_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreIncreaseReason) {
-        self.peer_list.increase_peer_score(mining_addr, reason);
+    fn increase_peer_score(&self, peer_id: &IrysPeerId, reason: ScoreIncreaseReason) {
+        self.peer_list
+            .increase_peer_score_by_peer_id(peer_id, reason);
     }
 
-    fn decrease_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreDecreaseReason) {
-        self.peer_list.decrease_peer_score(mining_addr, reason);
+    fn decrease_peer_score(&self, peer_id: &IrysPeerId, reason: ScoreDecreaseReason) {
+        self.peer_list
+            .decrease_peer_score_by_peer_id(peer_id, reason);
     }
 
     async fn create_handshake_request_v1(&self) -> HandshakeRequest {
@@ -283,10 +287,10 @@ impl PeerNetworkService {
         let trusted_peers = peer_list.trusted_peer_api_to_gossip_addresses();
         Self::trusted_peers_handshake_task(sender.clone(), trusted_peers);
 
-        let initial_peers: HashMap<IrysAddress, PeerListItem> = peer_list
+        let initial_peers: HashMap<IrysPeerId, PeerListItem> = peer_list
             .all_peers()
             .iter()
-            .map(|(addr, peer)| (*addr, peer.clone()))
+            .map(|(peer_id, peer)| (*peer_id, peer.clone()))
             .collect();
         Self::spawn_announce_yourself_to_all_peers_task(initial_peers, sender.clone());
 
@@ -854,10 +858,10 @@ impl PeerNetworkService {
     }
 
     fn spawn_announce_yourself_to_all_peers_task(
-        known_peers: HashMap<IrysAddress, PeerListItem>,
+        known_peers: HashMap<IrysPeerId, PeerListItem>,
         sender: PeerNetworkSender,
     ) {
-        for (_mining_addr, peer) in known_peers {
+        for (_peer_id, peer) in known_peers {
             send_message_and_log_error(
                 &sender,
                 PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer),
@@ -1140,6 +1144,8 @@ mod tests {
             api: api_addr,
             execution: RethPeerInfo::default(),
         };
+        // Generate a different peer_id to ensure we don't rely on peer_id == mining_addr
+        let peer_id = IrysPeerId::random();
         let peer = PeerListItem {
             address: peer_addr,
             reputation_score: PeerScore::new(50),
@@ -1147,7 +1153,7 @@ mod tests {
             last_seen: 123,
             is_online,
             protocol_version: Default::default(),
-            peer_id: Some(mining_addr), // V1 FALLBACK: Set peer_id to mining_addr
+            peer_id: Some(peer_id),
         };
         (mining_addr, peer)
     }
@@ -1316,8 +1322,8 @@ mod tests {
         )
         .1;
         let known_peers = HashMap::from([
-            (IrysAddress::repeat_byte(0xAA), peer1.clone()),
-            (IrysAddress::repeat_byte(0xBB), peer2.clone()),
+            (IrysPeerId(IrysAddress::repeat_byte(0xAA)), peer1.clone()),
+            (IrysPeerId(IrysAddress::repeat_byte(0xBB)), peer2.clone()),
         ]);
         PeerNetworkService::spawn_announce_yourself_to_all_peers_task(known_peers, sender);
         let mut api_addrs = Vec::new();
@@ -1616,36 +1622,38 @@ mod tests {
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
         let harness = TestHarness::new(temp_dir.path(), config);
-        let (staked_addr, staked_peer) = create_test_peer(
+        let (staked_mining_addr, staked_peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9400,
             true,
             None,
         );
-        let (unstaked_addr, unstaked_peer) = create_test_peer(
+        let (unstaked_mining_addr, unstaked_peer) = create_test_peer(
             "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             9402,
             true,
             None,
         );
+        let staked_peer_id = staked_peer.peer_id.expect("peer_id should be set");
+        let unstaked_peer_id = unstaked_peer.peer_id.expect("peer_id should be set");
         harness
             .peer_list()
-            .add_or_update_peer(staked_addr, staked_peer.clone(), true);
+            .add_or_update_peer(staked_mining_addr, staked_peer.clone(), true);
         harness
             .peer_list()
-            .add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+            .add_or_update_peer(unstaked_mining_addr, unstaked_peer.clone(), false);
         harness.inner.flush().await.expect("flush");
         let persistable = harness.peer_list().persistable_peers();
-        assert!(persistable.contains_key(&staked_addr));
-        assert!(!persistable.contains_key(&unstaked_addr));
+        assert!(persistable.contains_key(&staked_peer_id));
+        assert!(!persistable.contains_key(&unstaked_peer_id));
         for _ in 0..31 {
             harness
                 .peer_list()
-                .increase_peer_score(&unstaked_addr, ScoreIncreaseReason::Online);
+                .increase_peer_score(&unstaked_mining_addr, ScoreIncreaseReason::Online);
         }
         harness.inner.flush().await.expect("second flush");
         let persistable_after = harness.peer_list().persistable_peers();
-        assert!(persistable_after.contains_key(&unstaked_addr));
+        assert!(persistable_after.contains_key(&unstaked_peer_id));
     }
 
     #[test]
@@ -1667,11 +1675,12 @@ mod tests {
             true,
             None,
         );
+        let peer_id = peer.peer_id.expect("peer_id should be set");
         peer_list.add_or_update_peer(mining_addr, peer.clone(), false);
-        assert!(peer_list.temporary_peers().contains(&mining_addr));
+        assert!(peer_list.temporary_peers().contains(&peer_id));
         peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));
-        assert!(!peer_list.temporary_peers().contains(&mining_addr));
+        assert!(!peer_list.temporary_peers().contains(&peer_id));
         peer_list.add_or_update_peer(mining_addr, peer, false);
-        assert!(peer_list.temporary_peers().contains(&mining_addr));
+        assert!(peer_list.temporary_peers().contains(&peer_id));
     }
 }
