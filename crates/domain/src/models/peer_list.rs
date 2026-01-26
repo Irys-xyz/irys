@@ -293,7 +293,7 @@ impl PeerList {
     }
 
     /// Get persistable peers with their mining addresses (for database storage)
-    /// Returns tuples of (peer_id, mining_addr, peer) for peers that have a known mining address.
+    /// Returns tuples of (IrysPeerId, PeerListItem) from the persistent_peers_cache.
     pub fn persistable_peers_with_mining_addr(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
         guard

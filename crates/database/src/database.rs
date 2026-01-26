@@ -386,6 +386,16 @@ pub fn insert_peer_list_item<T: DbTxMut>(
 ) -> eyre::Result<()> {
     // Convert PeerListItem to PeerListItemInner for database storage
     let inner = peer_list_entry.to_inner();
+
+    // Validate that the peer_id in the payload matches the supplied peer_id
+    if peer_list_entry.peer_id != *peer_id {
+        eyre::bail!(
+            "Peer ID mismatch: supplied peer_id {:?} does not match PeerListItem.peer_id {:?}",
+            peer_id,
+            peer_list_entry.peer_id
+        );
+    }
+
     Ok(tx.put::<PeerListItems>(*peer_id, inner.into())?)
 }
 

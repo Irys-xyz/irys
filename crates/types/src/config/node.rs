@@ -761,7 +761,7 @@ impl NodeConfig {
     /// Generate and set peer_id if not present
     pub fn ensure_peer_id(&mut self) {
         if self.peer_id.is_none() {
-            self.peer_id = Some(IrysPeerId::from(rand::random::<[u8; 20]>()));
+            self.peer_id = Some(IrysPeerId::random());
         }
     }
 

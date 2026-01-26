@@ -55,13 +55,6 @@ impl From<IrysAddress> for IrysPeerId {
     }
 }
 
-impl From<IrysPeerId> for IrysAddress {
-    #[inline]
-    fn from(peer_id: IrysPeerId) -> Self {
-        peer_id.0
-    }
-}
-
 impl From<[u8; 20]> for IrysPeerId {
     #[inline]
     fn from(bytes: [u8; 20]) -> Self {
@@ -73,13 +66,6 @@ impl From<IrysPeerId> for [u8; 20] {
     #[inline]
     fn from(peer_id: IrysPeerId) -> Self {
         peer_id.0.into()
-    }
-}
-
-impl AsRef<IrysAddress> for IrysPeerId {
-    #[inline]
-    fn as_ref(&self) -> &IrysAddress {
-        &self.0
     }
 }
 

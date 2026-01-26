@@ -135,7 +135,18 @@ impl PeerListItem {
     pub fn from_inner(inner: PeerListItemInner, peer_id: IrysPeerId) -> Self {
         // For legacy peers, the key used to be the mining address. They have the same byte layout,
         //  so we can use it as a fallback for LEGACY PEERS ONLY.
-        let mining_address = inner.mining_address.unwrap_or(IrysAddress::from(peer_id));
+        let mining_address = inner.mining_address.unwrap_or_else(|| {
+            tracing::warn!(
+                "Legacy fallback: using peer_id as mining_address for peer_id={:?}, last_seen={}, protocol_version={:?}",
+                peer_id,
+                inner.last_seen,
+                inner.protocol_version
+            );
+            // Convert peer_id to bytes and back to IrysAddress to avoid direct conversion
+            // This is needed because peer_id and mining_address have the same byte layout for legacy peers
+            let peer_id_bytes: [u8; 20] = peer_id.into();
+            IrysAddress::from(peer_id_bytes)
+        });
         Self {
             peer_id,
             mining_address,
