@@ -81,7 +81,7 @@ fn send_block_to_block_validation(
 // from the consensus config.
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
-    use irys_types::CommitmentTypeV1;
+    use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -134,7 +134,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     // Create a pledge commitment with invalid value
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentTypeV1::Stake);
+    invalid_pledge.set_commitment_type(CommitmentTypeV2::Stake);
     invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
     invalid_pledge.set_signer(genesis_config.signer().address());
     invalid_pledge.set_fee(consensus_config.mempool.commitment_fee);
@@ -189,7 +189,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
-    use irys_types::CommitmentTypeV1;
+    use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -241,7 +241,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let pledge_count = 0;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentTypeV1::Pledge {
+    invalid_pledge.set_commitment_type(CommitmentTypeV2::Pledge {
         pledge_count_before_executing: pledge_count,
     });
     invalid_pledge.set_anchor(genesis_node.get_anchor().await?);

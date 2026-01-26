@@ -11,6 +11,8 @@ pub struct CommitmentStateEntry {
     pub signer: IrysAddress,
     /// Irys token amount in atomic units
     pub amount: U256,
+    /// Address to receive rewards (defaults to signer when stake is created)
+    pub reward_address: Option<IrysAddress>,
 }
 
 #[derive(Debug, Default, Clone, Hash)]

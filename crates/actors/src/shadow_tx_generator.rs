@@ -376,7 +376,7 @@ impl<'a> ShadowTxGenerator<'a> {
     /// Processed on block inclusion (different fees applied immediately to the user for having the tx included)
     fn process_commitment_transaction(&self, tx: &CommitmentTransaction) -> Result<ShadowMetadata> {
         match tx.commitment_type() {
-            irys_types::CommitmentTypeV1::Stake => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Stake => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Stake(BalanceDecrement {
                         amount: tx.value().into(),
@@ -387,7 +387,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV1::Pledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Pledge { .. } => Ok(ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Pledge(BalanceDecrement {
                         amount: tx.value().into(),
@@ -398,7 +398,7 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV1::Unpledge { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Unpledge { .. } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::Unpledge(irys_reth::shadow_tx::UnpledgeDebit {
@@ -409,13 +409,26 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV1::Unstake => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::Unstake => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UnstakeDebit(UnstakeDebit {
                         target: tx.signer().into(),
                         irys_ref: tx.id().into(),
                     }),
+                    (*self.solution_hash).into(),
+                ),
+                transaction_fee: tx.fee() as u128,
+            }),
+            irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => Ok(ShadowMetadata {
+                // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
+                shadow_tx: ShadowTransaction::new_v1(
+                    TransactionPacket::UpdateRewardAddress(
+                        irys_reth::shadow_tx::UpdateRewardAddressDebit {
+                            target: tx.signer().into(),
+                            irys_ref: tx.id().into(),
+                        },
+                    ),
                     (*self.solution_hash).into(),
                 ),
                 transaction_fee: tx.fee() as u128,
@@ -545,7 +558,7 @@ impl<'a> ShadowTxGenerator<'a> {
 
         // Update treasury based on commitment type
         match tx.commitment_type() {
-            irys_types::CommitmentTypeV1::Stake | irys_types::CommitmentTypeV1::Pledge { .. } => {
+            irys_types::CommitmentTypeV2::Stake | irys_types::CommitmentTypeV2::Pledge { .. } => {
                 // Stake and Pledge lock funds in the treasury
                 self.treasury_balance =
                     self.treasury_balance
@@ -554,11 +567,14 @@ impl<'a> ShadowTxGenerator<'a> {
                             eyre!("Treasury balance overflow when adding commitment value")
                         })?;
             }
-            irys_types::CommitmentTypeV1::Unstake => {
+            irys_types::CommitmentTypeV2::Unstake => {
                 // Unstake handled on epoch boundary
             }
-            irys_types::CommitmentTypeV1::Unpledge { .. } => {
+            irys_types::CommitmentTypeV2::Unpledge { .. } => {
                 // Unpledge handled on epoch boundary
+            }
+            irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => {
+                // No treasury movement - fee only
             }
         }
 

@@ -4,7 +4,7 @@ pub use crate::{
     IrysAddress, IrysSignature, IrysTransactionId, Node, PledgeDataProvider, Proof, Signature,
     H256, U256,
 };
-use crate::{CommitmentTypeV2, Versioned};
+use crate::Versioned;
 use alloy_rlp::{Decodable, Encodable, Error as RlpError};
 use alloy_rlp::{RlpDecodable, RlpEncodable};
 use bytes::Buf as _;
@@ -67,10 +67,10 @@ pub struct CommitmentTransactionV1 {
 impl Ord for CommitmentTransactionV1 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         compare_commitment_transactions(
-            &self.commitment_type,
+            &self.commitment_type.into(),
             self.user_fee(),
             self.id,
-            &other.commitment_type,
+            &other.commitment_type.into(),
             other.user_fee(),
             other.id,
         )
@@ -334,27 +334,6 @@ pub enum CommitmentTypeV1 {
         partition_hash: H256,
     },
     Unstake,
-}
-
-impl From<CommitmentTypeV2> for CommitmentTypeV1 {
-    fn from(value: CommitmentTypeV2) -> Self {
-        match value {
-            CommitmentTypeV2::Stake => Self::Stake,
-            CommitmentTypeV2::Pledge {
-                pledge_count_before_executing,
-            } => Self::Pledge {
-                pledge_count_before_executing,
-            },
-            CommitmentTypeV2::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            } => Self::Unpledge {
-                pledge_count_before_executing,
-                partition_hash,
-            },
-            CommitmentTypeV2::Unstake => Self::Unstake,
-        }
-    }
 }
 
 /// WARNING: THE BELOW ENCODING/DECODING IS NON-CANONICAL (NOT TO THE RLP SPEC) WHICH IS WHY CommitmentTransaction/CommitmentTypeV2 WERE CREATED

@@ -1,5 +1,8 @@
 use super::EpochSnapshot;
-use irys_types::{CommitmentTransaction, CommitmentTypeV1, IrysAddress};
+use irys_types::{CommitmentTransaction, CommitmentTypeV2, IrysAddress};
+
+#[cfg(test)]
+use irys_types::CommitmentTypeV1;
 use std::{
     collections::BTreeMap,
     hash::{Hash as _, Hasher as _},
@@ -8,14 +11,15 @@ use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,           // The commitment is valid and was added to the snapshot
-    Unknown,            // The commitment has no status in the snapshot
-    Unstaked,           // The pledge commitment doesn't have a corresponding stake
-    InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
-    Unowned,            // Target capacity partition is not owned by signer
-    UnpledgePending,    // Duplicate unpledge for same partition in this snapshot
-    UnstakePending,     // Duplicate unstake for the signer within this snapshot
-    HasActivePledges,   // Unstake not allowed because signer still has pledges
+    Accepted,                    // The commitment is valid and was added to the snapshot
+    Unknown,                     // The commitment has no status in the snapshot
+    Unstaked,                    // The pledge commitment doesn't have a corresponding stake
+    InvalidPledgeCount,          // The pledge count doesn't match the actual number of pledges
+    Unowned,                     // Target capacity partition is not owned by signer
+    UnpledgePending,             // Duplicate unpledge for same partition in this snapshot
+    UnstakePending,              // Duplicate unstake for the signer within this snapshot
+    HasActivePledges,            // Unstake not allowed because signer still has pledges
+    UpdateRewardAddressPending,  // Duplicate update reward address for the signer within this snapshot
 }
 
 #[derive(Debug, Default, Clone, Hash)]
@@ -29,6 +33,7 @@ pub struct MinerCommitments {
     pub pledges: Vec<CommitmentTransaction>,
     pub unpledges: Vec<CommitmentTransaction>,
     pub unstake: Option<CommitmentTransaction>,
+    pub update_reward_address: Option<CommitmentTransaction>,
 }
 
 impl CommitmentSnapshot {
@@ -58,7 +63,7 @@ impl CommitmentSnapshot {
 
         // Handle by the input values commitment type
         let status = match commitment_type {
-            CommitmentTypeV1::Stake => {
+            CommitmentTypeV2::Stake => {
                 // If already staked in current epoch, just return Accepted
                 if epoch_snapshot.is_staked(*signer) {
                     CommitmentSnapshotStatus::Accepted
@@ -77,7 +82,7 @@ impl CommitmentSnapshot {
                     }
                 }
             }
-            CommitmentTypeV1::Pledge { .. } | CommitmentTypeV1::Unpledge { .. } => {
+            CommitmentTypeV2::Pledge { .. } | CommitmentTypeV2::Unpledge { .. } => {
                 // For pledges, we need to ensure there's a stake (either current epoch or local)
                 if epoch_snapshot.is_staked(*signer) {
                     // Has stake in current epoch, check for duplicate pledge locally
@@ -115,7 +120,7 @@ impl CommitmentSnapshot {
                     }
                 }
             }
-            CommitmentTypeV1::Unstake => {
+            CommitmentTypeV2::Unstake => {
                 // Unstake requires signer to be staked (epoch or local) and not already pending unstake
                 let has_stake = if epoch_snapshot.is_staked(*signer) {
                     true
@@ -132,6 +137,34 @@ impl CommitmentSnapshot {
                         CommitmentSnapshotStatus::Accepted
                     } else if commitments.unstake.is_some() {
                         CommitmentSnapshotStatus::UnstakePending
+                    } else {
+                        CommitmentSnapshotStatus::Unknown
+                    }
+                } else {
+                    CommitmentSnapshotStatus::Unknown
+                }
+            }
+            CommitmentTypeV2::UpdateRewardAddress { .. } => {
+                // UpdateRewardAddress requires signer to be staked (epoch or local)
+                let has_stake = if epoch_snapshot.is_staked(*signer) {
+                    true
+                } else {
+                    self.commitments
+                        .get(signer)
+                        .is_some_and(|mc| mc.stake.is_some())
+                };
+                if !has_stake {
+                    return CommitmentSnapshotStatus::Unstaked;
+                }
+                if let Some(commitments) = self.commitments.get(signer) {
+                    if commitments
+                        .update_reward_address
+                        .as_ref()
+                        .is_some_and(|u| u.id() == txid)
+                    {
+                        CommitmentSnapshotStatus::Accepted
+                    } else if commitments.update_reward_address.is_some() {
+                        CommitmentSnapshotStatus::UpdateRewardAddressPending
                     } else {
                         CommitmentSnapshotStatus::Unknown
                     }
@@ -174,7 +207,7 @@ impl CommitmentSnapshot {
 
         // Handle commitment by type
         match tx_type {
-            CommitmentTypeV1::Stake => {
+            CommitmentTypeV2::Stake => {
                 // Check existing commitments in epoch service
                 if is_staked_in_current_epoch {
                     // Already staked in current epoch, no need to add again
@@ -193,7 +226,7 @@ impl CommitmentSnapshot {
                 miner_commitments.stake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentTypeV1::Pledge {
+            CommitmentTypeV2::Pledge {
                 pledge_count_before_executing,
             } => {
                 // First, check if the address has a stake (either in current epoch or pending)
@@ -245,7 +278,7 @@ impl CommitmentSnapshot {
                 miner_commitments.pledges.push(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentTypeV1::Unpledge {
+            CommitmentTypeV2::Unpledge {
                 pledge_count_before_executing,
                 partition_hash,
             } => {
@@ -288,7 +321,7 @@ impl CommitmentSnapshot {
                 if miner_commitments.unpledges.iter().any(|tx| {
                     matches!(
                         tx.commitment_type(),
-                        CommitmentTypeV1::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
+                        CommitmentTypeV2::Unpledge { partition_hash: ph, .. } if ph == *partition_hash
                     )
                 }) {
                     return CommitmentSnapshotStatus::UnpledgePending;
@@ -297,7 +330,7 @@ impl CommitmentSnapshot {
                 miner_commitments.unpledges.push(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentTypeV1::Unstake => {
+            CommitmentTypeV2::Unstake => {
                 // Require staked or pending local stake
                 let has_stake = if is_staked_in_current_epoch {
                     true
@@ -325,6 +358,29 @@ impl CommitmentSnapshot {
                 miner_commitments.unstake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
+            CommitmentTypeV2::UpdateRewardAddress { .. } => {
+                // Require staked or pending local stake
+                let has_stake = if is_staked_in_current_epoch {
+                    true
+                } else {
+                    self.commitments
+                        .get(signer)
+                        .is_some_and(|mc| mc.stake.is_some())
+                };
+                if !has_stake {
+                    return CommitmentSnapshotStatus::Unstaked;
+                }
+
+                let miner_commitments = self.commitments.entry(*signer).or_default();
+
+                // Only allow one update_reward_address per epoch per signer
+                if miner_commitments.update_reward_address.is_some() {
+                    return CommitmentSnapshotStatus::UpdateRewardAddressPending;
+                }
+
+                miner_commitments.update_reward_address = Some(commitment_tx.clone());
+                CommitmentSnapshotStatus::Accepted
+            }
         }
     }
 
@@ -348,6 +404,10 @@ impl CommitmentSnapshot {
 
             if let Some(unstake) = &miner_commitments.unstake {
                 all_commitments.push(unstake.clone());
+            }
+
+            if let Some(update_reward_address) = &miner_commitments.update_reward_address {
+                all_commitments.push(update_reward_address.clone());
             }
         }
 
@@ -486,6 +546,7 @@ mod tests {
                     partition_hash: Some(*hash),
                     signer,
                     amount: U256::from(1_000_u64),
+                    reward_address: Some(signer),
                 })
                 .collect(),
         );
@@ -497,6 +558,7 @@ mod tests {
                 partition_hash: None,
                 signer,
                 amount: U256::from(5_000_u64),
+                reward_address: Some(signer),
             },
         );
         for hash in &partition_hashes {
@@ -560,6 +622,7 @@ mod tests {
                     partition_hash: Some(*hash),
                     signer,
                     amount: U256::from(1_000_u64),
+                    reward_address: Some(signer),
                 })
                 .collect(),
         );
@@ -571,6 +634,7 @@ mod tests {
                 partition_hash: None,
                 signer,
                 amount: U256::from(5_000_u64),
+                reward_address: Some(signer),
             },
         );
         for hash in &partition_hashes {
@@ -656,6 +720,7 @@ mod tests {
                 partition_hash: None,
                 signer,
                 amount: U256::from(1000),
+                reward_address: Some(signer),
             },
         );
         let status = snapshot.add_commitment(&pledge, &epoch_snapshot);

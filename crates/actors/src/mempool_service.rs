@@ -50,7 +50,7 @@ use irys_types::{
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{BlockHash, CommitmentTypeV1};
+use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -715,7 +715,7 @@ impl Inner {
             }
 
             // signer stake status check
-            if matches!(tx.commitment_type(), CommitmentTypeV1::Stake) {
+            if matches!(tx.commitment_type(), CommitmentTypeV2::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer());
                 debug!(
                     tx.id = ?tx.id(),
@@ -807,8 +807,8 @@ impl Inner {
                     .iter()
                     .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
                         match tx.commitment_type() {
-                            CommitmentTypeV1::Stake => (stakes + 1, pledges),
-                            CommitmentTypeV1::Pledge { .. } => (stakes, pledges + 1),
+                            CommitmentTypeV2::Stake => (stakes + 1, pledges),
+                            CommitmentTypeV2::Pledge { .. } => (stakes, pledges + 1),
                             _ => (stakes, pledges),
                         }
                     });
@@ -1971,7 +1971,7 @@ impl AtomicMempoolState {
     pub async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
-        commitment_type_filter: impl Fn(CommitmentTypeV1) -> bool,
+        commitment_type_filter: impl Fn(CommitmentTypeV2) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
         let mempool = self.read().await;
@@ -2510,7 +2510,7 @@ impl AtomicMempoolState {
             // Check if there's at least one pending stake transaction
             if pending
                 .iter()
-                .any(|c| c.commitment_type() == CommitmentTypeV1::Stake)
+                .any(|c| c.commitment_type() == CommitmentTypeV2::Stake)
             {
                 return true;
             }
