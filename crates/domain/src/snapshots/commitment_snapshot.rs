@@ -144,7 +144,7 @@ impl CommitmentSnapshot {
                     CommitmentSnapshotStatus::Unknown
                 }
             }
-            CommitmentTypeV2::UpdateRewardAddress { .. } => {
+            CommitmentTypeV2::UpdateRewardAddress { nonce, .. } => {
                 // UpdateRewardAddress requires signer to be staked (epoch or local)
                 let has_stake = if epoch_snapshot.is_staked(*signer) {
                     true
@@ -157,17 +157,18 @@ impl CommitmentSnapshot {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
                 if let Some(commitments) = self.commitments.get(signer) {
-                    if commitments
-                        .update_reward_address
-                        .as_ref()
-                        .is_some_and(|u| u.id() == txid)
-                    {
-                        CommitmentSnapshotStatus::Accepted
-                    } else if commitments.update_reward_address.is_some() {
-                        CommitmentSnapshotStatus::UpdateRewardAddressPending
-                    } else {
-                        CommitmentSnapshotStatus::Unknown
+                    if let Some(existing_tx) = &commitments.update_reward_address {
+                        if existing_tx.id() == txid {
+                            return CommitmentSnapshotStatus::Accepted;
+                        }
+                        // Check if this nonce would be rejected
+                        if let CommitmentTypeV2::UpdateRewardAddress { nonce: existing_nonce, .. } = existing_tx.commitment_type() {
+                            if *nonce <= existing_nonce {
+                                return CommitmentSnapshotStatus::UpdateRewardAddressPending;
+                            }
+                        }
                     }
+                    CommitmentSnapshotStatus::Unknown
                 } else {
                     CommitmentSnapshotStatus::Unknown
                 }
@@ -358,7 +359,7 @@ impl CommitmentSnapshot {
                 miner_commitments.unstake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentTypeV2::UpdateRewardAddress { .. } => {
+            CommitmentTypeV2::UpdateRewardAddress { nonce, .. } => {
                 // Require staked or pending local stake
                 let has_stake = if is_staked_in_current_epoch {
                     true
@@ -373,9 +374,13 @@ impl CommitmentSnapshot {
 
                 let miner_commitments = self.commitments.entry(*signer).or_default();
 
-                // Only allow one update_reward_address per epoch per signer
-                if miner_commitments.update_reward_address.is_some() {
-                    return CommitmentSnapshotStatus::UpdateRewardAddressPending;
+                // Allow replacement only if new nonce is strictly greater
+                if let Some(existing_tx) = &miner_commitments.update_reward_address {
+                    if let CommitmentTypeV2::UpdateRewardAddress { nonce: existing_nonce, .. } = existing_tx.commitment_type() {
+                        if *nonce <= existing_nonce {
+                            return CommitmentSnapshotStatus::UpdateRewardAddressPending;
+                        }
+                    }
                 }
 
                 miner_commitments.update_reward_address = Some(commitment_tx.clone());

@@ -360,7 +360,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentTypeV2::UpdateRewardAddress { new_reward_address } =
+            let irys_types::CommitmentTypeV2::UpdateRewardAddress { new_reward_address, .. } =
                 &commitment.commitment_type()
             else {
                 continue;

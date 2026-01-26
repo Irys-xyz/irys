@@ -7,7 +7,7 @@ use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
-    IrysAddress, NodeConfig, H256,
+    IrysAddress, NodeConfig, H256, U256,
 };
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -563,6 +563,42 @@ async fn post_pledge_commitment(
     pledge_tx
 }
 
+async fn post_update_reward_address(
+    node: &IrysNodeTest<IrysNodeCtx>,
+    signer: &IrysSigner,
+    new_reward_address: IrysAddress,
+    nonce: U256,
+) -> CommitmentTransaction {
+    let consensus = &node.node_ctx.config.consensus;
+    let anchor = node
+        .get_anchor()
+        .await
+        .expect("anchor should be available");
+
+    let mut update_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+        tx: CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            },
+            anchor,
+            fee: consensus.mempool.commitment_fee,
+            value: U256::zero(), // Must be zero for UpdateRewardAddress
+            ..CommitmentTransactionV2::new(consensus)
+        },
+        metadata: Default::default(),
+    });
+
+    signer.sign_commitment(&mut update_tx).unwrap();
+    info!("Generated update_reward_address_tx.id: {}", update_tx.id());
+
+    node.post_commitment_tx(&update_tx)
+        .await
+        .expect("posted update reward address commitment tx");
+
+    update_tx
+}
+
 /// Validates that the partition_hashes associated with pledges in the EpochSnapshot::commitment_state are reflected
 /// in the EpochSnapshot::partition_assignments which maps partition_hashes to ledger or capacity.
 fn validate_pledge_assignments(
@@ -626,4 +662,230 @@ fn validate_pledge_assignments(
         .iter()
         .filter_map(|entry| entry.partition_hash)
         .collect())
+}
+
+#[tokio::test]
+async fn heavy_test_update_reward_address() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+
+    // Setup: 2-block epochs for fast transitions
+    let num_blocks_in_epoch = 2;
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    let signer_address = signer.address();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    // Create a different address for the new reward address
+    let new_reward_signer = IrysSigner::random_signer(&config.consensus_config());
+    let new_reward_address = new_reward_signer.address();
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("UPDATE_REWARD_ADDR_TEST", 10)
+        .await;
+
+    let block_tree_guard = &node.node_ctx.block_tree_guard;
+
+    // PHASE 1: Create stake and mine to first epoch boundary
+    let stake_tx = post_stake_commitment(&node, &signer).await;
+    node.mine_blocks(num_blocks_in_epoch).await?;
+
+    // ASSERT: Initial reward_address equals signer address
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let stake_entry = epoch_snapshot
+        .commitment_state
+        .stake_commitments
+        .get(&signer_address)
+        .expect("Signer should have stake in epoch snapshot");
+
+    assert_eq!(
+        stake_entry.reward_address,
+        Some(signer_address),
+        "Initial reward_address should equal signer address"
+    );
+
+    // PHASE 2: Submit UpdateRewardAddress and mine a block to include it
+    let update_tx = post_update_reward_address(&node, &signer, new_reward_address, U256::from(1)).await;
+
+    // Status is Unknown until mined
+    let status = node.get_commitment_snapshot_status(&update_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unknown);
+
+    // Mine a block to include the commitment
+    node.mine_blocks(1).await?;
+
+    // Now status should be Accepted
+    let status = node.get_commitment_snapshot_status(&update_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Accepted);
+
+    // PHASE 3: Mine to next epoch boundary (one more block since we already mined one)
+    node.mine_blocks(num_blocks_in_epoch - 1).await?;
+
+    // ASSERT: reward_address is now updated in epoch snapshot
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let stake_entry = epoch_snapshot
+        .commitment_state
+        .stake_commitments
+        .get(&signer_address)
+        .expect("Signer should still have stake after update");
+
+    assert_eq!(
+        stake_entry.reward_address,
+        Some(new_reward_address),
+        "reward_address should be updated after epoch boundary"
+    );
+
+    // Silence unused variable warning
+    let _ = stake_tx;
+
+    node.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+
+    let num_blocks_in_epoch = 2;
+    let config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+
+    // Create signer but DON'T stake
+    let unstaked_signer = IrysSigner::random_signer(&config.consensus_config());
+    let new_reward_address = IrysSigner::random_signer(&config.consensus_config()).address();
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("UPDATE_UNSTAKED_TEST", 10)
+        .await;
+
+    // Create UpdateRewardAddress tx for unstaked signer
+    let consensus = &node.node_ctx.config.consensus;
+    let anchor = node.get_anchor().await?;
+
+    let mut update_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+        tx: CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address,
+                nonce: U256::from(1),
+            },
+            anchor,
+            fee: consensus.mempool.commitment_fee,
+            value: U256::zero(),
+            ..CommitmentTransactionV2::new(consensus)
+        },
+        metadata: Default::default(),
+    });
+    unstaked_signer.sign_commitment(&mut update_tx).unwrap();
+
+    // ASSERT: Status should be Unstaked
+    let status = node.get_commitment_snapshot_status(&update_tx);
+    assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
+
+    // Posting should fail
+    let result = node.post_commitment_tx(&update_tx).await;
+    assert!(result.is_err());
+
+    node.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+
+    // Use 4 blocks per epoch to have room for testing within an epoch
+    let num_blocks_in_epoch = 4;
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+
+    let signer = IrysSigner::random_signer(&config.consensus_config());
+    let signer_address = signer.address();
+    config.fund_genesis_accounts(vec![&signer]);
+
+    let reward_address_1 = IrysSigner::random_signer(&config.consensus_config()).address();
+    let reward_address_2 = IrysSigner::random_signer(&config.consensus_config()).address();
+    let reward_address_3 = IrysSigner::random_signer(&config.consensus_config()).address();
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("MULTI_UPDATE_TEST", 10)
+        .await;
+
+    let block_tree_guard = &node.node_ctx.block_tree_guard;
+
+    // PHASE 1: Create stake and mine to first epoch boundary
+    let _stake_tx = post_stake_commitment(&node, &signer).await;
+    node.mine_blocks(num_blocks_in_epoch).await?;
+
+    // PHASE 2: Submit first update with nonce=1 and mine to include it (still within epoch)
+    let update_tx_1 = post_update_reward_address(&node, &signer, reward_address_1, U256::from(1)).await;
+    node.mine_blocks(1).await?;
+    assert_eq!(node.get_commitment_snapshot_status(&update_tx_1), CommitmentSnapshotStatus::Accepted);
+
+    // PHASE 3: Check that update with SAME nonce=1 would be rejected
+    let consensus = &node.node_ctx.config.consensus;
+    let anchor = node.get_anchor().await?;
+    let mut update_tx_same_nonce = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+        tx: CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address: reward_address_2,
+                nonce: U256::from(1),
+            },
+            anchor,
+            fee: consensus.mempool.commitment_fee,
+            value: U256::zero(),
+            ..CommitmentTransactionV2::new(consensus)
+        },
+        metadata: Default::default(),
+    });
+    signer.sign_commitment(&mut update_tx_same_nonce).unwrap();
+
+    // Status check shows it would be rejected (same nonce as existing)
+    let status = node.get_commitment_snapshot_status(&update_tx_same_nonce);
+    assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
+
+    // PHASE 4: Submit update with HIGHER nonce=2 and mine - should REPLACE the previous one
+    let update_tx_2 = post_update_reward_address(&node, &signer, reward_address_2, U256::from(2)).await;
+    node.mine_blocks(1).await?;
+    assert_eq!(node.get_commitment_snapshot_status(&update_tx_2), CommitmentSnapshotStatus::Accepted);
+
+    // Original tx_1 is no longer the accepted one - checking its status shows it would be
+    // rejected now because there's a higher nonce in the snapshot
+    let status = node.get_commitment_snapshot_status(&update_tx_1);
+    assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
+
+    // PHASE 5: Mine to epoch boundary - reward_address_2 should be applied (not reward_address_1)
+    // We've mined 2 blocks since epoch boundary, need 2 more to reach next epoch
+    node.mine_blocks(num_blocks_in_epoch - 2).await?;
+
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let stake_entry = epoch_snapshot
+        .commitment_state
+        .stake_commitments
+        .get(&signer_address)
+        .expect("Signer should have stake");
+    assert_eq!(
+        stake_entry.reward_address,
+        Some(reward_address_2),
+        "Higher nonce update should be applied"
+    );
+
+    // PHASE 6: New epoch - can submit with nonce=1 again (fresh snapshot for new epoch)
+    let update_tx_3 = post_update_reward_address(&node, &signer, reward_address_3, U256::from(1)).await;
+    node.mine_blocks(1).await?;
+    assert_eq!(node.get_commitment_snapshot_status(&update_tx_3), CommitmentSnapshotStatus::Accepted);
+
+    // Mine to next epoch boundary
+    node.mine_blocks(num_blocks_in_epoch - 1).await?;
+
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let stake_entry = epoch_snapshot
+        .commitment_state
+        .stake_commitments
+        .get(&signer_address)
+        .expect("Signer should have stake");
+    assert_eq!(stake_entry.reward_address, Some(reward_address_3));
+
+    node.stop().await;
+    Ok(())
 }
