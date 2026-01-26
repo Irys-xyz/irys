@@ -752,12 +752,10 @@ impl NodeConfig {
         IrysAddress::from_private_key(&self.mining_key)
     }
 
-    /// Get the peer_id, generating one if not present (without persisting)
+    /// Get the peer_id (must be set via ensure_peer_id at startup or via testing config)
     pub fn peer_id(&self) -> IrysPeerId {
-        self.peer_id.unwrap_or_else(|| {
-            // Generate from random 20 bytes
-            IrysPeerId::from(rand::random::<[u8; 20]>())
-        })
+        self.peer_id
+            .expect("peer_id should be set via ensure_peer_id() at startup")
     }
 
     /// Generate and set peer_id if not present

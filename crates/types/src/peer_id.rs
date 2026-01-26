@@ -1,9 +1,10 @@
 use crate::{Arbitrary, IrysAddress};
 
-/// Newtype wrapper for peer network identifier.
+/// A newtype wrapper for peer network identifier.
 /// Uses the same underlying type as IrysAddress (20 bytes) but represents
 /// a separate identity for P2P networking, distinct from mining/staking address.
-/// This is a distinct type to enforce separation from IrysAddress at compile time.
+/// It can be created from an address, but it is strictly forbidden to convert it back or access
+///  the inner address to avoid the temptation to use those types interchangeably.
 #[derive(
     Clone,
     Copy,
@@ -19,7 +20,7 @@ use crate::{Arbitrary, IrysAddress};
 )]
 #[serde(transparent)]
 #[repr(transparent)]
-pub struct IrysPeerId(pub IrysAddress);
+pub struct IrysPeerId(IrysAddress);
 
 impl IrysPeerId {
     /// Zero peer ID constant
@@ -29,18 +30,6 @@ impl IrysPeerId {
     #[inline]
     pub fn random() -> Self {
         Self(IrysAddress::random())
-    }
-
-    /// Get the inner address
-    #[inline]
-    pub const fn inner(&self) -> &IrysAddress {
-        &self.0
-    }
-
-    /// Convert to the inner address
-    #[inline]
-    pub const fn into_inner(self) -> IrysAddress {
-        self.0
     }
 }
 

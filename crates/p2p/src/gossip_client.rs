@@ -907,7 +907,7 @@ impl GossipClient {
         let peer = peer.1.clone();
 
         tokio::spawn(async move {
-            let peer_miner_address = peer_id.0;
+            let peer_miner_address = peer.mining_address;
             if let Err(e) = client
                 .send_data_and_update_score_internal(
                     (&peer_miner_address, &peer),
@@ -1574,8 +1574,8 @@ impl GossipClient {
                 };
 
                 // Update score for the peer based on the result
-                // TODO: handle_score still uses miner_address. Once updated to use peer_id, remove .0 extraction.
-                Self::handle_score(peer_list, &res, &peer.0 .0);
+                let miner_address = peer.1.mining_address;
+                Self::handle_score(peer_list, &res, &miner_address);
 
                 match res {
                     Ok(response) => match response {
@@ -1980,7 +1980,7 @@ mod tests {
 
         fn create_test_peer(id: u8) -> (IrysPeerId, IrysAddress, PeerListItem) {
             let mining_addr = IrysAddress::from([id; 20]);
-            let peer_id = IrysPeerId(mining_addr); // For tests: peer_id = mining_addr for simplicity
+            let peer_id = IrysPeerId::from(mining_addr); // For tests: peer_id = mining_addr for simplicity
             let peer_address = PeerAddress {
                 gossip: SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)),
@@ -1990,6 +1990,8 @@ mod tests {
                 execution: RethPeerInfo::default(),
             };
             let peer = PeerListItem {
+                peer_id,
+                mining_address: mining_addr,
                 address: peer_address,
                 reputation_score: PeerScore::new(PeerScore::INITIAL),
                 response_time: 100,
@@ -1999,7 +2001,6 @@ mod tests {
                     .unwrap()
                     .as_secs(),
                 protocol_version: Default::default(),
-                peer_id: Some(peer_id),
             };
             (peer_id, mining_addr, peer)
         }
@@ -2017,8 +2018,8 @@ mod tests {
 
             for (response_time, should_increase) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
-                let (peer_id, mining_addr, peer) = create_test_peer(1);
-                peer_list.add_or_update_peer(mining_addr, peer, true);
+                let (peer_id, _mining_addr, peer) = create_test_peer(1);
+                peer_list.add_or_update_peer(peer, true);
 
                 let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
 
@@ -2053,8 +2054,8 @@ mod tests {
 
             for (response_time, expected_decrease) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
-                let (peer_id, mining_addr, peer) = create_test_peer(1);
-                peer_list.add_or_update_peer(mining_addr, peer, true);
+                let (peer_id, _mining_addr, peer) = create_test_peer(1);
+                peer_list.add_or_update_peer(peer, true);
 
                 let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
 
@@ -2079,8 +2080,8 @@ mod tests {
         #[test]
         fn test_handle_data_retrieval_score_failed_response() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let (peer_id, mining_addr, peer) = create_test_peer(1);
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            let (peer_id, _mining_addr, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
 
             let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
             let response_time = Duration::from_millis(500);
@@ -2103,8 +2104,8 @@ mod tests {
         #[test]
         fn test_multiple_score_updates_in_sequence() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let (peer_id, mining_addr, peer) = create_test_peer(1);
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            let (peer_id, _mining_addr, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
 
             let operations = vec![
                 (Duration::from_millis(100), Ok(()), 51),
@@ -2191,7 +2192,8 @@ mod tests {
     mod concurrent_scoring_tests {
         use super::*;
         use irys_types::IrysAddress;
-        use irys_types::{PeerListItem, PeerScore};
+        use irys_types::{PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo};
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
         use std::sync::Arc;
         use tokio::task::JoinSet;
 
@@ -2199,12 +2201,22 @@ mod tests {
         async fn test_concurrent_score_updates() {
             let peer_list = Arc::new(PeerList::test_mock().expect("to create peer list mock"));
             let mining_addr = IrysAddress::from([1_u8; 20]);
-            let peer_id = IrysPeerId(mining_addr);
+            let peer_id = IrysPeerId::from(mining_addr);
             let peer = PeerListItem {
-                peer_id: Some(peer_id),
-                ..Default::default()
+                peer_id,
+                mining_address: mining_addr,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9000)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9001)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
             };
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            peer_list.add_or_update_peer(peer, true);
 
             let mut join_set = JoinSet::new();
 

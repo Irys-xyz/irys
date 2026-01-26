@@ -22,8 +22,8 @@ use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     parse_user_agent, BlockBody, BlockIndexQuery, CommitmentTransaction, DataTransactionHeader,
     GossipRequest, GossipRequestV2, HandshakeRequest, HandshakeRequestV2, HandshakeResponse,
-    IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem, ProtocolVersion,
-    UnpackedChunk,
+    IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, PeerListItem, PeerScore,
+    ProtocolVersion, UnpackedChunk,
 };
 use rand::prelude::SliceRandom as _;
 use reth::{builder::Block as _, primitives::Block};
@@ -102,8 +102,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        // For V1 peers, peer_id defaults to miner_address
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -198,21 +197,20 @@ where
                 )));
             }
 
-            // Verify peer_id matches if we have one stored
-            if let Some(stored_peer_id) = peer.peer_id {
-                if stored_peer_id != peer_id {
-                    warn!(
-                        stored_peer_id = %stored_peer_id,
-                        received_peer_id = %peer_id,
-                        miner_address = %miner_address,
-                        "Peer ID mismatch - peer may have changed their peer_id, requires handshake"
-                    );
-                    return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
-                        RejectionReason::HandshakeRequired(Some(
-                            HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
-                        )),
-                    )));
-                }
+            // Verify peer_id matches the stored one
+            let stored_peer_id = peer.peer_id;
+            if stored_peer_id != peer_id {
+                warn!(
+                    stored_peer_id = %stored_peer_id,
+                    received_peer_id = %peer_id,
+                    miner_address = %miner_address,
+                    "Peer ID mismatch - peer may have changed their peer_id, requires handshake"
+                );
+                return Err(HttpResponse::Ok().json(GossipResponse::<()>::Rejected(
+                    RejectionReason::HandshakeRequired(Some(
+                        HandshakeRequirementReason::RequestOriginDoesNotMatchExpected,
+                    )),
+                )));
             }
 
             Ok(peer)
@@ -263,8 +261,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        // For V1 peers, peer_id defaults to miner_address
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -347,7 +344,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -413,7 +410,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -461,7 +458,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -505,7 +502,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -549,7 +546,7 @@ where
         server.peer_list.set_is_online(&source_miner_address, true);
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -1068,11 +1065,19 @@ where
 
         let peer_address = version_request.address;
         let mining_addr = version_request.mining_address;
+        let peer_id = IrysPeerId::from(mining_addr); // V1 compatibility: V1 peers don't have separate peer_id
         let peer_list_entry = PeerListItem {
+            peer_id,
+            mining_address: mining_addr,
             address: peer_address,
             protocol_version: version_request.protocol_version,
-            peer_id: Some(IrysPeerId::from(mining_addr)), // V1 compatibility: V1 peers don't have separate peer_id
-            ..Default::default()
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            response_time: 0,
+            last_seen: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            is_online: true,
         };
 
         let is_staked = server
@@ -1083,7 +1088,7 @@ where
             .is_staked(mining_addr);
         server
             .peer_list
-            .add_or_update_peer(mining_addr, peer_list_entry, is_staked);
+            .add_or_update_peer(peer_list_entry, is_staked);
 
         let node_name = version_request
             .user_agent
@@ -1175,10 +1180,17 @@ where
         let peer_id = version_request.peer_id; // NEW: Extract peer_id from V2 request
 
         let peer_list_entry = PeerListItem {
+            peer_id,
+            mining_address: mining_addr,
             address: peer_address,
             protocol_version: version_request.protocol_version,
-            peer_id: Some(peer_id), // NEW: Store peer_id
-            ..Default::default()
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            response_time: 0,
+            last_seen: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            is_online: true,
         };
 
         let is_staked = server
@@ -1191,7 +1203,7 @@ where
         // TODO: In future, use peer_id as the key instead of mining_addr
         server
             .peer_list
-            .add_or_update_peer(mining_addr, peer_list_entry, is_staked);
+            .add_or_update_peer(peer_list_entry, is_staked);
 
         let node_name = version_request
             .user_agent
@@ -1312,7 +1324,7 @@ where
         };
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -1388,7 +1400,7 @@ where
         };
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -1429,7 +1441,7 @@ where
         };
 
         // Convert V1 → V2 for internal processing
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId(source_miner_address));
+        let peer_id = peer.peer_id;
         let v2_request = GossipRequestV2 {
             peer_id,
             miner_address: source_miner_address,
@@ -1623,7 +1635,11 @@ mod tests {
     use crate::tests::util::{BlockDiscoveryStub, MempoolStub};
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
-    use irys_types::{Config, DatabaseProvider, NodeConfig, PeerNetworkSender, PeerScore};
+    use irys_types::{
+        Config, DatabaseProvider, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore,
+        RethPeerInfo,
+    };
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::Arc;
     use tokio::sync::mpsc;
 
@@ -1647,7 +1663,24 @@ mod tests {
         .expect("peer list");
 
         let miner = IrysAddress::new([1_u8; 20]);
-        peer_list.add_or_update_peer(miner, PeerListItem::default(), true);
+        let test_peer = PeerListItem {
+            peer_id: IrysPeerId::from(miner),
+            mining_address: miner,
+            address: PeerAddress {
+                gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9000)),
+                api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9001)),
+                execution: RethPeerInfo::default(),
+            },
+            reputation_score: PeerScore::new(PeerScore::INITIAL),
+            response_time: 0,
+            last_seen: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            is_online: true,
+            protocol_version: ProtocolVersion::default(),
+        };
+        peer_list.add_or_update_peer(test_peer, true);
 
         let error = GossipError::BlockPool(CriticalBlockPoolError::BlockError("bad".into()));
         GossipServer::<MempoolStub, BlockDiscoveryStub>::handle_invalid_data(

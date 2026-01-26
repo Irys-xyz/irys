@@ -45,6 +45,8 @@ pub struct PeerListDataInner {
 
     /// Mapping to find peer_id from miner_address (for v1 compatibility)
     miner_addr_to_peer_id_map: HashMap<IrysAddress, IrysPeerId>,
+    /// Reverse mapping to find miner_address from peer_id (for database storage and events)
+    peer_id_to_miner_addr_map: HashMap<IrysPeerId, IrysAddress>,
 
     /// IP-based lookups for PeerId
     gossip_addr_to_peer_id_map: HashMap<IpAddr, IrysPeerId>,
@@ -100,11 +102,9 @@ impl PeerList {
         let peers = compact_peers
             .into_iter()
             .map(|(address, compact_item)| {
-                let mut peer_item = PeerListItem::from(compact_item);
-                // V1 FALLBACK: If peer_id is None (old record or v1 peer), use miner_address
-                if peer_item.peer_id.is_none() {
-                    peer_item.peer_id = Some(IrysPeerId::from(address));
-                }
+                // Convert from PeerListItemInner (database format) to PeerListItem (application format)
+                let inner: irys_types::PeerListItemInner = compact_item.into();
+                let peer_item = irys_types::PeerListItem::from_inner(inner, address);
                 (address, peer_item)
             })
             .collect();
@@ -133,14 +133,9 @@ impl PeerList {
         Ok(Self(Arc::new(RwLock::new(inner))))
     }
 
-    pub fn add_or_update_peer(
-        &self,
-        mining_addr: IrysAddress,
-        peer: PeerListItem,
-        is_staked: bool,
-    ) {
+    pub fn add_or_update_peer(&self, peer: PeerListItem, is_staked: bool) {
         let mut inner = self.0.write().expect("PeerListDataInner lock poisoned");
-        inner.add_or_update_peer(mining_addr, peer, is_staked);
+        inner.add_or_update_peer(peer, is_staked);
     }
 
     /// Get a peer by their peer_id (V2)
@@ -263,18 +258,12 @@ impl PeerList {
             }
         }
         if let Some(peer) = became_active {
-            inner.emit_peer_event(PeerEvent::BecameActive {
-                // V1 FALLBACK: Use peer_id.0 as mining_addr
-                mining_addr: peer_id.0,
-                peer,
-            });
+            let mining_addr = peer.mining_address;
+            inner.emit_peer_event(PeerEvent::BecameActive { mining_addr, peer });
         }
         if let Some(peer) = became_inactive {
-            inner.emit_peer_event(PeerEvent::BecameInactive {
-                // V1 FALLBACK: Use peer_id.0 as mining_addr
-                mining_addr: peer_id.0,
-                peer,
-            });
+            let mining_addr = peer.mining_address;
+            inner.emit_peer_event(PeerEvent::BecameInactive { mining_addr, peer });
         }
     }
 
@@ -302,6 +291,19 @@ impl PeerList {
     pub fn persistable_peers(&self) -> HashMap<IrysPeerId, PeerListItem> {
         let guard = self.read();
         guard.persistent_peers_cache.clone()
+    }
+
+    /// Get persistable peers with their mining addresses (for database storage)
+    /// Returns tuples of (peer_id, mining_addr, peer) for peers that have a known mining address.
+    pub fn persistable_peers_with_mining_addr(
+        &self,
+    ) -> Vec<(IrysPeerId, IrysAddress, PeerListItem)> {
+        let guard = self.read();
+        guard
+            .persistent_peers_cache
+            .iter()
+            .map(|(peer_id, peer)| (*peer_id, peer.mining_address, peer.clone()))
+            .collect()
     }
 
     pub fn temporary_peers(&self) -> LruCache<IrysPeerId, PeerListItem> {
@@ -510,6 +512,12 @@ impl PeerList {
             .cloned()
     }
 
+    /// Get mining address for a peer by their peer_id (reverse lookup)
+    pub fn mining_address_by_peer_id(&self, peer_id: &IrysPeerId) -> Option<IrysAddress> {
+        let binding = self.read();
+        binding.peer_id_to_miner_addr_map.get(peer_id).copied()
+    }
+
     pub fn peer_by_api_address(&self, address: SocketAddr) -> Option<PeerListItem> {
         let binding = self.read();
         let peer_id = binding.api_addr_to_peer_id_map.get(&address).copied()?;
@@ -657,6 +665,7 @@ impl PeerListDataInner {
                     .expect("Expected to be able to create an LRU cache"),
             ),
             miner_addr_to_peer_id_map: HashMap::new(),
+            peer_id_to_miner_addr_map: HashMap::new(),
             gossip_addr_to_peer_id_map: HashMap::new(),
             api_addr_to_peer_id_map: HashMap::new(),
             known_peers_cache: HashSet::new(),
@@ -673,12 +682,9 @@ impl PeerListDataInner {
                 peer_list_item.reputation_score.set_to_max();
             }
 
-            // V1 FALLBACK: Ensure peer_id is set
-            let peer_id = peer_list_item
-                .peer_id
-                .unwrap_or(IrysPeerId::from(mining_address));
-            peer_list_item.peer_id = Some(peer_id);
-
+            // At this point, peer_list_item should already have peer_id and mining_address set
+            // (either from DB via from_inner() or from creation in application code)
+            let peer_id = peer_list_item.peer_id;
             let address = peer_list_item.address;
 
             // Build all the index maps
@@ -691,6 +697,9 @@ impl PeerListDataInner {
             peer_list
                 .miner_addr_to_peer_id_map
                 .insert(mining_address, peer_id);
+            peer_list
+                .peer_id_to_miner_addr_map
+                .insert(peer_id, mining_address);
             peer_list
                 .persistent_peers_cache
                 .insert(peer_id, peer_list_item);
@@ -710,22 +719,15 @@ impl PeerListDataInner {
         }
     }
 
-    pub fn add_or_update_peer(
-        &mut self,
-        mining_addr: IrysAddress,
-        mut peer: PeerListItem,
-        is_staked: bool,
-    ) {
+    pub fn add_or_update_peer(&mut self, mut peer: PeerListItem, is_staked: bool) {
         // If scoring is disabled, set all peer scores to max, the same as in the constructor
         if !self.config.node_config.p2p_gossip.enable_scoring {
             peer.reputation_score.set_to_max();
         }
 
-        // V1 FALLBACK: Ensure peer_id is set
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId::from(mining_addr));
-        if peer.peer_id.is_none() {
-            peer.peer_id = Some(peer_id);
-        }
+        // At this point, peer should already have peer_id and mining_address set
+        let peer_id = peer.peer_id;
+        let mining_addr = peer.mining_address;
 
         // Determine previous active state (if existed)
         let was_active = self
@@ -739,7 +741,7 @@ impl PeerListDataInner {
             })
             .unwrap_or(false);
 
-        let is_updated = self.add_or_update_peer_internal(mining_addr, peer.clone(), is_staked);
+        let is_updated = self.add_or_update_peer_internal(peer.clone(), is_staked);
 
         // Determine a new active state
         let now_peer = self
@@ -821,11 +823,8 @@ impl PeerListDataInner {
             let to_send = (!was_active && now_active).then(|| peer.clone());
             let _ = peer;
             if let Some(peer) = to_send {
-                self.emit_peer_event(PeerEvent::BecameActive {
-                    // V1 FALLBACK: Use peer_id.0 as mining_addr (they're equal in V1 mode)
-                    mining_addr: peer_id.0,
-                    peer,
-                });
+                let mining_addr = peer.mining_address;
+                self.emit_peer_event(PeerEvent::BecameActive { mining_addr, peer });
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.get_mut(peer_id) {
             // Update score in purgatory
@@ -864,9 +863,9 @@ impl PeerListDataInner {
             if let Some(now_peer) = now_peer {
                 let now_active = now_peer.reputation_score.is_active() && now_peer.is_online;
                 if !was_active && now_active {
+                    let mining_addr = now_peer.mining_address;
                     self.emit_peer_event(PeerEvent::BecameActive {
-                        // V1 FALLBACK: Use peer_id.0 as mining_addr (they're equal in V1 mode)
-                        mining_addr: peer_id.0,
+                        mining_addr,
                         peer: now_peer,
                     });
                 }
@@ -917,25 +916,23 @@ impl PeerListDataInner {
             if was_active && !now_active {
                 warn!("Peer {:?} became inactive", peer_id);
                 let peer_clone = peer_item.clone();
+                let mining_addr = peer_item.mining_address;
                 self.emit_peer_event(PeerEvent::BecameInactive {
-                    // V1 FALLBACK: Use peer_id.0 as mining_addr (they're equal in V1 mode)
-                    mining_addr: peer_id.0,
+                    mining_addr,
                     peer: peer_clone,
                 });
             }
         } else if let Some(peer) = self.unstaked_peer_purgatory.pop(peer_id) {
+            // Get mining_addr from the peer
+            let mining_addr = peer.mining_address;
             self.gossip_addr_to_peer_id_map
                 .remove(&peer.address.gossip.ip());
             self.api_addr_to_peer_id_map.remove(&peer.address.api);
-            // V1 FALLBACK: Remove using peer_id.0 as mining_addr
-            self.miner_addr_to_peer_id_map.remove(&peer_id.0);
+            self.miner_addr_to_peer_id_map.remove(&mining_addr);
+            self.peer_id_to_miner_addr_map.remove(peer_id);
             self.known_peers_cache.remove(&peer.address);
             debug!("Removed unstaked peer {:?} from all caches", peer_id);
-            self.emit_peer_event(PeerEvent::PeerRemoved {
-                // V1 FALLBACK: Use peer_id.0 as mining_addr (they're equal in V1 mode)
-                mining_addr: peer_id.0,
-                peer,
-            });
+            self.emit_peer_event(PeerEvent::PeerRemoved { mining_addr, peer });
         }
     }
 
@@ -1083,6 +1080,7 @@ impl PeerListDataInner {
         self.api_addr_to_peer_id_map
             .insert(peer_address.api, peer_id);
         self.miner_addr_to_peer_id_map.insert(mining_addr, peer_id);
+        self.peer_id_to_miner_addr_map.insert(peer_id, mining_addr);
         self.known_peers_cache.insert(peer_address);
     }
 
@@ -1108,17 +1106,13 @@ impl PeerListDataInner {
 
     /// Add or update a peer in the appropriate cache based on staking status and current location.
     /// Returns true if the peer was added or needs re-handshaking, false if no update needed.
-    fn add_or_update_peer_internal(
-        &mut self,
-        mining_addr: IrysAddress,
-        peer: PeerListItem,
-        is_staked: bool,
-    ) -> bool {
+    fn add_or_update_peer_internal(&mut self, peer: PeerListItem, is_staked: bool) -> bool {
         let gossip_addr = peer.address.gossip;
         let peer_address = peer.address;
 
-        // V1 FALLBACK: Ensure peer_id is set
-        let peer_id = peer.peer_id.unwrap_or(IrysPeerId::from(mining_addr));
+        // At this point, peer should already have peer_id and mining_address set
+        let peer_id = peer.peer_id;
+        let mining_addr = peer.mining_address;
 
         // Check if peer exists by peer_id OR by mining_address (for updates where peer_id changed)
         let existing_peer_id = self.miner_addr_to_peer_id_map.get(&mining_addr).copied();
@@ -1147,6 +1141,8 @@ impl PeerListDataInner {
 
                 // Update all mappings to use new peer_id
                 self.miner_addr_to_peer_id_map.insert(mining_addr, peer_id);
+                self.peer_id_to_miner_addr_map.remove(&old_peer_id);
+                self.peer_id_to_miner_addr_map.insert(peer_id, mining_addr);
                 if let Some(peer_item) = self
                     .persistent_peers_cache
                     .get(&peer_id)
@@ -1307,6 +1303,8 @@ mod tests {
             execution: RethPeerInfo::default(),
         };
         let peer = PeerListItem {
+            peer_id,
+            mining_address: mining_addr,
             address: peer_address,
             reputation_score: PeerScore::new(PeerScore::INITIAL),
             response_time: 100,
@@ -1316,7 +1314,6 @@ mod tests {
                 .unwrap()
                 .as_secs(),
             protocol_version: irys_types::ProtocolVersion::default(),
-            peer_id: Some(peer_id),
         };
         (mining_addr, peer_id, peer)
     }
@@ -1337,6 +1334,7 @@ mod tests {
             gossip_addr_to_peer_id_map: HashMap::new(),
             api_addr_to_peer_id_map: HashMap::new(),
             miner_addr_to_peer_id_map: HashMap::new(),
+            peer_id_to_miner_addr_map: HashMap::new(),
             trusted_peers_api_to_gossip_addresses: HashMap::new(),
             peer_whitelist: HashSet::new(),
             peer_network_service_sender: create_mock_sender(),
@@ -1361,9 +1359,9 @@ mod tests {
             #[case] expected_score: u16,
         ) {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            peer_list.add_or_update_peer(peer, true);
 
             peer_list.decrease_peer_score_by_peer_id(&peer_id, reason);
             let updated_peer = peer_list.get_peer(&peer_id).unwrap();
@@ -1373,9 +1371,9 @@ mod tests {
         #[test]
         fn test_multiple_decreases_cumulative() {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            peer_list.add_or_update_peer(peer, true);
 
             peer_list.decrease_peer_score_by_peer_id(
                 &peer_id,
@@ -1414,10 +1412,10 @@ mod tests {
         #[test]
         fn test_decrease_score_removes_inactive_from_known_peers() {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, mut peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
             peer.reputation_score = PeerScore::new(25);
 
-            peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+            peer_list.add_or_update_peer(peer.clone(), true);
             assert!(peer_list.all_known_peers().contains(&peer.address));
 
             peer_list.decrease_peer_score_by_peer_id(
@@ -1436,9 +1434,9 @@ mod tests {
         #[test]
         fn test_decrease_score_unstaked_peer_removal() {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
-            peer_list.add_or_update_peer(mining_addr, peer.clone(), false);
+            peer_list.add_or_update_peer(peer.clone(), false);
             assert!(peer_list.get_peer(&peer_id).is_some());
 
             peer_list.decrease_peer_score_by_peer_id(
@@ -1458,9 +1456,9 @@ mod tests {
             #[case] expected_score: u16,
         ) {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, peer) = create_test_peer(1);
 
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            peer_list.add_or_update_peer(peer, true);
 
             peer_list.increase_peer_score_by_peer_id(&peer_id, reason);
             let updated_peer = peer_list.get_peer(&peer_id).unwrap();
@@ -1470,10 +1468,10 @@ mod tests {
         #[test]
         fn test_score_transitions_across_thresholds() {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, mut peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
 
             peer.reputation_score = PeerScore::new(PeerScore::ACTIVE_THRESHOLD + 2);
-            peer_list.add_or_update_peer(mining_addr, peer, true);
+            peer_list.add_or_update_peer(peer, true);
 
             peer_list.decrease_peer_score_by_peer_id(
                 &peer_id,
@@ -1493,10 +1491,10 @@ mod tests {
         #[test]
         fn test_unstaked_peer_operations() {
             let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
-            let (mining_addr, peer_id, mut peer) = create_test_peer(1);
+            let (_mining_addr, peer_id, mut peer) = create_test_peer(1);
 
             peer.reputation_score = PeerScore::new(50);
-            peer_list.add_or_update_peer(mining_addr, peer, false);
+            peer_list.add_or_update_peer(peer, false);
 
             let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
             assert_eq!(initial_score, 50);
@@ -1523,8 +1521,8 @@ mod tests {
         let (unstaked_mining_addr, unstaked_peer_id, unstaked_peer) = create_test_peer(2);
 
         // Add peers with different staking status
-        peer_list.add_or_update_peer(staked_mining_addr, staked_peer.clone(), true);
-        peer_list.add_or_update_peer(unstaked_mining_addr, unstaked_peer.clone(), false);
+        peer_list.add_or_update_peer(staked_peer.clone(), true);
+        peer_list.add_or_update_peer(unstaked_peer.clone(), false);
 
         // Test 1: persistable_peers should only return staked peers
         let persistable = peer_list.persistable_peers();
@@ -1670,14 +1668,14 @@ mod tests {
 
         // Test 11: inactive_peers should include both staked and unstaked peers if they're inactive
         // Create inactive peers
-        let (inactive_staked_mining_addr, inactive_staked_peer_id, mut inactive_staked_peer) =
+        let (_inactive_staked_mining_addr, inactive_staked_peer_id, mut inactive_staked_peer) =
             create_test_peer(3);
-        let (inactive_unstaked_mining_addr, inactive_unstaked_peer_id, mut inactive_unstaked_peer) =
+        let (_inactive_unstaked_mining_addr, inactive_unstaked_peer_id, mut inactive_unstaked_peer) =
             create_test_peer(4);
         inactive_staked_peer.reputation_score = PeerScore::new(10); // Below active threshold
         inactive_unstaked_peer.reputation_score = PeerScore::new(10); // Below active threshold
-        peer_list.add_or_update_peer(inactive_staked_mining_addr, inactive_staked_peer, true);
-        peer_list.add_or_update_peer(inactive_unstaked_mining_addr, inactive_unstaked_peer, false);
+        peer_list.add_or_update_peer(inactive_staked_peer, true);
+        peer_list.add_or_update_peer(inactive_unstaked_peer, false);
 
         let inactive_peers = peer_list.inactive_peers();
         let inactive_contains_staked = inactive_peers
@@ -1757,7 +1755,7 @@ mod tests {
         assert_eq!(peer.protocol_version, ProtocolVersion::V1);
 
         // Add peer to persistent cache (staked)
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
 
         // Verify initial protocol version
         let retrieved = peer_list.peer_by_mining_address(&mining_addr).unwrap();
@@ -1766,7 +1764,7 @@ mod tests {
         // Update peer with new protocol version (V2)
         peer.protocol_version = ProtocolVersion::V2;
         peer.last_seen += HANDSHAKE_COOLDOWN + 1; // Ensure cooldown expired
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
 
         // Verify protocol_version is updated via peer_by_mining_address
         let updated = peer_list.peer_by_mining_address(&mining_addr).unwrap();
@@ -1809,12 +1807,12 @@ mod tests {
         assert_eq!(unstaked_peer.protocol_version, ProtocolVersion::V1);
 
         // Add to purgatory
-        peer_list.add_or_update_peer(unstaked_mining_addr, unstaked_peer.clone(), false);
+        peer_list.add_or_update_peer(unstaked_peer.clone(), false);
 
         // Update protocol version for unstaked peer to V2
         unstaked_peer.protocol_version = ProtocolVersion::V2;
         unstaked_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
-        peer_list.add_or_update_peer(unstaked_mining_addr, unstaked_peer, false);
+        peer_list.add_or_update_peer(unstaked_peer, false);
 
         // Verify protocol_version updated in purgatory
         let unstaked_updated = peer_list
@@ -1831,7 +1829,7 @@ mod tests {
         promo_peer.protocol_version = ProtocolVersion::V2;
 
         // Add to purgatory first
-        peer_list.add_or_update_peer(promo_mining_addr, promo_peer.clone(), false);
+        peer_list.add_or_update_peer(promo_peer.clone(), false);
         let in_purgatory = peer_list
             .peer_by_mining_address(&promo_mining_addr)
             .unwrap();
@@ -1839,7 +1837,7 @@ mod tests {
 
         // Promote to persistent (staked)
         promo_peer.last_seen += HANDSHAKE_COOLDOWN + 1;
-        peer_list.add_or_update_peer(promo_mining_addr, promo_peer, true);
+        peer_list.add_or_update_peer(promo_peer, true);
 
         // Verify protocol_version preserved after promotion
         let promoted = peer_list
@@ -1864,8 +1862,8 @@ mod tests {
         let peer_list = create_test_peer_list(Config::new(NodeConfig::testing()));
 
         // Create test peers with active reputation scores
-        let (staked_mining_addr, _staked_peer_id, mut staked_peer) = create_test_peer(1);
-        let (unstaked_mining_addr, _unstaked_peer_id, mut unstaked_peer) = create_test_peer(2);
+        let (_staked_mining_addr, _staked_peer_id, mut staked_peer) = create_test_peer(1);
+        let (_unstaked_mining_addr, _unstaked_peer_id, mut unstaked_peer) = create_test_peer(2);
 
         // Make sure peers have active reputation scores (above ACTIVE_THRESHOLD = 20)
         // Start with INITIAL = 50, so they should already be active
@@ -1873,7 +1871,7 @@ mod tests {
         unstaked_peer.reputation_score = PeerScore::new(80); // Well above active threshold
 
         // Test case 1: Only unstaked peer is active
-        peer_list.add_or_update_peer(unstaked_mining_addr, unstaked_peer, false);
+        peer_list.add_or_update_peer(unstaked_peer, false);
 
         // The wait_for_active_peers should find the active unstaked peer
         // We'll test this by checking if there are active peers
@@ -1899,7 +1897,7 @@ mod tests {
         );
 
         // Test case 2: Add staked peer and verify both are counted
-        peer_list.add_or_update_peer(staked_mining_addr, staked_peer, true);
+        peer_list.add_or_update_peer(staked_peer, true);
 
         let active_peers_count_both = {
             let bindings = peer_list.read();

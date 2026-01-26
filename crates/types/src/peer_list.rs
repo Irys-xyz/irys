@@ -1,4 +1,6 @@
-use crate::{BlockHash, ChunkPathHash, Compact, IrysPeerId, PeerAddress, ProtocolVersion};
+use crate::{
+    BlockHash, ChunkPathHash, Compact, IrysAddress, IrysPeerId, PeerAddress, ProtocolVersion,
+};
 
 use crate::v2::GossipDataRequestV2;
 use alloy_primitives::B256;
@@ -77,7 +79,7 @@ impl PeerScore {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Arbitrary, Hash)]
-pub struct PeerListItem {
+pub struct PeerListItemInner {
     pub reputation_score: PeerScore,
     pub response_time: u16,
     pub address: PeerAddress,
@@ -88,9 +90,12 @@ pub struct PeerListItem {
     /// None means: (1) old record from DB, or (2) v1 peer
     /// On load, None records get peer_id = miner_address until handshake updates it
     pub peer_id: Option<IrysPeerId>,
+    /// Mining/staking address for this peer
+    /// None means: old record from DB - will be populated from DB key on load
+    pub mining_address: Option<IrysAddress>,
 }
 
-impl Default for PeerListItem {
+impl Default for PeerListItemInner {
     fn default() -> Self {
         Self {
             reputation_score: PeerScore(PeerScore::INITIAL),
@@ -107,6 +112,60 @@ impl Default for PeerListItem {
             is_online: true,
             protocol_version: ProtocolVersion::default(),
             peer_id: None,
+            mining_address: None,
+        }
+    }
+}
+
+/// PeerListItem is the main type used throughout the codebase.
+/// It has non-optional peer_id and mining_address fields for type safety.
+/// PeerListItemInner is only used for database serialization.
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize, Hash)]
+pub struct PeerListItem {
+    /// Peer network identifier (separate from mining address)
+    pub peer_id: IrysPeerId,
+    /// Mining/staking address for this peer
+    pub mining_address: IrysAddress,
+    pub reputation_score: PeerScore,
+    pub response_time: u16,
+    pub address: PeerAddress,
+    pub last_seen: u64,
+    pub is_online: bool,
+    pub protocol_version: ProtocolVersion,
+}
+
+impl PeerListItem {
+    /// Create a PeerListItem from PeerListItemInner loaded from a database.
+    /// Uses the mining_address_key (DB key) as fallback for missing fields.
+    pub fn from_inner(inner: PeerListItemInner, mining_address_key: IrysAddress) -> Self {
+        let peer_id = inner
+            .peer_id
+            .unwrap_or(IrysPeerId::from(mining_address_key));
+        let mining_address = inner.mining_address.unwrap_or(mining_address_key);
+        Self {
+            peer_id,
+            mining_address,
+            reputation_score: inner.reputation_score,
+            response_time: inner.response_time,
+            address: inner.address,
+            last_seen: inner.last_seen,
+            is_online: inner.is_online,
+            protocol_version: inner.protocol_version,
+        }
+    }
+
+    /// Convert to PeerListItemInner for database storage. NEVER use this method ANYWHERE except
+    /// for database serialization!
+    pub fn to_inner(&self) -> PeerListItemInner {
+        PeerListItemInner {
+            peer_id: Some(self.peer_id),
+            mining_address: Some(self.mining_address),
+            reputation_score: self.reputation_score,
+            response_time: self.response_time,
+            address: self.address,
+            last_seen: self.last_seen,
+            is_online: self.is_online,
+            protocol_version: self.protocol_version,
         }
     }
 }
@@ -236,7 +295,7 @@ pub fn decode_address(buf: &[u8]) -> (SocketAddr, usize) {
 /// in the future. New fields can be appended to the end of the compact buffer
 /// and the from_compact can populate new fields with defaults if the buffer
 /// length is from a previous smaller version of the struct.
-impl Compact for PeerListItem {
+impl Compact for PeerListItemInner {
     fn to_compact<B>(&self, buf: &mut B) -> usize
     where
         B: bytes::BufMut + AsMut<[u8]>,
@@ -275,6 +334,15 @@ impl Compact for PeerListItem {
         if let Some(peer_id) = &self.peer_id {
             buf.put_slice(peer_id.as_ref());
             size += 20;
+        }
+
+        // Append mining_address (20 bytes) after peer_id for backward compatibility
+        // Only written if peer_id was also written (ensures consistent ordering)
+        if self.peer_id.is_some() {
+            if let Some(mining_address) = &self.mining_address {
+                buf.put_slice(mining_address.as_ref());
+                size += 20;
+            }
         }
 
         size
@@ -327,6 +395,7 @@ impl Compact for PeerListItem {
                     is_online: false,
                     protocol_version: ProtocolVersion::default(),
                     peer_id: None,
+                    mining_address: None,
                 },
                 &[],
             );
@@ -387,6 +456,18 @@ impl Compact for PeerListItem {
             None // Old record without peer_id
         };
 
+        // Read mining_address (20 bytes) if available
+        // This field was added after peer_id, so older records won't have it
+        let mining_address = if peer_id.is_some() && buf.len() >= total_consumed + 20 {
+            let mining_address_bytes: [u8; 20] = buf[total_consumed..total_consumed + 20]
+                .try_into()
+                .expect("slice with incorrect length");
+            total_consumed += 20;
+            Some(IrysAddress::from(mining_address_bytes))
+        } else {
+            None // Old record without mining_address
+        };
+
         (
             Self {
                 reputation_score,
@@ -396,6 +477,7 @@ impl Compact for PeerListItem {
                 is_online,
                 protocol_version,
                 peer_id,
+                mining_address,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
             &buf[total_consumed.min(buf.len())..],
@@ -587,7 +669,9 @@ mod tests {
 
     #[test]
     fn peer_list_item_compact_roundtrip() {
-        let peer_list_item = PeerListItem {
+        let mining_addr = IrysAddress::from([1_u8; 20]);
+        let peer_id = IrysPeerId::from(mining_addr);
+        let peer_list_item_inner = PeerListItemInner {
             reputation_score: PeerScore::new(75),
             response_time: 150,
             address: PeerAddress {
@@ -604,12 +688,13 @@ mod tests {
             last_seen: 1704067200000, // Jan 1, 2024 timestamp in milliseconds
             is_online: true,
             protocol_version: ProtocolVersion::V2,
-            peer_id: None,
+            peer_id: Some(peer_id),
+            mining_address: Some(mining_addr),
         };
-        let mut buf = bytes::BytesMut::with_capacity(100);
-        peer_list_item.to_compact(&mut buf);
-        let (decoded, _) = PeerListItem::from_compact(&buf[..], buf.len());
-        assert_eq!(peer_list_item, decoded);
+        let mut buf = bytes::BytesMut::with_capacity(150);
+        peer_list_item_inner.to_compact(&mut buf);
+        let (decoded, _) = PeerListItemInner::from_compact(&buf[..], buf.len());
+        assert_eq!(peer_list_item_inner, decoded);
     }
 
     #[test]
@@ -841,10 +926,10 @@ mod tests {
 
     #[test]
     fn peer_list_item_compact_remainder_empty() {
-        let item = PeerListItem::default();
+        let item = PeerListItemInner::default();
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
-        let (_decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
+        let (_decoded, remainder) = PeerListItemInner::from_compact(&buf[..], buf.len());
         assert!(
             remainder.is_empty(),
             "expected no remainder after decoding full buffer"
@@ -853,9 +938,9 @@ mod tests {
 
     #[test]
     fn peer_list_item_from_compact_missing_is_online_and_protocol_version() {
-        let item = PeerListItem {
+        let item = PeerListItemInner {
             protocol_version: ProtocolVersion::V2,
-            ..PeerListItem::default()
+            ..PeerListItemInner::default()
         };
         let mut buf = bytes::BytesMut::with_capacity(64);
         item.to_compact(&mut buf);
@@ -863,7 +948,7 @@ mod tests {
         assert!(!buf.is_empty());
         buf.truncate(buf.len() - 5);
 
-        let (decoded, remainder) = PeerListItem::from_compact(&buf[..], buf.len());
+        let (decoded, remainder) = PeerListItemInner::from_compact(&buf[..], buf.len());
         assert!(
             remainder.is_empty(),
             "expected no remainder after decoding without is_online byte"

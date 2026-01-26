@@ -384,7 +384,9 @@ pub fn insert_peer_list_item<T: DbTxMut>(
     mining_address: &IrysAddress,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
+    // Convert PeerListItem to PeerListItemInner for database storage
+    let inner = peer_list_entry.to_inner();
+    Ok(tx.put::<PeerListItems>(*mining_address, inner.into())?)
 }
 
 /// Gets all ingress proofs associated with a specific data_root

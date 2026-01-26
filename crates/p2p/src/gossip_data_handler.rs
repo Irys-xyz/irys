@@ -371,12 +371,12 @@ where
             "Pulled block {} from peer {}, sending for processing",
             block_hash, source_address
         );
-        // Use peer_id directly, and extract miner_address from peer_id
-        // (In the current model, peer_id.0 contains the miner_address equivalent)
+        // Get miner_address from the peer item
+        let miner_address = peer_info.mining_address;
         self.handle_block_header(
             GossipRequestV2 {
                 peer_id: source_address,
-                miner_address: source_address.0,
+                miner_address,
                 data: (*irys_block).clone(),
             },
             peer_info.address.gossip,
@@ -405,12 +405,12 @@ where
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
-        // Use peer_id directly, and extract miner_address from peer_id
-        // (In the current model, peer_id.0 contains the miner_address equivalent)
+        // Get miner_address from the peer item
+        let miner_address = peer_info.mining_address;
         self.handle_block_header(
             GossipRequestV2 {
                 peer_id: source_peer_id,
-                miner_address: source_peer_id.0,
+                miner_address,
                 data: (*irys_block).clone(),
             },
             peer_info.address.gossip,
@@ -732,12 +732,24 @@ where
                 .await
             {
                 Ok((source_peer_id, execution_payload)) => {
-                    // Use peer_id directly, and extract miner_address from peer_id
-                    // (In the current model, peer_id.0 contains the miner_address equivalent)
+                    // Get miner_address from the peer item
+                    let miner_address = match self.peer_list.get_peer(&source_peer_id) {
+                        Some(peer) => peer.mining_address,
+                        None => {
+                            last_err = Some(GossipError::InvalidPeer(format!(
+                                "Peer not found for peer_id {:?}",
+                                source_peer_id
+                            )));
+                            if attempt < 3 {
+                                continue;
+                            }
+                            return Err(last_err.unwrap());
+                        }
+                    };
                     if let Err(e) = self
                         .handle_execution_payload(GossipRequestV2 {
                             peer_id: source_peer_id,
-                            miner_address: source_peer_id.0,
+                            miner_address,
                             data: execution_payload,
                         })
                         .await

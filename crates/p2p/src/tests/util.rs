@@ -525,6 +525,8 @@ impl GossipServiceTestFixture {
     #[must_use]
     pub(crate) fn create_default_peer_entry(&self) -> PeerListItem {
         PeerListItem {
+            peer_id: self.config.node_config.peer_id(),
+            mining_address: self.config.node_config.miner_address(),
             reputation_score: PeerScore::new(50),
             response_time: 0,
             address: PeerAddress {
@@ -535,7 +537,6 @@ impl GossipServiceTestFixture {
             last_seen: 0,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
-            peer_id: Some(self.config.node_config.peer_id()),
         }
     }
 
@@ -548,8 +549,7 @@ impl GossipServiceTestFixture {
             other.mining_address, peer, self.gossip_port
         );
 
-        self.peer_list
-            .add_or_update_peer(other.mining_address, peer, true);
+        self.peer_list.add_or_update_peer(peer, true);
     }
 
     pub(crate) async fn add_tx_to_mempool(&self, tx: DataTransactionHeader) {
@@ -1053,7 +1053,7 @@ pub(crate) async fn data_handler_stub(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId(IrysAddress::repeat_byte(2)),
+            IrysPeerId::from(IrysAddress::repeat_byte(2)),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
@@ -1099,7 +1099,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId(IrysAddress::repeat_byte(2)),
+            IrysPeerId::from(IrysAddress::repeat_byte(2)),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

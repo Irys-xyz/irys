@@ -222,12 +222,11 @@ impl PeerNetworkServiceInner {
             state.db.clone()
         };
 
-        let persistable_peers = self.peer_list.persistable_peers();
+        let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
         let _ = db
             .update(|tx| {
-                for (peer_id, peer) in persistable_peers.iter() {
-                    // TODO: Database still uses miner_address as key. Once updated to use peer_id, remove .0 extraction.
-                    insert_peer_list_item(tx, &peer_id.0, peer)
+                for (_peer_id, mining_addr, peer) in persistable_peers.iter() {
+                    insert_peer_list_item(tx, mining_addr, peer)
                         .map_err(PeerListServiceError::from)?;
                 }
                 Ok::<(), PeerListServiceError>(())
@@ -1147,13 +1146,14 @@ mod tests {
         // Generate a different peer_id to ensure we don't rely on peer_id == mining_addr
         let peer_id = IrysPeerId::random();
         let peer = PeerListItem {
+            peer_id,
+            mining_address: mining_addr,
             address: peer_addr,
             reputation_score: PeerScore::new(50),
             response_time: 100,
             last_seen: 123,
             is_online,
             protocol_version: Default::default(),
-            peer_id: Some(peer_id),
         };
         (mining_addr, peer)
     }
@@ -1216,13 +1216,13 @@ mod tests {
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
         )
         .expect("peer list");
-        let (mining_addr, peer) = create_test_peer(
+        let (_mining_addr, peer) = create_test_peer(
             "0x1234567890123456789012345678901234567890",
             8080,
             true,
             None,
         );
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
         assert_eq!(
             peer_list
                 .peer_by_gossip_address(peer.address.gossip)
@@ -1245,19 +1245,19 @@ mod tests {
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
         )
         .expect("peer list");
-        let (mining_addr1, mut peer1) = create_test_peer(
+        let (_mining_addr1, mut peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
             8081,
             true,
             None,
         );
-        let (mining_addr2, mut peer2) = create_test_peer(
+        let (_mining_addr2, mut peer2) = create_test_peer(
             "0x2222222222222222222222222222222222222222",
             8082,
             true,
             None,
         );
-        let (mining_addr3, peer3) = create_test_peer(
+        let (_mining_addr3, peer3) = create_test_peer(
             "0x3333333333333333333333333333333333333333",
             8083,
             false,
@@ -1266,9 +1266,9 @@ mod tests {
         peer1.reputation_score.increase_online();
         peer1.reputation_score.increase_online();
         peer2.reputation_score.increase_online();
-        peer_list.add_or_update_peer(mining_addr1, peer1.clone(), true);
-        peer_list.add_or_update_peer(mining_addr2, peer2.clone(), true);
-        peer_list.add_or_update_peer(mining_addr3, peer3, true);
+        peer_list.add_or_update_peer(peer1.clone(), true);
+        peer_list.add_or_update_peer(peer2.clone(), true);
+        peer_list.add_or_update_peer(peer3, true);
         let active = peer_list.top_active_peers(Some(2), Some(HashSet::new()));
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].1, peer1);
@@ -1322,8 +1322,14 @@ mod tests {
         )
         .1;
         let known_peers = HashMap::from([
-            (IrysPeerId(IrysAddress::repeat_byte(0xAA)), peer1.clone()),
-            (IrysPeerId(IrysAddress::repeat_byte(0xBB)), peer2.clone()),
+            (
+                IrysPeerId::from(IrysAddress::repeat_byte(0xAA)),
+                peer1.clone(),
+            ),
+            (
+                IrysPeerId::from(IrysAddress::repeat_byte(0xBB)),
+                peer2.clone(),
+            ),
         ]);
         PeerNetworkService::spawn_announce_yourself_to_all_peers_task(known_peers, sender);
         let mut api_addrs = Vec::new();
@@ -1385,7 +1391,7 @@ mod tests {
     //     .1;
     //     harness
     //         .peer_list()
-    //         .add_or_update_peer(IrysAddress::repeat_byte(0xAA), peer.clone(), true);
+    //         .add_or_update_peer(peer.clone(), true);
     //     harness
     //         .api_client
     //         .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
@@ -1478,13 +1484,13 @@ mod tests {
             tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle,
         );
-        let (addr, peer) = create_test_peer(
+        let (_addr, peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9100,
             true,
             None,
         );
-        peer_list.add_or_update_peer(addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
         sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
         let TokioServiceHandle {
             shutdown_signal,
@@ -1496,7 +1502,10 @@ mod tests {
         let read_tx = db.tx().expect("tx");
         let items = walk_all::<PeerListItems, _>(&read_tx).expect("walk");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].1 .0.address.api, peer.address.api);
+        // Convert from database format (CompactPeerListItem wrapping PeerListItemInner) to application format
+        let inner: irys_types::PeerListItemInner = items[0].1.clone().into();
+        let peer_item = irys_types::PeerListItem::from_inner(inner, items[0].0);
+        assert_eq!(peer_item.address.api, peer.address.api);
     }
 
     #[test]
@@ -1516,20 +1525,20 @@ mod tests {
             tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle.clone(),
         );
-        let (addr1, peer1) = create_test_peer(
+        let (_addr1, peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
             9200,
             true,
             None,
         );
-        let (addr2, peer2) = create_test_peer(
+        let (_addr2, peer2) = create_test_peer(
             "0x2222222222222222222222222222222222222222",
             9202,
             true,
             None,
         );
-        peer_list.add_or_update_peer(addr1, peer1.clone(), true);
-        peer_list.add_or_update_peer(addr2, peer2.clone(), true);
+        peer_list.add_or_update_peer(peer1.clone(), true);
+        peer_list.add_or_update_peer(peer2.clone(), true);
         sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
         let TokioServiceHandle {
             shutdown_signal,
@@ -1581,13 +1590,13 @@ mod tests {
             wait_list.wait_for_active_peers().await;
         });
         sleep(Duration::from_millis(50)).await;
-        let (mining_addr, peer) = create_test_peer(
+        let (_mining_addr, peer) = create_test_peer(
             "0x4444444444444444444444444444444444444444",
             9300,
             true,
             None,
         );
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
         wait_handle.await.expect("wait task");
         let active = peer_list.top_active_peers(None, None);
         assert_eq!(active.len(), 1);
@@ -1622,7 +1631,7 @@ mod tests {
         node_config.trusted_peers = vec![];
         let config = Config::new(node_config);
         let harness = TestHarness::new(temp_dir.path(), config);
-        let (staked_mining_addr, staked_peer) = create_test_peer(
+        let (_staked_mining_addr, staked_peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9400,
             true,
@@ -1634,14 +1643,14 @@ mod tests {
             true,
             None,
         );
-        let staked_peer_id = staked_peer.peer_id.expect("peer_id should be set");
-        let unstaked_peer_id = unstaked_peer.peer_id.expect("peer_id should be set");
+        let staked_peer_id = staked_peer.peer_id;
+        let unstaked_peer_id = unstaked_peer.peer_id;
         harness
             .peer_list()
-            .add_or_update_peer(staked_mining_addr, staked_peer.clone(), true);
+            .add_or_update_peer(staked_peer.clone(), true);
         harness
             .peer_list()
-            .add_or_update_peer(unstaked_mining_addr, unstaked_peer.clone(), false);
+            .add_or_update_peer(unstaked_peer.clone(), false);
         harness.inner.flush().await.expect("flush");
         let persistable = harness.peer_list().persistable_peers();
         assert!(persistable.contains_key(&staked_peer_id));
@@ -1675,12 +1684,12 @@ mod tests {
             true,
             None,
         );
-        let peer_id = peer.peer_id.expect("peer_id should be set");
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), false);
+        let peer_id = peer.peer_id;
+        peer_list.add_or_update_peer(peer.clone(), false);
         assert!(peer_list.temporary_peers().contains(&peer_id));
         peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));
         assert!(!peer_list.temporary_peers().contains(&peer_id));
-        peer_list.add_or_update_peer(mining_addr, peer, false);
+        peer_list.add_or_update_peer(peer, false);
         assert!(peer_list.temporary_peers().contains(&peer_id));
     }
 }
