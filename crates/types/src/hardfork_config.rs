@@ -1,7 +1,7 @@
 //! Configurable hardfork parameters.
 
 use crate::storage_pricing::{phantoms::Usd, Amount};
-use crate::{UnixTimestamp, VersionDiscriminant};
+use crate::{serialization::unix_timestamp_string_serde, UnixTimestamp, VersionDiscriminant};
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
@@ -40,7 +40,8 @@ pub struct FrontierParams {
 /// When this fork activates, the contained parameters take effect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NextNameTBD {
-    /// Timestamp (seconds since epoch) at which this hardfork activates
+    /// Times (seconds since epoch) at which this hardfork activates
+    #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
 
     /// Number of total ingress proofs required
@@ -84,6 +85,7 @@ pub struct Sprite {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Aurora {
     /// Timestamp (seconds since epoch) at which this hardfork activates
+    #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
     /// Minimum version required for commitment transactions
     pub minimum_commitment_tx_version: u8,

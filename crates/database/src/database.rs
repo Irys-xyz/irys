@@ -116,9 +116,18 @@ pub fn tx_header_by_txid<T: DbTx>(
     tx: &T,
     txid: &IrysTransactionId,
 ) -> eyre::Result<Option<DataTransactionHeader>> {
-    Ok(tx
+    if let Some(mut header) = tx
         .get::<IrysDataTxHeaders>(*txid)?
-        .map(DataTransactionHeader::from))
+        .map(DataTransactionHeader::from)
+    {
+        // Load metadata from separate table if it exists
+        if let Some(metadata) = crate::get_data_tx_metadata(tx, txid)? {
+            *header.metadata_mut() = metadata;
+        }
+        Ok(Some(header))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Inserts a [`CommitmentTransaction`] into [`IrysCommitments`]
@@ -499,7 +508,9 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
 
 #[cfg(test)]
 mod tests {
+    use arbitrary::Arbitrary as _;
     use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256};
+    use rand::Rng as _;
     use reth_db::Database as _;
     use tempfile::tempdir;
 
@@ -515,7 +526,19 @@ mod tests {
         let path = tempdir()?;
         println!("TempDir: {:?}", path);
 
-        let tx_header = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1::default());
+        // Generate arbitrary metadata using Arbitrary trait with properly sized buffer
+        let mut rng = rand::thread_rng();
+        let (min, max) = irys_types::DataTransactionMetadata::size_hint(0);
+        let length = max.unwrap_or(min.saturating_mul(4).max(256));
+        let bytes: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
+        let mut u = arbitrary::Unstructured::new(&bytes);
+
+        let tx_header =
+            DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+                tx: irys_types::DataTransactionHeaderV1::default(),
+                metadata: irys_types::DataTransactionMetadata::arbitrary(&mut u)?,
+            });
+
         let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
 
         // Write a Tx
@@ -523,13 +546,20 @@ mod tests {
 
         // Read a Tx
         let result = db.view_eyre(|tx| tx_header_by_txid(tx, &tx_header.id))?;
-        assert_eq!(result, Some(tx_header));
+        let result_as_v1 = result
+            .as_ref()
+            .and_then(|h| h.try_as_header_v1().cloned())
+            .unwrap();
+        assert_eq!(result_as_v1, tx_header.try_as_header_v1().cloned().unwrap());
 
         // Write a commitment tx
-        let commitment_tx = CommitmentTransaction::V2(irys_types::CommitmentTransactionV2 {
-            // Override some defaults to insure deserialization is working
-            id: H256::from([10_u8; 32]),
-            ..Default::default()
+        let commitment_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: irys_types::CommitmentTransactionV2 {
+                // Override some defaults to insure deserialization is working
+                id: H256::from([10_u8; 32]),
+                ..Default::default()
+            },
+            metadata: Default::default(),
         });
         let _ = db.update(|tx| insert_commitment_tx(tx, &commitment_tx))?;
 

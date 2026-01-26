@@ -9,7 +9,6 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_database::SystemLedger;
 use irys_domain::{BlockState, ChainState};
 use irys_reth::IrysBuiltPayload;
 use irys_reth_node_bridge::ext::IrysRethRpcTestContextExt as _;
@@ -18,6 +17,7 @@ use irys_reth_node_bridge::irys_reth::shadow_tx::{
 };
 use irys_reth_node_bridge::reth_e2e_test_utils::transaction::TransactionTestContext;
 use irys_testing_utils::initialize_tracing;
+use irys_types::SystemLedger;
 use irys_types::{
     irys::IrysSigner, storage_pricing::Amount, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     UnixTimestampMs, H256,

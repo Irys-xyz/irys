@@ -46,6 +46,7 @@ serde_json = { workspace = true, features = ["std", "raw_value"] }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 rust_decimal_macros.workspace = true
 

@@ -17,7 +17,7 @@ use alloy_rpc_types_engine::{
 };
 use alloy_signer_local::LocalSigner;
 use eyre::{eyre, OptionExt as _};
-use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _, SystemLedger};
+use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
     ExponentialMarketAvgCalculation,
@@ -39,8 +39,8 @@ use irys_types::{
     },
     AdjustmentStats, Base64, BlockTransactions, CommitmentTransaction, Config, DataLedger,
     DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress, IrysBlockHeader,
-    IrysTokenPrice, PoaData, Signature, SystemTransactionLedger, TokioServiceHandle, UnixTimestamp,
-    UnixTimestampMs, VDFLimiterInfo, H256, U256,
+    IrysTokenPrice, PoaData, Signature, SystemLedger, SystemTransactionLedger, TokioServiceHandle,
+    UnixTimestamp, UnixTimestampMs, VDFLimiterInfo, H256, U256,
 };
 use irys_vdf::state::VdfStateReadonly;
 use ledger_expiry::LedgerExpiryBalanceDelta;
@@ -1323,6 +1323,7 @@ pub trait BlockProdStrategy {
         info!(
             block.height = ?block.height,
             block.hash = ?block.block_hash,
+            block.timestamp_ms = block.timestamp.as_millis(),
             "Finished producing block",
         );
 
@@ -1409,7 +1410,9 @@ pub trait BlockProdStrategy {
         // Fetch mempool once
         let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
         // Sort txs to be of deterministic order
-        mempool_txs.submit_tx.sort();
+        mempool_txs
+            .submit_tx
+            .sort_by(irys_types::DataTransactionHeader::compare_tx);
         mempool_txs.commitment_tx.sort();
 
         let block_height = prev_block_header.height + 1;

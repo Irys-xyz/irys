@@ -573,6 +573,10 @@ mod tests {
 
         [hardforks.sprite.min_pd_transaction_cost]
         amount = "10000000000000000"
+
+        [hardforks.aurora]
+        minimum_commitment_tx_version = 2
+        activation_timestamp = "1970-01-01T00:00:00+00:00"
         "#;
 
         // Create the expected config

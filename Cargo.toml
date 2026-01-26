@@ -68,6 +68,7 @@ actix-http = "3.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
 tokio-stream = "0.1"
+tokio-util = "0.7"
 rand = "0.8"
 hex = "0.4"
 base64-url = "2"
@@ -147,6 +148,7 @@ priority-queue = "2.5"
 moka = "0.12.10"
 socket2 = "0.5"
 async-stream = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
 
 
 # Reth & Alloy deps

@@ -6,9 +6,9 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_database::SystemLedger;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
 use irys_reth::IrysBuiltPayload;
+use irys_types::SystemLedger;
 use irys_types::{
     block_production::SolutionContext, storage_pricing::Amount, AdjustmentStats, BlockTransactions,
     CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,

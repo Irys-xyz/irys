@@ -2,7 +2,7 @@
 
 use crate::utils::IrysNodeTest;
 use irys_api_client::ApiClientExt as _;
-use irys_api_client::{ApiClient as _, IrysApiClient};
+use irys_api_client::{ApiClient as _, IrysApiClient, TransactionStatus};
 use irys_chain::IrysNodeCtx;
 use irys_types::{BlockIndexQuery, IrysTransactionResponse, NodeConfig};
 use std::{
@@ -67,10 +67,12 @@ async fn check_transaction_endpoints(
         .await
         .expect("valid get transaction response");
 
-    assert_eq!(
-        retrieved_tx,
-        IrysTransactionResponse::Storage(tx.header.clone())
-    );
+    let storage_header = match retrieved_tx {
+        IrysTransactionResponse::Storage(header) => header,
+        _ => panic!("expected storage transaction response"),
+    };
+
+    assert!(storage_header.eq_tx(&tx.header));
 
     let txs = api_client
         .get_transactions(api_address, &[tx_id, tx_2_id])
@@ -210,6 +212,187 @@ async fn api_client_wait_for_promotion_happy_path() {
         .wait_for_promotion(api_address, tx.header.id, 100)
         .await
         .expect("wait_for_promotion should succeed for a properly posted tx");
+
+    ctx.stop().await;
+}
+
+/// Tests the transaction status API lifecycle: PENDING -> CONFIRMED -> FINALIZED
+#[test_log::test(tokio::test)]
+async fn api_tx_status_lifecycle() {
+    let config = NodeConfig::testing();
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.wait_for_packing(20).await;
+
+    let api_address = SocketAddr::new(
+        IpAddr::from_str("127.0.0.1").unwrap(),
+        ctx.node_ctx.config.node_config.http.bind_port,
+    );
+    let api_client = IrysApiClient::new();
+
+    // Create and post a transaction
+    let tx = ctx
+        .create_signed_data_tx(&ctx.node_ctx.config.irys_signer(), vec![1, 2, 3])
+        .await
+        .unwrap();
+    let tx_id = tx.header.id;
+
+    api_client
+        .post_transaction(api_address, tx.header.clone())
+        .await
+        .expect("post_transaction should succeed");
+
+    // Check status - should be PENDING
+    let status = api_client
+        .get_transaction_status(api_address, tx_id)
+        .await
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
+
+    assert!(matches!(status.status, TransactionStatus::Pending));
+    assert!(status.block_height.is_none());
+    assert!(status.confirmations.is_none());
+
+    // Mine a block to include the transaction
+    ctx.mine_block().await.expect("expected mined block");
+
+    // Poll until transaction is CONFIRMED or FINALIZED (accept both as terminal states)
+    let mut status = None;
+    for _ in 0..25 {
+        let s = api_client
+            .get_transaction_status(api_address, tx_id)
+            .await
+            .expect("get_transaction_status should succeed")
+            .expect("status should exist");
+
+        if matches!(s.status, TransactionStatus::Pending) {
+            ctx.mine_block().await.expect("expected mined block");
+            continue;
+        }
+
+        // Accept both Mined and Finalized as valid terminal states
+        if matches!(
+            s.status,
+            TransactionStatus::Confirmed | TransactionStatus::Finalized
+        ) {
+            status = Some(s);
+            break;
+        }
+    }
+
+    let status = status.expect("transaction should eventually be mined or finalized");
+    assert!(matches!(
+        status.status,
+        TransactionStatus::Confirmed | TransactionStatus::Finalized
+    ));
+    assert!(status.block_height.is_some());
+    assert!(status.confirmations.is_some());
+
+    let included_height = status
+        .block_height
+        .expect("included status should have block_height");
+    let migration_depth = ctx.node_ctx.config.consensus.block_migration_depth as u64;
+
+    // Mine more blocks to reach migration depth and make it CONFIRMED
+    // Skip if already Finalized
+    if matches!(status.status, TransactionStatus::Confirmed) {
+        for _ in 0..(migration_depth * 2) {
+            ctx.mine_block().await.expect("expected mined block");
+        }
+    }
+
+    // Wait for indexer to process migration depth to ensure Finalized status
+    let target_height = included_height + migration_depth;
+    ctx.wait_until_block_index_height(target_height, 15)
+        .await
+        .expect("block index should reach target height for finalization");
+
+    // Check status - should be CONFIRMED
+    let status = api_client
+        .get_transaction_status(api_address, tx_id)
+        .await
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
+
+    assert!(matches!(status.status, TransactionStatus::Finalized));
+    assert!(status.block_height.is_some());
+    assert!(status.confirmations.is_some());
+
+    ctx.stop().await;
+}
+
+/// Tests transaction status for commitment transactions
+#[test_log::test(tokio::test)]
+async fn api_tx_status_commitment_tx() {
+    let config = NodeConfig::testing();
+    let ctx = IrysNodeTest::new_genesis(config).start().await;
+    ctx.wait_for_packing(20).await;
+
+    let api_address = SocketAddr::new(
+        IpAddr::from_str("127.0.0.1").unwrap(),
+        ctx.node_ctx.config.node_config.http.bind_port,
+    );
+    let api_client = IrysApiClient::new();
+
+    // Create and post a valid pledge commitment transaction.
+    // NOTE: stake commitments can legitimately be skipped for inclusion when the signer is already staked,
+    // which would leave the tx PENDING forever and make this test flaky.
+    let anchor = ctx.get_anchor().await.expect("expected anchor");
+    let signer = ctx.node_ctx.config.irys_signer();
+    let mut pledge_tx = irys_types::CommitmentTransaction::new_pledge(
+        &ctx.node_ctx.config.consensus,
+        anchor,
+        ctx.node_ctx.mempool_pledge_provider.as_ref(),
+        signer.address(),
+    )
+    .await;
+    signer
+        .sign_commitment(&mut pledge_tx)
+        .expect("expected pledge tx to sign");
+    let tx_id = pledge_tx.id();
+
+    api_client
+        .post_commitment_transaction(api_address, pledge_tx.clone())
+        .await
+        .expect("post_commitment_transaction should succeed");
+
+    // Check status - should be PENDING
+    let status = api_client
+        .get_transaction_status(api_address, tx_id)
+        .await
+        .expect("get_transaction_status should succeed")
+        .expect("status should exist");
+
+    assert!(matches!(status.status, TransactionStatus::Pending));
+
+    // Commitment txs may not land in the immediately-next block; mine/poll until included.
+    let mut status = None;
+    for _ in 0..25 {
+        let s = api_client
+            .get_transaction_status(api_address, tx_id)
+            .await
+            .expect("get_transaction_status should succeed")
+            .expect("status should exist");
+
+        if matches!(s.status, TransactionStatus::Pending) {
+            ctx.mine_block().await.expect("expected mined block");
+            continue;
+        }
+
+        status = Some(s);
+        break;
+    }
+
+    let status = status.expect("commitment tx should eventually be included");
+    assert!(
+        matches!(
+            status.status,
+            TransactionStatus::Confirmed | TransactionStatus::Finalized
+        ),
+        "unexpected status: {:?}",
+        status
+    );
+    assert!(status.block_height.is_some());
+    assert!(status.confirmations.is_some());
 
     ctx.stop().await;
 }

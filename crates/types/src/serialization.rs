@@ -912,6 +912,36 @@ where
     }
 }
 
+pub mod unix_timestamp_string_serde {
+    use chrono::{DateTime, Utc};
+    use serde::{self, Deserialize as _, Deserializer, Serializer};
+
+    use crate::UnixTimestamp;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<UnixTimestamp, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+
+        Ok(UnixTimestamp::from_secs(
+            DateTime::parse_from_rfc3339(&s)
+                .map_err(|e| serde::de::Error::custom(format!("invalid timestamp: {}", &e)))?
+                .timestamp() as u64,
+        ))
+    }
+
+    pub fn serialize<S>(timestamp: &UnixTimestamp, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let dt = DateTime::<Utc>::from_timestamp(timestamp.as_secs() as i64, 0)
+            .ok_or_else(|| serde::ser::Error::custom("invalid timestamp"))?;
+
+        serializer.serialize_str(&dt.to_rfc3339())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1101,5 +1131,54 @@ mod tests {
         // Deserialize back
         let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized, test_struct);
+    }
+
+    mod unix_timestamp_string_serde_tests {
+        use super::super::unix_timestamp_string_serde;
+        use crate::UnixTimestamp;
+
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        struct TestStruct {
+            #[serde(with = "unix_timestamp_string_serde")]
+            timestamp: UnixTimestamp,
+        }
+
+        #[test]
+        fn test_round_trip_serialize_deserialize() {
+            let original_ts = UnixTimestamp::from_secs(1609459200); // 2021-01-01 00:00:00 UTC
+            let test_struct = TestStruct {
+                timestamp: original_ts,
+            };
+
+            // Serialize to JSON
+            let serialized = serde_json::to_string(&test_struct).unwrap();
+
+            // Assert JSON contains expected RFC3339 string
+            assert!(serialized.contains("2021-01-01T00:00:00+00:00"));
+
+            // Deserialize back
+            let deserialized: TestStruct = serde_json::from_str(&serialized).unwrap();
+
+            // Assert parsed equals original
+            assert_eq!(deserialized.timestamp, original_ts);
+        }
+
+        #[test]
+        fn test_deserialize_known_rfc3339_string() {
+            let json = r#"{"timestamp":"2026-01-15T11:30:00+00:00"}"#;
+
+            let deserialized: TestStruct = serde_json::from_str(json).unwrap();
+
+            assert_eq!(deserialized.timestamp.as_secs(), 1768476600);
+        }
+
+        #[test]
+        fn test_deserialize_malformed_string_returns_error() {
+            let json = r#"{"timestamp":"not-a-timestamp"}"#;
+
+            let result: Result<TestStruct, _> = serde_json::from_str(json);
+
+            assert!(result.is_err());
+        }
     }
 }

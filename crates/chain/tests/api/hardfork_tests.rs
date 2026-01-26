@@ -65,19 +65,25 @@ fn create_stake_inner(
     value: irys_types::U256,
 ) -> CommitmentTransaction {
     match version {
-        TxVersion::V1 => CommitmentTransaction::V1(CommitmentTransactionV1 {
-            commitment_type: CommitmentTypeV1::Stake,
-            anchor,
-            fee,
-            value,
-            ..CommitmentTransactionV1::new(consensus)
+        TxVersion::V1 => CommitmentTransaction::V1(irys_types::CommitmentV1WithMetadata {
+            tx: CommitmentTransactionV1 {
+                commitment_type: CommitmentTypeV1::Stake,
+                anchor,
+                fee,
+                value,
+                ..CommitmentTransactionV1::new(consensus)
+            },
+            metadata: Default::default(),
         }),
-        TxVersion::V2 => CommitmentTransaction::V2(CommitmentTransactionV2 {
-            commitment_type: CommitmentTypeV2::Stake,
-            anchor,
-            fee,
-            value,
-            ..CommitmentTransactionV2::new(consensus)
+        TxVersion::V2 => CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                commitment_type: CommitmentTypeV2::Stake,
+                anchor,
+                fee,
+                value,
+                ..CommitmentTransactionV2::new(consensus)
+            },
+            metadata: Default::default(),
         }),
     }
 }
@@ -497,7 +503,7 @@ mod edge_cases {
 #[cfg(test)]
 mod epoch_block_filtering {
     use super::*;
-    use irys_database::SystemLedger;
+    use irys_types::SystemLedger;
 
     const NUM_BLOCKS_IN_EPOCH: usize = 2;
 

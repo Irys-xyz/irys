@@ -79,7 +79,16 @@ pub trait ApiClient: Clone + Unpin + Default + Send + Sync + 'static {
     ) -> Result<Vec<BlockIndexItem>>;
 
     async fn node_info(&self, peer: SocketAddr) -> Result<NodeInfo>;
+
+    /// Get the transaction status (PENDING, INCLUDED, or CONFIRMED)
+    async fn get_transaction_status(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<Option<TransactionStatusResponse>>;
 }
+
+pub use irys_types::{TransactionStatus, TransactionStatusResponse};
 
 /// Real implementation of the API client that makes actual HTTP requests
 #[derive(Clone, Debug)]
@@ -294,6 +303,17 @@ impl ApiClient for IrysApiClient {
             Err(e) => Err(e),
         }
     }
+
+    async fn get_transaction_status(
+        &self,
+        peer: SocketAddr,
+        tx_id: H256,
+    ) -> Result<Option<TransactionStatusResponse>> {
+        // H256 Display prints full base58; using Display here is correct.
+        let path = format!("/tx/{}/status", tx_id);
+        self.make_request::<TransactionStatusResponse, _>(peer, Method::GET, &path, None::<&()>)
+            .await
+    }
 }
 
 #[cfg(feature = "test-utils")]
@@ -374,6 +394,14 @@ pub mod test_utils {
 
         async fn node_info(&self, _peer: SocketAddr) -> eyre::Result<NodeInfo> {
             Ok(NodeInfo::default())
+        }
+
+        async fn get_transaction_status(
+            &self,
+            _peer: SocketAddr,
+            _tx_id: H256,
+        ) -> Result<Option<TransactionStatusResponse>> {
+            Ok(None)
         }
     }
 }
@@ -470,6 +498,14 @@ mod tests {
         ) -> Result<Option<CombinedBlockHeader>> {
             Ok(None)
         }
+
+        async fn get_transaction_status(
+            &self,
+            _peer: SocketAddr,
+            _tx_id: H256,
+        ) -> Result<Option<TransactionStatusResponse>> {
+            Ok(None)
+        }
     }
 
     #[tokio::test]
@@ -484,6 +520,11 @@ mod tests {
             .get_transaction("127.0.0.1:8080".parse().unwrap(), tx_id)
             .await
             .unwrap();
-        assert_eq!(result, IrysTransactionResponse::Storage(tx_header));
+
+        let result_header = match &result {
+            IrysTransactionResponse::Storage(header) => header,
+            _ => panic!("Expected storage transaction"),
+        };
+        assert!(result_header.eq_tx(&tx_header));
     }
 }

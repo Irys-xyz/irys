@@ -12,9 +12,7 @@ use alloy_consensus::Transaction as _;
 use alloy_eips::eip7685::{Requests, RequestsOrHash};
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::{ensure, eyre, OptionExt as _};
-use irys_database::{
-    block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid, SystemLedger,
-};
+use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_header_by_txid};
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
@@ -33,7 +31,7 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, UnixTimestamp, H256, U256,
+    IrysBlockHeader, PoaData, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
@@ -2165,7 +2163,7 @@ pub async fn data_txs_are_valid(
 
                         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
                         // (they're waiting for proofs to arrive)
-                        if tx.promoted_height.is_some() {
+                        if tx.promoted_height().is_some() {
                             // TODO: This should be a hard error, but the test infrastructure currently
                             // creates transactions with ingress proofs that get placed in Submit ledger.
                             // This needs to be fixed in the block production logic to properly place
@@ -2245,7 +2243,7 @@ pub async fn data_txs_are_valid(
 
         // Submit ledger transactions should not have ingress proofs, that's why they are in the submit ledger
         // (they're waiting for proofs to arrive)
-        if tx.promoted_height.is_some() {
+        if tx.promoted_height().is_some() {
             // TODO: This should be a hard error, but the test infrastructure currently
             // creates transactions with ingress proofs that get placed in Submit ledger.
             // This needs to be fixed in the block production logic to properly place
@@ -3073,6 +3071,7 @@ mod tests {
         let block_index_handle = BlockIndexService::spawn_service(
             block_index_rx,
             block_index.clone(),
+            None, // No supply state needed for tests
             &consensus_config,
             tokio::runtime::Handle::current(),
         );
@@ -3913,7 +3912,7 @@ mod commitment_version_tests {
                     minimum_commitment_tx_version: min_version,
                 }),
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         }
     }
 
@@ -3928,21 +3927,27 @@ mod commitment_version_tests {
                 sprite: None,
                 aurora: None,
             },
-            ..ConsensusConfig::testnet()
+            ..ConsensusConfig::testing()
         }
     }
 
     fn make_v1_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction::V1(CommitmentTransactionV1 {
-            commitment_type: CommitmentTypeV1::Stake,
-            ..CommitmentTransactionV1::new(consensus)
+        CommitmentTransaction::V1(irys_types::CommitmentV1WithMetadata {
+            tx: CommitmentTransactionV1 {
+                commitment_type: CommitmentTypeV1::Stake,
+                ..CommitmentTransactionV1::new(consensus)
+            },
+            metadata: Default::default(),
         })
     }
 
     fn make_v2_commitment(consensus: &ConsensusConfig) -> CommitmentTransaction {
-        CommitmentTransaction::V2(CommitmentTransactionV2 {
-            commitment_type: CommitmentTypeV2::Stake,
-            ..CommitmentTransactionV2::new(consensus)
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                commitment_type: CommitmentTypeV2::Stake,
+                ..CommitmentTransactionV2::new(consensus)
+            },
+            metadata: Default::default(),
         })
     }
 
