@@ -17,8 +17,8 @@ use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
 use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, Config, DatabaseProvider, IrysAddress, MempoolConfig, NodeConfig, PeerAddress,
-    PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
+    BlockBody, Config, DatabaseProvider, IrysAddress, IrysPeerId, MempoolConfig, NodeConfig,
+    PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use std::net::SocketAddr;
@@ -260,9 +260,12 @@ async fn should_process_block_with_intermediate_block_in_api() {
     let peer_list_guard = peer_list_data_guard.clone();
     // Set the mock client to return block2 when requested
     // Adding a peer so we can send a request to the mock client
+    let fake_mining_addr2 =
+        IrysAddress::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1]);
     peer_list_guard.add_or_update_peer(
-        IrysAddress::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
         PeerListItem {
+            peer_id: IrysPeerId::from(fake_mining_addr2),
+            mining_address: fake_mining_addr2,
             reputation_score: PeerScore::new(100),
             response_time: 0,
             address: PeerAddress {
@@ -441,9 +444,12 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
     let peer_list_guard = peer_list_data_guard.clone();
     // Set the mock client to return block2 when requested
     // Adding a peer so we can send a request to the mock client
+    let fake_mining_addr2 =
+        IrysAddress::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1]);
     peer_list_guard.add_or_update_peer(
-        IrysAddress::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
         PeerListItem {
+            peer_id: IrysPeerId::from(fake_mining_addr2),
+            mining_address: fake_mining_addr2,
             reputation_score: PeerScore::new(100),
             response_time: 0,
             address: PeerAddress {
@@ -697,9 +703,12 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
     let peer_list_guard = peer_list_data_guard.clone();
 
     // Adding a peer so we can send a request to the mock client
+    let fake_mining_addr3 =
+        IrysAddress::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]);
     peer_list_guard.add_or_update_peer(
-        IrysAddress::new([0, 1, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0]),
         PeerListItem {
+            peer_id: IrysPeerId::from(fake_mining_addr3),
+            mining_address: fake_mining_addr3,
             reputation_score: PeerScore::new(100),
             response_time: 0,
             address: PeerAddress {

@@ -14,8 +14,8 @@ use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
     BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader, IrysTransactionId, PeerListItem,
-    TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
+    DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
+    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -381,10 +381,22 @@ pub fn get_cache_size<T: Table, TX: DbTx>(tx: &TX, chunk_size: u64) -> eyre::Res
 
 pub fn insert_peer_list_item<T: DbTxMut>(
     tx: &T,
-    mining_address: &IrysAddress,
+    peer_id: &IrysPeerId,
     peer_list_entry: &PeerListItem,
 ) -> eyre::Result<()> {
-    Ok(tx.put::<PeerListItems>(*mining_address, peer_list_entry.clone().into())?)
+    // Convert PeerListItem to PeerListItemInner for database storage
+    let inner = peer_list_entry.to_inner();
+
+    // Validate that the peer_id in the payload matches the supplied peer_id
+    if peer_list_entry.peer_id != *peer_id {
+        eyre::bail!(
+            "Peer ID mismatch: supplied peer_id {:?} does not match PeerListItem.peer_id {:?}",
+            peer_id,
+            peer_list_entry.peer_id
+        );
+    }
+
+    Ok(tx.put::<PeerListItems>(*peer_id, inner.into())?)
 }
 
 /// Gets all ingress proofs associated with a specific data_root

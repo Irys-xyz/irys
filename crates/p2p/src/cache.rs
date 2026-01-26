@@ -5,7 +5,7 @@
 )]
 use crate::types::GossipResult;
 use core::time::Duration;
-use irys_types::{BlockHash, ChunkPathHash, GossipCacheKey, IrysAddress, IrysTransactionId, H256};
+use irys_types::{BlockHash, ChunkPathHash, GossipCacheKey, IrysPeerId, IrysTransactionId, H256};
 use moka::sync::Cache;
 use reth::revm::primitives::B256;
 use std::collections::HashSet;
@@ -17,12 +17,12 @@ const GOSSIP_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 /// Tracks which peers have seen what data to avoid sending duplicates
 #[derive(Debug)]
 pub struct GossipCache {
-    /// Maps data identifiers to a set of peer addresses that have seen the data
-    chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<IrysAddress>>>>,
-    transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<IrysAddress>>>>,
-    blocks: Cache<BlockHash, Arc<RwLock<HashSet<IrysAddress>>>>,
-    payloads: Cache<B256, Arc<RwLock<HashSet<IrysAddress>>>>,
-    ingress_proofs: Cache<H256, Arc<RwLock<HashSet<IrysAddress>>>>,
+    /// Maps data identifiers to a set of peer IDs that have seen the data
+    chunks: Cache<ChunkPathHash, Arc<RwLock<HashSet<IrysPeerId>>>>,
+    transactions: Cache<IrysTransactionId, Arc<RwLock<HashSet<IrysPeerId>>>>,
+    blocks: Cache<BlockHash, Arc<RwLock<HashSet<IrysPeerId>>>>,
+    payloads: Cache<B256, Arc<RwLock<HashSet<IrysPeerId>>>>,
+    ingress_proofs: Cache<H256, Arc<RwLock<HashSet<IrysPeerId>>>>,
 }
 
 impl Default for GossipCache {
@@ -73,11 +73,7 @@ impl GossipCache {
     /// # Errors
     ///
     /// This function will return an error if the cache cannot be accessed.
-    pub(crate) fn record_seen(
-        &self,
-        miner_address: IrysAddress,
-        key: GossipCacheKey,
-    ) -> GossipResult<()> {
+    pub(crate) fn record_seen(&self, peer_id: IrysPeerId, key: GossipCacheKey) -> GossipResult<()> {
         match key {
             GossipCacheKey::Chunk(chunk_path_hash) => {
                 let peer_set = self.chunks.get(&chunk_path_hash).unwrap_or_else(|| {
@@ -85,7 +81,7 @@ impl GossipCache {
                     self.chunks.insert(chunk_path_hash, new_set.clone());
                     new_set
                 });
-                peer_set.write().unwrap().insert(miner_address);
+                peer_set.write().unwrap().insert(peer_id);
             }
             GossipCacheKey::Transaction(irys_transaction_hash) => {
                 let peer_set = self
@@ -97,7 +93,7 @@ impl GossipCache {
                             .insert(irys_transaction_hash, new_set.clone());
                         new_set
                     });
-                peer_set.write().unwrap().insert(miner_address);
+                peer_set.write().unwrap().insert(peer_id);
             }
             GossipCacheKey::Block(irys_block_hash) => {
                 let peer_set = self.blocks.get(&irys_block_hash).unwrap_or_else(|| {
@@ -105,7 +101,7 @@ impl GossipCache {
                     self.blocks.insert(irys_block_hash, new_set.clone());
                     new_set
                 });
-                peer_set.write().unwrap().insert(miner_address);
+                peer_set.write().unwrap().insert(peer_id);
             }
             GossipCacheKey::ExecutionPayload(payload_block_hash) => {
                 let peer_set = self.payloads.get(&payload_block_hash).unwrap_or_else(|| {
@@ -113,7 +109,7 @@ impl GossipCache {
                     self.payloads.insert(payload_block_hash, new_set.clone());
                     new_set
                 });
-                peer_set.write().unwrap().insert(miner_address);
+                peer_set.write().unwrap().insert(peer_id);
             }
             GossipCacheKey::IngressProof(proof_hash) => {
                 let peer_set = self.ingress_proofs.get(&proof_hash).unwrap_or_else(|| {
@@ -121,7 +117,7 @@ impl GossipCache {
                     self.ingress_proofs.insert(proof_hash, new_set.clone());
                     new_set
                 });
-                peer_set.write().unwrap().insert(miner_address);
+                peer_set.write().unwrap().insert(peer_id);
             }
         }
         Ok(())
@@ -130,7 +126,7 @@ impl GossipCache {
     pub(crate) fn peers_that_have_seen(
         &self,
         cache_key: &GossipCacheKey,
-    ) -> GossipResult<HashSet<IrysAddress>> {
+    ) -> GossipResult<HashSet<IrysPeerId>> {
         let result = match cache_key {
             GossipCacheKey::Chunk(chunk_path_hash) => self
                 .chunks
