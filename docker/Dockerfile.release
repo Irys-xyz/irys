@@ -35,7 +35,7 @@ ENV SOURCE_DATE_EPOCH=0 \
 
 RUN cargo build --release --bin irys -p irys-chain --locked
 
-RUN set -o pipefail && sha256sum /workspace/target/release/irys | tee /workspace/binary_sha256.txt
+RUN /bin/bash -o pipefail -c "sha256sum /workspace/target/release/irys | tee /workspace/binary_sha256.txt"
 
 # --- Artifacts stage: for binary extraction ---
 FROM scratch AS artifacts
