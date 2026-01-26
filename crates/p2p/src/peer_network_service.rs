@@ -225,9 +225,8 @@ impl PeerNetworkServiceInner {
         let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
         let _ = db
             .update(|tx| {
-                for (_peer_id, mining_addr, peer) in persistable_peers.iter() {
-                    insert_peer_list_item(tx, mining_addr, peer)
-                        .map_err(PeerListServiceError::from)?;
+                for (peer_id, peer) in persistable_peers.iter() {
+                    insert_peer_list_item(tx, peer_id, peer).map_err(PeerListServiceError::from)?;
                 }
                 Ok::<(), PeerListServiceError>(())
             })
@@ -1502,9 +1501,10 @@ mod tests {
         let read_tx = db.tx().expect("tx");
         let items = walk_all::<PeerListItems, _>(&read_tx).expect("walk");
         assert_eq!(items.len(), 1);
-        // Convert from database format (CompactPeerListItem wrapping PeerListItemInner) to application format
+        // Convert from the database format back to PeerListItem
+        let peer_id = items[0].0;
         let inner: irys_types::PeerListItemInner = items[0].1.clone().into();
-        let peer_item = irys_types::PeerListItem::from_inner(inner, items[0].0);
+        let peer_item = PeerListItem::from_inner(inner, peer_id);
         assert_eq!(peer_item.address.api, peer.address.api);
     }
 

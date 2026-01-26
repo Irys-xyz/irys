@@ -453,58 +453,49 @@ impl TestSetup {
         let fast_api_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8003);
 
         // Create peer list with performance characteristics
-        let peers_data: Vec<(IrysAddress, PeerListItem)> = vec![
-            (
-                slow_peer_addr, // <- Slow peer
-                PeerListItem {
-                    peer_id: IrysPeerId::from(slow_peer_addr),
-                    mining_address: slow_peer_addr,
-                    address: PeerAddress {
-                        gossip: slow_api_addr,
-                        api: slow_api_addr,
-                        ..Default::default()
-                    },
-                    reputation_score: PeerScore::new(PeerScore::INITIAL),
-                    response_time: 0,
-                    last_seen: 0,
-                    is_online: true,
-                    protocol_version: ProtocolVersion::default(),
+        let peers_data: Vec<PeerListItem> = vec![
+            PeerListItem {
+                peer_id: IrysPeerId::from(slow_peer_addr),
+                mining_address: slow_peer_addr,
+                address: PeerAddress {
+                    gossip: slow_api_addr,
+                    api: slow_api_addr,
+                    ..Default::default()
                 },
-            ),
-            (
-                stable_peer_addr, // <- Stable peer
-                PeerListItem {
-                    peer_id: IrysPeerId::from(stable_peer_addr),
-                    mining_address: stable_peer_addr,
-                    address: PeerAddress {
-                        gossip: stable_api_addr,
-                        api: stable_api_addr,
-                        ..Default::default()
-                    },
-                    reputation_score: PeerScore::new(PeerScore::INITIAL),
-                    response_time: 0,
-                    last_seen: 0,
-                    is_online: true,
-                    protocol_version: ProtocolVersion::default(),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            },
+            PeerListItem {
+                peer_id: IrysPeerId::from(stable_peer_addr),
+                mining_address: stable_peer_addr,
+                address: PeerAddress {
+                    gossip: stable_api_addr,
+                    api: stable_api_addr,
+                    ..Default::default()
                 },
-            ),
-            (
-                fast_peer_addr, // <- Fast peer
-                PeerListItem {
-                    peer_id: IrysPeerId::from(fast_peer_addr),
-                    mining_address: fast_peer_addr,
-                    address: PeerAddress {
-                        gossip: fast_api_addr,
-                        api: fast_api_addr,
-                        ..Default::default()
-                    },
-                    reputation_score: PeerScore::new(PeerScore::INITIAL),
-                    response_time: 0,
-                    last_seen: 0,
-                    is_online: true,
-                    protocol_version: ProtocolVersion::default(),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            },
+            PeerListItem {
+                peer_id: IrysPeerId::from(fast_peer_addr),
+                mining_address: fast_peer_addr,
+                address: PeerAddress {
+                    gossip: fast_api_addr,
+                    api: fast_api_addr,
+                    ..Default::default()
                 },
-            ),
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            },
         ];
 
         // Create service senders to finish initializing the PeerList

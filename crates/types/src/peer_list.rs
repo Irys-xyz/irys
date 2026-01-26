@@ -86,10 +86,6 @@ pub struct PeerListItemInner {
     pub last_seen: u64,
     pub is_online: bool,
     pub protocol_version: ProtocolVersion,
-    /// Peer network identifier (separate from mining address)
-    /// None means: (1) old record from DB, or (2) v1 peer
-    /// On load, None records get peer_id = miner_address until handshake updates it
-    pub peer_id: Option<IrysPeerId>,
     /// Mining/staking address for this peer
     /// None means: old record from DB - will be populated from DB key on load
     pub mining_address: Option<IrysAddress>,
@@ -111,7 +107,6 @@ impl Default for PeerListItemInner {
                 .as_millis() as u64,
             is_online: true,
             protocol_version: ProtocolVersion::default(),
-            peer_id: None,
             mining_address: None,
         }
     }
@@ -137,11 +132,10 @@ pub struct PeerListItem {
 impl PeerListItem {
     /// Create a PeerListItem from PeerListItemInner loaded from a database.
     /// Uses the mining_address_key (DB key) as fallback for missing fields.
-    pub fn from_inner(inner: PeerListItemInner, mining_address_key: IrysAddress) -> Self {
-        let peer_id = inner
-            .peer_id
-            .unwrap_or(IrysPeerId::from(mining_address_key));
-        let mining_address = inner.mining_address.unwrap_or(mining_address_key);
+    pub fn from_inner(inner: PeerListItemInner, peer_id: IrysPeerId) -> Self {
+        // For legacy peers, the key used to be the mining address. They have the same byte layout,
+        //  so we can use it as a fallback for LEGACY PEERS ONLY.
+        let mining_address = inner.mining_address.unwrap_or(IrysAddress::from(peer_id));
         Self {
             peer_id,
             mining_address,
@@ -158,7 +152,6 @@ impl PeerListItem {
     /// for database serialization!
     pub fn to_inner(&self) -> PeerListItemInner {
         PeerListItemInner {
-            peer_id: Some(self.peer_id),
             mining_address: Some(self.mining_address),
             reputation_score: self.reputation_score,
             response_time: self.response_time,
@@ -329,20 +322,11 @@ impl Compact for PeerListItemInner {
         buf.put_u32(self.protocol_version as u32);
         size += 4;
 
-        // Append peer_id (20 bytes) at the end for backward compatibility
+        // Append mining_address (20 bytes) at the end for backward compatibility
         // Old records won't have this field, will decode as None
-        if let Some(peer_id) = &self.peer_id {
-            buf.put_slice(peer_id.as_ref());
+        if let Some(mining_address) = &self.mining_address {
+            buf.put_slice(mining_address.as_ref());
             size += 20;
-        }
-
-        // Append mining_address (20 bytes) after peer_id for backward compatibility
-        // Only written if peer_id was also written (ensures consistent ordering)
-        if self.peer_id.is_some() {
-            if let Some(mining_address) = &self.mining_address {
-                buf.put_slice(mining_address.as_ref());
-                size += 20;
-            }
         }
 
         size
@@ -394,7 +378,6 @@ impl Compact for PeerListItemInner {
                     last_seen: 0,
                     is_online: false,
                     protocol_version: ProtocolVersion::default(),
-                    peer_id: None,
                     mining_address: None,
                 },
                 &[],
@@ -444,26 +427,14 @@ impl Compact for PeerListItemInner {
             total_consumed += 4;
         }
 
-        // Read peer_id (20 bytes) if available
-        // This field was added after protocol_version, so older records won't have it
-        let peer_id = if buf.len() >= total_consumed + 20 {
-            let peer_id_bytes: [u8; 20] = buf[total_consumed..total_consumed + 20]
-                .try_into()
-                .expect("slice with incorrect length");
-            total_consumed += 20;
-            Some(IrysPeerId::from(peer_id_bytes))
-        } else {
-            None // Old record without peer_id
-        };
-
         // Read mining_address (20 bytes) if available
-        // This field was added after peer_id, so older records won't have it
-        let mining_address = if peer_id.is_some() && buf.len() >= total_consumed + 20 {
-            let mining_address_bytes: [u8; 20] = buf[total_consumed..total_consumed + 20]
+        // This field was added after protocol_version, so older records won't have it
+        let mining_address = if buf.len() >= total_consumed + 20 {
+            let address_bytes: [u8; 20] = buf[total_consumed..total_consumed + 20]
                 .try_into()
                 .expect("slice with incorrect length");
             total_consumed += 20;
-            Some(IrysAddress::from(mining_address_bytes))
+            Some(IrysAddress::from(address_bytes))
         } else {
             None // Old record without mining_address
         };
@@ -476,7 +447,6 @@ impl Compact for PeerListItemInner {
                 last_seen,
                 is_online,
                 protocol_version,
-                peer_id,
                 mining_address,
             },
             // Advance the remainder past the bytes we logically consumed in this tail section.
@@ -670,7 +640,6 @@ mod tests {
     #[test]
     fn peer_list_item_compact_roundtrip() {
         let mining_addr = IrysAddress::from([1_u8; 20]);
-        let peer_id = IrysPeerId::from(mining_addr);
         let peer_list_item_inner = PeerListItemInner {
             reputation_score: PeerScore::new(75),
             response_time: 150,
@@ -688,7 +657,6 @@ mod tests {
             last_seen: 1704067200000, // Jan 1, 2024 timestamp in milliseconds
             is_online: true,
             protocol_version: ProtocolVersion::V2,
-            peer_id: Some(peer_id),
             mining_address: Some(mining_addr),
         };
         let mut buf = bytes::BytesMut::with_capacity(150);

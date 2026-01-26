@@ -1,4 +1,7 @@
 use crate::{Arbitrary, IrysAddress};
+use reth_codecs::Compact;
+use reth_db::DatabaseError;
+use reth_db_api::table::{Decode, Encode};
 
 /// A newtype wrapper for peer network identifier.
 /// Uses the same underlying type as IrysAddress (20 bytes) but represents
@@ -90,18 +93,48 @@ impl AsRef<[u8]> for IrysPeerId {
 impl alloy_rlp::Encodable for IrysPeerId {
     #[inline]
     fn length(&self) -> usize {
-        self.0.length()
+        alloy_rlp::Encodable::length(&self.0)
     }
 
     #[inline]
     fn encode(&self, out: &mut dyn alloy_rlp::BufMut) {
-        self.0.encode(out)
+        alloy_rlp::Encodable::encode(&self.0, out)
     }
 }
 
 impl alloy_rlp::Decodable for IrysPeerId {
     #[inline]
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        IrysAddress::decode(buf).map(Self)
+        <IrysAddress as alloy_rlp::Decodable>::decode(buf).map(Self)
+    }
+}
+
+impl Compact for IrysPeerId {
+    #[inline]
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: bytes::BufMut + AsMut<[u8]>,
+    {
+        self.0.to_compact(buf)
+    }
+
+    #[inline]
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (addr, buf) = IrysAddress::from_compact(buf, len);
+        (Self(addr), buf)
+    }
+}
+
+impl Encode for IrysPeerId {
+    type Encoded = [u8; 20];
+
+    fn encode(self) -> Self::Encoded {
+        <IrysAddress as Encode>::encode(self.0)
+    }
+}
+
+impl Decode for IrysPeerId {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        <IrysAddress as Decode>::decode(value).map(Self)
     }
 }

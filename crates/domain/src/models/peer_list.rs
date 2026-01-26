@@ -99,13 +99,12 @@ impl PeerList {
         let compact_peers =
             walk_all::<PeerListItems, _>(&read_tx).map_err(PeerNetworkError::from)?;
 
-        let peers = compact_peers
+        let peers: Vec<PeerListItem> = compact_peers
             .into_iter()
-            .map(|(address, compact_item)| {
+            .map(|(peer_id, compact_item)| {
                 // Convert from PeerListItemInner (database format) to PeerListItem (application format)
                 let inner: irys_types::PeerListItemInner = compact_item.into();
-                let peer_item = irys_types::PeerListItem::from_inner(inner, address);
-                (address, peer_item)
+                PeerListItem::from_inner(inner, peer_id)
             })
             .collect();
         let inner = PeerListDataInner::new(peers, peer_service_sender, config, peer_events)?;
@@ -124,7 +123,7 @@ impl PeerList {
     }
 
     pub fn from_peers(
-        peers: Vec<(IrysAddress, PeerListItem)>,
+        peers: Vec<PeerListItem>,
         peer_network: PeerNetworkSender,
         config: &Config,
         peer_events: broadcast::Sender<PeerEvent>,
@@ -295,14 +294,12 @@ impl PeerList {
 
     /// Get persistable peers with their mining addresses (for database storage)
     /// Returns tuples of (peer_id, mining_addr, peer) for peers that have a known mining address.
-    pub fn persistable_peers_with_mining_addr(
-        &self,
-    ) -> Vec<(IrysPeerId, IrysAddress, PeerListItem)> {
+    pub fn persistable_peers_with_mining_addr(&self) -> Vec<(IrysPeerId, PeerListItem)> {
         let guard = self.read();
         guard
             .persistent_peers_cache
             .iter()
-            .map(|(peer_id, peer)| (*peer_id, peer.mining_address, peer.clone()))
+            .map(|(peer_id, peer)| (*peer_id, peer.clone()))
             .collect()
     }
 
@@ -633,7 +630,7 @@ impl PeerList {
 
 impl PeerListDataInner {
     pub fn new(
-        peers: Vec<(IrysAddress, PeerListItem)>,
+        peers: Vec<PeerListItem>,
         peer_network_sender: PeerNetworkSender,
         config: &Config,
         peer_events: broadcast::Sender<PeerEvent>,
@@ -676,7 +673,7 @@ impl PeerListDataInner {
             config: config.clone(),
         };
 
-        for (mining_address, mut peer_list_item) in peers {
+        for mut peer_list_item in peers {
             // If scoring is disabled, set all peer scores to max
             if !config.node_config.p2p_gossip.enable_scoring {
                 peer_list_item.reputation_score.set_to_max();
@@ -685,6 +682,7 @@ impl PeerListDataInner {
             // At this point, peer_list_item should already have peer_id and mining_address set
             // (either from DB via from_inner() or from creation in application code)
             let peer_id = peer_list_item.peer_id;
+            let mining_address = peer_list_item.mining_address;
             let address = peer_list_item.address;
 
             // Build all the index maps
