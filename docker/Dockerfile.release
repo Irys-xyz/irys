@@ -55,6 +55,6 @@ LABEL org.opencontainers.image.description="Irys blockchain node"
 COPY --from=artifacts /irys /irys
 COPY --from=artifacts /binary_sha256.txt /binary_sha256.txt
 
-EXPOSE 1984 1985
+EXPOSE 8080 8081
 
 ENTRYPOINT ["/irys"]
