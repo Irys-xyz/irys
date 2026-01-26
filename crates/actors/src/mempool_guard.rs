@@ -1,5 +1,8 @@
 use crate::mempool_service::AtomicMempoolState;
-use irys_types::{CommitmentTransaction, DataRoot, DataTransactionHeader, IrysTransactionId};
+use irys_types::{
+    CommitmentTransaction, CommitmentTransactionMetadata, DataRoot, DataTransactionHeader,
+    DataTransactionMetadata, IrysTransactionId,
+};
 use std::collections::HashMap;
 
 /// Wraps the internal `Arc<RwLock<_>>` to provide readonly access to mempool state
@@ -65,5 +68,39 @@ impl MempoolReadGuard {
         self.mempool_state
             .pending_chunk_count_for_data_root(data_root)
             .await
+    }
+
+    /// Check if a transaction ID is in the recent valid transactions cache.
+    pub async fn is_recent_valid_tx(&self, tx_id: &IrysTransactionId) -> bool {
+        self.mempool_state.is_recent_valid_tx(tx_id).await
+    }
+
+    /// Get transaction metadata from mempool (returns None if not found or no metadata).
+    /// This checks both commitment and data transaction metadata.
+    pub async fn get_tx_metadata(&self, tx_id: &IrysTransactionId) -> Option<TxMetadata> {
+        self.mempool_state.get_tx_metadata(tx_id).await
+    }
+}
+
+/// Enum to represent either commitment or data metadata
+#[derive(Debug, Clone)]
+pub enum TxMetadata {
+    Commitment(CommitmentTransactionMetadata),
+    Data(DataTransactionMetadata),
+}
+
+impl TxMetadata {
+    pub fn included_height(&self) -> Option<u64> {
+        match self {
+            Self::Commitment(m) => m.included_height,
+            Self::Data(m) => m.included_height,
+        }
+    }
+
+    pub fn promoted_height(&self) -> Option<u64> {
+        match self {
+            Self::Commitment(_) => None,
+            Self::Data(m) => m.promoted_height,
+        }
     }
 }

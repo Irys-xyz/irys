@@ -17,7 +17,9 @@ pub mod reth_service;
 pub mod services;
 pub mod shadow_tx_generator;
 pub mod storage_module_service;
+pub mod supply_state_calculator;
 pub mod test_helpers;
+pub mod transaction_status;
 pub mod validation_service;
 
 pub use block_producer::*;
@@ -29,6 +31,7 @@ pub use partition_mining_service::*;
 pub use reth_ethereum_primitives;
 pub use shadow_tx_generator::ShadowMetadata;
 pub use storage_module_service::*;
+pub use transaction_status::{compute_transaction_status, db_metadata_to_tx_metadata};
 
 pub use async_trait;
 pub use openssl::sha;

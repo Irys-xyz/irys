@@ -25,7 +25,7 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_database::SystemLedger;
+use irys_types::SystemLedger;
 use irys_types::{
     BlockTransactions, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1,
     H256List, IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger,
@@ -911,20 +911,22 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
     let data_root = H256(root.id);
 
     // Create data transaction header and sign it
-    let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-        id: H256::zero(),
-        anchor,
-        signer: test_signer.address(),
-        data_root,
-        data_size: data_bytes.len() as u64,
-        header_size: 0,
-        term_fee: U256::from(1000).into(),
-        perm_fee: Some(U256::from(1000).into()), // Increased to cover 2 ingress proofs + base storage
-        ledger_id: 0,
-        bundle_format: Some(0),
-        chain_id: 1,
-        promoted_height: Some(1),
-        signature: Default::default(),
+    let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+        tx: DataTransactionHeaderV1 {
+            id: H256::zero(),
+            anchor,
+            signer: test_signer.address(),
+            data_root,
+            data_size: data_bytes.len() as u64,
+            header_size: 0,
+            term_fee: U256::from(1000).into(),
+            perm_fee: Some(U256::from(1000).into()), // Increased to cover 2 ingress proofs + base storage
+            ledger_id: 0,
+            bundle_format: Some(0),
+            chain_id: 1,
+            signature: Default::default(),
+        },
+        metadata: irys_types::DataTransactionMetadata::with_promoted_height(1),
     })
     .sign(&test_signer)?;
 

@@ -230,21 +230,24 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let original_header = DataTransactionHeader::V1(crate::DataTransactionHeaderV1 {
-            id: Default::default(),
-            anchor: H256::from([1_u8; 32]),
-            signer: IrysAddress::ZERO,
-            data_root: H256::from([3_u8; 32]),
-            data_size: 242,
-            header_size: 0,
-            term_fee: BoundedFee::from(99_u64),
-            perm_fee: Some(BoundedFee::from(98_u64)),
-            ledger_id: 0,
-            bundle_format: None,
-            chain_id: testing_config.chain_id,
-            promoted_height: None,
-            signature: Default::default(),
-        });
+        let original_header =
+            DataTransactionHeader::V1(crate::DataTransactionHeaderV1WithMetadata {
+                tx: crate::DataTransactionHeaderV1 {
+                    id: Default::default(),
+                    anchor: H256::from([1_u8; 32]),
+                    signer: IrysAddress::ZERO,
+                    data_root: H256::from([3_u8; 32]),
+                    data_size: 242,
+                    header_size: 0,
+                    term_fee: BoundedFee::from(99_u64),
+                    perm_fee: Some(BoundedFee::from(98_u64)),
+                    ledger_id: 0,
+                    bundle_format: None,
+                    chain_id: testing_config.chain_id,
+                    signature: Default::default(),
+                },
+                metadata: crate::DataTransactionMetadata::new(),
+            });
 
         let transaction = DataTransaction {
             header: original_header,
@@ -313,21 +316,26 @@ mod tests {
             chunk_size: testing_config.chunk_size,
         };
 
-        let mut transaction = CommitmentTransaction::V2(crate::CommitmentTransactionV2 {
-            id: Default::default(),
-            // anchor: H256::from([1_u8; 32]),
-            anchor: H256::from_base58("GqrCZEc5WU4gXj9qveAUDkNRPhsPPjWrD8buKAc5sXdZ"),
+        let mut transaction = CommitmentTransaction::V2(crate::CommitmentV2WithMetadata {
+            tx: crate::CommitmentTransactionV2 {
+                id: Default::default(),
+                // anchor: H256::from([1_u8; 32]),
+                anchor: H256::from_base58("GqrCZEc5WU4gXj9qveAUDkNRPhsPPjWrD8buKAc5sXdZ"),
 
-            signer: IrysAddress::ZERO,
-            commitment_type: CommitmentTypeV2::Unpledge {
-                pledge_count_before_executing: u64::MAX,
-                // partition_hash: [2_u8; 32].into(),
-                partition_hash: H256::from_base58("12Yjd3YA9xjzkqDfdcXVWgyu6TpAq9WJdh6NJRWzZBKt"),
+                signer: IrysAddress::ZERO,
+                commitment_type: CommitmentTypeV2::Unpledge {
+                    pledge_count_before_executing: u64::MAX,
+                    // partition_hash: [2_u8; 32].into(),
+                    partition_hash: H256::from_base58(
+                        "12Yjd3YA9xjzkqDfdcXVWgyu6TpAq9WJdh6NJRWzZBKt",
+                    ),
+                },
+                chain_id: 1270,
+                signature: Default::default(),
+                fee: 1234,
+                value: 222.into(),
             },
-            chain_id: 1270,
-            signature: Default::default(),
-            fee: 1234,
-            value: 222.into(),
+            metadata: Default::default(),
         });
 
         irys_signer.sign_commitment(&mut transaction)?;

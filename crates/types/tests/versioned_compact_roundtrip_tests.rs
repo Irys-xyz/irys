@@ -47,7 +47,11 @@ fn test_versioned_data_transaction_header_compact_roundtrip() {
     assert!(rest.is_empty(), "entire buffer should be consumed");
 
     // Verify the decoded version matches the original
-    assert_eq!(decoded_versioned, versioned);
+    assert!(decoded_versioned.try_as_header_v1().is_some());
+    assert_eq!(
+        decoded_versioned.try_as_header_v1(),
+        versioned.try_as_header_v1()
+    );
     assert_eq!(decoded_versioned.version(), 1);
 }
 
@@ -103,7 +107,12 @@ fn test_versioned_data_transaction_header_compact_with_default() {
     let (decoded_versioned, rest) = DataTransactionHeader::from_compact(&buf, buf.len());
 
     assert!(rest.is_empty());
-    assert_eq!(decoded_versioned, versioned);
+    assert!(decoded_versioned.try_as_header_v1().is_some());
+    assert_eq!(
+        decoded_versioned.try_as_header_v1(),
+        versioned.try_as_header_v1()
+    );
+    assert_eq!(decoded_versioned.version(), 1);
 }
 
 #[test]

@@ -84,7 +84,7 @@ impl MempoolFacade for MempoolStub {
             .read()
             .expect("to unlock mempool txs")
             .iter()
-            .any(|tx| tx == &tx_header);
+            .any(|tx| tx.eq_tx(&tx_header));
 
         if already_exists {
             return Err(TxIngressError::Skipped);

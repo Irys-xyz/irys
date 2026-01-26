@@ -1,5 +1,5 @@
-use crate::hardfork_config::{FrontierParams, IrysHardforkConfig};
-use crate::serde_utils;
+use crate::hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig};
+use crate::{serde_utils, unix_timestamp_string_serde, UnixTimestamp};
 use crate::{
     storage_pricing::{
         phantoms::{
@@ -17,6 +17,7 @@ use alloy_primitives::{Address, U256};
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::de::value::StringDeserializer;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -606,33 +607,6 @@ impl ConsensusConfig {
         const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
         const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
 
-        let base = Self::testnet();
-
-        let difficulty_adjustment = DifficultyAdjustmentConfig {
-            block_time: DEFAULT_BLOCK_TIME,
-            difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)
-                * 14,
-            ..base.difficulty_adjustment
-        };
-
-        let vdf = VdfConsensusConfig {
-            sha_1s_difficulty: SHA1_DIFFICULTY,
-            ..base.vdf
-        };
-
-        Self {
-            chunk_size: CHUNK_SIZE,
-            num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
-            num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
-            difficulty_adjustment,
-            vdf,
-            ..base
-        }
-    }
-
-    pub fn testnet() -> Self {
-        const DEFAULT_BLOCK_TIME: u64 = 12;
-
         // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
@@ -653,9 +627,9 @@ impl ConsensusConfig {
             },
             expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
-            chunk_size: Self::CHUNK_SIZE,
-            num_chunks_in_partition: 51_872_000,
-            num_chunks_in_recall_range: 800,
+            chunk_size: CHUNK_SIZE,
+            num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
+            num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             num_partitions_per_slot: 1,
             block_migration_depth: 6,
             block_tree_depth: 50,
@@ -676,7 +650,7 @@ impl ConsensusConfig {
                 reset_frequency: 50 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
-                sha_1s_difficulty: 1_800_000,
+                sha_1s_difficulty: SHA1_DIFFICULTY,
             },
 
             epoch: EpochConfig {
@@ -741,8 +715,114 @@ impl ConsensusConfig {
                     number_of_ingress_proofs_total: 1,
                     number_of_ingress_proofs_from_assignees: 0,
                 },
+                aurora: Some(Aurora {
+                    activation_timestamp: UnixTimestamp::from_secs(1768476600),
+                    minimum_commitment_tx_version: 2,
+                }),
                 next_name_tbd: None,
-                aurora: None,
+            },
+        }
+    }
+
+    pub fn testnet() -> Self {
+        const BLOCK_TIME: u64 = 10;
+        const INFLATION_CAP: u128 = 100_000_000;
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
+
+        Self {
+            chain_id: 1270,
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
+            safe_minimum_number_of_years: 200,
+
+            expected_genesis_hash: Some(H256::from_base58(
+                "CVqXN2QqETJYke83dKCMjBWEnxstrFGk6ySUqNho7QRr",
+            )),
+            token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            chunk_size: Self::CHUNK_SIZE,
+            num_chunks_in_partition: 51_872_000,
+            num_chunks_in_recall_range: 800,
+            num_partitions_per_slot: 1,
+            block_migration_depth: 6,
+            block_tree_depth: 50,
+            entropy_packing_iterations: 1000,
+            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
+            enable_full_ingress_proof_validation: false,
+            max_future_timestamp_drift_millis: 15_000,
+
+            genesis: GenesisConfig {
+                timestamp_millis: 1764677430138,
+                miner_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
+                    .unwrap(),
+                reward_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
+                    .unwrap(),
+                last_epoch_hash: H256::from_base58("6mZBRJGrxbYZsLLQqwZEFEAsdvNvx4Hd7RVVBAD69f7Y"),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
+                genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            },
+
+            mempool: MempoolConsensusConfig {
+                max_data_txs_per_block: 100,
+                max_commitment_txs_per_block: 100,
+                tx_anchor_expiry_depth: 59,
+                ingress_proof_anchor_expiry_depth: 200,
+                commitment_fee: 100,
+            },
+            vdf: VdfConsensusConfig {
+                reset_frequency: 1200,
+                num_checkpoints_in_vdf_step: 25,
+                max_allowed_vdf_fork_steps: 190_735,
+                sha_1s_difficulty: 10_000_000,
+            },
+
+            epoch: EpochConfig {
+                capacity_scalar: 100,
+                num_blocks_in_epoch: 360,
+                submit_ledger_epoch_length: 5,
+                num_capacity_partitions: None,
+            },
+
+            difficulty_adjustment: DifficultyAdjustmentConfig {
+                block_time: BLOCK_TIME,
+                difficulty_adjustment_interval: 2000,
+                max_difficulty_adjustment_factor: dec!(4),
+                min_difficulty_adjustment_factor: dec!(0.25),
+            },
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            reth: IrysRethConfig {
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                alloc: BTreeMap::new(),
+            },
+            block_reward_config: BlockRewardConfig {
+                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
+            },
+
+            // Hardfork configuration
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 3,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                aurora: Some(Aurora {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-01-15T11:30:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    minimum_commitment_tx_version: 2,
+                }),
+                next_name_tbd: None,
             },
         }
     }

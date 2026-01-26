@@ -27,8 +27,13 @@ pub struct PriceInfo {
 pub struct CommitmentPriceInfo {
     pub value: U256,
     pub fee: U256,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_address: Option<IrysAddress>,
-    #[serde(default, with = "irys_types::serialization::optional_string_u64")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        with = "irys_types::serialization::optional_string_u64"
+    )]
     pub pledge_count: Option<u64>,
 }
 
