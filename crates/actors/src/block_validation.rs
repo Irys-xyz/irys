@@ -321,6 +321,14 @@ pub enum ValidationError {
         minimum: u8,
     },
 
+    /// Commitment type not allowed before hardfork activation (e.g., UpdateRewardAddress before Borealis)
+    #[error("Commitment {tx_id} at position {position} uses type {commitment_type} not allowed before hardfork activation")]
+    CommitmentTypeNotAllowed {
+        tx_id: H256,
+        position: usize,
+        commitment_type: String,
+    },
+
     /// Commitment ordering validation failed
     #[error("Commitment ordering validation failed: {0}")]
     CommitmentOrderingFailed(String),
@@ -1737,6 +1745,51 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
+    // Get parent epoch snapshot early to check Borealis activation
+    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
+        let read = block_tree_guard.read();
+        let commitment_snapshot = read
+            .get_commitment_snapshot(&block.previous_block_hash)
+            .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
+        let epoch_snapshot = read
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .ok_or_else(|| ValidationError::ParentEpochSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
+        (commitment_snapshot, epoch_snapshot)
+    };
+
+    // Validate commitment types against Borealis hardfork rules (epoch-aligned activation)
+    // UpdateRewardAddress is only allowed after Borealis activation for the current epoch
+    if !is_epoch_block {
+        let epoch_block_timestamp = parent_epoch_snapshot.epoch_block.timestamp_secs();
+        if !config
+            .consensus
+            .hardforks
+            .is_update_reward_address_allowed(epoch_block_timestamp)
+        {
+            for (idx, tx) in commitment_txs.iter().enumerate() {
+                if matches!(
+                    tx.commitment_type(),
+                    CommitmentTypeV2::UpdateRewardAddress { .. }
+                ) {
+                    error!(
+                        "Commitment transaction {} at position {} uses UpdateRewardAddress before Borealis activation",
+                        tx.id(),
+                        idx
+                    );
+                    return Err(ValidationError::CommitmentTypeNotAllowed {
+                        tx_id: tx.id(),
+                        position: idx,
+                        commitment_type: "UpdateRewardAddress".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
     // Validate that all commitment transactions have correct values
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
@@ -1753,21 +1806,6 @@ pub async fn commitment_txs_are_valid(
             }
         })?;
     }
-
-    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
-        let read = block_tree_guard.read();
-        let commitment_snapshot = read
-            .get_commitment_snapshot(&block.previous_block_hash)
-            .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
-                block_hash: block.previous_block_hash,
-            })?;
-        let epoch_snapshot = read
-            .get_epoch_snapshot(&block.previous_block_hash)
-            .ok_or_else(|| ValidationError::ParentEpochSnapshotMissing {
-                block_hash: block.previous_block_hash,
-            })?;
-        (commitment_snapshot, epoch_snapshot)
-    };
 
     if is_epoch_block {
         debug!(
@@ -3831,6 +3869,7 @@ mod commitment_version_tests {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
                 }),
+                borealis: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -3845,6 +3884,7 @@ mod commitment_version_tests {
                 },
                 next_name_tbd: None,
                 aurora: None,
+                borealis: None,
             },
             ..ConsensusConfig::testing()
         }

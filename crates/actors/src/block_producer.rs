@@ -1369,6 +1369,24 @@ pub trait BlockProdStrategy {
                     block_timestamp.to_secs(),
                 );
 
+            // Filter commitments by type using epoch block timestamp (Borealis hardfork)
+            // UpdateRewardAddress is only allowed after Borealis activation
+            let epoch_block_timestamp = parent_epoch_snapshot.epoch_block.timestamp_secs();
+            if !self
+                .inner()
+                .config
+                .consensus
+                .hardforks
+                .is_update_reward_address_allowed(epoch_block_timestamp)
+            {
+                mempool_txs.commitment_tx.retain(|tx| {
+                    !matches!(
+                        tx.commitment_type(),
+                        irys_types::CommitmentTypeV2::UpdateRewardAddress { .. }
+                    )
+                });
+            }
+
             debug!(
                 block.height = block_height,
                 custom.commitment_ids = ?mempool_txs

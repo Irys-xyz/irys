@@ -2824,6 +2824,9 @@ pub enum TxIngressError {
         "Commitment transaction version {version} is below minimum required version {minimum}"
     )]
     InvalidVersion { version: u8, minimum: u8 },
+    /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
+    #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]
+    UpdateRewardAddressNotAllowed,
     /// The account does not have enough tokens to fund this transaction
     #[error("Account has insufficient funds for transaction {0}")]
     Unfunded(H256),
