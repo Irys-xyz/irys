@@ -25,7 +25,7 @@ static BASE_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
 #[cfg(test)]
 #[inline]
 fn get_current_time_nanos() -> u64 {
-    let override_time = test_utils::TEST_TIME_OVERRIDE.load(Ordering::Relaxed);
+    let override_time = test_utils::TEST_TIME_OVERRIDE.load(Ordering::SeqCst);
     if override_time > 0 {
         override_time
     } else {
