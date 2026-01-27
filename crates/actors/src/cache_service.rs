@@ -882,7 +882,7 @@ mod tests {
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
         DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
-        IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
+        IrysBlockHeader, IrysPeerId, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -892,7 +892,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -979,7 +979,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1085,7 +1085,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1182,7 +1182,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1399,7 +1399,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
         node_config.cache.max_cache_size_bytes = 96;
-        let config_below = Config::new(node_config.clone());
+        let config_below = Config::new(node_config.clone(), IrysPeerId::random());
 
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
@@ -1493,7 +1493,7 @@ mod tests {
         // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
         let mut node_config2 = node_config.clone();
         node_config2.cache.max_cache_size_bytes = 64;
-        let config_above = Config::new(node_config2);
+        let config_above = Config::new(node_config2, IrysPeerId::random());
         let task_above = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
@@ -1523,7 +1523,7 @@ mod tests {
     #[tokio::test]
     async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1592,7 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,

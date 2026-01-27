@@ -1636,8 +1636,8 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
-        Config, DatabaseProvider, NodeConfig, PeerAddress, PeerNetworkSender, PeerScore,
-        RethPeerInfo,
+        Config, DatabaseProvider, IrysPeerId, NodeConfig, PeerAddress, PeerNetworkSender,
+        PeerScore, RethPeerInfo,
     };
     use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use std::sync::Arc;
@@ -1648,7 +1648,7 @@ mod tests {
     async fn handle_invalid_block_penalizes_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let db_env =
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf()).expect("db");
         let db = DatabaseProvider(Arc::new(db_env));

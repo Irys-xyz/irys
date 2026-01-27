@@ -8,14 +8,14 @@ pub use consensus::*;
 pub use node::*;
 
 use crate::irys::IrysSigner;
-use crate::UnixTimestamp;
+use crate::{IrysPeerId, UnixTimestamp};
 
 /// Ergonomic and cheaply copyable Configuration that has the consensus and user-defined configs extracted out
 #[derive(Debug, Clone)]
 pub struct Config(Arc<CombinedConfigInner>);
 
 impl Config {
-    pub fn new(node_config: NodeConfig) -> Self {
+    pub fn new(node_config: NodeConfig, peer_id: IrysPeerId) -> Self {
         let consensus = node_config.consensus_config();
 
         Self(Arc::new(CombinedConfigInner {
@@ -23,7 +23,12 @@ impl Config {
             mempool: node_config.mempool(),
             vdf: node_config.vdf(),
             node_config,
+            peer_id,
         }))
+    }
+
+    pub fn peer_id(&self) -> IrysPeerId {
+        self.0.peer_id
     }
 
     pub fn irys_signer(&self) -> IrysSigner {
@@ -106,12 +111,6 @@ impl Deref for Config {
     }
 }
 
-impl From<NodeConfig> for Config {
-    fn from(val: NodeConfig) -> Self {
-        Self::new(val)
-    }
-}
-
 #[derive(Debug)]
 pub struct CombinedConfigInner {
     pub consensus: ConsensusConfig,
@@ -119,6 +118,7 @@ pub struct CombinedConfigInner {
     // composite configs - here to amortize the creation cost
     pub vdf: VdfConfig,
     pub mempool: MempoolConfig,
+    pub peer_id: IrysPeerId,
 }
 
 impl From<&NodeConfig> for VdfConfig {
@@ -699,8 +699,6 @@ mod tests {
         expected_config.http.bind_ip = Some("127.0.0.1".to_string());
         expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
         expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
-        // Test TOML doesn't have peer_id, so it should be None
-        expected_config.peer_id = None;
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();

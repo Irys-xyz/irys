@@ -352,6 +352,7 @@ pub struct IrysNode {
     pub config: Config,
     pub http_listener: TcpListener,
     pub gossip_listener: TcpListener,
+    pub irys_db: DatabaseProvider,
 }
 
 impl IrysNode {
@@ -402,13 +403,20 @@ impl IrysNode {
             node_config.gossip.public_port = node_config.gossip.bind_port;
         }
 
-        let config = Config::new(node_config);
+        // Initialize database early to get/create peer_id
+        let irys_db = init_irys_db(&node_config)?;
+
+        // Get or create peer_id from database
+        let peer_id = get_or_create_peer_id(&irys_db)?;
+
+        let config = Config::new(node_config, peer_id);
         config.validate()?;
 
         Ok(Self {
             config,
             http_listener,
             gossip_listener,
+            irys_db,
         })
     }
 
@@ -708,8 +716,8 @@ impl IrysNode {
         let config = &self.config;
         let node_mode = &config.node_config.node_mode;
 
-        // In all startup modes, irys_db and block_index are prerequisites
-        let irys_db = init_irys_db(config).expect("could not open irys db");
+        // Use the irys_db already initialized in new()
+        let irys_db = self.irys_db.clone();
         let mut block_index = BlockIndex::new(&config.node_config)
             .await
             .expect("initializing a new block index should be doable");
@@ -1232,7 +1240,7 @@ impl IrysNode {
             node_config.reth.network.public_port = reth_peering.peering_tcp_addr.port();
         }
 
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, config.peer_id());
 
         let (block_index_tx, block_index_rx) = oneshot::channel();
         service_senders
@@ -1307,7 +1315,7 @@ impl IrysNode {
 
         let p2p_service = P2PService::new(
             config.node_config.miner_address(),
-            config.node_config.peer_id(),
+            config.peer_id(),
             receivers.gossip_broadcast,
         );
         let sync_state = p2p_service.sync_state.clone();
@@ -2175,12 +2183,27 @@ async fn init_reth_db(
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-fn init_irys_db(config: &Config) -> Result<DatabaseProvider, eyre::Error> {
+fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Error> {
     let irys_db_env =
-        open_or_create_irys_consensus_data_db(&config.node_config.irys_consensus_data_dir())?;
+        open_or_create_irys_consensus_data_db(&node_config.irys_consensus_data_dir())?;
     let irys_db = DatabaseProvider(Arc::new(irys_db_env));
     debug!("Irys DB initialized");
     Ok(irys_db)
+}
+
+/// Gets the peer_id from the database, or generates a new one and stores it.
+pub fn get_or_create_peer_id(db: &DatabaseProvider) -> eyre::Result<irys_types::IrysPeerId> {
+    let tx = db.tx()?;
+    if let Some(peer_id) = database::get_peer_id(&tx)? {
+        info!("Loaded peer_id from database: {:?}", peer_id);
+        return Ok(peer_id);
+    }
+    drop(tx);
+
+    let peer_id = irys_types::IrysPeerId::random();
+    db.update(|tx| database::set_peer_id(tx, peer_id))??;
+    info!("Generated new peer_id: {:?}", peer_id);
+    Ok(peer_id)
 }
 
 /// This function is used by the node to automatically stake & pledge on startup, if the `node_config.stake_pledge_drives` option is `true`

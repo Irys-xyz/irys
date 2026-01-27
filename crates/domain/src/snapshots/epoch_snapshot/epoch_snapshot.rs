@@ -7,7 +7,7 @@ use irys_types::CommitmentStatus;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
+    IrysBlockHeader, IrysPeerId, NodeConfig, SimpleRNG, SystemLedger, H256,
 };
 use irys_types::{
     partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
@@ -48,7 +48,7 @@ pub struct EpochSnapshot {
 impl Default for EpochSnapshot {
     fn default() -> Self {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         Self {
             ledgers: Ledgers::new(&config.consensus),
             partition_assignments: PartitionAssignments::new(),
@@ -1340,7 +1340,7 @@ mod tests {
             num_partitions_per_slot: 2,
             ..node_config.consensus_config()
         });
-        let config = Config::new(node_config);
+        let config = Config::new(node_config, IrysPeerId::random());
         let mut snapshot = EpochSnapshot {
             ledgers: Ledgers::new(&config.consensus),
             partition_assignments: PartitionAssignments::new(),

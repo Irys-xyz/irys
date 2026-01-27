@@ -18,8 +18,8 @@ use irys_types::storage_pricing::{
 };
 use irys_types::{BlockTransactions, IngressProofsList};
 use irys_types::{
-    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, OracleConfig,
-    UnixTimestamp, U256,
+    Config, DataLedger, DataTransactionHeader, IrysBlockHeader, IrysPeerId, NodeConfig,
+    OracleConfig, UnixTimestamp, U256,
 };
 use reth_db::Database as _;
 use rust_decimal_macros::dec;
@@ -103,7 +103,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
-                config: Config::new(evil_config),
+                config: Config::new(evil_config, IrysPeerId::random()),
                 db: genesis_block_prod.db.clone(),
                 block_discovery: genesis_block_prod.block_discovery.clone(),
                 mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
@@ -230,7 +230,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
-                config: Config::new(evil_config),
+                config: Config::new(evil_config, IrysPeerId::random()),
                 db: genesis_block_prod.db.clone(),
                 block_discovery: genesis_block_prod.block_discovery.clone(),
                 mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),

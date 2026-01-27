@@ -327,10 +327,8 @@ impl GossipServiceTestFixture {
         node_config.mining_key = random_signer.signer;
         // Generate a distinct peer_id for this test fixture
         // peer_id is separate from mining_address in V2
-        // Must clear the preset peer_id from testing() before ensure_peer_id() will generate a new one
-        node_config.peer_id = None;
-        node_config.ensure_peer_id();
-        let config = Config::new(node_config);
+        let peer_id = IrysPeerId::random();
+        let config = Config::new(node_config, peer_id);
 
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -458,7 +456,7 @@ impl GossipServiceTestFixture {
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
-            self.config.node_config.peer_id(),
+            self.config.peer_id(),
             self.gossip_receiver.take().expect("to take receiver"),
         );
         info!("Starting gossip service on port {}", self.gossip_port);
@@ -525,7 +523,7 @@ impl GossipServiceTestFixture {
     #[must_use]
     pub(crate) fn create_default_peer_entry(&self) -> PeerListItem {
         PeerListItem {
-            peer_id: self.config.node_config.peer_id(),
+            peer_id: self.config.peer_id(),
             mining_address: self.config.node_config.miner_address(),
             reputation_score: PeerScore::new(50),
             response_time: 0,
@@ -579,7 +577,7 @@ fn random_free_port() -> u16 {
 #[must_use]
 pub(crate) fn generate_test_tx() -> DataTransaction {
     let testing_config = NodeConfig::testing();
-    let config = Config::new(testing_config);
+    let config = Config::new(testing_config, IrysPeerId::random());
     let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
