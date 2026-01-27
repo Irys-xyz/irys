@@ -144,6 +144,16 @@ impl EpochSnapshot {
         new_self
     }
 
+    /// Resolves a miner address to their configured reward address.
+    /// Returns the reward_address from the stake entry if present.
+    /// Returns None if the miner has no stake entry (should not happen for active miners).
+    pub fn resolve_reward_address(&self, miner_address: IrysAddress) -> Option<IrysAddress> {
+        self.commitment_state
+            .stake_commitments
+            .get(&miner_address)
+            .and_then(|entry| entry.reward_address)
+    }
+
     pub fn replay_epoch_data(
         &mut self,
         epoch_replay_data: Vec<EpochBlockData>,

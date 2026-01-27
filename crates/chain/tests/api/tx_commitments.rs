@@ -1,14 +1,18 @@
 use crate::utils::*;
+use alloy_eips::HashOrNumber;
+use alloy_rpc_types_eth::TransactionTrait as _;
 use assert_matches::assert_matches;
 use eyre::eyre;
 
 use irys_chain::IrysNodeCtx;
 use irys_domain::{CommitmentSnapshotStatus, EpochSnapshot};
+use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_testing_utils::initialize_tracing;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
     IrysAddress, NodeConfig, H256, U256,
 };
+use reth::providers::TransactionsProvider as _;
 use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{debug, debug_span, info};
@@ -563,41 +567,6 @@ async fn post_pledge_commitment(
     pledge_tx
 }
 
-async fn post_update_reward_address(
-    node: &IrysNodeTest<IrysNodeCtx>,
-    signer: &IrysSigner,
-    new_reward_address: IrysAddress,
-    nonce: U256,
-) -> CommitmentTransaction {
-    let consensus = &node.node_ctx.config.consensus;
-    let anchor = node
-        .get_anchor()
-        .await
-        .expect("anchor should be available");
-
-    let mut update_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
-        tx: CommitmentTransactionV2 {
-            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                new_reward_address,
-                nonce,
-            },
-            anchor,
-            fee: consensus.mempool.commitment_fee,
-            value: U256::zero(), // Must be zero for UpdateRewardAddress
-            ..CommitmentTransactionV2::new(consensus)
-        },
-        metadata: Default::default(),
-    });
-
-    signer.sign_commitment(&mut update_tx).unwrap();
-    info!("Generated update_reward_address_tx.id: {}", update_tx.id());
-
-    node.post_commitment_tx(&update_tx)
-        .await
-        .expect("posted update reward address commitment tx");
-
-    update_tx
-}
 
 /// Validates that the partition_hashes associated with pledges in the EpochSnapshot::commitment_state are reflected
 /// in the EpochSnapshot::partition_assignments which maps partition_hashes to ledger or capacity.
@@ -706,7 +675,9 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
     );
 
     // PHASE 2: Submit UpdateRewardAddress and mine a block to include it
-    let update_tx = post_update_reward_address(&node, &signer, new_reward_address, U256::from(1)).await;
+    let update_tx = node
+        .post_update_reward_address(&signer, new_reward_address, U256::from(1))
+        .await?;
 
     // Status is Unknown until mined
     let status = node.get_commitment_snapshot_status(&update_tx);
@@ -818,7 +789,9 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     node.mine_blocks(num_blocks_in_epoch).await?;
 
     // PHASE 2: Submit first update with nonce=1 and mine to include it (still within epoch)
-    let update_tx_1 = post_update_reward_address(&node, &signer, reward_address_1, U256::from(1)).await;
+    let update_tx_1 = node
+        .post_update_reward_address(&signer, reward_address_1, U256::from(1))
+        .await?;
     node.mine_blocks(1).await?;
     assert_eq!(node.get_commitment_snapshot_status(&update_tx_1), CommitmentSnapshotStatus::Accepted);
 
@@ -845,7 +818,9 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
 
     // PHASE 4: Submit update with HIGHER nonce=2 and mine - should REPLACE the previous one
-    let update_tx_2 = post_update_reward_address(&node, &signer, reward_address_2, U256::from(2)).await;
+    let update_tx_2 = node
+        .post_update_reward_address(&signer, reward_address_2, U256::from(2))
+        .await?;
     node.mine_blocks(1).await?;
     assert_eq!(node.get_commitment_snapshot_status(&update_tx_2), CommitmentSnapshotStatus::Accepted);
 
@@ -871,7 +846,9 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     );
 
     // PHASE 6: New epoch - can submit with nonce=1 again (fresh snapshot for new epoch)
-    let update_tx_3 = post_update_reward_address(&node, &signer, reward_address_3, U256::from(1)).await;
+    let update_tx_3 = node
+        .post_update_reward_address(&signer, reward_address_3, U256::from(1))
+        .await?;
     node.mine_blocks(1).await?;
     assert_eq!(node.get_commitment_snapshot_status(&update_tx_3), CommitmentSnapshotStatus::Accepted);
 
@@ -885,6 +862,207 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
         .get(&signer_address)
         .expect("Signer should have stake");
     assert_eq!(stake_entry.reward_address, Some(reward_address_3));
+
+    node.stop().await;
+    Ok(())
+}
+
+/// Test that verifies mining rewards (specifically TermFeeReward from ledger expiry)
+/// go to the configured reward_address instead of the signer address when a custom
+/// reward_address is set.
+///
+/// This test explicitly validates that TermFeeReward shadow transactions are emitted
+/// and routed to the custom reward_address.
+///
+/// ## How This Test Works
+/// 1. Start genesis node (which has stake + pledges + partitions already)
+/// 2. Fund a separate user for posting data transactions
+/// 3. Genesis updates its reward_address to a custom address
+/// 4. Post data (which goes to genesis's partitions since genesis is the only miner)
+/// 5. Mine to expiry epoch where Submit ledger expires
+/// 6. Verify TermFeeReward goes to the custom reward_address (not genesis miner address)
+#[tokio::test]
+async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
+    std::env::set_var("RUST_LOG", "debug");
+    initialize_tracing();
+
+    // Configure with fast ledger expiry
+    let num_blocks_in_epoch = 2;
+    let submit_ledger_epoch_length: u64 = 1;
+    let chunk_size = 32_u64;
+    let num_chunks_in_partition = 10_u64;
+
+    let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    config.consensus.get_mut().block_migration_depth = 1;
+    config.consensus.get_mut().chunk_size = chunk_size;
+    config.consensus.get_mut().num_chunks_in_partition = num_chunks_in_partition;
+    config.consensus.get_mut().epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
+
+    // Fund a separate user for posting data transactions
+    let user_signer = IrysSigner::random_signer(&config.consensus_config());
+    config.fund_genesis_accounts(vec![&user_signer]);
+
+    let node = IrysNodeTest::new_genesis(config.clone())
+        .start_and_wait_for_packing("REWARD_ADDR_TEST", 10)
+        .await;
+
+    // Use genesis node's signer - this is the miner who owns partitions
+    let genesis_signer = node.cfg.signer();
+    let genesis_address = genesis_signer.address();
+
+    // Create a separate reward recipient address
+    let reward_recipient = IrysSigner::random_signer(&config.consensus_config()).address();
+
+    let block_tree_guard = &node.node_ctx.block_tree_guard;
+
+    info!(
+        "Genesis miner address: {}, Custom reward address: {}",
+        genesis_address, reward_recipient
+    );
+
+    // PHASE 1: Update reward_address to different address
+    let _update_tx = node
+        .post_update_reward_address(&genesis_signer, reward_recipient, U256::from(1))
+        .await?;
+    node.wait_for_mempool(_update_tx.id(), 10).await?;
+    node.mine_block().await?;
+
+    info!("UpdateRewardAddress transaction included in block");
+
+    // PHASE 2: Post enough data to create 2 slots (so first slot can expire)
+    // The expiry logic skips the "last slot" (active slot), so we need enough data
+    // to create at least 2 slots for the first one to be eligible for expiry.
+    let num_txs_to_post = (num_chunks_in_partition + 2) as usize;
+    info!(
+        "Posting {} data transactions to fill at least one complete slot",
+        num_txs_to_post
+    );
+
+    let anchor = node.get_anchor().await?;
+    let mut data_tx_ids = Vec::new();
+    for i in 0..num_txs_to_post {
+        let data = vec![42 + i as u8; chunk_size as usize];
+        let data_tx = node.post_data_tx(anchor, data, &user_signer).await;
+        node.wait_for_mempool(data_tx.header.id, 5).await?;
+        data_tx_ids.push(data_tx.header.id);
+    }
+    node.mine_block().await?;
+
+    info!("Data transactions included in block");
+
+    // PHASE 3: Get initial balances
+    let head_block = node
+        .get_block_by_height(node.get_canonical_chain_height().await)
+        .await?;
+    let reward_balance_before = node
+        .get_balance(reward_recipient, head_block.evm_block_hash)
+        .await;
+    let genesis_balance_before = node
+        .get_balance(genesis_address, head_block.evm_block_hash)
+        .await;
+
+    info!(
+        "Initial balances - reward_recipient: {}, genesis: {}",
+        reward_balance_before, genesis_balance_before
+    );
+
+    // PHASE 4: Mine to next epoch boundary
+    // With submit_ledger_epoch_length = 1, data included in epoch N expires at epoch N+1 boundary.
+    // Data was included at block 2 (epoch 1 start), so it expires at block 4 (epoch 2 start).
+    // UpdateRewardAddress also takes effect at this epoch boundary.
+    let (_mined, expiry_height) = node.mine_until_next_epoch().await?;
+    info!(
+        "Reached epoch boundary at height {}, UpdateRewardAddress active and ledger expires",
+        expiry_height
+    );
+
+    // Verify that reward_address is now updated in epoch snapshot
+    let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let stake_entry = epoch_snapshot
+        .commitment_state
+        .stake_commitments
+        .get(&genesis_address)
+        .expect("Genesis should have stake after epoch boundary");
+
+    assert_eq!(
+        stake_entry.reward_address,
+        Some(reward_recipient),
+        "reward_address should be updated to reward_recipient after epoch boundary"
+    );
+
+    info!(
+        "Verified reward_address is updated: genesis={}, reward_recipient={}",
+        genesis_address, reward_recipient
+    );
+
+    // PHASE 5: Verify TermFeeReward shadow transaction at the expiry epoch block
+    // Ledger expiry fees are calculated only at epoch blocks (height % num_blocks_in_epoch == 0)
+    let reth_ctx = node.node_ctx.reth_node_adapter.clone();
+    let expiry_block = node.get_block_by_height(expiry_height).await?;
+    let block_txs = reth_ctx
+        .inner
+        .provider
+        .transactions_by_block(HashOrNumber::Hash(expiry_block.evm_block_hash))?
+        .unwrap_or_default();
+
+    let mut found_term_fee_reward = false;
+    for tx in &block_txs {
+        if let Ok(shadow_tx) = ShadowTransaction::decode(&mut tx.input().as_ref()) {
+            if let Some(TransactionPacket::TermFeeReward(reward)) = shadow_tx.as_v1() {
+                info!(
+                    "Found TermFeeReward at height {}: target={}, amount={}",
+                    expiry_height, reward.target, reward.amount
+                );
+                // KEY ASSERTION: TermFeeReward must go to reward_recipient
+                assert_eq!(
+                    reward.target,
+                    reward_recipient.to_alloy_address(),
+                    "TermFeeReward must go to custom reward_address, not genesis miner address"
+                );
+                found_term_fee_reward = true;
+            }
+        }
+    }
+
+    assert!(
+        found_term_fee_reward,
+        "Expected TermFeeReward at expiry epoch block height {}",
+        expiry_height
+    );
+
+    info!("TermFeeReward found and correctly sent to custom reward_address");
+
+    // PHASE 6: Verify rewards routing via balance changes
+    let head_block = node
+        .get_block_by_height(node.get_canonical_chain_height().await)
+        .await?;
+    let reward_balance_after = node
+        .get_balance(reward_recipient, head_block.evm_block_hash)
+        .await;
+    let genesis_balance_after = node
+        .get_balance(genesis_address, head_block.evm_block_hash)
+        .await;
+
+    info!(
+        "Final balances - reward_recipient: {} (was {}), genesis: {} (was {})",
+        reward_balance_after, reward_balance_before, genesis_balance_after, genesis_balance_before
+    );
+
+    // Verify the reward address configuration persists through block production
+    let final_epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
+    let final_stake_entry = final_epoch_snapshot
+        .commitment_state
+        .stake_commitments
+        .get(&genesis_address)
+        .expect("Genesis should still have stake at end of test");
+
+    assert_eq!(
+        final_stake_entry.reward_address,
+        Some(reward_recipient),
+        "reward_address configuration should persist through mining operations"
+    );
+
+    info!("Test passed: TermFeeReward correctly routed to custom reward_address");
 
     node.stop().await;
     Ok(())

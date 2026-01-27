@@ -46,6 +46,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -209,6 +210,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -339,6 +341,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -445,6 +448,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

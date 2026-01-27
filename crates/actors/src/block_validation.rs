@@ -1602,6 +1602,7 @@ async fn generate_expected_shadow_transactions(
         &expired_ledger_fees,
         &commitment_refund_events,
         &unstake_refund_events,
+        &parent_epoch_snapshot,
     )
     .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 

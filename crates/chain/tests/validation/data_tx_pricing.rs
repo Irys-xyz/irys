@@ -55,6 +55,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -178,6 +179,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -598,6 +600,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

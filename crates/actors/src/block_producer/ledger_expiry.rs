@@ -236,13 +236,13 @@ pub async fn calculate_expired_ledger_fees(
     )?;
 
     let total_fees = fees
-        .miner_balance_increment
+        .reward_balance_increment
         .values()
         .fold(U256::from(0), |acc, (fee, _)| acc.saturating_add(*fee));
 
     tracing::info!(
         "Calculated fees for {} miners, total fees: {}",
-        fees.miner_balance_increment.len(),
+        fees.reward_balance_increment.len(),
         total_fees
     );
 
@@ -308,12 +308,20 @@ fn collect_expired_partitions(
                 partition.miner_address
             );
 
+            let reward_addr = parent_epoch_snapshot
+                .resolve_reward_address(partition.miner_address)
+                .ok_or_else(|| {
+                    eyre!(
+                        "No stake entry found for miner {} receiving rewards - this indicates a fatal bug",
+                        partition.miner_address
+                    )
+                })?;
             expired_ledger_slot_indexes
                 .entry(slot_index)
                 .and_modify(|miners: &mut Vec<IrysAddress>| {
-                    miners.push(partition.miner_address);
+                    miners.push(reward_addr);
                 })
-                .or_insert(vec![partition.miner_address]);
+                .or_insert(vec![reward_addr]);
         } else {
             tracing::debug!(
                 "Skipping partition with ledger_id={:?} (looking for {:?})",
@@ -622,7 +630,7 @@ async fn process_middle_blocks(
 pub struct LedgerExpiryBalanceDelta {
     /// Rewards for miners who stored the expired data, mapped by miner address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
-    pub miner_balance_increment: BTreeMap<IrysAddress, (U256, RollingHash)>,
+    pub reward_balance_increment: BTreeMap<IrysAddress, (U256, RollingHash)>,
 
     /// Refunds of permanent fees for users whose transactions were not promoted.
     /// Sorted by transaction ID. Each tuple contains (transaction_id, refund_amount, user_address).
@@ -659,7 +667,7 @@ fn aggregate_balance_deltas(
 
             for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
                 balance_delta
-                    .miner_balance_increment
+                    .reward_balance_increment
                     .entry(*miner)
                     .and_modify(|(current_fee, hash)| {
                         *current_fee = current_fee.saturating_add(fee);
@@ -807,19 +815,19 @@ mod tests {
         let miner2_total = tx1_fee_per_miner + tx2_fee_per_miner;
 
         assert_eq!(
-            result.miner_balance_increment.get(&miner1).unwrap().0,
+            result.reward_balance_increment.get(&miner1).unwrap().0,
             miner1_total,
             "Miner1 should receive correct deduplicated fee"
         );
         assert_eq!(
-            result.miner_balance_increment.get(&miner2).unwrap().0,
+            result.reward_balance_increment.get(&miner2).unwrap().0,
             miner2_total,
             "Miner2 should receive correct fee"
         );
 
         // Verify total fees distributed equals treasury amounts
         let total_distributed: U256 = result
-            .miner_balance_increment
+            .reward_balance_increment
             .values()
             .map(|(fee, _)| *fee)
             .fold(U256::from(0), |acc, fee| acc + fee);

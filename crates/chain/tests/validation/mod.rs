@@ -1,6 +1,7 @@
 mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
+mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
 mod poa_cases;
 mod unpledge_partition;
@@ -109,11 +110,12 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -217,11 +219,12 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -323,11 +326,12 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -448,11 +452,12 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -614,11 +619,12 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -871,11 +877,12 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                     proofs: Some(proofs),
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -1063,11 +1070,12 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
