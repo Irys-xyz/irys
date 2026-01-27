@@ -1381,12 +1381,12 @@ impl IrysNode {
             },
         );
 
-        error!(
+        debug!(
             "JESSEDEBUG PARTITION ASSIGNMENTS {:#?}", //\n COMMITMENTS {:#?}",
             red_data // &epoch_snapshot.partition_assignments,    // &replay_data
         );
 
-        error!(
+        debug!(
             "JESSEDEBUG REDATA {}",
             serde_json::to_string_pretty(&red_data)?
         );
