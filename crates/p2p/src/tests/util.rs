@@ -1045,7 +1045,7 @@ pub(crate) fn data_handler_stub(
         gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId::from(IrysAddress::repeat_byte(2)),
+            IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
         ),
         peer_list: peer_list_guard.clone(),
@@ -1093,7 +1093,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
         gossip_client: GossipClient::with_circuit_breaker_config(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
-            IrysPeerId::from(IrysAddress::repeat_byte(2)),
+            IrysPeerId::from([0xAA_u8; 20]),
             CircuitBreakerConfig::testing(),
         ),
         peer_list: peer_list_guard.clone(),

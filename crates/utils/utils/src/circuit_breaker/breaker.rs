@@ -160,10 +160,9 @@ mod tests {
 
     #[test]
     fn test_half_open_transition_after_cooldown() {
-        use super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
-        reset_test_time();
-        set_test_time(1_000_000_000);
+        let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = TestConfigBuilder::default().build();
         let breaker = CircuitBreaker::new(&config);
@@ -177,16 +176,13 @@ mod tests {
 
         assert!(breaker.is_available());
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
-
-        reset_test_time();
     }
 
     #[test]
     fn test_half_open_limits_recovery_attempts() {
-        use super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
-        reset_test_time();
-        set_test_time(1_000_000_000);
+        let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = test_config_with_recovery_attempts(2);
         let breaker = CircuitBreaker::new(&config);
@@ -203,16 +199,13 @@ mod tests {
         assert!(breaker.is_available());
 
         assert!(!breaker.is_available());
-
-        reset_test_time();
     }
 
     #[test]
     fn test_is_stale_after_timeout() {
-        use super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
-        reset_test_time();
-        set_test_time(1_000_000_000);
+        let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = test_config_with_stale_timeout(Duration::from_millis(100));
         let breaker = CircuitBreaker::new(&config);
@@ -222,16 +215,13 @@ mod tests {
         advance_test_time(Duration::from_millis(150));
 
         assert!(breaker.is_stale());
-
-        reset_test_time();
     }
 
     #[test]
     fn test_is_available_updates_access_time() {
-        use super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
-        reset_test_time();
-        set_test_time(1_000_000_000);
+        let _guard = TestTimeGuard::new(1_000_000_000);
 
         let config = test_config_with_stale_timeout(Duration::from_millis(100));
         let breaker = CircuitBreaker::new(&config);
@@ -241,8 +231,6 @@ mod tests {
         let _ = breaker.is_available();
 
         assert!(!breaker.is_stale());
-
-        reset_test_time();
     }
 
     mod proptests {
@@ -312,10 +300,9 @@ mod tests {
             fn prop_half_open_single_failure_reopens(
                 failure_threshold in 1_u32..20,
             ) {
-                use super::super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+                use super::super::super::test_utils::{advance_test_time, TestTimeGuard};
 
-                reset_test_time();
-                set_test_time(1_000_000_000);
+                let _guard = TestTimeGuard::new(1_000_000_000);
 
                 let config = proptest_config(failure_threshold);
                 let breaker = CircuitBreaker::new(&config);
@@ -332,8 +319,6 @@ mod tests {
 
                 breaker.record_failure();
                 prop_assert_eq!(breaker.state(), CircuitState::Open);
-
-                reset_test_time();
             }
 
             #[test]
@@ -342,10 +327,9 @@ mod tests {
                 recovery_attempts in 1_u32..10,
                 extra_attempts in 0_u32..20,
             ) {
-                use super::super::super::test_utils::{advance_test_time, reset_test_time, set_test_time};
+                use super::super::super::test_utils::{advance_test_time, TestTimeGuard};
 
-                reset_test_time();
-                set_test_time(1_000_000_000);
+                let _guard = TestTimeGuard::new(1_000_000_000);
 
                 let config = proptest_config_with_recovery(failure_threshold, recovery_attempts);
                 let breaker = CircuitBreaker::new(&config);
@@ -365,8 +349,6 @@ mod tests {
                     }
                 }
                 prop_assert!(successful_attempts <= recovery_attempts);
-
-                reset_test_time();
             }
 
             #[test]

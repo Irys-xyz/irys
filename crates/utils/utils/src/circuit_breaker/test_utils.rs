@@ -7,17 +7,36 @@ use super::config::{BreakerCapacity, CircuitBreakerConfig, FailureThreshold, Rec
 pub(crate) static TEST_TIME_OVERRIDE: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn set_test_time(nanos: u64) {
-    TEST_TIME_OVERRIDE.store(nanos, Ordering::Relaxed);
+    TEST_TIME_OVERRIDE.store(nanos, Ordering::SeqCst);
 }
 
 pub(crate) fn advance_test_time(duration: Duration) {
-    let current = TEST_TIME_OVERRIDE.load(Ordering::Relaxed);
+    let current = TEST_TIME_OVERRIDE.load(Ordering::SeqCst);
     let new_time = current.saturating_add(duration.as_nanos() as u64);
-    TEST_TIME_OVERRIDE.store(new_time, Ordering::Relaxed);
+    TEST_TIME_OVERRIDE.store(new_time, Ordering::SeqCst);
 }
 
 pub(crate) fn reset_test_time() {
-    TEST_TIME_OVERRIDE.store(0, Ordering::Relaxed);
+    TEST_TIME_OVERRIDE.store(0, Ordering::SeqCst);
+}
+
+/// RAII guard that sets test time on creation and resets on drop.
+/// Prevents test pollution when a test panics before manual reset.
+#[must_use = "guard resets test time on drop; bind it to a variable"]
+pub(crate) struct TestTimeGuard;
+
+impl TestTimeGuard {
+    pub(crate) fn new(initial_nanos: u64) -> Self {
+        reset_test_time();
+        set_test_time(initial_nanos);
+        Self
+    }
+}
+
+impl Drop for TestTimeGuard {
+    fn drop(&mut self) {
+        reset_test_time();
+    }
 }
 
 #[must_use = "time conversion result must be used"]
