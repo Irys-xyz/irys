@@ -609,7 +609,8 @@ mod tests {
     fn should_sign_and_verify_signature() {
         let mut version_request = HandshakeRequest::default();
         let testing_config = NodeConfig::testing();
-        let config = Config::new(testing_config, crate::IrysPeerId::random());
+        let peer_id = IrysPeerId::from([1_u8; 20]);
+        let config = Config::new(testing_config, peer_id);
         let signer = config.irys_signer();
 
         signer.sign_p2p_handshake_v1(&mut version_request).unwrap();
@@ -629,7 +630,8 @@ mod tests {
     fn should_sign_and_verify_signature_v2() {
         let mut version_request = HandshakeRequestV2::default();
         let testing_config = NodeConfig::testing();
-        let config = Config::new(testing_config, crate::IrysPeerId::random());
+        let peer_id = crate::IrysPeerId::from([2_u8; 20]);
+        let config = Config::new(testing_config, peer_id);
         let signer = config.irys_signer();
 
         signer.sign_p2p_handshake_v2(&mut version_request).unwrap();

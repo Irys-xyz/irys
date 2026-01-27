@@ -32,6 +32,7 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
+use irys_database::reth_db::DatabaseError;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
@@ -2193,16 +2194,17 @@ fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Erro
 
 /// Gets the peer_id from the database, or generates a new one and stores it.
 pub fn get_or_create_peer_id(db: &DatabaseProvider) -> eyre::Result<irys_types::IrysPeerId> {
-    let tx = db.tx()?;
-    if let Some(peer_id) = database::get_peer_id(&tx)? {
-        info!("Loaded peer_id from database: {:?}", peer_id);
-        return Ok(peer_id);
-    }
-    drop(tx);
+    let peer_id = db.update(|tx| -> Result<irys_types::IrysPeerId, DatabaseError> {
+        if let Some(existing_peer_id) = database::get_peer_id(tx)? {
+            info!("Loaded peer_id from database: {:?}", existing_peer_id);
+            return Ok(existing_peer_id);
+        }
 
-    let peer_id = irys_types::IrysPeerId::random();
-    db.update(|tx| database::set_peer_id(tx, peer_id))??;
-    info!("Generated new peer_id: {:?}", peer_id);
+        let new_peer_id = irys_types::IrysPeerId::random();
+        database::set_peer_id(tx, new_peer_id)?;
+        info!("Generated new peer_id: {:?}", new_peer_id);
+        Ok(new_peer_id)
+    })??;
     Ok(peer_id)
 }
 
