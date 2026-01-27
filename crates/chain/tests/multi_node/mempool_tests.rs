@@ -12,7 +12,6 @@ use irys_reth_node_bridge::{
 };
 use irys_testing_utils::initialize_tracing;
 use irys_types::CommitmentTypeV1;
-use irys_types::SystemLedger;
 use irys_types::{
     irys::IrysSigner, CommitmentTransaction, ConsensusConfig, DataLedger, DataTransaction,
     IngressProofsList, IrysBlockHeader, NodeConfig, SystemLedger, H256,

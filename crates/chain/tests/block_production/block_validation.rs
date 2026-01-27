@@ -4,7 +4,6 @@ use irys_actors::block_validation::{prevalidate_block, PreValidationError};
 use irys_actors::{BlockProdStrategy as _, ProductionStrategy};
 use irys_chain::IrysNodeCtx;
 use irys_domain::{EmaSnapshot, EpochSnapshot};
-use irys_types::SystemLedger;
 use irys_types::{
     CommitmentTransaction, DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig,
     SealedBlock, SystemLedger, UnixTimestampMs, H256, U256,

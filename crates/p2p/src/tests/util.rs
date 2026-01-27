@@ -30,10 +30,10 @@ use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2
 use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
-    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof, SealedBlock,
+    DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
     IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    TxKnownStatus, UnpackedChunk, H256,
+    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, TokioServiceHandle,
+    TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};

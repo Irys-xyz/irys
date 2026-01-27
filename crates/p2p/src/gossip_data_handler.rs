@@ -21,8 +21,8 @@ use irys_domain::{
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
 use irys_types::{
-    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey, SealedBlock,
-    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
+    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -1185,7 +1185,7 @@ where
                                 "Fetched block body for block {} height {} from peer {:?}",
                                 block_hash, header.height, source_peer_id
                             );
-                            return Ok(irys_block_body);
+                            return Ok((*irys_block_body).clone());
                         }
                         Ok(false) => {
                             warn!(

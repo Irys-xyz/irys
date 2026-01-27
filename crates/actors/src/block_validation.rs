@@ -28,7 +28,7 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, SealedBlock, UnixTimestamp, H256, U256, SystemLedger
+    IrysBlockHeader, PoaData, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};

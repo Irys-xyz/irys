@@ -1258,9 +1258,9 @@ pub trait BlockProdStrategy {
         }
 
         info!(
-            block.height = ?block.height,
-            block.hash = ?block.block_hash,
-            block.timestamp_ms = block.timestamp.as_millis(),
+            block.height = ?block.header().height,
+            block.hash = ?block.header().block_hash(),
+            block.timestamp_ms = block.header().timestamp.as_millis(),
             "Finished producing block",
         );
 

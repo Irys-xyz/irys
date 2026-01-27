@@ -17,7 +17,6 @@ use irys_domain::execution_payload_cache::RethBlockProvider;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::SystemLedger;
 use irys_types::{
     BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
     IrysTransactionResponse, PeerNetworkError, SealedBlock, H256,

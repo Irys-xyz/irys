@@ -1017,7 +1017,7 @@ impl GossipClient {
             use_trusted_peers_only,
             peer_list,
             |gossip_data| match gossip_data {
-                GossipDataV2::BlockBody(body) => Ok(body.clone()),
+                GossipDataV2::BlockBody(body) => Ok(body),
                 _ => Err(PeerNetworkError::UnexpectedData(format!(
                     "Expected BlockBody, got {:?}",
                     gossip_data.data_type_and_id()

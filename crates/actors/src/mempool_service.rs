@@ -37,7 +37,6 @@ use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAda
 use irys_storage::RecoveredMempoolState;
 use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
-use irys_types::SystemLedger;
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, NodeConfig, SystemLedger, UnixTimestamp, H256, U256,
