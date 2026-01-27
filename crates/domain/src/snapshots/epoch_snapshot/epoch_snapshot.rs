@@ -251,7 +251,7 @@ impl EpochSnapshot {
         new_epoch_block: &IrysBlockHeader,
         new_epoch_commitments: Vec<CommitmentTransaction>,
     ) -> Result<(), EpochSnapshotError> {
-        tracing::error!(
+        tracing::debug!(
             "JESSEDEBUG COMMITMENTS {:?}",
             &new_epoch_commitments.iter().fold(vec![], |mut acc, c| {
                 acc.push(c.id());
@@ -768,7 +768,7 @@ impl EpochSnapshot {
             }
         }
 
-        tracing::error!(
+        tracing::debug!(
             "JESSEDEBUG COMMITMENTS {:?} {:?}",
             &stake_commitments.iter().fold(vec![], |mut acc, c| {
                 acc.push(c.id());
@@ -1061,7 +1061,7 @@ impl EpochSnapshot {
                 .map(|(pos, id)| (*id, pos))
                 .collect();
 
-            tracing::error!(
+            tracing::debug!(
                 "JESSEDEBUG UNASSIGNED1 {} {:?}",
                 &self.epoch_height,
                 &unassigned_pledges.iter().fold(vec![], |mut acc, c| {
