@@ -78,7 +78,6 @@ impl GossipClient {
     ) -> Self {
         let circuit_breaker = CircuitBreakerManager::new(circuit_config);
 
-
         Self {
             mining_address,
             peer_id,
@@ -1575,7 +1574,10 @@ impl GossipClient {
         debug!("Hydrating peers online status");
         let peers = peer_list.all_peers_sorted_by_score();
         for peer in peers {
-            match self.check_health(&peer.1.mining_address, peer.1.address, peer_list).await {
+            match self
+                .check_health(&peer.1.mining_address, peer.1.address, peer_list)
+                .await
+            {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
                     peer_list.set_is_online_by_peer_id(&peer.0, is_healthy);
