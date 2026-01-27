@@ -7,7 +7,7 @@ use irys_actors::MempoolFacade;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysAddress, NodeMode,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle, U256,
 };
 use rand::prelude::SliceRandom as _;
@@ -1008,9 +1008,9 @@ async fn pull_highest_blocks(
     gossip_client: &GossipClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
-) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)>> {
+) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysPeerId, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
-    let peers: Vec<(IrysAddress, irys_types::PeerListItem)> = if use_trusted_peers_only {
+    let peers: Vec<(IrysPeerId, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Post-sync: Collecting the highest blocks from trusted peers");
         peer_list.online_trusted_peers()
     } else {
@@ -1029,7 +1029,7 @@ async fn pull_highest_blocks(
         ));
     }
 
-    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)> =
+    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysPeerId, PeerListItem)>)> =
         HashMap::new();
 
     for (miner_address, peer) in peers {
@@ -1426,7 +1426,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
     peer_list: &PeerList,
     gossip_client: &GossipClient,
     trusted_peers_only: bool,
-) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysAddress, PeerListItem)>>> {
+) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem)>>> {
     let peers = if trusted_peers_only {
         peer_list.online_trusted_peers()
     } else {
@@ -1612,9 +1612,11 @@ mod tests {
                 tokio_handle,
             );
 
+            let fake_mining_addr = IrysAddress::repeat_byte(2);
             peer_list_guard.add_or_update_peer(
-                IrysAddress::repeat_byte(2),
                 PeerListItem {
+                    peer_id: IrysPeerId::from(fake_mining_addr),
+                    mining_address: fake_mining_addr,
                     reputation_score: PeerScore::new(100),
                     response_time: 0,
                     address: fake_peer_address,
@@ -1716,9 +1718,11 @@ mod tests {
                 execution: Default::default(),
             };
 
+            let fake_mining_addr = IrysAddress::repeat_byte(2);
             peer_list.add_or_update_peer(
-                IrysAddress::repeat_byte(2),
                 PeerListItem {
+                    peer_id: IrysPeerId::from(fake_mining_addr),
+                    mining_address: fake_mining_addr,
                     reputation_score: PeerScore::new(100),
                     response_time: 0,
                     address: fake_peer_address,
@@ -1846,7 +1850,11 @@ mod tests {
             );
 
             // Add two peers reporting the same highest hash
+            let addr_a = IrysAddress::repeat_byte(0xA0);
+            let addr_b = IrysAddress::repeat_byte(0xB0);
             let peer1 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_a),
+                mining_address: addr_a,
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
                 address: PeerAddress {
@@ -1859,6 +1867,8 @@ mod tests {
                 protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_b),
+                mining_address: addr_b,
                 reputation_score: PeerScore::new(99),
                 response_time: 0,
                 address: PeerAddress {
@@ -1871,10 +1881,8 @@ mod tests {
                 protocol_version: Default::default(),
             };
 
-            let addr_a = IrysAddress::repeat_byte(0xA0);
-            let addr_b = IrysAddress::repeat_byte(0xB0);
-            peer_list_guard.add_or_update_peer(addr_a, peer1, true);
-            peer_list_guard.add_or_update_peer(addr_b, peer2, true);
+            peer_list_guard.add_or_update_peer(peer1, true);
+            peer_list_guard.add_or_update_peer(peer2, true);
 
             // Build data handler
             let db = db.clone();
@@ -1972,7 +1980,11 @@ mod tests {
                 runtime_handle,
             );
 
+            let addr_a = IrysAddress::repeat_byte(0xA1);
+            let addr_b = IrysAddress::repeat_byte(0xB1);
             let peer1 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_a),
+                mining_address: addr_a,
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
                 address: PeerAddress {
@@ -1985,6 +1997,8 @@ mod tests {
                 protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_b),
+                mining_address: addr_b,
                 reputation_score: PeerScore::new(99),
                 response_time: 0,
                 address: PeerAddress {
@@ -1996,10 +2010,8 @@ mod tests {
                 is_online: true,
                 protocol_version: Default::default(),
             };
-            let addr_a = IrysAddress::repeat_byte(0xA1);
-            let addr_b = IrysAddress::repeat_byte(0xB1);
-            peer_list_guard.add_or_update_peer(addr_a, peer1, true);
-            peer_list_guard.add_or_update_peer(addr_b, peer2, true);
+            peer_list_guard.add_or_update_peer(peer1, true);
+            peer_list_guard.add_or_update_peer(peer2, true);
 
             let db = db.clone();
             let data_handler =

@@ -906,6 +906,12 @@ impl BlockTreeServiceInner {
             // Validate migration will succeed BEFORE emitting any events
             if tip_changed {
                 self.validate_migration_continuity(&markers.migration_block)?;
+                info!(
+                    block.height = arc_block.height,
+                    block.hash = ?arc_block.block_hash,
+                    block.timestamp_ms = arc_block.timestamp.as_millis(),
+                    "New canonical tip",
+                );
             }
 
             // Emit consensus events (only after we know migration will succeed)

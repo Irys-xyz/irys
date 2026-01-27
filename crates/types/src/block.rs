@@ -461,9 +461,10 @@ impl IrysBlockHeaderV1 {
     /// get storage ledger txs from blocks data ledger
     pub fn get_commitment_ledger_tx_ids(&self) -> Vec<H256> {
         let mut commitment_txids = Vec::new();
-        // Because of a circular dependency the types crate can't import the SystemLedger enum
-        // SystemLedger::Commitments = 0, so finding `ledger_id: 0` here, locates the commitment ledger
-        let commitment_ledger = self.system_ledgers.iter().find(|l| l.ledger_id == 0);
+        let commitment_ledger = self
+            .system_ledgers
+            .iter()
+            .find(|l| l.ledger_id == SystemLedger::Commitment as u32);
 
         if let Some(commitment_ledger) = commitment_ledger {
             commitment_txids = commitment_ledger.tx_ids.0.clone();
@@ -712,6 +713,24 @@ pub struct SystemTransactionLedger {
     pub tx_ids: H256List,
 }
 
+impl Index<SystemLedger> for Vec<SystemTransactionLedger> {
+    type Output = SystemTransactionLedger;
+
+    fn index(&self, ledger: SystemLedger) -> &Self::Output {
+        self.iter()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No system transaction ledger found for given ledger type")
+    }
+}
+
+impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
+    fn index_mut(&mut self, ledger: SystemLedger) -> &mut Self::Output {
+        self.iter_mut()
+            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
+            .expect("No system transaction ledger found for given ledger type")
+    }
+}
+
 impl fmt::Display for IrysBlockHeaderV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
@@ -841,7 +860,62 @@ pub struct CombinedBlockHeader {
     pub execution: ExecutionHeader,
 }
 
-/// Names for each of the ledgers as well as their `ledger_id` discriminant
+/// Names for each of the system ledgers as well as their `ledger_id` discriminant
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
+)]
+#[repr(u32)]
+#[derive(Default)]
+pub enum SystemLedger {
+    /// The commitments ledger, for pledging and staking related transactions
+    #[default]
+    Commitment = 0,
+}
+
+impl SystemLedger {
+    /// An array of all the System Ledgers, suitable for enumeration
+    pub const ALL: [Self; 1] = [Self::Commitment];
+
+    /// Make it possible to iterate over all the System ledgers in order
+    pub fn iter() -> impl Iterator<Item = Self> {
+        Self::ALL.iter().copied()
+    }
+    /// get the associated numeric SystemLedger ID
+    pub const fn get_id(&self) -> u32 {
+        *self as u32
+    }
+}
+
+impl From<SystemLedger> for u32 {
+    fn from(system_ledger: SystemLedger) -> Self {
+        system_ledger as Self
+    }
+}
+
+impl TryFrom<u32> for SystemLedger {
+    type Error = eyre::Report;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Commitment),
+            _ => Err(eyre::eyre!("Invalid system ledger number")),
+        }
+    }
+}
+
+impl PartialEq<u32> for SystemLedger {
+    fn eq(&self, other: &u32) -> bool {
+        self.get_id() == *other
+    }
+}
+
+impl PartialEq<SystemLedger> for u32 {
+    fn eq(&self, other: &SystemLedger) -> bool {
+        *self == other.get_id()
+    }
+}
+
+/// Names for each of the data ledgers as well as their `ledger_id` discriminant
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
 )]

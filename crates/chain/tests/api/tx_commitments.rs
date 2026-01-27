@@ -505,12 +505,15 @@ async fn post_stake_commitment(
         .get_anchor()
         .await
         .expect("anchor should be available for stake commitment");
-    let mut stake_tx = CommitmentTransaction::V2(CommitmentTransactionV2 {
-        commitment_type: CommitmentTypeV2::Stake,
-        anchor,
-        fee: price_info.fee.try_into().expect("fee should fit in u64"),
-        value: price_info.value,
-        ..CommitmentTransactionV2::new(consensus)
+    let mut stake_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+        tx: CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::Stake,
+            anchor,
+            fee: price_info.fee.try_into().expect("fee should fit in u64"),
+            value: price_info.value,
+            ..CommitmentTransactionV2::new(consensus)
+        },
+        metadata: Default::default(),
     });
 
     info!("Created stake_tx with value: {:?}", stake_tx.value());
@@ -536,14 +539,17 @@ async fn post_pledge_commitment(
         .expect("Failed to get pledge price from API");
 
     let consensus = &node.node_ctx.config.consensus;
-    let mut pledge_tx = CommitmentTransaction::V2(CommitmentTransactionV2 {
-        commitment_type: CommitmentTypeV2::Pledge {
-            pledge_count_before_executing: 0, // First pledge
+    let mut pledge_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+        tx: CommitmentTransactionV2 {
+            commitment_type: CommitmentTypeV2::Pledge {
+                pledge_count_before_executing: 0, // First pledge
+            },
+            anchor,
+            fee: price_info.fee.try_into().expect("fee should fit in u64"),
+            value: price_info.value,
+            ..CommitmentTransactionV2::new(consensus)
         },
-        anchor,
-        fee: price_info.fee.try_into().expect("fee should fit in u64"),
-        value: price_info.value,
-        ..CommitmentTransactionV2::new(consensus)
+        metadata: Default::default(),
     });
 
     signer.sign_commitment(&mut pledge_tx).unwrap();

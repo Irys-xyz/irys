@@ -34,6 +34,7 @@ pub mod storage_pricing;
 pub mod system_ledger;
 pub mod time;
 pub mod transaction;
+pub mod transaction_metadata;
 pub mod tx_known_status;
 pub mod tx_source;
 pub mod version;
@@ -47,6 +48,8 @@ pub mod remote_packing;
 pub mod rlp;
 
 pub mod address;
+mod peer_id;
+
 pub use address::IrysAddress;
 
 use std::sync::{atomic::AtomicU64, Arc};
@@ -58,6 +61,7 @@ pub use commitment_v2::*;
 pub use config::*;
 pub use difficulty_adjustment_config::*;
 pub use gossip::*;
+pub use peer_id::*;
 pub use serialization::*;
 pub use shutdown::*;
 pub use signature::*;
@@ -66,6 +70,7 @@ pub use storage_pricing::*;
 pub use system_ledger::*;
 pub use time::*;
 pub use transaction::*;
+pub use transaction_metadata::*;
 pub use tx_source::*;
 
 pub use alloy_primitives::{/* Address, */ Signature};

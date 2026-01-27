@@ -6,9 +6,12 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Base64, IrysAddress, PeerListItem};
+use irys_types::{Base64, IrysAddress, IrysPeerId, PeerListItemInner};
 use irys_types::{ChunkPathHash, DataRoot, H256};
-use irys_types::{CommitmentTransaction, DataTransactionHeader, IrysBlockHeader};
+use irys_types::{
+    CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
+    DataTransactionMetadata, IrysBlockHeader,
+};
 use reth_codecs::Compact;
 use reth_db::{table::DupSort, tables, DatabaseError, TableSet};
 use reth_db::{TableType, TableViewer};
@@ -23,7 +26,7 @@ macro_rules! add_wrapper_struct {
 	($(($name:tt, $wrapper:tt)),+) => {
         $(
             /// Wrapper struct enabling `Compact` derivation so it can be used directly as a table value.
-            #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Compact)]
+            #[derive(Debug, Clone, Default, Serialize, Deserialize, Compact)]
             #[derive(arbitrary::Arbitrary)] //#[add_arbitrary_tests(compact)]
             pub struct $wrapper(pub $name);
 
@@ -76,8 +79,10 @@ macro_rules! impl_compression_for_compact {
 add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((DataTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
-add_wrapper_struct!((PeerListItem, CompactPeerListItem));
+add_wrapper_struct!((PeerListItemInner, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
+add_wrapper_struct!((CommitmentTransactionMetadata, CompactCommitmentTxMetadata));
+add_wrapper_struct!((DataTransactionMetadata, CompactDataTxMetadata));
 
 add_wrapper_struct!((CachedIngressProof, CompactCachedIngressProof));
 
@@ -94,7 +99,9 @@ impl_compression_for_compact!(
     DataRootInfos,
     GlobalChunkOffset,
     CompactBase64,
-    CompactCachedIngressProof
+    CompactCachedIngressProof,
+    CompactCommitmentTxMetadata,
+    CompactDataTxMetadata
 );
 
 use paste::paste;
@@ -125,6 +132,20 @@ table IrysDataTxHeaders {
 table IrysCommitments {
     type Key = H256;
     type Value = CompactCommitment;
+}
+
+/// Stores metadata for commitment transactions
+/// Tracks inclusion height
+table IrysCommitmentTxMetadata {
+    type Key = H256;
+    type Value = CompactCommitmentTxMetadata;
+}
+
+/// Stores metadata for data transactions
+/// Tracks inclusion height and promotion height
+table IrysDataTxMetadata {
+    type Key = H256;
+    type Value = CompactDataTxMetadata;
 }
 
 /// Indexes the DataRoots currently in the cache
@@ -158,7 +179,7 @@ table IngressProofs {
 /// ones with high reputation - the PeerListItems contain all the peers
 /// that the node is aware of and is periodically updated via peer discovery
 table PeerListItems {
-    type Key = IrysAddress;
+    type Key = IrysPeerId;
     type Value = CompactPeerListItem;
 }
 

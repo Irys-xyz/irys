@@ -26,7 +26,7 @@ use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::execution_payload_cache::ExecutionPayloadCache;
 use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, PeerList};
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{Config, DatabaseProvider, IrysAddress, P2PGossipConfig};
+use irys_types::{Config, DatabaseProvider, IrysAddress, IrysPeerId, P2PGossipConfig};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -124,12 +124,13 @@ impl P2PService {
     /// be sent by the internal components of the system only after complete validation.
     pub fn new(
         mining_address: IrysAddress,
+        peer_id: IrysPeerId,
         broadcast_data_receiver: UnboundedReceiver<GossipBroadcastMessageV2>,
     ) -> Self {
         let cache = Arc::new(GossipCache::new());
 
         let client_timeout = Duration::from_secs(5);
-        let client = GossipClient::new(client_timeout, mining_address);
+        let client = GossipClient::new(client_timeout, mining_address, peer_id);
 
         Self {
             client,
@@ -276,9 +277,7 @@ impl P2PService {
         while !peers.is_empty() {
             // Remove peers that have seen the data since the last iteration
             let peers_that_seen_data = self.cache.peers_that_have_seen(&key)?;
-            peers.retain(|(peer_miner_address, _peer)| {
-                !peers_that_seen_data.contains(peer_miner_address)
-            });
+            peers.retain(|(peer_id, _peer)| !peers_that_seen_data.contains(peer_id));
 
             if peers.is_empty() {
                 debug!(

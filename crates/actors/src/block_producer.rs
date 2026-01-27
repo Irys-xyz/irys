@@ -1258,8 +1258,9 @@ pub trait BlockProdStrategy {
         }
 
         info!(
-            block.height = ?block.header().height,
-            block.hash = ?block.header().block_hash,
+            block.height = ?block.height,
+            block.hash = ?block.block_hash,
+            block.timestamp_ms = block.timestamp.as_millis(),
             "Finished producing block",
         );
 
@@ -1327,7 +1328,9 @@ pub trait BlockProdStrategy {
         // Fetch mempool once
         let mut mempool_txs = self.fetch_best_mempool_txs(prev_block_header).await?;
         // Sort txs to be of deterministic order
-        mempool_txs.submit_tx.sort();
+        mempool_txs
+            .submit_tx
+            .sort_by(irys_types::DataTransactionHeader::compare_tx);
         mempool_txs.commitment_tx.sort();
 
         let block_height = prev_block_header.height + 1;

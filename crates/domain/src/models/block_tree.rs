@@ -1,9 +1,8 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid};
-use irys_types::SystemLedger;
 use irys_types::{
     BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DatabaseProvider,
-    H256List, IrysBlockHeader, H256, U256,
+    H256List, IrysBlockHeader, SystemLedger, H256, U256,
 };
 use reth_db::Database as _;
 use std::{

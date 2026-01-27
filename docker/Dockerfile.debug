@@ -1,0 +1,67 @@
+# Debug build Dockerfile for Irys
+#
+# Usage:
+#   docker build -f docker/Dockerfile.debug -t irys:debug .
+#
+# For reproducible builds, use Dockerfile.release.
+
+# --- Builder stage: compile the Rust binary ---
+FROM rust:1.86-slim@sha256:522059b4d7f4f788f8d5fa2c19eedc4acf01f9c64cd6cd6975d06e45e6e09a21 AS builder
+
+WORKDIR /workspace
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    build-essential \
+    pkg-config \
+    clang \
+    cmake \
+    git \
+    ca-certificates \
+    libgmp-dev \
+    m4 \
+    file \
+    && rm -rf /var/lib/apt/lists/*
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# Copy the full workspace
+COPY . .
+
+# Build the release binary with portable CPU target
+ENV RUSTFLAGS="-C target-cpu=x86-64"
+RUN cargo build --release --bin irys -p irys-chain --locked
+
+# Compute binary MD5 hash
+RUN md5sum /workspace/target/release/irys | awk '{print $1}' > /workspace/binary_md5.txt
+
+# --- Runtime stage: minimal Debian runtime ---
+FROM debian:bookworm-slim@sha256:94882f177083c7fa6764b9ef2a86ed3c29c99593b34d5441648a7fb3c0cd10ec
+
+ARG GIT_COMMIT=unknown
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    libgmp10 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1000 -s /sbin/nologin irys
+
+# Copy the compiled binary and MD5 from builder
+COPY --from=builder /workspace/target/release/irys /app/irys
+COPY --from=builder /workspace/binary_md5.txt /tmp/binary_md5.txt
+COPY docker/entrypoint.sh /app/entrypoint.sh
+
+RUN chmod +x /app/irys /app/entrypoint.sh
+
+# Write build info
+RUN echo "commit=${GIT_COMMIT}" > /app/build-info.txt && \
+    echo "binary_md5=$(cat /tmp/binary_md5.txt)" >> /app/build-info.txt && \
+    rm /tmp/binary_md5.txt
+
+USER irys
+
+ENTRYPOINT ["/app/entrypoint.sh"]
