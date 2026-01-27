@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_types::{
     irys::IrysSigner, transaction::PledgeDataProvider, CommitmentTransaction, Config, H256List,
