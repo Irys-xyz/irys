@@ -22,7 +22,7 @@ use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
-    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
+    GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, SealedBlock, UnpackedChunk,
 };
 use reth::builder::Block as _;
 use reth::primitives::Block;
@@ -529,12 +529,15 @@ where
             .pull_block_body(&block_header, use_trusted_peers_only)
             .await?;
 
+        let sealed_block = SealedBlock::new(block_header, block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(
-                Arc::new(block_header),
-                block_body,
-                skip_validation_for_fast_track,
-            )
+            .process_block(Arc::new(sealed_block), skip_validation_for_fast_track)
             .await?;
         Ok(())
     }
@@ -681,8 +684,15 @@ where
         self.cache
             .record_seen(source_peer_id, GossipCacheKey::Block(block_hash))?;
 
+        let sealed_block = SealedBlock::new((*block_header).clone(), block_body).map_err(|e| {
+            GossipError::Internal(InternalGossipError::Unknown(format!(
+                "Failed to create SealedBlock: {:?}",
+                e
+            )))
+        })?;
+
         self.block_pool
-            .process_block(block_header, Arc::new(block_body), skip_block_validation)
+            .process_block(Arc::new(sealed_block), skip_block_validation)
             .await?;
         Ok(())
     }
@@ -890,7 +900,7 @@ where
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipDataV2::BlockBody(block_body));
+                    let data = Arc::new(GossipDataV2::BlockBody(Arc::new(block_body)));
                     self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
                     Ok(true)
                 } else {
@@ -1000,7 +1010,7 @@ where
             GossipDataRequestV2::BlockBody(block_hash) => {
                 let maybe_block_body =
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
-                Ok(maybe_block_body.map(GossipDataV2::BlockBody))
+                Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::new(body))))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
@@ -1146,7 +1156,7 @@ where
         &self,
         header: &IrysBlockHeader,
         use_trusted_peers_only: bool,
-    ) -> GossipResult<Arc<BlockBody>> {
+    ) -> GossipResult<BlockBody> {
         let block_hash = header.block_hash;
 
         debug!(
@@ -1175,7 +1185,7 @@ where
                                 "Fetched block body for block {} height {} from peer {:?}",
                                 block_hash, header.height, source_peer_id
                             );
-                            return Ok(irys_block_body);
+                            return Ok((*irys_block_body).clone());
                         }
                         Ok(false) => {
                             warn!(
@@ -1259,7 +1269,7 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     block_hash: &BlockHash,
     block_pool: &BlockPool<B, M>,
     mempool: &M,
-) -> GossipResult<Option<Arc<BlockBody>>> {
+) -> GossipResult<Option<BlockBody>> {
     let maybe_block_body =
         if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
             Some(block_body)
@@ -1283,7 +1293,7 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
                     )))
                 })?;
                 debug!("Successfully built block body for block {:?}", block_hash);
-                Some(Arc::new(block_body))
+                Some(block_body)
             } else {
                 warn!(
                     "Didn't find the block header to build the block body for the block {:?}",

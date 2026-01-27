@@ -19,7 +19,7 @@ use crate::{
     u64_stringify, Arbitrary, Base64, Compact, Config, DataRootLeaf, H256List, IngressProofsList,
     IrysSignature, Proof, H256, U256,
 };
-use crate::{CommitmentTransaction, IrysAddress};
+use crate::{CommitmentTransaction, IrysAddress, SystemLedger};
 
 use alloy_primitives::map::foldhash::HashSet;
 use alloy_primitives::{keccak256, TxHash, B256};
@@ -712,24 +712,6 @@ pub struct SystemTransactionLedger {
     pub tx_ids: H256List,
 }
 
-impl Index<SystemLedger> for Vec<SystemTransactionLedger> {
-    type Output = SystemTransactionLedger;
-
-    fn index(&self, ledger: SystemLedger) -> &Self::Output {
-        self.iter()
-            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
-            .expect("No system transaction ledger found for given ledger type")
-    }
-}
-
-impl IndexMut<SystemLedger> for Vec<SystemTransactionLedger> {
-    fn index_mut(&mut self, ledger: SystemLedger) -> &mut Self::Output {
-        self.iter_mut()
-            .find(|tx_ledger| tx_ledger.ledger_id == ledger as u32)
-            .expect("No system transaction ledger found for given ledger type")
-    }
-}
-
 impl fmt::Display for IrysBlockHeaderV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Convert the struct to a JSON string using serde_json
@@ -857,61 +839,6 @@ pub struct CombinedBlockHeader {
     #[serde(flatten)]
     pub irys: IrysBlockHeader,
     pub execution: ExecutionHeader,
-}
-
-/// Names for each of the system ledgers as well as their `ledger_id` discriminant
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
-)]
-#[repr(u32)]
-#[derive(Default)]
-pub enum SystemLedger {
-    /// The commitments ledger, for pledging and staking related transactions
-    #[default]
-    Commitment = 0,
-}
-
-impl SystemLedger {
-    /// An array of all the System Ledgers, suitable for enumeration
-    pub const ALL: [Self; 1] = [Self::Commitment];
-
-    /// Make it possible to iterate over all the System ledgers in order
-    pub fn iter() -> impl Iterator<Item = Self> {
-        Self::ALL.iter().copied()
-    }
-    /// get the associated numeric SystemLedger ID
-    pub const fn get_id(&self) -> u32 {
-        *self as u32
-    }
-}
-
-impl From<SystemLedger> for u32 {
-    fn from(system_ledger: SystemLedger) -> Self {
-        system_ledger as Self
-    }
-}
-
-impl TryFrom<u32> for SystemLedger {
-    type Error = eyre::Report;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(Self::Commitment),
-            _ => Err(eyre::eyre!("Invalid system ledger number")),
-        }
-    }
-}
-
-impl PartialEq<u32> for SystemLedger {
-    fn eq(&self, other: &u32) -> bool {
-        self.get_id() == *other
-    }
-}
-
-impl PartialEq<SystemLedger> for u32 {
-    fn eq(&self, other: &SystemLedger) -> bool {
-        *self == other.get_id()
-    }
 }
 
 /// Names for each of the data ledgers as well as their `ledger_id` discriminant
@@ -1194,6 +1121,179 @@ impl BlockBody {
 
         Ok(expected_commitment_tx_ids == actual_commitment_tx_ids
             && expected_data_tx_ids == actual_data_tx_ids)
+    }
+}
+
+#[derive(Debug)]
+pub struct SealedBlock {
+    header: IrysBlockHeader,
+    body: BlockBody,
+    transactions: BlockTransactions,
+}
+
+impl SealedBlock {
+    pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
+        // Verifies all tx signatures and that the tx ids in the body match those in the header
+        body.tx_ids_match_the_header(&header)?;
+
+        // Order transactions according to header specification
+        let transactions = Self::order_transactions(
+            &header,
+            body.data_transactions.clone(),
+            body.commitment_transactions.clone(),
+        )?;
+
+        Ok(Self {
+            header,
+            body,
+            transactions,
+        })
+    }
+
+    pub fn header(&self) -> &IrysBlockHeader {
+        &self.header
+    }
+
+    pub fn body(&self) -> &BlockBody {
+        &self.body
+    }
+
+    pub fn transactions(&self) -> &BlockTransactions {
+        &self.transactions
+    }
+
+    /// Order pre-fetched transactions into BlockTransactions structure.
+    ///
+    /// Transactions are returned in the exact order specified in the block header,
+    /// which is critical for commitment transaction validation (e.g., stake must come before pledge).
+    fn order_transactions(
+        block_header: &IrysBlockHeader,
+        data_txs: Vec<DataTransactionHeader>,
+        commitment_txs: Vec<CommitmentTransaction>,
+    ) -> eyre::Result<BlockTransactions> {
+        use std::collections::{HashMap, HashSet};
+
+        // Extract required IDs from block header (preserving order)
+        // Use ledger_id-based lookup to avoid relying on vector ordering
+        let submit_ids: Vec<H256> = block_header
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::Submit as u32)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        let publish_ids: Vec<H256> = block_header
+            .data_ledgers
+            .iter()
+            .find(|l| l.ledger_id == DataLedger::Publish as u32)
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        let commitment_ids: Vec<H256> = block_header
+            .system_ledgers
+            .iter()
+            .find(|l| l.ledger_id == SystemLedger::Commitment as u32) // SystemLedger::Commitment
+            .map(|l| l.tx_ids.0.clone())
+            .unwrap_or_default();
+
+        // Create sets for quick lookup
+        let submit_ids_set: HashSet<H256> = submit_ids.iter().copied().collect();
+        let publish_ids_set: HashSet<H256> = publish_ids.iter().copied().collect();
+
+        // Collect transactions into maps by ID
+        let mut submit_txs_map: HashMap<H256, _> = HashMap::new();
+        let mut publish_txs_map: HashMap<H256, _> = HashMap::new();
+        let mut commitment_txs_map: HashMap<H256, _> = HashMap::new();
+
+        for data_tx in data_txs {
+            // Note: A tx can be in both submit and publish ledgers (published after submission)
+            // so we check both independently and clone if needed for both
+            let in_submit = submit_ids_set.contains(&data_tx.id);
+            let in_publish = publish_ids_set.contains(&data_tx.id);
+
+            if in_submit && in_publish {
+                submit_txs_map.insert(data_tx.id, data_tx.clone());
+                publish_txs_map.insert(data_tx.id, data_tx);
+            } else if in_submit {
+                submit_txs_map.insert(data_tx.id, data_tx);
+            } else if in_publish {
+                publish_txs_map.insert(data_tx.id, data_tx);
+            }
+        }
+
+        for commitment_tx in commitment_txs {
+            commitment_txs_map.insert(commitment_tx.id(), commitment_tx);
+        }
+
+        // Build final vectors in the exact order specified by block header
+        let submit_txs: Vec<_> = submit_ids
+            .iter()
+            .filter_map(|id| submit_txs_map.remove(id))
+            .collect();
+
+        let publish_txs: Vec<_> = publish_ids
+            .iter()
+            .filter_map(|id| publish_txs_map.remove(id))
+            .collect();
+
+        let commitment_txs: Vec<_> = commitment_ids
+            .iter()
+            .filter_map(|id| commitment_txs_map.remove(id))
+            .collect();
+
+        // Validate header/body consistency: check that resolved counts match expected counts
+        if submit_txs.len() != submit_ids.len() {
+            let missing_ids: Vec<H256> = submit_ids
+                .iter()
+                .filter(|id| !submit_txs.iter().any(|tx| &tx.id == *id))
+                .copied()
+                .collect();
+            eyre::bail!(
+                "Header/body mismatch in block {:?}: submit ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+                block_header.block_hash,
+                submit_ids.len(),
+                submit_txs.len(),
+                missing_ids
+            );
+        }
+
+        if publish_txs.len() != publish_ids.len() {
+            let missing_ids: Vec<H256> = publish_ids
+                .iter()
+                .filter(|id| !publish_txs.iter().any(|tx| &tx.id == *id))
+                .copied()
+                .collect();
+            eyre::bail!(
+                "Header/body mismatch in block {:?}: publish ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+                block_header.block_hash,
+                publish_ids.len(),
+                publish_txs.len(),
+                missing_ids
+            );
+        }
+
+        if commitment_txs.len() != commitment_ids.len() {
+            let missing_ids: Vec<H256> = commitment_ids
+                .iter()
+                .filter(|id| !commitment_txs.iter().any(|tx| &tx.id() == *id))
+                .copied()
+                .collect();
+            eyre::bail!(
+                "Header/body mismatch in block {:?}: commitment ledger expects {} txs but found {}. Missing tx IDs: {:?}",
+                block_header.block_hash,
+                commitment_ids.len(),
+                commitment_txs.len(),
+                missing_ids
+            );
+        }
+
+        Ok(BlockTransactions {
+            commitment_txs,
+            data_txs: HashMap::from([
+                (DataLedger::Submit, submit_txs),
+                (DataLedger::Publish, publish_txs),
+            ]),
+        })
     }
 }
 
