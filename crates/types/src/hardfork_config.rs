@@ -139,26 +139,6 @@ impl IrysHardforkConfig {
             commitments.retain(|tx| tx.version() >= min_version);
         }
     }
-
-    /// Check if the Borealis hardfork is active for a given epoch block timestamp.
-    ///
-    /// Borealis activation is epoch-aligned: the feature is enabled for all blocks
-    /// in an epoch if that epoch's epoch block has a timestamp >= activation_timestamp.
-    ///
-    /// # Arguments
-    /// * `epoch_block_timestamp` - The timestamp of the epoch block (in seconds)
-    #[must_use]
-    pub fn is_borealis_active(&self, epoch_block_timestamp: UnixTimestamp) -> bool {
-        self.borealis
-            .as_ref()
-            .is_some_and(|f| epoch_block_timestamp >= f.activation_timestamp)
-    }
-
-    /// Check if UpdateRewardAddress commitment type is allowed based on epoch block timestamp.
-    #[must_use]
-    pub fn is_update_reward_address_allowed(&self, epoch_block_timestamp: UnixTimestamp) -> bool {
-        self.is_borealis_active(epoch_block_timestamp)
-    }
 }
 
 #[cfg(test)]

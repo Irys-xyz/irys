@@ -19,7 +19,7 @@ use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
-    ExponentialMarketAvgCalculation,
+    ExponentialMarketAvgCalculation, HardforkConfigExt as _,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -1370,13 +1370,12 @@ pub trait BlockProdStrategy {
                 );
 
             // Filter UpdateRewardAddress by Borealis activation
-            let epoch_block_timestamp = parent_epoch_snapshot.epoch_block.timestamp_secs();
             if !self
                 .inner()
                 .config
                 .consensus
                 .hardforks
-                .is_update_reward_address_allowed(epoch_block_timestamp)
+                .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
             {
                 mempool_txs.commitment_tx.retain(|tx| {
                     !matches!(

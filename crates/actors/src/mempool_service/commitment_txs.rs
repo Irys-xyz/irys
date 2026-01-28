@@ -1,6 +1,6 @@
 use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
-use irys_domain::CommitmentSnapshotStatus;
+use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
     CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, IrysAddress,
     IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, UnixTimestamp,
@@ -77,12 +77,11 @@ impl Inner {
                 let tree = self.block_tree_read_guard.read();
                 tree.canonical_epoch_snapshot()
             };
-            let epoch_block_timestamp = epoch_snapshot.epoch_block.timestamp_secs();
             if !self
                 .config
                 .consensus
                 .hardforks
-                .is_update_reward_address_allowed(epoch_block_timestamp)
+                .is_update_reward_address_allowed_for_epoch(&epoch_snapshot)
             {
                 return Err(TxIngressError::UpdateRewardAddressNotAllowed);
             }

@@ -14,6 +14,7 @@ use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_head
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
+    HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
@@ -1762,29 +1763,27 @@ pub async fn commitment_txs_are_valid(
     };
 
     // Validate Borealis: reject UpdateRewardAddress if not activated
-    if !is_epoch_block {
-        let epoch_block_timestamp = parent_epoch_snapshot.epoch_block.timestamp_secs();
-        if !config
+    if !is_epoch_block
+        && !config
             .consensus
             .hardforks
-            .is_update_reward_address_allowed(epoch_block_timestamp)
-        {
-            for (idx, tx) in commitment_txs.iter().enumerate() {
-                if matches!(
-                    tx.commitment_type(),
-                    CommitmentTypeV2::UpdateRewardAddress { .. }
-                ) {
-                    error!(
+            .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
+    {
+        for (idx, tx) in commitment_txs.iter().enumerate() {
+            if matches!(
+                tx.commitment_type(),
+                CommitmentTypeV2::UpdateRewardAddress { .. }
+            ) {
+                error!(
                         "Commitment transaction {} at position {} uses UpdateRewardAddress before Borealis activation",
                         tx.id(),
                         idx
                     );
-                    return Err(ValidationError::CommitmentTypeNotAllowed {
-                        tx_id: tx.id(),
-                        position: idx,
-                        commitment_type: "UpdateRewardAddress".to_string(),
-                    });
-                }
+                return Err(ValidationError::CommitmentTypeNotAllowed {
+                    tx_id: tx.id(),
+                    position: idx,
+                    commitment_type: "UpdateRewardAddress".to_string(),
+                });
             }
         }
     }
