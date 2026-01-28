@@ -110,7 +110,7 @@ services:
       - discovery.type=single-node
       - xpack.security.enabled=false
       - xpack.security.enrollment.enabled=false
-      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms2g -Xmx2g}"
+      - "ES_JAVA_OPTS=${ES_JAVA_OPTS:--Xms512m -Xmx512m}"
       - cluster.name=${ES_CLUSTER_NAME:-observation-cluster}
       - bootstrap.memory_lock=true
     ulimits:
