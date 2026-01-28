@@ -1,8 +1,5 @@
 use crate::mempool_service::ingress_proofs::generate_and_store_ingress_proof;
-use crate::mempool_service::metrics::{
-    record_chunk_duplicate, record_chunk_ingested, record_storage_duration,
-    record_validation_duration,
-};
+use crate::mempool_service::metrics::{record_chunk_duplicate, record_chunk_ingested};
 use crate::mempool_service::Inner;
 use eyre::eyre;
 use irys_database::{
@@ -21,7 +18,6 @@ use irys_types::{
 use rayon::prelude::*;
 use reth::revm::primitives::alloy_primitives::ChainId;
 use reth_db::{cursor::DbDupCursorRO as _, transaction::DbTx as _, Database as _};
-use std::time::Instant;
 use std::{collections::HashSet, fmt::Display};
 use tracing::{debug, error, info, instrument, warn, Instrument as _};
 
@@ -71,7 +67,7 @@ pub fn select_data_size_from_storage_modules(
 }
 
 impl Inner {
-    #[instrument(level = "trace", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
+    #[instrument(level = "info", skip_all, err(Debug), fields(chunk.data_root = ?chunk.data_root, chunk.tx_offset = ?chunk.tx_offset))]
     pub async fn handle_chunk_ingress_message(
         &self,
         chunk: UnpackedChunk,
@@ -311,7 +307,6 @@ impl Inner {
             chunk.tx_offset, chunk.data_size, target_offset
         );
 
-        let validation_start = Instant::now();
         let path_result = match validate_path(root_hash, path_buff, target_offset)
             .map_err(|_| CriticalChunkIngressError::InvalidProof)
         {
@@ -386,11 +381,7 @@ impl Inner {
             return Err(CriticalChunkIngressError::InvalidDataHash.into());
         }
 
-        // Record validation duration
-        record_validation_duration(validation_start.elapsed().as_secs_f64() * 1000.0);
-
         // Finally write the chunk to CachedChunks, this will succeed even if the chunk is one that's already inserted
-        let storage_start = Instant::now();
         if let Err(e) = self
             .irys_db
             .update_eyre(|tx| irys_database::cache_chunk(tx, &chunk))
@@ -404,7 +395,6 @@ impl Inner {
         {
             return Err(e.into());
         }
-        record_storage_duration(storage_start.elapsed().as_secs_f64() * 1000.0);
 
         // Add to recent valid chunks cache to prevent re-processing
         mempool_state

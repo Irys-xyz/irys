@@ -72,6 +72,12 @@ NODE_URLS="http://localhost:19080,http://localhost:19081,http://localhost:19082"
 cargo test --package irys-chain --test mod sync_partition_data_remote_test -- --nocapture --ignored
 ```
 
+## Platform Notes
+
+### Linux Docker Engine
+
+On native Linux, `host.docker.internal` is not available by default. The compose file includes `extra_hosts: host.docker.internal:host-gateway` on all services to ensure consistent behavior across Linux and Docker Desktop (macOS/Windows).
+
 ## Configuration
 
 ### Irys Nodes
