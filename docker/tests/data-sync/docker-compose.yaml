@@ -13,6 +13,8 @@ services:
     pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "19080:8080"
       - "19001:9001"  # Reth metrics
@@ -36,6 +38,8 @@ services:
     pull_policy: never
     container_name: test-irys-2
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-1:
         condition: service_started
@@ -66,6 +70,8 @@ services:
     pull_policy: never
     container_name: test-irys-3
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-1:
         condition: service_started

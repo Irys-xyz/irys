@@ -48,7 +48,7 @@ cp .env.example .env
 | `OTEL_GRPC_PORT` | 4317 | OTEL Collector gRPC port |
 | `OTEL_HTTP_PORT` | 4318 | OTEL Collector HTTP port |
 | `LOG_RETENTION_DAYS` | 7 | Elasticsearch log retention (days) |
-| `ES_JAVA_OPTS` | -Xms2g -Xmx2g | Elasticsearch JVM options |
+| `ES_JAVA_OPTS` | -Xms512m -Xmx512m | Elasticsearch JVM options (increase for production) |
 | `ES_CLUSTER_NAME` | observation-cluster | Elasticsearch cluster name |
 
 ## Integration
@@ -83,7 +83,7 @@ Configure Irys nodes to send telemetry to the OTEL Collector:
 
 ```yaml
 environment:
-  - RUST_LOG=debug
+  - RUST_LOG=info           # Use 'debug' for detailed troubleshooting
   - ENABLE_TELEMETRY=true
   - OTEL_SERVICE_NAME=irys-node-1    # Unique name per node
   - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
