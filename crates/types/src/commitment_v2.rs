@@ -402,7 +402,10 @@ impl Encodable for CommitmentTypeV2 {
                 partition_hash.encode(acc)
             }
             Self::Unstake => COMMITMENT_TYPE_UNSTAKE.encode(acc),
-            Self::UpdateRewardAddress { new_reward_address, nonce } => {
+            Self::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => {
                 alloy_rlp::Header {
                     list: true,
                     payload_length: self.alloy_rlp_payload_length(),
@@ -436,9 +439,10 @@ impl CommitmentTypeV2 {
                 pledge_count_before_executing,
                 partition_hash,
             } => 1 + pledge_count_before_executing.length() + partition_hash.length(),
-            Self::UpdateRewardAddress { new_reward_address, nonce } => {
-                1 + new_reward_address.length() + nonce.length()
-            }
+            Self::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => 1 + new_reward_address.length() + nonce.length(),
         }
     }
 }
@@ -496,7 +500,10 @@ impl Decodable for CommitmentTypeV2 {
             COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS => {
                 let new_reward_address = IrysAddress::decode(buf)?;
                 let nonce = U256::decode(buf)?;
-                Ok(Self::UpdateRewardAddress { new_reward_address, nonce })
+                Ok(Self::UpdateRewardAddress {
+                    new_reward_address,
+                    nonce,
+                })
             }
             _ => Err(RlpError::Custom("unknown commitment type in header")),
         }
@@ -535,7 +542,10 @@ impl reth_codecs::Compact for CommitmentTypeV2 {
                 buf.put_u8(COMMITMENT_TYPE_UNSTAKE);
                 TYPE_DISCRIMINANT_SIZE
             }
-            Self::UpdateRewardAddress { new_reward_address, nonce } => {
+            Self::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => {
                 buf.put_u8(COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS);
                 buf.put_slice(new_reward_address.0.as_slice());
                 buf.put_slice(&nonce.to_be_bytes());
@@ -621,9 +631,13 @@ impl reth_codecs::Compact for CommitmentTypeV2 {
                     );
                 }
                 let mut addr_bytes = [0_u8; 20];
-                addr_bytes.copy_from_slice(&buf[TYPE_DISCRIMINANT_SIZE..TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE]);
+                addr_bytes.copy_from_slice(
+                    &buf[TYPE_DISCRIMINANT_SIZE..TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE],
+                );
                 let mut nonce_bytes = [0_u8; 32];
-                nonce_bytes.copy_from_slice(&buf[TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE..required_size]);
+                nonce_bytes.copy_from_slice(
+                    &buf[TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE..required_size],
+                );
                 (
                     Self::UpdateRewardAddress {
                         new_reward_address: IrysAddress(alloy_primitives::FixedBytes(addr_bytes)),

@@ -11,15 +11,15 @@ use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,                    // The commitment is valid and was added to the snapshot
-    Unknown,                     // The commitment has no status in the snapshot
-    Unstaked,                    // The pledge commitment doesn't have a corresponding stake
-    InvalidPledgeCount,          // The pledge count doesn't match the actual number of pledges
-    Unowned,                     // Target capacity partition is not owned by signer
-    UnpledgePending,             // Duplicate unpledge for same partition in this snapshot
-    UnstakePending,              // Duplicate unstake for the signer within this snapshot
-    HasActivePledges,            // Unstake not allowed because signer still has pledges
-    UpdateRewardAddressPending,  // Duplicate update reward address for the signer within this snapshot
+    Accepted,                   // The commitment is valid and was added to the snapshot
+    Unknown,                    // The commitment has no status in the snapshot
+    Unstaked,                   // The pledge commitment doesn't have a corresponding stake
+    InvalidPledgeCount,         // The pledge count doesn't match the actual number of pledges
+    Unowned,                    // Target capacity partition is not owned by signer
+    UnpledgePending,            // Duplicate unpledge for same partition in this snapshot
+    UnstakePending,             // Duplicate unstake for the signer within this snapshot
+    HasActivePledges,           // Unstake not allowed because signer still has pledges
+    UpdateRewardAddressPending, // Duplicate update reward address for the signer within this snapshot
 }
 
 #[derive(Debug, Default, Clone, Hash)]
@@ -162,7 +162,11 @@ impl CommitmentSnapshot {
                             return CommitmentSnapshotStatus::Accepted;
                         }
                         // Check if this nonce would be rejected
-                        if let CommitmentTypeV2::UpdateRewardAddress { nonce: existing_nonce, .. } = existing_tx.commitment_type() {
+                        if let CommitmentTypeV2::UpdateRewardAddress {
+                            nonce: existing_nonce,
+                            ..
+                        } = existing_tx.commitment_type()
+                        {
                             if *nonce <= existing_nonce {
                                 return CommitmentSnapshotStatus::UpdateRewardAddressPending;
                             }
@@ -376,7 +380,11 @@ impl CommitmentSnapshot {
 
                 // Allow replacement only if new nonce is strictly greater
                 if let Some(existing_tx) = &miner_commitments.update_reward_address {
-                    if let CommitmentTypeV2::UpdateRewardAddress { nonce: existing_nonce, .. } = existing_tx.commitment_type() {
+                    if let CommitmentTypeV2::UpdateRewardAddress {
+                        nonce: existing_nonce,
+                        ..
+                    } = existing_tx.commitment_type()
+                    {
                         if *nonce <= existing_nonce {
                             return CommitmentSnapshotStatus::UpdateRewardAddressPending;
                         }

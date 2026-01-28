@@ -50,7 +50,11 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
     genesis_config.consensus.get_mut().block_migration_depth = 1;
     genesis_config.consensus.get_mut().chunk_size = chunk_size;
     genesis_config.consensus.get_mut().num_chunks_in_partition = num_chunks_in_partition;
-    genesis_config.consensus.get_mut().epoch.submit_ledger_epoch_length = submit_ledger_epoch_length;
+    genesis_config
+        .consensus
+        .get_mut()
+        .epoch
+        .submit_ledger_epoch_length = submit_ledger_epoch_length;
 
     // Fund user for data tx
     let user_signer =
@@ -75,7 +79,7 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
         genesis_addr, custom_reward_address
     );
 
-    // Phase 2: Genesis updates reward_address (BEFORE adding peer)
+    // Genesis updates reward_address (before adding peer)
     let _update_tx = genesis_node
         .post_update_reward_address(&genesis_signer, custom_reward_address, U256::from(1))
         .await
@@ -87,12 +91,9 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
 
     info!("UpdateRewardAddress transaction included in block");
 
-    // Phase 3: Post data BEFORE adding peer miner
-    // This guarantees all data is stored in genesis's partitions (only miner at this point)
-    // The expiry logic skips the "last slot" (active slot), so we need to fill a slot
-    // completely so it's no longer the last slot and can expire.
-    // With num_chunks_in_partition = 10 and chunk_size = 32, we need >10 chunks to create 2 slots.
-    let num_txs_to_post = (num_chunks_in_partition + 2) as usize; // Post enough to create 2 slots
+    // Post data before adding peer (ensures data in genesis's partitions)
+    // Need >1 slot worth of data so first slot can expire (expiry skips active slot)
+    let num_txs_to_post = (num_chunks_in_partition + 2) as usize;
     info!(
         "Posting {} data transactions to fill at least one complete slot",
         num_txs_to_post
@@ -102,9 +103,7 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
     let mut data_tx_ids = Vec::new();
     for i in 0..num_txs_to_post {
         let data = vec![42 + i as u8; chunk_size as usize]; // One chunk per tx
-        let data_tx = genesis_node
-            .post_data_tx(anchor, data, &user_signer)
-            .await;
+        let data_tx = genesis_node.post_data_tx(anchor, data, &user_signer).await;
         genesis_node
             .wait_for_mempool(data_tx.header.id, seconds_to_wait)
             .await?;
@@ -124,9 +123,7 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
         .count();
     info!(
         "Included {}/{} data transactions in Submit ledger at height {}",
-        included_count,
-        num_txs_to_post,
-        data_inclusion_block.height
+        included_count, num_txs_to_post, data_inclusion_block.height
     );
     assert!(
         included_count > 0,
@@ -145,12 +142,9 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
         data_submit_height, data_inclusion_epoch, data_expiry_height, expiry_epoch
     );
 
-    // Note: TermFeeReward is generated at Submit ledger expiry, regardless of whether
-    // the data was promoted to Publish ledger. We don't need to upload chunks for this test.
+    // TermFeeReward generated at Submit expiry (promotion not needed)
 
-    // Phase 4: Add peer miner AFTER data submission
-    // This keeps the network functional after genesis unstakes.
-    // Data was submitted before this, so it's guaranteed to be in genesis's partitions.
+    // Add peer miner (keeps network functional after genesis unstakes)
     let peer_node = genesis_node
         .testing_peer_with_assignments(&peer_signer)
         .await?;
@@ -162,9 +156,11 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
         height_after_peer
     );
 
-    // Phase 5: Mine to next epoch boundary so UpdateRewardAddress takes effect
+    // Mine to epoch boundary (UpdateRewardAddress takes effect)
     let (_mined, epoch1_height) = genesis_node.mine_until_next_epoch().await?;
-    peer_node.wait_until_height(epoch1_height, seconds_to_wait).await?;
+    peer_node
+        .wait_until_height(epoch1_height, seconds_to_wait)
+        .await?;
 
     info!(
         "Reached epoch boundary at height {}, UpdateRewardAddress should now be active",
@@ -188,9 +184,12 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
         "reward_address should be updated to custom_reward_address after epoch boundary"
     );
 
-    info!("Verified reward_address is active: {:?}", stake_entry.reward_address);
+    info!(
+        "Verified reward_address is active: {:?}",
+        stake_entry.reward_address
+    );
 
-    // Phase 6: Genesis unpledges all partitions
+    // Genesis unpledges all partitions
     let assigned_partitions: Vec<PartitionAssignment> =
         genesis_node.get_partition_assignments(genesis_addr);
     info!(
@@ -245,23 +244,23 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
     // Mine block to include unpledges and unstake
     genesis_node.mine_block().await?;
 
-    // Phase 7: Mine to refund epoch
-    // Unpledge/Unstake refunds happen at the next epoch boundary after they're included.
-    // Since we just included them in a block, mine to the next epoch boundary.
+    // Mine to refund epoch (refunds happen at next epoch boundary)
     let current_height = genesis_node.get_canonical_chain_height().await;
     info!(
         "Unpledge/unstake commitments included, current height: {}. Mining to next epoch boundary for refunds.",
         current_height
     );
 
-    // Mine to the next epoch boundary where refunds (and ledger expiry) will be processed
     let (_, refund_epoch_height) = genesis_node.mine_until_next_epoch().await?;
-    peer_node.wait_until_height(refund_epoch_height, seconds_to_wait).await?;
-    info!("Reached refund epoch boundary at height {}", refund_epoch_height);
+    peer_node
+        .wait_until_height(refund_epoch_height, seconds_to_wait)
+        .await?;
+    info!(
+        "Reached refund epoch boundary at height {}",
+        refund_epoch_height
+    );
 
-    // Phase 8: Verify shadow transactions
-    // TermFeeReward is emitted at data_expiry_height (epoch after data inclusion)
-    // UnpledgeRefund/UnstakeRefund are emitted at refund_epoch_height
+    // Verify shadow transactions
     let reth_ctx = genesis_node.node_ctx.reth_node_adapter.clone();
 
     let mut found_term_fee_reward = false;
@@ -299,7 +298,9 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
 
     // Check refund_epoch_height for UnpledgeRefund and UnstakeRefund
     {
-        let refund_block = genesis_node.get_block_by_height(refund_epoch_height).await?;
+        let refund_block = genesis_node
+            .get_block_by_height(refund_epoch_height)
+            .await?;
         let block_txs = reth_ctx
             .inner
             .provider
@@ -384,9 +385,7 @@ async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> 
 
     info!("Verified genesis is fully unstaked");
 
-    // Note: Balance verification is skipped because the complex timing of
-    // ledger expiry + unstaking makes it difficult to reliably check balances.
-    // The key assertions (transaction targets) are verified above.
+    // Balance verification skipped (complex timing); transaction targets verified above
 
     // Cleanup
     genesis_node.stop().await;

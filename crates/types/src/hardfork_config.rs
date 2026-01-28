@@ -155,8 +155,6 @@ impl IrysHardforkConfig {
     }
 
     /// Check if UpdateRewardAddress commitment type is allowed based on epoch block timestamp.
-    ///
-    /// This is equivalent to checking if Borealis hardfork is active.
     #[must_use]
     pub fn is_update_reward_address_allowed(&self, epoch_block_timestamp: UnixTimestamp) -> bool {
         self.is_borealis_active(epoch_block_timestamp)

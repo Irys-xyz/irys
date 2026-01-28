@@ -2466,10 +2466,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         nonce: U256,
     ) -> eyre::Result<CommitmentTransaction> {
         let consensus = &self.node_ctx.config.consensus;
-        let anchor = self
-            .get_anchor()
-            .await
-            .expect("anchor should be available");
+        let anchor = self.get_anchor().await.expect("anchor should be available");
 
         let mut update_tx = CommitmentTransaction::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2 {

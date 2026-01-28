@@ -1354,7 +1354,7 @@ pub trait BlockProdStrategy {
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
-        // Always fetch the epoch snapshot - needed for reward address resolution
+        // Fetch epoch snapshot (needed for reward address resolution)
         let (parent_epoch_snapshot, parent_commitment_snapshot) =
             self.fetch_parent_snapshots(prev_block_header)?;
 
@@ -1369,8 +1369,7 @@ pub trait BlockProdStrategy {
                     block_timestamp.to_secs(),
                 );
 
-            // Filter commitments by type using epoch block timestamp (Borealis hardfork)
-            // UpdateRewardAddress is only allowed after Borealis activation
+            // Filter UpdateRewardAddress by Borealis activation
             let epoch_block_timestamp = parent_epoch_snapshot.epoch_block.timestamp_secs();
             if !self
                 .inner()

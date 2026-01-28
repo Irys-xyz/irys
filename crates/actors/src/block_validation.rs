@@ -1745,7 +1745,7 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
-    // Get parent epoch snapshot early to check Borealis activation
+    // Get parent snapshots for Borealis activation check
     let (parent_commitment_snapshot, parent_epoch_snapshot) = {
         let read = block_tree_guard.read();
         let commitment_snapshot = read
@@ -1761,8 +1761,7 @@ pub async fn commitment_txs_are_valid(
         (commitment_snapshot, epoch_snapshot)
     };
 
-    // Validate commitment types against Borealis hardfork rules (epoch-aligned activation)
-    // UpdateRewardAddress is only allowed after Borealis activation for the current epoch
+    // Validate Borealis: reject UpdateRewardAddress if not activated
     if !is_epoch_block {
         let epoch_block_timestamp = parent_epoch_snapshot.epoch_block.timestamp_secs();
         if !config

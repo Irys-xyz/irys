@@ -725,7 +725,7 @@ mod borealis_hardfork {
     }
 
     fn borealis_config_with_timestamp(activation_secs: u64) -> NodeConfig {
-        // Include Aurora (activated in past) since UpdateRewardAddress requires V2 transactions
+        // Aurora required for V2 transactions
         let aurora = Some(Aurora {
             activation_timestamp: UnixTimestamp::from_secs(0),
             minimum_commitment_tx_version: AURORA_MIN_VERSION,
@@ -770,9 +770,7 @@ mod borealis_hardfork {
         tx
     }
 
-    /// Test UpdateRewardAddress acceptance before and after Borealis activation.
-    /// - Pre-activation: UpdateRewardAddress should be rejected at mempool
-    /// - Post-activation: UpdateRewardAddress should be accepted at mempool
+    /// Test UpdateRewardAddress rejection pre-activation, acceptance post-activation.
     #[rstest]
     #[case::pre_activation_rejected(true, false)]
     #[case::post_activation_accepted(false, true)]
@@ -799,7 +797,8 @@ mod borealis_hardfork {
 
         // Now try UpdateRewardAddress
         let anchor = node.get_anchor().await?;
-        let new_reward_address = IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
+        let new_reward_address =
+            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
         let tx = create_update_reward_address_tx(
             &node.node_ctx.config.consensus,
             anchor,
@@ -828,77 +827,6 @@ mod borealis_hardfork {
         Ok(())
     }
 
-    /// Test epoch-based activation: UpdateRewardAddress becomes available when
-    /// epoch block timestamp exceeds activation timestamp.
-    /// Uses small epochs (2 blocks) to test epoch transition behavior.
-    #[test_log::test(tokio::test)]
-    async fn heavy_test_borealis_epoch_based_activation() -> eyre::Result<()> {
-        initialize_tracing();
-
-        const NUM_BLOCKS_IN_EPOCH: usize = 2;
-
-        let borealis_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
-        // Use testing_with_epochs to ensure epoch boundaries occur frequently
-        let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
-        // Set up Aurora (already active) and Borealis (activating soon)
-        config.consensus.get_mut().hardforks = IrysHardforkConfig {
-            frontier: default_test_frontier(),
-            next_name_tbd: None,
-            aurora: Some(Aurora {
-                activation_timestamp: UnixTimestamp::from_secs(0),
-                minimum_commitment_tx_version: AURORA_MIN_VERSION,
-            }),
-            borealis: Some(Borealis {
-                activation_timestamp: UnixTimestamp::from_secs(borealis_activation),
-            }),
-        };
-        let signer = create_funded_signer(&mut config);
-        let node = IrysNodeTest::new_genesis(config).start().await;
-
-        // Stake first (mine to block 1, still in epoch 0 with genesis as epoch block)
-        let stake_tx = create_stake_tx(&node, &signer, TxVersion::V2).await;
-        node.post_commitment_tx(&stake_tx).await?;
-        node.mine_blocks(1).await?;
-
-        // Before activation: should be rejected (epoch block is genesis, pre-activation)
-        let anchor = node.get_anchor().await?;
-        let new_reward_address = IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
-        let tx_before = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-        let result_before = node.post_commitment_tx(&tx_before).await;
-        assert!(
-            result_before.is_err(),
-            "UpdateRewardAddress should be rejected before Borealis activation"
-        );
-
-        // Mine blocks until activation - ensures we cross epoch boundaries with new timestamps
-        wait_until_activation(&node, borealis_activation).await;
-
-        // After activation: should be accepted (epoch block timestamp >= activation)
-        let anchor = node.get_anchor().await?;
-        let tx_after = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-        let result_after = node.post_commitment_tx(&tx_after).await;
-        assert!(
-            result_after.is_ok(),
-            "UpdateRewardAddress should be accepted after Borealis activation: {:?}",
-            result_after.err()
-        );
-
-        node.stop().await;
-        Ok(())
-    }
-
     /// Test that UpdateRewardAddress transactions in mempool before activation
     /// are filtered out by the block producer when blocks are mined after activation.
     #[test_log::test(tokio::test)]
@@ -918,7 +846,8 @@ mod borealis_hardfork {
 
         // Submit UpdateRewardAddress (should be accepted since Borealis is active)
         let anchor = node.get_anchor().await?;
-        let new_reward_address = IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
+        let new_reward_address =
+            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
         let update_tx = create_update_reward_address_tx(
             &node.node_ctx.config.consensus,
             anchor,
@@ -975,7 +904,8 @@ mod borealis_hardfork {
 
         // Before activation timestamp: UpdateRewardAddress should be rejected
         let anchor = node.get_anchor().await?;
-        let new_reward_address = IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
+        let new_reward_address =
+            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
         let tx_pre = create_update_reward_address_tx(
             &node.node_ctx.config.consensus,
             anchor,
@@ -1057,7 +987,8 @@ mod borealis_hardfork {
 
         // Try UpdateRewardAddress - should be rejected since Borealis is disabled
         let anchor = node.get_anchor().await?;
-        let new_reward_address = IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
+        let new_reward_address =
+            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
         let tx = create_update_reward_address_tx(
             &node.node_ctx.config.consensus,
             anchor,

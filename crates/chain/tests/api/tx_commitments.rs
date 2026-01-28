@@ -567,7 +567,6 @@ async fn post_pledge_commitment(
     pledge_tx
 }
 
-
 /// Validates that the partition_hashes associated with pledges in the EpochSnapshot::commitment_state are reflected
 /// in the EpochSnapshot::partition_assignments which maps partition_hashes to ledger or capacity.
 fn validate_pledge_assignments(
@@ -633,9 +632,8 @@ fn validate_pledge_assignments(
         .collect())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_test_update_reward_address() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Setup: 2-block epochs for fast transitions
@@ -656,11 +654,11 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
 
     let block_tree_guard = &node.node_ctx.block_tree_guard;
 
-    // PHASE 1: Create stake and mine to first epoch boundary
-    let stake_tx = post_stake_commitment(&node, &signer).await;
+    // Stake and mine to first epoch boundary
+    let _stake_tx = post_stake_commitment(&node, &signer).await;
     node.mine_blocks(num_blocks_in_epoch).await?;
 
-    // ASSERT: Initial reward_address equals signer address
+    // Initial reward_address equals signer address
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let stake_entry = epoch_snapshot
         .commitment_state
@@ -674,7 +672,7 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
         "Initial reward_address should equal signer address"
     );
 
-    // PHASE 2: Submit UpdateRewardAddress and mine a block to include it
+    // Submit UpdateRewardAddress and mine to include it
     let update_tx = node
         .post_update_reward_address(&signer, new_reward_address, U256::from(1))
         .await?;
@@ -690,10 +688,10 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
     let status = node.get_commitment_snapshot_status(&update_tx);
     assert_eq!(status, CommitmentSnapshotStatus::Accepted);
 
-    // PHASE 3: Mine to next epoch boundary (one more block since we already mined one)
+    // Mine to next epoch boundary
     node.mine_blocks(num_blocks_in_epoch - 1).await?;
 
-    // ASSERT: reward_address is now updated in epoch snapshot
+    // Verify reward_address is updated in epoch snapshot
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let stake_entry = epoch_snapshot
         .commitment_state
@@ -707,16 +705,12 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
         "reward_address should be updated after epoch boundary"
     );
 
-    // Silence unused variable warning
-    let _ = stake_tx;
-
     node.stop().await;
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     let num_blocks_in_epoch = 2;
@@ -749,7 +743,7 @@ async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<
     });
     unstaked_signer.sign_commitment(&mut update_tx).unwrap();
 
-    // ASSERT: Status should be Unstaked
+    // Status should be Unstaked (no stake for signer)
     let status = node.get_commitment_snapshot_status(&update_tx);
     assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
 
@@ -761,9 +755,8 @@ async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Use 4 blocks per epoch to have room for testing within an epoch
@@ -784,53 +777,57 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
 
     let block_tree_guard = &node.node_ctx.block_tree_guard;
 
-    // PHASE 1: Create stake and mine to first epoch boundary
+    // Stake and mine to first epoch boundary
     let _stake_tx = post_stake_commitment(&node, &signer).await;
     node.mine_blocks(num_blocks_in_epoch).await?;
 
-    // PHASE 2: Submit first update with nonce=1 and mine to include it (still within epoch)
+    // Submit first update (nonce=1)
     let update_tx_1 = node
         .post_update_reward_address(&signer, reward_address_1, U256::from(1))
         .await?;
     node.mine_blocks(1).await?;
-    assert_eq!(node.get_commitment_snapshot_status(&update_tx_1), CommitmentSnapshotStatus::Accepted);
+    assert_eq!(
+        node.get_commitment_snapshot_status(&update_tx_1),
+        CommitmentSnapshotStatus::Accepted
+    );
 
-    // PHASE 3: Check that update with SAME nonce=1 would be rejected
+    // Same nonce=1 should be rejected
     let consensus = &node.node_ctx.config.consensus;
     let anchor = node.get_anchor().await?;
-    let mut update_tx_same_nonce = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
-        tx: CommitmentTransactionV2 {
-            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                new_reward_address: reward_address_2,
-                nonce: U256::from(1),
+    let mut update_tx_same_nonce =
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                commitment_type: CommitmentTypeV2::UpdateRewardAddress {
+                    new_reward_address: reward_address_2,
+                    nonce: U256::from(1),
+                },
+                anchor,
+                fee: consensus.mempool.commitment_fee,
+                value: U256::zero(),
+                ..CommitmentTransactionV2::new(consensus)
             },
-            anchor,
-            fee: consensus.mempool.commitment_fee,
-            value: U256::zero(),
-            ..CommitmentTransactionV2::new(consensus)
-        },
-        metadata: Default::default(),
-    });
+            metadata: Default::default(),
+        });
     signer.sign_commitment(&mut update_tx_same_nonce).unwrap();
 
-    // Status check shows it would be rejected (same nonce as existing)
     let status = node.get_commitment_snapshot_status(&update_tx_same_nonce);
     assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
 
-    // PHASE 4: Submit update with HIGHER nonce=2 and mine - should REPLACE the previous one
+    // Higher nonce=2 replaces nonce=1
     let update_tx_2 = node
         .post_update_reward_address(&signer, reward_address_2, U256::from(2))
         .await?;
     node.mine_blocks(1).await?;
-    assert_eq!(node.get_commitment_snapshot_status(&update_tx_2), CommitmentSnapshotStatus::Accepted);
+    assert_eq!(
+        node.get_commitment_snapshot_status(&update_tx_2),
+        CommitmentSnapshotStatus::Accepted
+    );
 
-    // Original tx_1 is no longer the accepted one - checking its status shows it would be
-    // rejected now because there's a higher nonce in the snapshot
+    // Original tx_1 now shows pending due to higher nonce in snapshot
     let status = node.get_commitment_snapshot_status(&update_tx_1);
     assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
 
-    // PHASE 5: Mine to epoch boundary - reward_address_2 should be applied (not reward_address_1)
-    // We've mined 2 blocks since epoch boundary, need 2 more to reach next epoch
+    // Mine to epoch boundary - reward_address_2 applied (highest nonce wins)
     node.mine_blocks(num_blocks_in_epoch - 2).await?;
 
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
@@ -845,12 +842,15 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
         "Higher nonce update should be applied"
     );
 
-    // PHASE 6: New epoch - can submit with nonce=1 again (fresh snapshot for new epoch)
+    // New epoch allows nonce=1 again (fresh snapshot)
     let update_tx_3 = node
         .post_update_reward_address(&signer, reward_address_3, U256::from(1))
         .await?;
     node.mine_blocks(1).await?;
-    assert_eq!(node.get_commitment_snapshot_status(&update_tx_3), CommitmentSnapshotStatus::Accepted);
+    assert_eq!(
+        node.get_commitment_snapshot_status(&update_tx_3),
+        CommitmentSnapshotStatus::Accepted
+    );
 
     // Mine to next epoch boundary
     node.mine_blocks(num_blocks_in_epoch - 1).await?;
@@ -881,9 +881,8 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
 /// 4. Post data (which goes to genesis's partitions since genesis is the only miner)
 /// 5. Mine to expiry epoch where Submit ledger expires
 /// 6. Verify TermFeeReward goes to the custom reward_address (not genesis miner address)
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
-    std::env::set_var("RUST_LOG", "debug");
     initialize_tracing();
 
     // Configure with fast ledger expiry
@@ -906,7 +905,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
         .start_and_wait_for_packing("REWARD_ADDR_TEST", 10)
         .await;
 
-    // Use genesis node's signer - this is the miner who owns partitions
+    // Genesis node owns all partitions
     let genesis_signer = node.cfg.signer();
     let genesis_address = genesis_signer.address();
 
@@ -920,7 +919,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
         genesis_address, reward_recipient
     );
 
-    // PHASE 1: Update reward_address to different address
+    // Update reward_address to different address
     let _update_tx = node
         .post_update_reward_address(&genesis_signer, reward_recipient, U256::from(1))
         .await?;
@@ -929,9 +928,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     info!("UpdateRewardAddress transaction included in block");
 
-    // PHASE 2: Post enough data to create 2 slots (so first slot can expire)
-    // The expiry logic skips the "last slot" (active slot), so we need enough data
-    // to create at least 2 slots for the first one to be eligible for expiry.
+    // Post enough data to fill >1 slot (expiry logic skips active slot)
     let num_txs_to_post = (num_chunks_in_partition + 2) as usize;
     info!(
         "Posting {} data transactions to fill at least one complete slot",
@@ -950,7 +947,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     info!("Data transactions included in block");
 
-    // PHASE 3: Get initial balances
+    // Get initial balances
     let head_block = node
         .get_block_by_height(node.get_canonical_chain_height().await)
         .await?;
@@ -966,10 +963,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
         reward_balance_before, genesis_balance_before
     );
 
-    // PHASE 4: Mine to next epoch boundary
-    // With submit_ledger_epoch_length = 1, data included in epoch N expires at epoch N+1 boundary.
-    // Data was included at block 2 (epoch 1 start), so it expires at block 4 (epoch 2 start).
-    // UpdateRewardAddress also takes effect at this epoch boundary.
+    // Mine to epoch boundary (data expires, UpdateRewardAddress takes effect)
     let (_mined, expiry_height) = node.mine_until_next_epoch().await?;
     info!(
         "Reached epoch boundary at height {}, UpdateRewardAddress active and ledger expires",
@@ -995,8 +989,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
         genesis_address, reward_recipient
     );
 
-    // PHASE 5: Verify TermFeeReward shadow transaction at the expiry epoch block
-    // Ledger expiry fees are calculated only at epoch blocks (height % num_blocks_in_epoch == 0)
+    // Verify TermFeeReward shadow transaction at expiry epoch block
     let reth_ctx = node.node_ctx.reth_node_adapter.clone();
     let expiry_block = node.get_block_by_height(expiry_height).await?;
     let block_txs = reth_ctx
@@ -1032,7 +1025,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     info!("TermFeeReward found and correctly sent to custom reward_address");
 
-    // PHASE 6: Verify rewards routing via balance changes
+    // Verify rewards routing via balance changes
     let head_block = node
         .get_block_by_height(node.get_canonical_chain_height().await)
         .await?;

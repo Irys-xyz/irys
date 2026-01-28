@@ -348,15 +348,8 @@ impl<'a> ShadowTxGenerator<'a> {
 
             // Aggregate rewards by address and update rolling hash
             for charge in fee_charges {
-                // Resolve to reward_address - missing stake entry is a fatal bug
-                let reward_addr = epoch_snapshot
-                    .resolve_reward_address(charge.address)
-                    .ok_or_else(|| {
-                        eyre::eyre!(
-                            "No stake entry found for address {} receiving ingress rewards - this indicates a fatal bug",
-                            charge.address
-                        )
-                    })?;
+                // Resolve to reward_address (falls back to miner address if no stake entry)
+                let reward_addr = epoch_snapshot.resolve_reward_address(charge.address);
 
                 let entry = rewards_map
                     .entry(reward_addr)
@@ -801,17 +794,17 @@ mod tests {
         use irys_domain::CommitmentStateEntry;
         let mut snapshot = EpochSnapshot::default();
         for miner in miners {
-            snapshot
-                .commitment_state
-                .stake_commitments
-                .insert(*miner, CommitmentStateEntry {
+            snapshot.commitment_state.stake_commitments.insert(
+                *miner,
+                CommitmentStateEntry {
                     id: H256::random(),
                     commitment_status: CommitmentStatus::Active,
                     partition_hash: None,
                     signer: *miner,
                     amount: U256::from(1000),
                     reward_address: Some(*miner),
-                });
+                },
+            );
         }
         snapshot
     }

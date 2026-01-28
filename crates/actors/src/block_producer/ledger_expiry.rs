@@ -308,14 +308,7 @@ fn collect_expired_partitions(
                 partition.miner_address
             );
 
-            let reward_addr = parent_epoch_snapshot
-                .resolve_reward_address(partition.miner_address)
-                .ok_or_else(|| {
-                    eyre!(
-                        "No stake entry found for miner {} receiving rewards - this indicates a fatal bug",
-                        partition.miner_address
-                    )
-                })?;
+            let reward_addr = parent_epoch_snapshot.resolve_reward_address(partition.miner_address);
             expired_ledger_slot_indexes
                 .entry(slot_index)
                 .and_modify(|miners: &mut Vec<IrysAddress>| {

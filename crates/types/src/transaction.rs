@@ -6,9 +6,9 @@ pub use crate::{
         compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
         VersioningError,
     },
-    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact, ConsensusConfig,
-    DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature, TxChunkOffset,
-    UnpackedChunk, H256, U256,
+    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
+    ConsensusConfig, DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature,
+    TxChunkOffset, UnpackedChunk, H256, U256,
 };
 
 use alloy_primitives::keccak256;

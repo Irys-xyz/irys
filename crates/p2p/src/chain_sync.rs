@@ -1654,7 +1654,16 @@ mod tests {
             // Check that the sync status has changed to synced
             assert!(!sync_state.is_syncing());
 
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait for all block requests to complete (with timeout)
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(5);
+            while start.elapsed() < timeout {
+                let len = block_requests_clone.lock().unwrap().len();
+                if len >= 3 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
 
             let block_requests = block_requests_clone.lock().unwrap();
             assert_eq!(block_requests.len(), 3);
