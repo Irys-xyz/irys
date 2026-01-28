@@ -5,8 +5,7 @@ use irys_database::db::RethDbWrapper;
 use irys_reth::{IrysEngineValidatorBuilder, IrysEthereumNode, IrysPayloadBuilderAttributes};
 use irys_types::NetworkConfigWithDefaults as _;
 use reth::{
-    args::DatabaseArgs,
-    prometheus_exporter::install_prometheus_recorder,
+    args::{DatabaseArgs, MetricArgs},
     revm::primitives::B256,
     rpc::builder::{RethRpcModule, RpcModuleSelection},
     tasks::TaskExecutor,
@@ -20,6 +19,7 @@ use reth_node_builder::{
 use reth_provider::providers::BlockchainProvider;
 use reth_rpc_eth_api::EthApiServer as _;
 use std::future::IntoFuture as _;
+use std::net::SocketAddr;
 use std::{collections::HashSet, fmt::Formatter, sync::Arc};
 use std::{fmt::Debug, ops::Deref};
 use tracing::{warn, Instrument as _};
@@ -153,9 +153,23 @@ pub async fn run_node(
 
     reth_config.txpool.additional_validation_tasks = 2;
 
+    // Enable Prometheus metrics endpoint on port 9001 for local scraping by OTEL collector sidecar.
+    // The sidecar will scrape these metrics and push them to the central OTEL collector.
+    let metrics_addr: SocketAddr = format!(
+        "{}:9001",
+        node_config
+            .reth
+            .network
+            .bind_ip(&node_config.network_defaults)
+    )
+    .parse()
+    .expect("valid metrics socket address");
+    reth_config.metrics = MetricArgs {
+        prometheus: Some(metrics_addr),
+        ..Default::default()
+    };
+
     let db_args = DatabaseArgs::default();
-    // Install the prometheus recorder to be sure to record all metrics
-    let _ = install_prometheus_recorder();
 
     let data_dir = reth_config.datadir();
     let db_path = data_dir.db();

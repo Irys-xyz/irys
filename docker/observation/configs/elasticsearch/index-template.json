@@ -1,0 +1,11 @@
+{
+  "index_patterns": ["irys-logs*"],
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "logs-retention",
+      "number_of_shards": 1,
+      "number_of_replicas": __ES_REPLICAS__
+    }
+  },
+  "priority": 200
+}
