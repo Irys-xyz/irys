@@ -777,29 +777,58 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
 
     let block_tree_guard = &node.node_ctx.block_tree_guard;
 
-    // Stake and mine to first epoch boundary
     let _stake_tx = post_stake_commitment(&node, &signer).await;
-    node.mine_blocks(num_blocks_in_epoch).await?;
+    node.mine_until_next_epoch().await?;
 
-    // Submit first update (nonce=1)
-    let update_tx_1 = node
+    // Submit updates out of order (3, 1, 2) - should be included in one block sorted by nonce
+    info!("Submitting 3 UpdateRewardAddress txs with nonces 3, 1, 2 (out of order)");
+
+    let update_tx_nonce_3 = node
+        .post_update_reward_address(&signer, reward_address_3, U256::from(3))
+        .await?;
+    node.wait_for_mempool(update_tx_nonce_3.id(), 5).await?;
+
+    let update_tx_nonce_1 = node
         .post_update_reward_address(&signer, reward_address_1, U256::from(1))
         .await?;
-    node.mine_blocks(1).await?;
+    node.wait_for_mempool(update_tx_nonce_1.id(), 5).await?;
+
+    let update_tx_nonce_2 = node
+        .post_update_reward_address(&signer, reward_address_2, U256::from(2))
+        .await?;
+    node.wait_for_mempool(update_tx_nonce_2.id(), 5).await?;
+
+    let block = node.mine_block().await?;
+    let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
+
+    // Verify nonce-ascending order: idx 0=nonce1, idx 1=nonce2, idx 2=nonce3
+    assert_eq!(commitment_tx_ids[0], update_tx_nonce_1.id());
+    assert_eq!(commitment_tx_ids[1], update_tx_nonce_2.id());
+    assert_eq!(commitment_tx_ids[2], update_tx_nonce_3.id());
+
+    // Status reflects current state: nonce=3 is stored, so lower nonces show as pending
     assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_1),
+        node.get_commitment_snapshot_status(&update_tx_nonce_1),
+        CommitmentSnapshotStatus::UpdateRewardAddressPending
+    );
+    assert_eq!(
+        node.get_commitment_snapshot_status(&update_tx_nonce_2),
+        CommitmentSnapshotStatus::UpdateRewardAddressPending
+    );
+    assert_eq!(
+        node.get_commitment_snapshot_status(&update_tx_nonce_3),
         CommitmentSnapshotStatus::Accepted
     );
 
-    // Same nonce=1 should be rejected
+    // Same nonce=3 should show as pending
     let consensus = &node.node_ctx.config.consensus;
     let anchor = node.get_anchor().await?;
     let mut update_tx_same_nonce =
         CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2 {
                 commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                    new_reward_address: reward_address_2,
-                    nonce: U256::from(1),
+                    new_reward_address: reward_address_1,
+                    nonce: U256::from(3),
                 },
                 anchor,
                 fee: consensus.mempool.commitment_fee,
@@ -813,55 +842,51 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     let status = node.get_commitment_snapshot_status(&update_tx_same_nonce);
     assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
 
-    // Higher nonce=2 replaces nonce=1
-    let update_tx_2 = node
-        .post_update_reward_address(&signer, reward_address_2, U256::from(2))
+    // Higher nonce=4 replaces previous
+    let reward_address_4 = IrysSigner::random_signer(&config.consensus_config()).address();
+    let update_tx_nonce_4 = node
+        .post_update_reward_address(&signer, reward_address_4, U256::from(4))
         .await?;
     node.mine_blocks(1).await?;
     assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_2),
+        node.get_commitment_snapshot_status(&update_tx_nonce_4),
         CommitmentSnapshotStatus::Accepted
     );
 
-    // Original tx_1 now shows pending due to higher nonce in snapshot
-    let status = node.get_commitment_snapshot_status(&update_tx_1);
+    // nonce=3 now pending since nonce=4 exists
+    let status = node.get_commitment_snapshot_status(&update_tx_nonce_3);
     assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
 
-    // Mine to epoch boundary - reward_address_2 applied (highest nonce wins)
-    node.mine_blocks(num_blocks_in_epoch - 2).await?;
+    node.mine_until_next_epoch().await?;
 
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let stake_entry = epoch_snapshot
         .commitment_state
         .stake_commitments
         .get(&signer_address)
-        .expect("Signer should have stake");
-    assert_eq!(
-        stake_entry.reward_address,
-        Some(reward_address_2),
-        "Higher nonce update should be applied"
-    );
+        .expect("stake");
+    assert_eq!(stake_entry.reward_address, Some(reward_address_4));
 
-    // New epoch allows nonce=1 again (fresh snapshot)
-    let update_tx_3 = node
-        .post_update_reward_address(&signer, reward_address_3, U256::from(1))
+    // New epoch resets nonce tracking
+    let reward_address_5 = IrysSigner::random_signer(&config.consensus_config()).address();
+    let update_tx_new_epoch = node
+        .post_update_reward_address(&signer, reward_address_5, U256::from(1))
         .await?;
     node.mine_blocks(1).await?;
     assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_3),
+        node.get_commitment_snapshot_status(&update_tx_new_epoch),
         CommitmentSnapshotStatus::Accepted
     );
 
-    // Mine to next epoch boundary
-    node.mine_blocks(num_blocks_in_epoch - 1).await?;
+    node.mine_until_next_epoch().await?;
 
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let stake_entry = epoch_snapshot
         .commitment_state
         .stake_commitments
         .get(&signer_address)
-        .expect("Signer should have stake");
-    assert_eq!(stake_entry.reward_address, Some(reward_address_3));
+        .expect("stake");
+    assert_eq!(stake_entry.reward_address, Some(reward_address_5));
 
     node.stop().await;
     Ok(())
