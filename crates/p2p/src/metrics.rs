@@ -34,7 +34,7 @@ pub fn record_gossip_chunk_error(error_type: &'static str, is_advisory: bool) {
             1,
             &[
                 KeyValue::new("error_type", error_type),
-                KeyValue::new("advisory", is_advisory.to_string()),
+                KeyValue::new("advisory", is_advisory),
             ],
         );
 }
