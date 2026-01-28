@@ -80,6 +80,7 @@ async fn heavy_block_unstake_with_active_pledges_gets_rejected() -> eyre::Result
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -239,6 +240,7 @@ async fn heavy_block_unstake_never_staked_gets_rejected() -> eyre::Result<()> {
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

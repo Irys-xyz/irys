@@ -716,6 +716,11 @@ impl BlockDiscoveryServiceInner {
                                     "Unstake not allowed while pledges are active".to_string(),
                                 ));
                             }
+                            CommitmentSnapshotStatus::UpdateRewardAddressPending => {
+                                return Err(BlockDiscoveryError::InvalidCommitmentTransaction(
+                                    "Update reward address already pending for signer".to_string(),
+                                ));
+                            }
                             CommitmentSnapshotStatus::Unknown => {} // Success case
                         }
 

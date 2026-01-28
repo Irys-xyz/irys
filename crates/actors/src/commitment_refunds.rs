@@ -1,6 +1,6 @@
 use eyre::{bail, Result};
 use irys_domain::CommitmentSnapshot;
-use irys_types::CommitmentTypeV1;
+use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, ConsensusConfig};
 
 use crate::block_producer::{UnpledgeRefundEvent, UnstakeRefundEvent};
@@ -23,7 +23,7 @@ pub(crate) fn derive_unpledge_refunds_from_snapshot(
     let mut out = Vec::with_capacity(unpledges.len());
     for tx in unpledges {
         let amount = match tx.commitment_type() {
-            CommitmentTypeV1::Unpledge {
+            CommitmentTypeV2::Unpledge {
                 pledge_count_before_executing,
                 ..
             } => {

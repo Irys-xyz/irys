@@ -11,10 +11,10 @@ use irys_types::{
 };
 use irys_types::{
     partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
-    PartitionChunkOffset,
+    PartitionChunkOffset, U256,
 };
 use openssl::sha;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use tracing::{debug, error, trace, warn};
 
@@ -104,6 +104,9 @@ pub enum EpochSnapshotError {
     /// Unstake attempted while pledges still active
     #[error("unstake for signer {signer:?} has active pledges: {remaining}")]
     UnstakeHasActivePledges { signer: IrysAddress, remaining: u64 },
+    /// UpdateRewardAddress signer does not have an active stake
+    #[error("update reward address signer {signer:?} is not currently staked")]
+    UpdateRewardAddressSignerNotStaked { signer: IrysAddress },
 }
 
 impl EpochSnapshot {
@@ -139,6 +142,17 @@ impl EpochSnapshot {
         let _storage_module_info = new_self.map_storage_modules_to_partition_assignments();
 
         new_self
+    }
+
+    /// Resolves a miner address to their configured reward address.
+    /// Returns the reward_address from the stake entry if present, falling back to miner_address
+    /// if the stake entry has no reward_address configured or if there is no stake entry.
+    pub fn resolve_reward_address(&self, miner_address: IrysAddress) -> IrysAddress {
+        self.commitment_state
+            .stake_commitments
+            .get(&miner_address)
+            .and_then(|entry| entry.reward_address)
+            .unwrap_or(miner_address)
     }
 
     pub fn replay_epoch_data(
@@ -298,6 +312,8 @@ impl EpochSnapshot {
 
         self.apply_unstakes(&new_epoch_commitments)?;
 
+        self.apply_update_reward_addresses(&new_epoch_commitments)?;
+
         self.backfill_missing_partitions();
 
         self.allocate_additional_capacity();
@@ -318,7 +334,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentTypeV1::Unstake = &commitment.commitment_type() else {
+            let irys_types::CommitmentTypeV2::Unstake = &commitment.commitment_type() else {
                 continue;
             };
             let signer = commitment.signer();
@@ -341,6 +357,64 @@ impl EpochSnapshot {
             }
 
             debug!(tx.signer = %signer, "unstake_applied");
+        }
+        Ok(())
+    }
+
+    /// Applies update reward address operations found in a set of epoch commitments.
+    ///
+    /// Behavior:
+    /// - For each UpdateRewardAddress commitment, tracks the highest nonce per signer.
+    /// - Only the UpdateRewardAddress with the highest nonce per signer is applied.
+    /// - Verifies the signer has an active stake before applying.
+    /// - Updates the stake entry's reward_address field to the new address.
+    pub fn apply_update_reward_addresses(
+        &mut self,
+        commitments: &[CommitmentTransaction],
+    ) -> Result<(), EpochSnapshotError> {
+        // Build a map tracking the highest nonce per signer
+        let mut highest_nonce_map: HashMap<IrysAddress, (U256, IrysAddress)> = HashMap::new();
+
+        for commitment in commitments {
+            let irys_types::CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } = &commitment.commitment_type()
+            else {
+                continue;
+            };
+            let signer = commitment.signer();
+
+            // Update map if this nonce is higher than what we've seen for this signer
+            highest_nonce_map
+                .entry(signer)
+                .and_modify(|(existing_nonce, existing_addr)| {
+                    if nonce > existing_nonce {
+                        *existing_nonce = *nonce;
+                        *existing_addr = *new_reward_address;
+                    }
+                })
+                .or_insert((*nonce, *new_reward_address));
+        }
+
+        // Now apply the updates from the map
+        for (signer, (nonce, new_reward_address)) in highest_nonce_map {
+            // Get mutable reference to stake entry; error if not found
+            let stake_entry = self
+                .commitment_state
+                .stake_commitments
+                .get_mut(&signer)
+                .ok_or(EpochSnapshotError::UpdateRewardAddressSignerNotStaked { signer })?;
+
+            // Update the reward address
+            stake_entry.reward_address = Some(new_reward_address);
+
+            debug!(
+                tx.signer = %signer,
+                tx.new_reward_address = %new_reward_address,
+                tx.nonce = %nonce,
+                "update_reward_address_applied"
+            );
         }
         Ok(())
     }
@@ -749,14 +823,16 @@ impl EpochSnapshot {
         let mut pledge_commitments: Vec<&CommitmentTransaction> = Vec::new();
         for commitment_tx in commitments.iter() {
             match commitment_tx.commitment_type() {
-                irys_types::CommitmentTypeV1::Stake => stake_commitments.push(commitment_tx),
-                irys_types::CommitmentTypeV1::Pledge { .. } => {
+                irys_types::CommitmentTypeV2::Stake => stake_commitments.push(commitment_tx),
+                irys_types::CommitmentTypeV2::Pledge { .. } => {
                     pledge_commitments.push(commitment_tx)
                 }
                 // Unpledges are handled by `apply_unpledges()` during epoch processing
-                irys_types::CommitmentTypeV1::Unpledge { .. } => {}
+                irys_types::CommitmentTypeV2::Unpledge { .. } => {}
                 // Unstakes are applied in `apply_unstakes()` after pledges have been processed
-                irys_types::CommitmentTypeV1::Unstake => {}
+                irys_types::CommitmentTypeV2::Unstake => {}
+                // UpdateRewardAddress is handled by `apply_update_reward_addresses()` during epoch processing
+                irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => {}
             }
         }
 
@@ -770,6 +846,8 @@ impl EpochSnapshot {
                 partition_hash: None,
                 signer: stake_commitment.signer(),
                 amount: stake_commitment.value(),
+                // Initialize reward_address to signer - can be updated via UpdateRewardAddress tx
+                reward_address: Some(stake_commitment.signer()),
             };
             self.commitment_state
                 .stake_commitments
@@ -798,6 +876,8 @@ impl EpochSnapshot {
                 partition_hash: None,
                 signer: pledge_commitment.signer(),
                 amount: pledge_commitment.value(),
+                // Pledges don't have their own reward_address - they use the stake's reward_address
+                reward_address: None,
             };
 
             // Add the pledge state to the signer's collection (or create a new collection if first pledge)
@@ -825,7 +905,7 @@ impl EpochSnapshot {
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
         for commitment in commitments {
-            let irys_types::CommitmentTypeV1::Unpledge { partition_hash, .. } =
+            let irys_types::CommitmentTypeV2::Unpledge { partition_hash, .. } =
                 &commitment.commitment_type()
             else {
                 continue;
@@ -1442,7 +1522,7 @@ mod tests {
     mod unpledge_processing {
         use super::*;
         use irys_types::CommitmentStatus;
-        use irys_types::{transaction::CommitmentTypeV1, U256};
+        use irys_types::{transaction::CommitmentTypeV2, U256};
 
         fn setup_snapshot_with_assignment(ph: H256, is_data: bool) -> EpochSnapshot {
             let mut snapshot = EpochSnapshot::default();
@@ -1487,6 +1567,7 @@ mod tests {
                 partition_hash: Some(ph),
                 signer: miner,
                 amount: U256::zero(),
+                reward_address: None,
             };
             snapshot
                 .commitment_state
@@ -1505,7 +1586,7 @@ mod tests {
         ) -> CommitmentTransaction {
             let mut tx = CommitmentTransaction::new(config);
             tx.set_signer(signer);
-            tx.set_commitment_type(CommitmentTypeV1::Unpledge {
+            tx.set_commitment_type(CommitmentTypeV2::Unpledge {
                 pledge_count_before_executing: 1,
                 partition_hash: ph,
             });

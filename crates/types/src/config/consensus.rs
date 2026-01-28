@@ -1,4 +1,4 @@
-use crate::hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig};
+use crate::hardfork_config::{Aurora, Borealis, FrontierParams, IrysHardforkConfig};
 use crate::{serde_utils, unix_timestamp_string_serde, UnixTimestamp};
 use crate::{
     storage_pricing::{
@@ -596,6 +596,7 @@ impl ConsensusConfig {
                 },
                 next_name_tbd: None,
                 aurora: None,
+                borealis: None,
             },
         }
     }
@@ -720,6 +721,10 @@ impl ConsensusConfig {
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
+                // Borealis hardfork - enabled from genesis for testing
+                borealis: Some(Borealis {
+                    activation_timestamp: UnixTimestamp::from_secs(0),
+                }),
             },
         }
     }
@@ -823,6 +828,8 @@ impl ConsensusConfig {
                     minimum_commitment_tx_version: 2,
                 }),
                 next_name_tbd: None,
+                // Borealis hardfork - disabled for testnet (controlled activation)
+                borealis: None,
             },
         }
     }

@@ -65,10 +65,10 @@ pub struct CommitmentTransactionV2 {
 impl Ord for CommitmentTransactionV2 {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         compare_commitment_transactions(
-            &self.commitment_type.into(),
+            &self.commitment_type,
             self.user_fee(),
             self.id,
-            &other.commitment_type.into(),
+            &other.commitment_type,
             other.user_fee(),
             other.id,
         )
@@ -199,6 +199,7 @@ impl CommitmentTransactionV2 {
             CommitmentTypeV2::Pledge { .. } => self.value,
             CommitmentTypeV2::Unpledge { .. } => U256::zero(),
             CommitmentTypeV2::Unstake => U256::zero(),
+            CommitmentTypeV2::UpdateRewardAddress { .. } => U256::zero(),
         };
         U256::from(self.fee).saturating_add(additional_fee)
     }
@@ -288,6 +289,14 @@ impl CommitmentTransactionV2 {
                     });
                 }
             }
+            CommitmentTypeV2::UpdateRewardAddress { .. } => {
+                // UpdateRewardAddress must have zero value (fee-only)
+                if self.value != U256::zero() {
+                    return Err(CommitmentValidationError::InvalidUpdateRewardAddressValue {
+                        provided: self.value,
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -299,11 +308,14 @@ const COMMITMENT_TYPE_STAKE: u8 = 1;
 const COMMITMENT_TYPE_PLEDGE: u8 = 2;
 const COMMITMENT_TYPE_UNPLEDGE: u8 = 3;
 const COMMITMENT_TYPE_UNSTAKE: u8 = 4;
+const COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS: u8 = 5;
 
 // Size constants
 const TYPE_DISCRIMINANT_SIZE: usize = 1;
 const U64_SIZE: usize = 8;
 const PARTITION_HASH_SIZE: usize = 32;
+const IRYS_ADDRESS_SIZE: usize = 20;
+const U256_SIZE: usize = 32;
 
 #[derive(
     PartialEq,
@@ -332,6 +344,11 @@ pub enum CommitmentTypeV2 {
         partition_hash: H256,
     },
     Unstake,
+    UpdateRewardAddress {
+        #[serde(rename = "newRewardAddress")]
+        new_reward_address: IrysAddress,
+        nonce: U256,
+    },
 }
 
 impl From<CommitmentTypeV1> for CommitmentTypeV2 {
@@ -385,6 +402,19 @@ impl Encodable for CommitmentTypeV2 {
                 partition_hash.encode(acc)
             }
             Self::Unstake => COMMITMENT_TYPE_UNSTAKE.encode(acc),
+            Self::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => {
+                alloy_rlp::Header {
+                    list: true,
+                    payload_length: self.alloy_rlp_payload_length(),
+                }
+                .encode(acc);
+                COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS.encode(acc);
+                new_reward_address.encode(acc);
+                nonce.encode(acc);
+            }
         };
     }
 
@@ -409,6 +439,10 @@ impl CommitmentTypeV2 {
                 pledge_count_before_executing,
                 partition_hash,
             } => 1 + pledge_count_before_executing.length() + partition_hash.length(),
+            Self::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => 1 + new_reward_address.length() + nonce.length(),
         }
     }
 }
@@ -463,6 +497,14 @@ impl Decodable for CommitmentTypeV2 {
                     partition_hash: H256::decode(buf)?,
                 })
             }
+            COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS => {
+                let new_reward_address = IrysAddress::decode(buf)?;
+                let nonce = U256::decode(buf)?;
+                Ok(Self::UpdateRewardAddress {
+                    new_reward_address,
+                    nonce,
+                })
+            }
             _ => Err(RlpError::Custom("unknown commitment type in header")),
         }
     }
@@ -499,6 +541,15 @@ impl reth_codecs::Compact for CommitmentTypeV2 {
             Self::Unstake => {
                 buf.put_u8(COMMITMENT_TYPE_UNSTAKE);
                 TYPE_DISCRIMINANT_SIZE
+            }
+            Self::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => {
+                buf.put_u8(COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS);
+                buf.put_slice(new_reward_address.0.as_slice());
+                buf.put_slice(&nonce.to_be_bytes());
+                TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE + U256_SIZE
             }
         }
     }
@@ -569,6 +620,32 @@ impl reth_codecs::Compact for CommitmentTypeV2 {
                 )
             }
             COMMITMENT_TYPE_UNSTAKE => (Self::Unstake, &buf[TYPE_DISCRIMINANT_SIZE..]),
+            COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS => {
+                let required_size = TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE + U256_SIZE;
+                if buf.len() < required_size {
+                    panic!(
+                        "CommitmentTypeV2::from_compact: buffer too short for UpdateRewardAddress variant, \
+                         expected at least {} bytes but got {}",
+                        required_size,
+                        buf.len()
+                    );
+                }
+                let mut addr_bytes = [0_u8; 20];
+                addr_bytes.copy_from_slice(
+                    &buf[TYPE_DISCRIMINANT_SIZE..TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE],
+                );
+                let mut nonce_bytes = [0_u8; 32];
+                nonce_bytes.copy_from_slice(
+                    &buf[TYPE_DISCRIMINANT_SIZE + IRYS_ADDRESS_SIZE..required_size],
+                );
+                (
+                    Self::UpdateRewardAddress {
+                        new_reward_address: IrysAddress(alloy_primitives::FixedBytes(addr_bytes)),
+                        nonce: U256::from_be_bytes(nonce_bytes),
+                    },
+                    &buf[required_size..],
+                )
+            }
             _ => panic!(
                 "CommitmentTypeV2::from_compact: unknown commitment type discriminant: {type_id}"
             ),
@@ -592,6 +669,9 @@ mod tests {
     #[case::unpledge_hundred(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 100, partition_hash: [128_u8; 32].into() })]
     #[case::unpledge_max(CommitmentTypeV2::Unpledge { pledge_count_before_executing: u64::MAX, partition_hash: [u8::MAX; 32].into() })]
     #[case::unstake(CommitmentTypeV2::Unstake)]
+    #[case::update_reward_address_zero_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([1_u8; 20]), nonce: U256::zero() })]
+    #[case::update_reward_address_small_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0x42_u8; 20]), nonce: U256::from(123) })]
+    #[case::update_reward_address_max_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0xff_u8; 20]), nonce: U256::MAX })]
     fn test_commitment_type_rlp_roundtrip(#[case] original: CommitmentTypeV2) {
         // Encode
         let mut buf = BytesMut::new();
@@ -613,6 +693,9 @@ mod tests {
     #[case::pledge_max(CommitmentTypeV2::Pledge { pledge_count_before_executing: u64::MAX }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::unpledge(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 42, partition_hash: [7_u8; 32].into() }, 1 + 8 + 32, COMMITMENT_TYPE_UNPLEDGE)]
     #[case::unstake(CommitmentTypeV2::Unstake, 1, COMMITMENT_TYPE_UNSTAKE)]
+    #[case::update_reward_address_zero_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([1_u8; 20]), nonce: U256::zero() }, 1 + 20 + 32, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS)]
+    #[case::update_reward_address_small_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0x42_u8; 20]), nonce: U256::from(123) }, 1 + 20 + 32, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS)]
+    #[case::update_reward_address_max_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0xff_u8; 20]), nonce: U256::MAX }, 1 + 20 + 32, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS)]
     fn test_commitment_type_compact_roundtrip(
         #[case] original: CommitmentTypeV2,
         #[case] expected_len: usize,

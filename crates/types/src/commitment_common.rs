@@ -138,21 +138,11 @@ impl CommitmentTransaction {
 
     /// Get the commitment type from any version
     /// DO NOT USE FOR SIGNING AND/OR ENCODE-DECODE
-    /// TODO: switch this to CommitmentTypeV2
     #[inline]
-    pub fn commitment_type(&self) -> CommitmentTypeV1 {
+    pub fn commitment_type(&self) -> CommitmentTypeV2 {
         match self {
-            Self::V1(v1) => v1.tx.commitment_type,
-            Self::V2(v2) => v2.tx.commitment_type.into(),
-        }
-    }
-
-    /// Get the v2 commitment type
-    #[inline]
-    pub fn commitment_type_v2(&self) -> Option<CommitmentTypeV2> {
-        match self {
-            Self::V1(_v1) => None,
-            Self::V2(v2) => Some(v2.tx.commitment_type),
+            Self::V1(v1) => v1.tx.commitment_type.into(),
+            Self::V2(v2) => v2.tx.commitment_type,
         }
     }
 
@@ -265,12 +255,13 @@ impl CommitmentTransaction {
     }
 
     /// Set the commitment type
-    /// TODO: change to CommitmentTypeV2
+    /// Note: This will panic if called on a V1 transaction, as V1 transactions
+    /// should only come from deserialization of historical data and should not be modified.
     #[inline]
-    pub fn set_commitment_type(&mut self, commitment_type: CommitmentTypeV1) {
+    pub fn set_commitment_type(&mut self, commitment_type: CommitmentTypeV2) {
         match self {
-            Self::V1(v1) => v1.tx.commitment_type = commitment_type,
-            Self::V2(v2) => v2.tx.commitment_type = commitment_type.into(),
+            Self::V1(_) => panic!("Cannot set commitment type on V1 transaction"),
+            Self::V2(v2) => v2.tx.commitment_type = commitment_type,
         }
     }
 
@@ -477,24 +468,26 @@ impl CommitmentTransaction {
 // Ordering for `CommitmentTransaction` prioritizes transactions as follows:
 /// 1. Stake commitments (fee desc, then id tie-breaker)
 /// 2. Pledge commitments (count asc, then fee desc, then id tie-breaker)
-/// 3. Unpledge commitments (count desc, then fee desc, then id tie-breaker)
-/// 4. Unstake commitments (last, fee desc, then id tie-breaker)
+/// 3. UpdateRewardAddress commitments (nonce asc, then fee desc, then id tie-breaker)
+/// 4. Unpledge commitments (count desc, then fee desc, then id tie-breaker)
+/// 5. Unstake commitments (fee desc, then id tie-breaker)
 pub fn compare_commitment_transactions(
-    self_type: &CommitmentTypeV1,
+    self_type: &CommitmentTypeV2,
     self_fee: U256,
     self_id: H256,
-    other_type: &CommitmentTypeV1,
+    other_type: &CommitmentTypeV2,
     other_fee: U256,
     other_id: H256,
 ) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
-    fn commitment_priority(commitment_type: &CommitmentTypeV1) -> u8 {
+    fn commitment_priority(commitment_type: &CommitmentTypeV2) -> u8 {
         match commitment_type {
-            CommitmentTypeV1::Stake => 0,
-            CommitmentTypeV1::Pledge { .. } => 1,
-            CommitmentTypeV1::Unpledge { .. } => 2,
-            CommitmentTypeV1::Unstake => 3,
+            CommitmentTypeV2::Stake => 0,
+            CommitmentTypeV2::Pledge { .. } => 1,
+            CommitmentTypeV2::UpdateRewardAddress { .. } => 2,
+            CommitmentTypeV2::Unpledge { .. } => 3,
+            CommitmentTypeV2::Unstake => 4,
         }
     }
 
@@ -505,14 +498,14 @@ pub fn compare_commitment_transactions(
         Ordering::Less => Ordering::Less,
         Ordering::Greater => Ordering::Greater,
         Ordering::Equal => match (self_type, other_type) {
-            (CommitmentTypeV1::Stake, CommitmentTypeV1::Stake) => other_fee
+            (CommitmentTypeV2::Stake, CommitmentTypeV2::Stake) => other_fee
                 .cmp(&self_fee)
                 .then_with(|| self_id.cmp(&other_id)),
             (
-                CommitmentTypeV1::Pledge {
+                CommitmentTypeV2::Pledge {
                     pledge_count_before_executing: count_a,
                 },
-                CommitmentTypeV1::Pledge {
+                CommitmentTypeV2::Pledge {
                     pledge_count_before_executing: count_b,
                 },
             ) => count_a // lowest pledge_count_before_executing first
@@ -520,11 +513,11 @@ pub fn compare_commitment_transactions(
                 .then_with(|| other_fee.cmp(&self_fee))
                 .then_with(|| self_id.cmp(&other_id)),
             (
-                CommitmentTypeV1::Unpledge {
+                CommitmentTypeV2::Unpledge {
                     pledge_count_before_executing: count_a,
                     ..
                 },
-                CommitmentTypeV1::Unpledge {
+                CommitmentTypeV2::Unpledge {
                     pledge_count_before_executing: count_b,
                     ..
                 },
@@ -532,8 +525,15 @@ pub fn compare_commitment_transactions(
                 .cmp(count_a)
                 .then_with(|| other_fee.cmp(&self_fee))
                 .then_with(|| self_id.cmp(&other_id)),
-            (CommitmentTypeV1::Unstake, CommitmentTypeV1::Unstake) => other_fee
+            (CommitmentTypeV2::Unstake, CommitmentTypeV2::Unstake) => other_fee
                 .cmp(&self_fee)
+                .then_with(|| self_id.cmp(&other_id)),
+            (
+                CommitmentTypeV2::UpdateRewardAddress { nonce: nonce_a, .. },
+                CommitmentTypeV2::UpdateRewardAddress { nonce: nonce_b, .. },
+            ) => nonce_a
+                .cmp(nonce_b)
+                .then_with(|| other_fee.cmp(&self_fee))
                 .then_with(|| self_id.cmp(&other_id)),
             _ => unreachable!("equal priorities imply identical commitment types"),
         },
@@ -547,42 +547,54 @@ mod tests {
     use rstest::rstest;
     use std::cmp::Ordering;
 
-    fn stake() -> CommitmentTypeV1 {
-        CommitmentTypeV1::Stake
+    fn stake() -> CommitmentTypeV2 {
+        CommitmentTypeV2::Stake
     }
 
-    fn pledge(count: u64) -> CommitmentTypeV1 {
-        CommitmentTypeV1::Pledge {
+    fn pledge(count: u64) -> CommitmentTypeV2 {
+        CommitmentTypeV2::Pledge {
             pledge_count_before_executing: count,
         }
     }
 
-    fn unpledge(count: u64) -> CommitmentTypeV1 {
-        CommitmentTypeV1::Unpledge {
+    fn unpledge(count: u64) -> CommitmentTypeV2 {
+        CommitmentTypeV2::Unpledge {
             pledge_count_before_executing: count,
             partition_hash: H256::zero(),
         }
     }
 
-    fn unstake() -> CommitmentTypeV1 {
-        CommitmentTypeV1::Unstake
+    fn unstake() -> CommitmentTypeV2 {
+        CommitmentTypeV2::Unstake
+    }
+
+    fn update_reward_address(nonce: u64) -> CommitmentTypeV2 {
+        CommitmentTypeV2::UpdateRewardAddress {
+            nonce: U256::from(nonce),
+            new_reward_address: IrysAddress::ZERO,
+        }
     }
 
     // ===================
-    // Cross-type priority: Stake < Pledge < Unpledge < Unstake
+    // Cross-type priority: Stake < Pledge < UpdateRewardAddress < Unpledge < Unstake
     // ===================
     #[rstest]
     #[case(stake(), pledge(0), Ordering::Less)]
+    #[case(stake(), update_reward_address(0), Ordering::Less)]
     #[case(stake(), unpledge(0), Ordering::Less)]
     #[case(stake(), unstake(), Ordering::Less)]
+    #[case(pledge(0), update_reward_address(0), Ordering::Less)]
     #[case(pledge(0), unpledge(0), Ordering::Less)]
     #[case(pledge(0), unstake(), Ordering::Less)]
+    #[case(update_reward_address(0), unpledge(0), Ordering::Less)]
+    #[case(update_reward_address(0), unstake(), Ordering::Less)]
     #[case(unpledge(0), unstake(), Ordering::Less)]
     #[case(unstake(), stake(), Ordering::Greater)]
     #[case(unpledge(0), pledge(0), Ordering::Greater)]
+    #[case(unpledge(0), update_reward_address(0), Ordering::Greater)]
     fn test_cross_type_priority(
-        #[case] self_type: CommitmentTypeV1,
-        #[case] other_type: CommitmentTypeV1,
+        #[case] self_type: CommitmentTypeV2,
+        #[case] other_type: CommitmentTypeV2,
         #[case] expected: Ordering,
     ) {
         let result = compare_commitment_transactions(
@@ -628,6 +640,7 @@ mod tests {
         let test_cases = [
             (stake(), stake()),
             (pledge(0), pledge(0)),
+            (update_reward_address(0), update_reward_address(0)),
             (unpledge(0), unpledge(0)),
             (unstake(), unstake()),
         ];
@@ -745,6 +758,45 @@ mod tests {
             U256::from(self_fee),
             H256::zero(),
             &unstake(),
+            U256::from(other_fee),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case(1, 5, Ordering::Less)] // lower nonce comes first
+    #[case(5, 1, Ordering::Greater)]
+    #[case(3, 3, Ordering::Equal)]
+    fn test_update_reward_address_nonce_ordering(
+        #[case] self_nonce: u64,
+        #[case] other_nonce: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &update_reward_address(self_nonce),
+            U256::from(100),
+            H256::zero(),
+            &update_reward_address(other_nonce),
+            U256::from(100),
+            H256::zero(),
+        );
+        assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case(200, 100, Ordering::Less)] // same nonce, higher fee comes first
+    #[case(100, 200, Ordering::Greater)]
+    fn test_update_reward_address_fee_after_nonce(
+        #[case] self_fee: u64,
+        #[case] other_fee: u64,
+        #[case] expected: Ordering,
+    ) {
+        let result = compare_commitment_transactions(
+            &update_reward_address(5),
+            U256::from(self_fee),
+            H256::zero(),
+            &update_reward_address(5),
             U256::from(other_fee),
             H256::zero(),
         );
