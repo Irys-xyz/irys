@@ -202,7 +202,8 @@ pub fn run_server(app_state: ApiState, listener: TcpListener) -> Server {
             .route("/", web::get().to(|| async { Redirect::to("/v1/info") }))
             .service(routes())
             .wrap(Cors::permissive())
-            .wrap(TracingLogger::default()) // TODO: figure out how to change the `target` so we can easily filter HTTP and Gossip server logs
+            .wrap(TracingLogger::default())
+            .wrap(metrics::RequestMetrics)
     })
     .listen(listener)
     .unwrap()
