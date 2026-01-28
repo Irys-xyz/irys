@@ -159,7 +159,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(irys_mempool_chunks_duplicates_total[5m])) / (sum(rate(irys_mempool_chunks_ingested_total[5m])) + sum(rate(irys_mempool_chunks_duplicates_total[5m]))) * 100",
+          "expr": "100 * sum(rate(irys_mempool_chunks_duplicates_total[5m])) / clamp_min(sum(rate(irys_mempool_chunks_ingested_total[5m])) + sum(rate(irys_mempool_chunks_duplicates_total[5m])), 1)",
           "legendFormat": "dup %",
           "refId": "A"
         }
