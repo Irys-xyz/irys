@@ -15,11 +15,11 @@ static SYNC_STATE: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_UP: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_UPTIME: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_START_TIME: OnceLock<Instant> = OnceLock::new();
+static VDF_GLOBAL_STEP: OnceLock<Gauge<u64>> = OnceLock::new();
 static VDF_MINING_ENABLED: OnceLock<Gauge<u64>> = OnceLock::new();
 static STORAGE_MODULES_TOTAL: OnceLock<Gauge<u64>> = OnceLock::new();
 static PARTITIONS_ASSIGNED: OnceLock<Gauge<u64>> = OnceLock::new();
 static PARTITIONS_UNASSIGNED: OnceLock<Gauge<u64>> = OnceLock::new();
-static VDF_GLOBAL_STEP: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_SHUTDOWN: OnceLock<Counter<u64>> = OnceLock::new();
 static PLEDGE_TX_POSTED: OnceLock<Counter<u64>> = OnceLock::new();
 static PEER_FETCH_ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
@@ -40,7 +40,7 @@ pub(crate) fn record_peer_count(count: u64) {
     PEER_COUNT
         .get_or_init(|| {
             meter()
-                .u64_gauge("irys.chain.peer_count")
+                .u64_gauge("irys.p2p.peer_count")
                 .with_description("Number of connected peers")
                 .build()
         })
@@ -158,7 +158,7 @@ pub(crate) fn record_partitions_unassigned(count: u64) {
         .record(count, &[]);
 }
 
-pub(crate) fn record_node_shutdown(reason: &'static str) {
+pub(crate) fn record_node_shutdown(reason: &str) {
     NODE_SHUTDOWN
         .get_or_init(|| {
             meter()
@@ -166,7 +166,7 @@ pub(crate) fn record_node_shutdown(reason: &'static str) {
                 .with_description("Node shutdown events by reason")
                 .build()
         })
-        .add(1, &[KeyValue::new("reason", reason)]);
+        .add(1, &[KeyValue::new("reason", reason.to_owned())]);
 }
 
 pub(crate) fn record_pledge_tx_posted() {
@@ -180,7 +180,7 @@ pub(crate) fn record_pledge_tx_posted() {
         .add(1, &[]);
 }
 
-pub(crate) fn record_peer_fetch_error(error_type: &'static str) {
+pub(crate) fn record_peer_fetch_error(error_type: &str) {
     PEER_FETCH_ERRORS
         .get_or_init(|| {
             meter()
@@ -188,7 +188,7 @@ pub(crate) fn record_peer_fetch_error(error_type: &'static str) {
                 .with_description("Peer fetch errors by type")
                 .build()
         })
-        .add(1, &[KeyValue::new("error_type", error_type)]);
+        .add(1, &[KeyValue::new("error_type", error_type.to_owned())]);
 }
 
 pub(crate) fn record_reth_fcu_head_height(height: u64) {
