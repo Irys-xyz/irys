@@ -27,6 +27,11 @@ impl Config {
         }))
     }
 
+    pub fn new_with_random_peer_id(node_config: NodeConfig) -> Self {
+        let peer_id = IrysPeerId::random();
+        Self::new(node_config, peer_id)
+    }
+
     pub fn peer_id(&self) -> IrysPeerId {
         self.0.peer_id
     }

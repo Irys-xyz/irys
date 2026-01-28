@@ -5,7 +5,7 @@ use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
 use irys_types::chainspec::irys_chain_spec;
-use irys_types::{Config, IrysPeerId, NodeConfig, H256};
+use irys_types::{Config, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_provider::{providers::StaticFileProvider, ProviderFactory};
@@ -101,7 +101,7 @@ async fn main() -> eyre::Result<()> {
         }
         Commands::InitState { state_path } => {
             let node_config: NodeConfig = load_config()?;
-            let config = Config::new(node_config.clone(), IrysPeerId::random());
+            let config = Config::new_with_random_peer_id(node_config.clone());
             // Convert timestamp from millis to seconds for reth
             let timestamp_secs =
                 std::time::Duration::from_millis(config.consensus.genesis.timestamp_millis as u64)
@@ -292,7 +292,7 @@ pub fn cli_init_reth_provider() -> eyre::Result<(
             );
             NodeConfig::testnet()
         });
-    let config = Config::new(node_config.clone(), IrysPeerId::random());
+    let config = Config::new_with_random_peer_id(node_config.clone());
 
     // open the Reth database
     let db_path = node_config.reth_data_dir().join("db");

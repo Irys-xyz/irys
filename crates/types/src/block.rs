@@ -1458,7 +1458,7 @@ mod tests {
         // setup
         let mut header = IrysBlockHeader::V1(mock_header());
         let testing_config = NodeConfig::testing();
-        let config = Config::new(testing_config, crate::IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(testing_config);
         let signer = config.irys_signer();
 
         // action

@@ -9,7 +9,7 @@ use irys_types::{
     ie,
     partition::{PartitionAssignment, PartitionHash},
     remote_packing::PackingWorkerConfig,
-    Config, ConsensusConfig, IrysPeerId, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
+    Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
     RemotePackingConfig, StorageSyncConfig,
 };
 use irys_utils::listener::create_listener;
@@ -91,7 +91,7 @@ pub async fn heavy_packing_worker_full_node_test() -> eyre::Result<()> {
         base_directory: base_path.clone(),
         ..NodeConfig::testing()
     };
-    let config = Config::new(node_config, IrysPeerId::random());
+    let config = Config::new_with_random_peer_id(node_config);
 
     let infos = [StorageModuleInfo {
         id: 0,

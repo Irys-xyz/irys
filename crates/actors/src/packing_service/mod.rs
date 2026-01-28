@@ -488,7 +488,7 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         partition::{PartitionAssignment, PartitionHash},
-        Config, ConsensusConfig, IrysPeerId, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
+        Config, ConsensusConfig, NodeConfig, PartitionChunkOffset, PartitionChunkRange,
         StorageSyncConfig,
     };
     use tokio::sync::Semaphore;
@@ -523,7 +523,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config, IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(node_config);
 
         let infos = [StorageModuleInfo {
             id: 0,
@@ -914,7 +914,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        Config::new(node_config, IrysPeerId::random())
+        Config::new_with_random_peer_id(node_config)
     }
 
     fn create_test_storage_module(

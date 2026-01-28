@@ -138,7 +138,7 @@ mod tests {
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
         partition_chunk_offset_ie, Base64, Config, ConsensusConfig, DataTransactionLedger,
-        IrysPeerId, LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk, H256,
+        LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk, H256,
     };
     use nodit::interval::ii;
     use rand::Rng as _;
@@ -156,7 +156,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config, IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(node_config);
         let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),

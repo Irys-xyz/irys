@@ -272,7 +272,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vdf_step() {
-        let config = Config::new(NodeConfig::testing(), IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let mut hasher = Sha256::new();
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
@@ -314,7 +314,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new(node_config, IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(node_config);
 
         let seed = H256::random();
         let reset_seed = H256::random();
@@ -435,7 +435,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new(node_config, IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(node_config);
 
         let seed = H256::random();
         let reset_seed = H256::random();

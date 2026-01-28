@@ -1648,7 +1648,7 @@ mod tests {
     async fn handle_invalid_block_penalizes_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config, IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env =
             open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf()).expect("db");
         let db = DatabaseProvider(Arc::new(db_env));

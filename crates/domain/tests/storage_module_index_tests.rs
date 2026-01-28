@@ -11,8 +11,8 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::{
     ledger_chunk_offset_ii, partition::PartitionAssignment, partition_chunk_offset_ie,
     partition_chunk_offset_ii, Base64, Config, ConsensusConfig, ConsensusOptions, DataTransaction,
-    DataTransactionHeader, DataTransactionLedger, IrysPeerId, LedgerChunkOffset, LedgerChunkRange,
-    NodeConfig, PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk, H256,
+    DataTransactionHeader, DataTransactionLedger, LedgerChunkOffset, LedgerChunkRange, NodeConfig,
+    PartitionChunkOffset, PartitionChunkRange, TxChunkOffset, UnpackedChunk, H256,
 };
 use openssl::sha;
 use reth_db::Database as _;
@@ -35,7 +35,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         ..node_config.consensus_config()
     });
     node_config.base_directory = base_path;
-    let config = Config::new(node_config, IrysPeerId::random());
+    let config = Config::new_with_random_peer_id(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in
     // slots 0, 1, and 2

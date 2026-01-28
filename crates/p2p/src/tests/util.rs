@@ -327,8 +327,7 @@ impl GossipServiceTestFixture {
         node_config.mining_key = random_signer.signer;
         // Generate a distinct peer_id for this test fixture
         // peer_id is separate from mining_address in V2
-        let peer_id = IrysPeerId::random();
-        let config = Config::new(node_config, peer_id);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -577,7 +576,7 @@ fn random_free_port() -> u16 {
 #[must_use]
 pub(crate) fn generate_test_tx() -> DataTransaction {
     let testing_config = NodeConfig::testing();
-    let config = Config::new(testing_config, IrysPeerId::random());
+    let config = Config::new_with_random_peer_id(testing_config);
     let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();

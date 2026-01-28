@@ -2922,7 +2922,7 @@ mod tests {
     use irys_types::{
         hash_sha256, irys::IrysSigner, partition::PartitionAssignment, Base64, BlockHash,
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
-        IrysBlockHeaderV1, IrysPeerId, NodeConfig, Signature, H256, U256,
+        IrysBlockHeaderV1, NodeConfig, Signature, H256, U256,
     };
     use std::sync::{Arc, RwLock};
     use tempfile::TempDir;
@@ -2953,7 +2953,7 @@ mod tests {
             base_directory: data_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config, IrysPeerId::random());
+        let config = Config::new_with_random_peer_id(node_config);
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;
