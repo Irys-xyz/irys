@@ -1,4 +1,4 @@
-use opentelemetry::metrics::{Counter, Histogram};
+use opentelemetry::metrics::Counter;
 use opentelemetry::{global, KeyValue};
 use std::sync::OnceLock;
 
@@ -9,8 +9,6 @@ fn meter() -> opentelemetry::metrics::Meter {
 static CHUNKS_INGESTED: OnceLock<Counter<u64>> = OnceLock::new();
 static BYTES_INGESTED: OnceLock<Counter<u64>> = OnceLock::new();
 static DUPLICATES: OnceLock<Counter<u64>> = OnceLock::new();
-static VALIDATION_MS: OnceLock<Histogram<f64>> = OnceLock::new();
-static STORAGE_MS: OnceLock<Histogram<f64>> = OnceLock::new();
 static ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
 
 pub(super) fn record_chunk_ingested(bytes: u64) {
@@ -39,28 +37,6 @@ pub(super) fn record_chunk_duplicate() {
                 .build()
         })
         .add(1, &[]);
-}
-
-pub(super) fn record_validation_duration(ms: f64) {
-    VALIDATION_MS
-        .get_or_init(|| {
-            meter()
-                .f64_histogram("irys.mempool.chunks.validation_duration_ms")
-                .with_description("Chunk proof validation latency")
-                .build()
-        })
-        .record(ms, &[]);
-}
-
-pub(super) fn record_storage_duration(ms: f64) {
-    STORAGE_MS
-        .get_or_init(|| {
-            meter()
-                .f64_histogram("irys.mempool.chunks.storage_duration_ms")
-                .with_description("Chunk database storage latency")
-                .build()
-        })
-        .record(ms, &[]);
 }
 
 pub(super) fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
