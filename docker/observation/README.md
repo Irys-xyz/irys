@@ -55,11 +55,12 @@ cp .env.example .env
 
 ### Including in Other Compose Files
 
-<<<<<<< HEAD
-Use Docker Compose's `include` directive to add the observability stack to your project (requires Docker Compose **v2.20+** / Docker Desktop **4.22+**):
-=======
-Use Docker Compose's `include` directive to add the observability stack to your project:
->>>>>>> 3c13b3fb (fix(logging): use a self hosted stack for monitoring instead of Axiom)
+Use Docker Compose's `include` directive to add the observability stack to your project.
+
+> **Requires Docker Compose v2.20+** for `include` support. For older versions, use:
+> ```bash
+> docker compose -f docker/observation/docker-compose.yaml -f docker/tests/your-test/docker-compose.yaml up -d
+> ```
 
 ```yaml
 # docker/tests/your-test/docker-compose.yaml

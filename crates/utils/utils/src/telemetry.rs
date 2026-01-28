@@ -285,6 +285,7 @@ pub fn init_telemetry() -> Result<()> {
         "OpenTelemetry telemetry initialized - logs, traces, metrics, and Reth metrics will be exported"
     );
 
+    opentelemetry::global::set_meter_provider(meter_provider);
     let _ = INIT_GUARD.set(());
 
     Ok(())
