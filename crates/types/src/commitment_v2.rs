@@ -669,6 +669,9 @@ mod tests {
     #[case::unpledge_hundred(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 100, partition_hash: [128_u8; 32].into() })]
     #[case::unpledge_max(CommitmentTypeV2::Unpledge { pledge_count_before_executing: u64::MAX, partition_hash: [u8::MAX; 32].into() })]
     #[case::unstake(CommitmentTypeV2::Unstake)]
+    #[case::update_reward_address_zero_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([1_u8; 20]), nonce: U256::zero() })]
+    #[case::update_reward_address_small_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0x42_u8; 20]), nonce: U256::from(123) })]
+    #[case::update_reward_address_max_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0xff_u8; 20]), nonce: U256::MAX })]
     fn test_commitment_type_rlp_roundtrip(#[case] original: CommitmentTypeV2) {
         // Encode
         let mut buf = BytesMut::new();
@@ -690,6 +693,9 @@ mod tests {
     #[case::pledge_max(CommitmentTypeV2::Pledge { pledge_count_before_executing: u64::MAX }, 9, COMMITMENT_TYPE_PLEDGE)]
     #[case::unpledge(CommitmentTypeV2::Unpledge { pledge_count_before_executing: 42, partition_hash: [7_u8; 32].into() }, 1 + 8 + 32, COMMITMENT_TYPE_UNPLEDGE)]
     #[case::unstake(CommitmentTypeV2::Unstake, 1, COMMITMENT_TYPE_UNSTAKE)]
+    #[case::update_reward_address_zero_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([1_u8; 20]), nonce: U256::zero() }, 1 + 20 + 32, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS)]
+    #[case::update_reward_address_small_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0x42_u8; 20]), nonce: U256::from(123) }, 1 + 20 + 32, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS)]
+    #[case::update_reward_address_max_nonce(CommitmentTypeV2::UpdateRewardAddress { new_reward_address: IrysAddress::from([0xff_u8; 20]), nonce: U256::MAX }, 1 + 20 + 32, COMMITMENT_TYPE_UPDATE_REWARD_ADDRESS)]
     fn test_commitment_type_compact_roundtrip(
         #[case] original: CommitmentTypeV2,
         #[case] expected_len: usize,

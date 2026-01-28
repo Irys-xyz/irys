@@ -11,10 +11,10 @@ use irys_types::{
 };
 use irys_types::{
     partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
-    PartitionChunkOffset,
+    PartitionChunkOffset, U256,
 };
 use openssl::sha;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use tracing::{debug, error, trace, warn};
 
@@ -364,21 +364,41 @@ impl EpochSnapshot {
     /// Applies update reward address operations found in a set of epoch commitments.
     ///
     /// Behavior:
-    /// - For each UpdateRewardAddress commitment, verify the signer has an active stake.
-    /// - Update the stake entry's reward_address field to the new address.
+    /// - For each UpdateRewardAddress commitment, tracks the highest nonce per signer.
+    /// - Only the UpdateRewardAddress with the highest nonce per signer is applied.
+    /// - Verifies the signer has an active stake before applying.
+    /// - Updates the stake entry's reward_address field to the new address.
     pub fn apply_update_reward_addresses(
         &mut self,
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
+        // Build a map tracking the highest nonce per signer
+        let mut highest_nonce_map: HashMap<IrysAddress, (U256, IrysAddress)> = HashMap::new();
+
         for commitment in commitments {
             let irys_types::CommitmentTypeV2::UpdateRewardAddress {
-                new_reward_address, ..
+                new_reward_address,
+                nonce,
             } = &commitment.commitment_type()
             else {
                 continue;
             };
             let signer = commitment.signer();
 
+            // Update map if this nonce is higher than what we've seen for this signer
+            highest_nonce_map
+                .entry(signer)
+                .and_modify(|(existing_nonce, existing_addr)| {
+                    if nonce > existing_nonce {
+                        *existing_nonce = *nonce;
+                        *existing_addr = *new_reward_address;
+                    }
+                })
+                .or_insert((*nonce, *new_reward_address));
+        }
+
+        // Now apply the updates from the map
+        for (signer, (nonce, new_reward_address)) in highest_nonce_map {
             // Get mutable reference to stake entry; error if not found
             let stake_entry = self
                 .commitment_state
@@ -387,11 +407,12 @@ impl EpochSnapshot {
                 .ok_or(EpochSnapshotError::UpdateRewardAddressSignerNotStaked { signer })?;
 
             // Update the reward address
-            stake_entry.reward_address = Some(*new_reward_address);
+            stake_entry.reward_address = Some(new_reward_address);
 
             debug!(
                 tx.signer = %signer,
                 tx.new_reward_address = %new_reward_address,
+                tx.nonce = %nonce,
                 "update_reward_address_applied"
             );
         }

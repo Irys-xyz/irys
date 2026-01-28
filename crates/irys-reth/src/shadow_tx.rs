@@ -123,6 +123,10 @@ pub struct UpdateRewardAddressDebit {
     pub target: Address,
     /// Reference to the consensus layer transaction that resulted in this shadow tx.
     pub irys_ref: FixedBytes<32>,
+    /// New reward address being set.
+    pub new_reward_address: Address,
+    /// Nonce for ordering multiple updates from the same signer.
+    pub nonce: U256,
 }
 
 impl TransactionPacket {
@@ -596,6 +600,8 @@ impl BorshSerialize for UpdateRewardAddressDebit {
     fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
         writer.write_all(self.target.as_slice())?;
         writer.write_all(self.irys_ref.as_slice())?;
+        writer.write_all(self.new_reward_address.as_slice())?;
+        writer.write_all(&self.nonce.to_be_bytes::<32>())?;
         Ok(())
     }
 }
@@ -605,10 +611,25 @@ impl BorshDeserialize for UpdateRewardAddressDebit {
         let mut addr = [0_u8; 20];
         reader.read_exact(&mut addr)?;
         let target = Address::from_slice(&addr);
+
         let mut ref_buf = [0_u8; 32];
         reader.read_exact(&mut ref_buf)?;
         let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
-        Ok(Self { target, irys_ref })
+
+        let mut new_addr = [0_u8; 20];
+        reader.read_exact(&mut new_addr)?;
+        let new_reward_address = Address::from_slice(&new_addr);
+
+        let mut nonce_buf = [0_u8; 32];
+        reader.read_exact(&mut nonce_buf)?;
+        let nonce = U256::from_be_bytes(nonce_buf);
+
+        Ok(Self {
+            target,
+            irys_ref,
+            new_reward_address,
+            nonce,
+        })
     }
 }
 

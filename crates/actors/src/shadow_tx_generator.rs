@@ -427,13 +427,18 @@ impl<'a> ShadowTxGenerator<'a> {
                 ),
                 transaction_fee: tx.fee() as u128,
             }),
-            irys_types::CommitmentTypeV2::UpdateRewardAddress { .. } => Ok(ShadowMetadata {
+            irys_types::CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address,
+                nonce,
+            } => Ok(ShadowMetadata {
                 // Inclusion-time behavior: fee-only via priority fee; no treasury movement here
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::UpdateRewardAddress(
                         irys_reth::shadow_tx::UpdateRewardAddressDebit {
                             target: tx.signer().into(),
                             irys_ref: tx.id().into(),
+                            new_reward_address: new_reward_address.into(),
+                            nonce: nonce.into(),
                         },
                     ),
                     (*self.solution_hash).into(),

@@ -40,7 +40,7 @@ use crate::utils::IrysNodeTest;
 async fn heavy_test_ledger_expiry_with_concurrent_unstake() -> eyre::Result<()> {
     // Configuration - use smaller epochs to reduce test time
     let num_blocks_in_epoch: usize = 2; // Smaller epochs for faster test
-    let submit_ledger_epoch_length: u64 = 1; // Data expires after 1 epoch (faster)
+    let submit_ledger_epoch_length: u64 = 2; // Data expires after 2 epochs (matches num_blocks_in_epoch)
     let chunk_size = 32_u64;
     let num_chunks_in_partition = 10_u64;
     let seconds_to_wait = 30;

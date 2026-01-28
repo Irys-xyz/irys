@@ -827,10 +827,11 @@ mod borealis_hardfork {
         Ok(())
     }
 
-    /// Test that UpdateRewardAddress transactions in mempool before activation
-    /// are filtered out by the block producer when blocks are mined after activation.
+    /// Test that UpdateRewardAddress transactions are allowed and included by the block
+    /// producer when Borealis is active from the start.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_borealis_block_producer_filters_pre_activation() -> eyre::Result<()> {
+    async fn heavy_test_borealis_block_producer_allows_post_activation_update_reward_address(
+    ) -> eyre::Result<()> {
         initialize_tracing();
 
         // Start with Borealis already active so we can submit the tx
