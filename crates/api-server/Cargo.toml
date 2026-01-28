@@ -26,7 +26,7 @@ futures.workspace = true
 actix-cors = "0.7"
 tracing.workspace = true
 opentelemetry.workspace = true
-tracing-actix-web = "0.7"
+tracing-actix-web = { version = "0.7", features = ["opentelemetry_0_31"] }
 eyre.workspace = true
 thiserror.workspace = true
 

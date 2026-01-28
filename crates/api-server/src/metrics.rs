@@ -1,29 +1,45 @@
 use actix_web::dev::{Service, ServiceRequest, ServiceResponse, Transform};
 use futures::future::{ok, Ready};
+use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::{global, KeyValue};
+use std::sync::OnceLock;
 use std::{future::Future, pin::Pin, time::Instant};
 
 fn meter() -> opentelemetry::metrics::Meter {
     global::meter("irys-api-server")
 }
 
+static CHUNKS_RECEIVED: OnceLock<Counter<u64>> = OnceLock::new();
+static BYTES_RECEIVED: OnceLock<Counter<u64>> = OnceLock::new();
+static CHUNK_ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
+static REQUEST_DURATION_MS: OnceLock<Histogram<f64>> = OnceLock::new();
+static REQUESTS_TOTAL: OnceLock<Counter<u64>> = OnceLock::new();
+
 pub fn record_chunk_received(bytes: u64) {
-    let m = meter();
-    m.u64_counter("irys.api.chunks.received_total")
-        .with_description("Total chunks received via API")
-        .build()
-        .add(1, &[]);
-    m.u64_counter("irys.api.chunks.bytes_received_total")
-        .with_description("Total bytes received in chunk payloads")
-        .build()
-        .add(bytes, &[]);
+    let chunks = CHUNKS_RECEIVED.get_or_init(|| {
+        meter()
+            .u64_counter("irys.api.chunks.received_total")
+            .with_description("Total chunks received via API")
+            .build()
+    });
+    let bytes_counter = BYTES_RECEIVED.get_or_init(|| {
+        meter()
+            .u64_counter("irys.api.chunks.bytes_received_total")
+            .with_description("Total bytes received in chunk payloads")
+            .build()
+    });
+    chunks.add(1, &[]);
+    bytes_counter.add(bytes, &[]);
 }
 
 pub fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
-    meter()
-        .u64_counter("irys.api.chunks.errors_total")
-        .with_description("Chunk processing errors by type")
-        .build()
+    CHUNK_ERRORS
+        .get_or_init(|| {
+            meter()
+                .u64_counter("irys.api.chunks.errors_total")
+                .with_description("Chunk processing errors by type")
+                .build()
+        })
         .add(
             1,
             &[
@@ -99,15 +115,21 @@ where
                 KeyValue::new("status", status),
             ];
 
-            let m = meter();
-            m.f64_histogram("irys.api.http.request_duration_ms")
-                .with_description("HTTP request processing latency in milliseconds")
-                .build()
-                .record(duration_ms, &attrs);
-            m.u64_counter("irys.api.http.requests_total")
-                .with_description("Total HTTP requests by method, path, and status")
-                .build()
-                .add(1, &attrs);
+            let duration_hist = REQUEST_DURATION_MS.get_or_init(|| {
+                meter()
+                    .f64_histogram("irys.api.http.request_duration_ms")
+                    .with_description("HTTP request processing latency in milliseconds")
+                    .build()
+            });
+            let requests_counter = REQUESTS_TOTAL.get_or_init(|| {
+                meter()
+                    .u64_counter("irys.api.http.requests_total")
+                    .with_description("Total HTTP requests by method, path, and status")
+                    .build()
+            });
+
+            duration_hist.record(duration_ms, &attrs);
+            requests_counter.add(1, &attrs);
 
             Ok(res)
         })
