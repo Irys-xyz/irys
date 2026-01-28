@@ -1763,11 +1763,10 @@ pub async fn commitment_txs_are_valid(
     };
 
     // Validate Borealis: reject UpdateRewardAddress if not activated
-    if !is_epoch_block
-        && !config
-            .consensus
-            .hardforks
-            .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
+    if !config
+        .consensus
+        .hardforks
+        .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
     {
         for (idx, tx) in commitment_txs.iter().enumerate() {
             if matches!(

@@ -764,9 +764,6 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    // ===================
-    // UpdateRewardAddress: nonce asc (lowest first), then fee desc, then id asc
-    // ===================
     #[rstest]
     #[case(1, 5, Ordering::Less)] // lower nonce comes first
     #[case(5, 1, Ordering::Greater)]

@@ -698,14 +698,6 @@ mod epoch_block_filtering {
     }
 }
 
-// =============================================================================
-// Borealis Hardfork Tests
-// =============================================================================
-//
-// Borealis hardfork enables UpdateRewardAddress commitment transactions.
-// Activation is epoch-aligned: enabled for all blocks in an epoch if the
-// epoch block's timestamp >= activation_timestamp.
-
 #[cfg(test)]
 mod borealis_hardfork {
     use super::*;
