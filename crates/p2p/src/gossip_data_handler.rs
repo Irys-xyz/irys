@@ -1,10 +1,7 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
-    metrics::{
-        record_gossip_chunk_error, record_gossip_chunk_processing_duration,
-        record_gossip_chunk_received,
-    },
+    metrics::{record_gossip_chunk_error, record_gossip_chunk_received},
     rate_limiting::{DataRequestTracker, RequestCheckResult},
     types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
@@ -86,12 +83,11 @@ where
     M: MempoolFacade,
     B: BlockDiscoveryFacade,
 {
-    #[tracing::instrument(level = "trace", skip_all, err)]
+    #[tracing::instrument(level = "info", skip_all, err)]
     pub(crate) async fn handle_chunk(
         &self,
         chunk_request: GossipRequestV2<UnpackedChunk>,
     ) -> GossipResult<()> {
-        let start = Instant::now();
         let source_peer_id = chunk_request.peer_id;
         let chunk = chunk_request.data;
         let chunk_size = chunk.bytes.0.len() as u64;
@@ -101,16 +97,12 @@ where
 
         match self.mempool.handle_chunk_ingress(chunk).await {
             Ok(()) => {
-                // Record processing duration on success
-                record_gossip_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
-
                 // Success. Mempool will send the tx data to the internal mempool,
                 //  but we still need to update the cache with the source address.
                 self.cache
                     .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
-                record_gossip_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
                 record_gossip_chunk_error(error.error_type(), error.is_advisory());
 
                 Err(match error {
