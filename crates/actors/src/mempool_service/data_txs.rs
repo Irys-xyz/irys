@@ -1,6 +1,7 @@
 use crate::mempool_service::metrics::record_chunk_error;
 use crate::mempool_service::TxIngressError;
 use crate::mempool_service::{Inner, TxReadError};
+use crate::metrics;
 use eyre::eyre;
 use irys_database::{
     block_header_by_hash, db::IrysDatabaseExt as _, tables::CachedDataRoots, tx_header_by_txid,
@@ -81,6 +82,7 @@ impl Inner {
         self.cache_data_root_with_expiry(tx, expiry_height);
         self.process_pending_chunks_for_root(tx.data_root).await?;
         self.broadcast_tx_gossip(tx);
+        metrics::record_data_tx_ingested();
         Ok(())
     }
     /// check the mempool and mdbx for data transaction
@@ -268,6 +270,7 @@ impl Inner {
                 tx.signer = %tx.signer,
                 "Insufficient balance for data tx"
             );
+            metrics::record_data_tx_unfunded();
             return Err(TxIngressError::Unfunded(tx.id));
         }
 

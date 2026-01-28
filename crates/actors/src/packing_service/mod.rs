@@ -98,6 +98,8 @@ use irys_types::{
 use tokio::sync::{mpsc, oneshot, Notify, Semaphore};
 use tracing::{debug, info, warn};
 
+use crate::metrics;
+
 use self::{
     strategies::{cpu::CpuPackingStrategy, remote::RemotePackingStrategy, PackingStrategy},
     types::PackingServiceMessage,
@@ -231,6 +233,10 @@ impl PackingService {
             };
 
             let _guard = ActiveWorkerGuard::new(self.active_workers.clone(), self.notify.clone());
+            metrics::record_packing_workers(
+                self.active_workers.load(Ordering::Relaxed) as u64,
+                self.semaphore.available_permits() as u64,
+            );
 
             // TODO(optimization): Check for already-packed ranges.
 
