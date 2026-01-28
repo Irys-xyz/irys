@@ -5173,6 +5173,7 @@ dependencies = [
  "awc",
  "base58",
  "eyre",
+ "futures",
  "hex",
  "irys-actors",
  "irys-database",

@@ -1,6 +1,6 @@
 use crate::{
     error::{ApiError, ApiStatusResponse},
-    metrics::{record_chunk_error, record_chunk_processing_duration, record_chunk_received},
+    metrics::{record_chunk_error, record_chunk_received},
     ApiState,
 };
 use actix_web::{
@@ -11,7 +11,6 @@ use actix_web::{
 use awc::http::StatusCode;
 use irys_actors::{ChunkIngressError, MempoolServiceMessage};
 use irys_types::UnpackedChunk;
-use std::time::Instant;
 use tracing::{info, warn};
 
 /// Handles the HTTP POST request for adding a chunk to the mempool.
@@ -22,8 +21,6 @@ pub async fn post_chunk(
     state: web::Data<ApiState>,
     body: Json<UnpackedChunk>,
 ) -> Result<HttpResponse, ApiError> {
-    let start = Instant::now();
-
     let chunk = body.into_inner();
     let chunk_size = chunk.bytes.0.len() as u64;
     let data_root = chunk.data_root;
@@ -87,9 +84,6 @@ pub async fn post_chunk(
             Err((format!("{err:?}"), status).into())
         };
     }
-
-    // Record processing duration on success
-    record_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
 
     // If everything succeeded, return an HTTP 200 OK response
     Ok(HttpResponse::Ok()
