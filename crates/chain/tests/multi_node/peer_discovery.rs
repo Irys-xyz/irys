@@ -11,8 +11,8 @@ use alloy_genesis::GenesisAccount;
 use irys_domain::ScoreDecreaseReason;
 use irys_p2p::{GossipResponse, GossipRoutes, RejectionReason};
 use irys_types::{
-    build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequest, HandshakeResponse, NodeConfig,
-    PeerAddress, RethPeerInfo,
+    build_user_agent, irys::IrysSigner, BlockHash, HandshakeRequestV2, HandshakeResponse,
+    IrysPeerId, NodeConfig, PeerAddress, RethPeerInfo,
 };
 use tracing::{debug, error, info};
 
@@ -61,7 +61,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     // Post a 3 peer requests from different mining addresses, have them report
     // different IP addresses
     let miner_signer_1 = IrysSigner::random_signer(&config.consensus_config());
-    let mut version_request = HandshakeRequest {
+    let mut version_request = HandshakeRequestV2 {
         chain_id: miner_signer_1.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.1:8080".parse().expect("valid socket address"),
@@ -71,12 +71,13 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
             },
         },
+        peer_id: IrysPeerId::random(),
         mining_address: miner_signer_1.address(),
         user_agent: Some(build_user_agent("miner1", "0.1.0")),
         ..Default::default()
     };
     miner_signer_1
-        .sign_p2p_handshake(&mut version_request)
+        .sign_p2p_handshake_v2(&mut version_request)
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()
@@ -130,9 +131,12 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // spellchecker:off
     let version_json = serde_json::json!({
         "version": "0.1.0",
-        "protocol_version": "V1",
+        "protocol_version": "V2",
+        "mining_address": "4AV9BV6viDGKWW88TZ65qT1bZDMy",
+        "peer_id": "4JaNfJ1tQ2TCLREq6opq6pWGmCJW",
         "chain_id": 1270,
         "address": {
             "gossip": "127.0.0.2:8080",
@@ -142,11 +146,11 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 "peer_id": "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
             },
         },
-        "mining_address": "0x050e7a06903a4a7af956efc2842d224775e52b59",
-        "user_agent": "miner2/0.1.0 (macos/aarch64)",
         "timestamp": 0,
-        "signature": "6npXVuBZ7oCyjPUPamZikc3txKCFvmhM3GX9yWDmBQ4dtbdjSmtqNsq6DpGegiw8ENkfkZ1K797L2VHCeb6rfkiFt"
+        "user_agent": "miner2/0.1.0 (macos/aarch64)",
+        "signature": "7Z8g7rpyjRFjQky3kHLGr6YU5Er44a1MfUH8LWqLL4FDjsdMwmeoCHbcDNQz8Y44RKo2biebghZ5qcmVQ1ioBvr2N"
     });
+    // spellchecker:on
 
     let req = TestRequest::post()
         .uri(&format!("/gossip/v2{}", GossipRoutes::Handshake))
@@ -185,7 +189,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
 
     let version_json = serde_json::json!({
         "version": "0.1.0",
-        "protocol_version": "V1",
+        "protocol_version": "V2",
         "chain_id": miner_signer_2.chain_id,
         "address": {
             "gossip": "127.0.0.2:8080",
@@ -196,10 +200,11 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
             },
         },
         "mining_address": miner_signer_2.address(),
+        "peer_id": miner_signer_2.address(),
         "user_agent": build_user_agent("miner2", "0.1.0"),
         "timestamp": timestamp,
-        // Signature from another signer, should fail verification
-        "signature": "7vAD7AoznW7zzFuyxnT4ghhX3i7jAZbR3i2tt8Pe8L6nCdNpDJHFA4N5qEvRMNyvkUHEDZShiXzjLniBet6rrPwtN"
+        // Signature from another signer (0xaabb...), should fail verification
+        "signature": "BGhPXuxCGZAomzoNKMZAr9ZrNEfcTWJgx5ag3N2fCDTVWgjTdc5SQhqQt4PHh6YZTYDnCURVGbuQL7vhEMjt4dhUo"
     });
 
     let req = TestRequest::post()
@@ -224,7 +229,7 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
     }
 
     let miner_signer_3 = IrysSigner::random_signer(&config.consensus_config());
-    let mut version_request = HandshakeRequest {
+    let mut version_request = HandshakeRequestV2 {
         chain_id: miner_signer_3.chain_id,
         address: PeerAddress {
             gossip: "127.0.0.3:8080".parse().expect("valid socket address"),
@@ -234,12 +239,13 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
                 peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap()
             },
         },
+        peer_id: IrysPeerId::random(),
         mining_address: miner_signer_3.address(),
         user_agent: Some(build_user_agent("miner3", "0.1.0")),
         ..Default::default()
     };
     miner_signer_3
-        .sign_p2p_handshake(&mut version_request)
+        .sign_p2p_handshake_v2(&mut version_request)
         .expect("sign p2p handshake");
 
     let req = TestRequest::post()

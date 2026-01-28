@@ -702,6 +702,8 @@ mod tests {
         expected_config.http.bind_ip = Some("127.0.0.1".to_string());
         expected_config.reth.network.public_ip = Some("0.0.0.0".to_string());
         expected_config.reth.network.bind_ip = Some("0.0.0.0".to_string());
+        // Test TOML doesn't have peer_id, so it should be None
+        expected_config.peer_id = None;
         // for debugging purposes
 
         let expected_toml_data = toml::to_string(&expected_config).unwrap();

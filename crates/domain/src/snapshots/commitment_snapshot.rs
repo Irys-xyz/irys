@@ -481,6 +481,28 @@ mod tests {
         tx
     }
 
+    fn create_test_commitment_v2(
+        signer: IrysAddress,
+        commitment_type: CommitmentTypeV2,
+        value: U256,
+    ) -> CommitmentTransaction {
+        let mut tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: irys_types::CommitmentTransactionV2 {
+                id: H256::zero(),
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value,
+                commitment_type,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
+        });
+        tx.set_id(H256::random());
+        tx
+    }
+
     #[test]
     fn test_pledge_count_validation_success() {
         let mut snapshot = CommitmentSnapshot::default();
@@ -809,6 +831,25 @@ mod tests {
         // Try to add unstake
         let unstake = create_test_commitment(signer, CommitmentTypeV1::Unstake, U256::from(1000));
         let status = snapshot.add_commitment(&unstake, &EpochSnapshot::default());
+        assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
+    }
+
+    #[test]
+    fn test_update_reward_address_without_stake() {
+        let mut snapshot = CommitmentSnapshot::default();
+        let signer = IrysAddress::random();
+        let new_reward_address = IrysAddress::random();
+
+        // Try to update reward address without stake
+        let update_tx = create_test_commitment_v2(
+            signer,
+            CommitmentTypeV2::UpdateRewardAddress {
+                new_reward_address,
+                nonce: U256::from(1),
+            },
+            U256::zero(),
+        );
+        let status = snapshot.add_commitment(&update_tx, &EpochSnapshot::default());
         assert_eq!(status, CommitmentSnapshotStatus::Unstaked);
     }
 

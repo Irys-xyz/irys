@@ -6,7 +6,7 @@ use crate::{
     submodule::tables::ChunkPathHashes,
 };
 use irys_types::ingress::CachedIngressProof;
-use irys_types::{Base64, IrysAddress, PeerListItem};
+use irys_types::{Base64, IrysAddress, IrysPeerId, PeerListItemInner};
 use irys_types::{ChunkPathHash, DataRoot, H256};
 use irys_types::{
     CommitmentTransaction, CommitmentTransactionMetadata, DataTransactionHeader,
@@ -79,7 +79,7 @@ macro_rules! impl_compression_for_compact {
 add_wrapper_struct!((IrysBlockHeader, CompactIrysBlockHeader));
 add_wrapper_struct!((DataTransactionHeader, CompactTxHeader));
 add_wrapper_struct!((CommitmentTransaction, CompactCommitment));
-add_wrapper_struct!((PeerListItem, CompactPeerListItem));
+add_wrapper_struct!((PeerListItemInner, CompactPeerListItem));
 add_wrapper_struct!((Base64, CompactBase64));
 add_wrapper_struct!((CommitmentTransactionMetadata, CompactCommitmentTxMetadata));
 add_wrapper_struct!((DataTransactionMetadata, CompactDataTxMetadata));
@@ -179,7 +179,7 @@ table IngressProofs {
 /// ones with high reputation - the PeerListItems contain all the peers
 /// that the node is aware of and is periodically updated via peer discovery
 table PeerListItems {
-    type Key = IrysAddress;
+    type Key = IrysPeerId;
     type Value = CompactPeerListItem;
 }
 
