@@ -110,6 +110,7 @@ where
                     .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
+                record_gossip_chunk_processing_duration(start.elapsed().as_secs_f64() * 1000.0);
                 record_gossip_chunk_error(error.error_type(), error.is_advisory());
 
                 Err(match error {

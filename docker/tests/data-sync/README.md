@@ -16,11 +16,13 @@ Remote data synchronization test for validating partition data sync across a mul
 This builds the debug image (`irys:debug`) which includes a shell required for the test scripts.
 
 With telemetry support (required for observability stack):
+
 ```bash
 ENABLE_TELEMETRY=true ./build_image.sh
 ```
 
 The image is tagged as `localhost/irys-test:latest` by default. Override with:
+
 ```bash
 IMAGE_NAME=my-image:tag ./build_image.sh
 ```
@@ -28,6 +30,7 @@ IMAGE_NAME=my-image:tag ./build_image.sh
 ## Running the Cluster
 
 ### Start the cluster
+
 ```bash
 ./start_cluster.sh
 ```
@@ -46,6 +49,7 @@ docker compose logs -f
 ```
 
 ### Stop the cluster
+
 ```bash
 docker compose down -v
 ```
@@ -61,6 +65,7 @@ docker compose down -v
 This script starts the cluster, runs the sync test, and cleans up on exit.
 
 ### Manual
+
 ```bash
 docker compose down && docker compose up -d --force-recreate --remove-orphans && \
 NODE_URLS="http://localhost:19080,http://localhost:19081,http://localhost:19082" \
@@ -76,6 +81,11 @@ cargo test --package irys-chain --test mod sync_partition_data_remote_test -- --
   - `IMAGE_NAME`: Docker image to use (default: `irys:debug`)
   - `MIN_HEIGHT`: Height when peer nodes start in the Docker compose (default: 40 for node 2, 50 for node 3)
   - `PEER_START_HEIGHT`: Height when rust test begins peer interaction (default: 60)
+  - `OTEL_REMOTE_HOST`: OTEL collector host (default: `51.38.53.126`, an external OVH endpoint requiring network access). Override for local/isolated environments:
+
+    ```bash
+    OTEL_REMOTE_HOST=host.docker.internal docker compose up
+    ```
 
 ### Observability Stack
 
