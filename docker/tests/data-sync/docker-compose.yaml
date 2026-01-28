@@ -110,6 +110,8 @@ services:
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: otel-sidecar-1
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-1:
         condition: service_started
@@ -127,6 +129,8 @@ services:
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: otel-sidecar-2
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-2:
         condition: service_started
@@ -144,6 +148,8 @@ services:
     image: otel/opentelemetry-collector-contrib:0.96.0
     container_name: otel-sidecar-3
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       test-irys-3:
         condition: service_started

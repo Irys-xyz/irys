@@ -35,11 +35,6 @@ pub fn record_chunk_error(error_type: &'static str, is_advisory: bool) {
     );
 }
 
-/// Actix-web middleware that records request duration and status for every route.
-///
-/// Emits:
-/// - `irys.api.http.request_duration_ms` histogram with `method`, `path`, `status` attributes
-/// - `irys.api.http.requests_total` counter with `method`, `path`, `status` attributes
 pub struct RequestMetrics;
 
 impl<S, B> Transform<S, ServiceRequest> for RequestMetrics
@@ -82,8 +77,6 @@ where
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
         let method = req.method().to_string();
-        // Use the matched route pattern (e.g. "/v1/tx/{tx_id}") for low-cardinality labels,
-        // falling back to the raw path only if no pattern is matched.
         let path = req
             .match_pattern()
             .unwrap_or_else(|| req.path().to_string());
