@@ -20,6 +20,7 @@ irys_utils::define_metrics! {
     counter NODE_SHUTDOWN("irys.node.shutdown_total", "Node shutdown events by reason");
     counter PLEDGE_TX_POSTED("irys.commitment.pledge_tx_posted_total", "Pledge transactions posted");
     counter PEER_FETCH_ERRORS("irys.peer.fetch_errors_total", "Peer fetch errors by type");
+    gauge RETH_FCU_HEAD_HEIGHT("irys.reth.fcu_head_height", "Reth fork choice update head block height");
 }
 
 // Not a metric instrument — tracks process start time for uptime calculation.
@@ -84,4 +85,8 @@ pub(crate) fn record_pledge_tx_posted() {
 
 pub(crate) fn record_peer_fetch_error(error_type: &'static str) {
     PEER_FETCH_ERRORS.add(1, &[KeyValue::new("error_type", error_type)]);
+}
+
+pub(crate) fn record_reth_fcu_head_height(height: u64) {
+    RETH_FCU_HEAD_HEIGHT.record(height, &[]);
 }
