@@ -156,7 +156,7 @@ pub(crate) fn record_pledge_tx_posted() {
         .add(1, &[]);
 }
 
-pub(crate) fn record_peer_fetch_error(error_type: &str) {
+pub(crate) fn record_peer_fetch_error(error_type: &'static str) {
     PEER_FETCH_ERRORS
         .get_or_init(|| {
             meter()
@@ -164,7 +164,7 @@ pub(crate) fn record_peer_fetch_error(error_type: &str) {
                 .with_description("Peer fetch errors by type")
                 .build()
         })
-        .add(1, &[KeyValue::new("error_type", error_type.to_owned())]);
+        .add(1, &[KeyValue::new("error_type", error_type)]);
 }
 
 pub(crate) fn record_reth_fcu_head_height(height: u64) {
