@@ -13,7 +13,7 @@ pub enum GossipError {
     #[error("Network error: {0}")]
     Network(String),
     #[error("Circuit breaker open for peer {0}")]
-    CircuitBreakerOpen(irys_types::IrysAddress),
+    CircuitBreakerOpen(irys_types::IrysPeerId),
     #[error("Invalid peer: {0}")]
     InvalidPeer(String),
     #[error("Cache error: {0}")]
