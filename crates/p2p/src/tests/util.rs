@@ -30,7 +30,7 @@ use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
     DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
-    IrysBlockHeader, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+    IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
     PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
     TxKnownStatus, UnpackedChunk, H256,
 };
@@ -325,7 +325,9 @@ impl GossipServiceTestFixture {
         node_config.http.bind_port = gossip_port;
         let random_signer = IrysSigner::random_signer(&node_config.consensus_config());
         node_config.mining_key = random_signer.signer;
-        let config = Config::new(node_config);
+        // Generate a distinct peer_id for this test fixture
+        // peer_id is separate from mining_address in V2
+        let config = Config::new_with_random_peer_id(node_config);
 
         let db_env = open_or_create_irys_consensus_data_db(&temp_dir.path().to_path_buf())
             .expect("can't open temp dir");
@@ -453,6 +455,7 @@ impl GossipServiceTestFixture {
     ) {
         let gossip_service = P2PService::new(
             self.mining_address,
+            self.config.peer_id(),
             self.gossip_receiver.take().expect("to take receiver"),
         );
         info!("Starting gossip service on port {}", self.gossip_port);
@@ -519,6 +522,8 @@ impl GossipServiceTestFixture {
     #[must_use]
     pub(crate) fn create_default_peer_entry(&self) -> PeerListItem {
         PeerListItem {
+            peer_id: self.config.peer_id(),
+            mining_address: self.config.node_config.miner_address(),
             reputation_score: PeerScore::new(50),
             response_time: 0,
             address: PeerAddress {
@@ -541,8 +546,7 @@ impl GossipServiceTestFixture {
             other.mining_address, peer, self.gossip_port
         );
 
-        self.peer_list
-            .add_or_update_peer(other.mining_address, peer, true);
+        self.peer_list.add_or_update_peer(peer, true);
     }
 
     pub(crate) async fn add_tx_to_mempool(&self, tx: DataTransactionHeader) {
@@ -572,7 +576,7 @@ fn random_free_port() -> u16 {
 #[must_use]
 pub(crate) fn generate_test_tx() -> DataTransaction {
     let testing_config = NodeConfig::testing();
-    let config = Config::new(testing_config);
+    let config = Config::new_with_random_peer_id(testing_config);
     let account1 = IrysSigner::random_signer(&config.consensus);
     let message = "Hirys, world!";
     let data_bytes = message.as_bytes().to_vec();
@@ -773,6 +777,11 @@ impl FakeGossipServer {
                 .service(
                     web::resource("/gossip/block-index").route(web::get().to(handle_block_index)),
                 )
+                .service(
+                    web::resource("/gossip/protocol_version")
+                        .route(web::get().to(handle_protocol_version)),
+                )
+                .service(web::resource("/gossip/health").route(web::get().to(handle_health)))
                 .default_service(web::to(|| async {
                     warn!("Request hit default handler - check your route paths");
                     HttpResponse::NotFound()
@@ -948,6 +957,19 @@ async fn handle_info(
     }
 }
 
+async fn handle_protocol_version() -> HttpResponse {
+    // Return both V1 and V2 support
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(vec![1_u32, 2_u32])
+}
+
+async fn handle_health() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("application/json")
+        .json(GossipResponse::Accepted(true))
+}
+
 async fn handle_block_index(
     handler: web::Data<Arc<RwLock<FakeGossipDataHandler>>>,
     query: web::Query<BlockIndexQuery>,
@@ -1028,6 +1050,7 @@ pub(crate) async fn data_handler_stub(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
+            IrysPeerId::from(IrysAddress::repeat_byte(2)),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state: sync_state.clone(),
@@ -1073,6 +1096,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         gossip_client: GossipClient::new(
             Duration::from_millis(100000),
             IrysAddress::repeat_byte(2),
+            IrysPeerId::from(IrysAddress::repeat_byte(2)),
         ),
         peer_list: peer_list_guard.clone(),
         sync_state,

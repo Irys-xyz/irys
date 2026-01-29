@@ -1,7 +1,8 @@
 use crate::{
     generate_data_root, generate_leaves, resolve_proofs, versioning::Signable as _, Base64,
     BoundedFee, CommitmentTransaction, DataLedger, DataTransaction, DataTransactionHeader,
-    HandshakeRequest, IngressProof, IrysAddress, IrysBlockHeader, IrysSignature, Signature, H256,
+    HandshakeRequest, HandshakeRequestV2, IngressProof, IrysAddress, IrysBlockHeader,
+    IrysSignature, Signature, H256,
 };
 use alloy_core::primitives::keccak256;
 
@@ -160,7 +161,19 @@ impl IrysSigner {
         Ok(())
     }
 
-    pub fn sign_p2p_handshake(&self, handshake_message: &mut HandshakeRequest) -> Result<()> {
+    pub fn sign_p2p_handshake_v1(&self, handshake_message: &mut HandshakeRequest) -> Result<()> {
+        // Store the signer address
+        handshake_message.mining_address = self.address();
+
+        // Create the signature hash and sign it
+        let prehash = handshake_message.signature_hash();
+        let signature: Signature = self.signer.sign_prehash_recoverable(&prehash)?.into();
+        handshake_message.signature = IrysSignature::new(signature);
+
+        Ok(())
+    }
+
+    pub fn sign_p2p_handshake_v2(&self, handshake_message: &mut HandshakeRequestV2) -> Result<()> {
         // Store the signer address
         handshake_message.mining_address = self.address();
 

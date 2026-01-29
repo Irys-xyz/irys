@@ -1,6 +1,6 @@
 use crate::{
     BlockHash, ChunkPathHash, CommitmentTransaction, DataTransactionHeader, IngressProof,
-    IrysAddress, IrysBlockHeader, IrysTransactionId, UnpackedChunk, H256,
+    IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId, UnpackedChunk, H256,
 };
 use alloy_primitives::B256;
 use reth::core::primitives::SealedBlock;
@@ -419,8 +419,31 @@ impl GossipCacheKey {
     }
 }
 
+/// V1 GossipRequest - uses miner_address for identification (backward compatibility)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GossipRequest<T> {
+pub struct GossipRequestV1<T> {
     pub miner_address: IrysAddress,
     pub data: T,
+}
+
+/// V2 GossipRequest - uses peer_id for identification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GossipRequestV2<T> {
+    pub peer_id: IrysPeerId,
+    /// Miner address still included for staking checks and verification
+    pub miner_address: IrysAddress,
+    pub data: T,
+}
+
+/// Legacy type alias for backward compatibility - maps to V1
+pub type GossipRequest<T> = GossipRequestV1<T>;
+
+/// Conversion from V2 to V1 (simple projection)
+impl<T> From<GossipRequestV2<T>> for GossipRequestV1<T> {
+    fn from(v2: GossipRequestV2<T>) -> Self {
+        Self {
+            miner_address: v2.miner_address,
+            data: v2.data,
+        }
+    }
 }

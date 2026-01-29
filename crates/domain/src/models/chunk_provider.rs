@@ -175,7 +175,7 @@ mod tests {
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::{
         irys::IrysSigner, ledger_chunk_offset_ii, partition::PartitionAssignment,
-        partition_chunk_offset_ie, Base64, ConsensusConfig, DataTransactionLedger,
+        partition_chunk_offset_ie, Base64, Config, ConsensusConfig, DataTransactionLedger,
         LedgerChunkRange, NodeConfig, PartitionChunkOffset, UnpackedChunk, H256,
     };
     use nodit::interval::ii;
@@ -194,7 +194,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let infos = [StorageModuleInfo {
             id: 0,
             partition_assignment: Some(PartitionAssignment::default()),

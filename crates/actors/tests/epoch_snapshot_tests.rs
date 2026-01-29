@@ -31,7 +31,7 @@ async fn genesis_test() {
     let tmp_dir = setup_tracing_and_temp_dir(None, false);
     let base_path = tmp_dir.path().to_path_buf();
     config.base_directory = base_path;
-    let config: Config = config.into();
+    let config: Config = Config::new_with_random_peer_id(config);
 
     // genesis block
     let mut genesis_block = IrysBlockHeader::new_mock_header();
@@ -184,7 +184,7 @@ async fn add_slots_test() {
     let mut testing_config = NodeConfig::testing();
     testing_config.base_directory = base_path;
     testing_config.consensus = ConsensusOptions::Custom(consensus_config);
-    let config = Config::new(testing_config);
+    let config = Config::new_with_random_peer_id(testing_config);
     genesis_block.height = 0;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
@@ -276,7 +276,7 @@ async fn unique_addresses_per_slot_test() {
     let mut testing_config = NodeConfig::testing();
     testing_config.base_directory = base_path;
     testing_config.consensus = ConsensusOptions::Custom(consensus_config);
-    let config = Config::new(testing_config);
+    let config = Config::new_with_random_peer_id(testing_config);
     let genesis_signer = config.irys_signer();
     genesis_block.height = 0;
     let (mut commitments, _) = add_genesis_commitments(&mut genesis_block, &config).await;
@@ -422,7 +422,7 @@ async fn partition_expiration_and_repacking_test() {
     let mut config = NodeConfig::testing();
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
-    let config = Config::new(config);
+    let config = Config::new_with_random_peer_id(config);
 
     let mut genesis_block = IrysBlockHeader::new_mock_header();
     genesis_block.height = 0;
@@ -760,7 +760,7 @@ async fn epoch_blocks_reinitialization_test() {
     let mut config = NodeConfig::testing();
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
-    let config = Config::new(config);
+    let config = Config::new_with_random_peer_id(config);
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
@@ -970,7 +970,7 @@ async fn partitions_assignment_determinism_test() {
     config.storage.num_writes_before_sync = 1;
     config.base_directory = base_path.clone();
     config.consensus = ConsensusOptions::Custom(consensus_config);
-    let config = Config::new(config);
+    let config = Config::new_with_random_peer_id(config);
     let num_chunks_in_partition = config.consensus.num_chunks_in_partition;
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 

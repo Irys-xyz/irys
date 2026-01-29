@@ -1908,7 +1908,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -2122,7 +2122,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let chunk_size = config.consensus.chunk_size as usize;
 
         // Create a StorageModule with the specified submodules and config
@@ -2330,7 +2330,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -2408,7 +2408,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
@@ -2473,7 +2473,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
@@ -2552,7 +2552,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config.clone());
+        let config = Config::new_with_random_peer_id(node_config.clone());
 
         {
             let storage_module = StorageModule::new(&infos[0], &config)?;
@@ -2592,7 +2592,8 @@ mod tests {
         }
 
         // Create a new StorageModule instance (simulating restart)
-        let storage_module = StorageModule::new(&infos[0], &Config::new(node_config))?;
+        let storage_module =
+            StorageModule::new(&infos[0], &Config::new_with_random_peer_id(node_config))?;
 
         // Verify that Interrupted chunks are reset to Uninitialized on load
         let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
@@ -2632,7 +2633,7 @@ mod tests {
             },
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let infos = [StorageModuleInfo {
             id: 0,

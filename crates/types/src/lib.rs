@@ -48,6 +48,8 @@ pub mod remote_packing;
 pub mod rlp;
 
 pub mod address;
+mod peer_id;
+
 pub use address::IrysAddress;
 
 use std::sync::{atomic::AtomicU64, Arc};
@@ -59,6 +61,7 @@ pub use commitment_v2::*;
 pub use config::*;
 pub use difficulty_adjustment_config::*;
 pub use gossip::*;
+pub use peer_id::*;
 pub use serialization::*;
 pub use shutdown::*;
 pub use signature::*;

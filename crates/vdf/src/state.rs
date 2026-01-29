@@ -466,7 +466,7 @@ mod tests {
             .vdf
             .num_checkpoints_in_vdf_step = 10;
 
-        let config = Config::new(node_config.clone());
+        let config = Config::new_with_random_peer_id(node_config.clone());
         let vdf_config = config.vdf.clone();
 
         // Generate fewer steps but with much higher computational cost each

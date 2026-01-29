@@ -8,9 +8,9 @@ use irys_domain::{PeerEvent, PeerList, ScoreDecreaseReason, ScoreIncreaseReason}
 use irys_types::v2::GossipDataRequestV2;
 use irys_types::{
     build_user_agent, AnnouncementFinishedMessage, Config, DatabaseProvider, HandshakeMessage,
-    HandshakeRequest, IrysAddress, NetworkConfigWithDefaults as _, PeerAddress, PeerFilterMode,
-    PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage, PeerResponse,
-    RejectedResponse, RethPeerInfo, TokioServiceHandle,
+    HandshakeRequest, HandshakeRequestV2, IrysPeerId, NetworkConfigWithDefaults as _, PeerAddress,
+    PeerFilterMode, PeerListItem, PeerNetworkError, PeerNetworkSender, PeerNetworkServiceMessage,
+    PeerResponse, ProtocolVersion, RejectedResponse, RethPeerInfo, TokioServiceHandle,
 };
 use moka::sync::Cache;
 use rand::prelude::SliceRandom as _;
@@ -71,8 +71,7 @@ struct PeerNetworkServiceState {
 struct HandshakeTask {
     api_address: SocketAddr,
     gossip_address: SocketAddr,
-    handshake_request: HandshakeRequest,
-    config: Config,
+    inner: Arc<PeerNetworkServiceInner>,
     is_trusted_peer: bool,
     peer_filter_mode: PeerFilterMode,
     peer_list: PeerList,
@@ -141,16 +140,34 @@ fn build_peer_address(config: &Config) -> PeerAddress {
     }
 }
 impl PeerNetworkServiceState {
-    fn create_handshake_request(&self) -> HandshakeRequest {
+    fn create_handshake_request_v1(&self) -> HandshakeRequest {
         let mut handshake_request = HandshakeRequest {
             address: self.peer_address,
             chain_id: self.chain_id,
+            protocol_version: ProtocolVersion::V1,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
             ..HandshakeRequest::default()
         };
         self.config
             .irys_signer()
-            .sign_p2p_handshake(&mut handshake_request)
+            .sign_p2p_handshake_v1(&mut handshake_request)
+            .expect("Failed to sign handshake request");
+        handshake_request
+    }
+
+    fn create_handshake_request_v2(&self) -> HandshakeRequestV2 {
+        let peer_id = self.config.peer_id();
+        let mut handshake_request = HandshakeRequestV2 {
+            address: self.peer_address,
+            chain_id: self.chain_id,
+            peer_id,
+            protocol_version: ProtocolVersion::V2,
+            user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            ..HandshakeRequestV2::default()
+        };
+        self.config
+            .irys_signer()
+            .sign_p2p_handshake_v2(&mut handshake_request)
             .expect("Failed to sign handshake request");
         handshake_request
     }
@@ -180,6 +197,7 @@ impl PeerNetworkServiceInner {
             gossip_client: GossipClient::new(
                 Duration::from_secs(5),
                 config.node_config.miner_address(),
+                config.peer_id(),
             ),
             chain_id: config.consensus.chain_id,
             peer_address,
@@ -204,11 +222,11 @@ impl PeerNetworkServiceInner {
             state.db.clone()
         };
 
-        let persistable_peers = self.peer_list.persistable_peers();
+        let persistable_peers = self.peer_list.persistable_peers_with_mining_addr();
         let _ = db
             .update(|tx| {
-                for (addr, peer) in persistable_peers.iter() {
-                    insert_peer_list_item(tx, addr, peer).map_err(PeerListServiceError::from)?;
+                for (peer_id, peer) in persistable_peers.iter() {
+                    insert_peer_list_item(tx, peer_id, peer).map_err(PeerListServiceError::from)?;
                 }
                 Ok::<(), PeerListServiceError>(())
             })
@@ -217,17 +235,24 @@ impl PeerNetworkServiceInner {
         Ok(())
     }
 
-    fn increase_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreIncreaseReason) {
-        self.peer_list.increase_peer_score(mining_addr, reason);
+    fn increase_peer_score(&self, peer_id: &IrysPeerId, reason: ScoreIncreaseReason) {
+        self.peer_list
+            .increase_peer_score_by_peer_id(peer_id, reason);
     }
 
-    fn decrease_peer_score(&self, mining_addr: &IrysAddress, reason: ScoreDecreaseReason) {
-        self.peer_list.decrease_peer_score(mining_addr, reason);
+    fn decrease_peer_score(&self, peer_id: &IrysPeerId, reason: ScoreDecreaseReason) {
+        self.peer_list
+            .decrease_peer_score_by_peer_id(peer_id, reason);
     }
 
-    async fn create_handshake_request(&self) -> HandshakeRequest {
+    async fn create_handshake_request_v1(&self) -> HandshakeRequest {
         let state = self.state.lock().await;
-        state.create_handshake_request()
+        state.create_handshake_request_v1()
+    }
+
+    async fn create_handshake_request_v2(&self) -> HandshakeRequestV2 {
+        let state = self.state.lock().await;
+        state.create_handshake_request_v2()
     }
 
     fn sender(&self) -> PeerNetworkSender {
@@ -260,10 +285,10 @@ impl PeerNetworkService {
         let trusted_peers = peer_list.trusted_peer_api_to_gossip_addresses();
         Self::trusted_peers_handshake_task(sender.clone(), trusted_peers);
 
-        let initial_peers: HashMap<IrysAddress, PeerListItem> = peer_list
+        let initial_peers: HashMap<IrysPeerId, PeerListItem> = peer_list
             .all_peers()
             .iter()
-            .map(|(addr, peer)| (*addr, peer.clone()))
+            .map(|(peer_id, peer)| (*peer_id, peer.clone()))
             .collect();
         Self::spawn_announce_yourself_to_all_peers_task(initial_peers, sender.clone());
 
@@ -328,6 +353,7 @@ impl PeerNetworkService {
             }
         }
     }
+
     async fn run_inactive_peers_health_check(&self) {
         let inactive_peers = self.inner.peer_list().inactive_peers();
         if inactive_peers.is_empty() {
@@ -378,13 +404,13 @@ impl PeerNetworkService {
             });
         }
     }
+
     async fn handle_announce_peer(&self, peer: PeerListItem) {
         debug!("AnnounceYourselfToPeer message received: {:?}", peer);
         let peer_api_addr = peer.address.api;
         let peer_gossip_addr = peer.address.gossip;
         let reth_peer_info = peer.address.execution;
 
-        let handshake_request = self.inner.create_handshake_request().await;
         let is_trusted_peer = self.inner.peer_list().is_trusted_peer(&peer_api_addr);
         let (
             gossip_client,
@@ -393,7 +419,7 @@ impl PeerNetworkService {
             sender,
             reth_peer_sender,
             peers_limit,
-            config,
+            inner,
         ) = {
             let state = self.inner.state.lock().await;
             (
@@ -403,7 +429,7 @@ impl PeerNetworkService {
                 self.inner.sender(),
                 state.reth_peer_sender.clone(),
                 state.peers_limit,
-                state.config.clone(),
+                self.inner.clone(),
             )
         };
 
@@ -411,8 +437,7 @@ impl PeerNetworkService {
             gossip_client,
             peer_api_addr,
             peer_gossip_addr,
-            handshake_request,
-            config,
+            inner,
             sender,
             is_trusted_peer,
             peer_filter_mode,
@@ -481,15 +506,12 @@ impl PeerNetworkService {
             debug!("Need to announce yourself to peer {:?}", api_address);
             state.currently_running_announcements.insert(api_address);
 
-            let handshake_request = state.create_handshake_request();
-
             let gossip_address = handshake.gossip_address;
 
             HandshakeTask {
                 api_address,
                 gossip_address,
-                handshake_request,
-                config: state.config.clone(),
+                inner: self.inner.clone(),
                 is_trusted_peer: self.inner.peer_list().is_trusted_peer(&api_address),
                 peer_filter_mode: state.config.node_config.peer_filter_mode,
                 peer_list: self.inner.peer_list(),
@@ -511,8 +533,7 @@ impl PeerNetworkService {
                 task.gossip_client,
                 task.api_address,
                 task.gossip_address,
-                task.handshake_request,
-                task.config,
+                task.inner,
                 task.sender,
                 task.is_trusted_peer,
                 task.peer_filter_mode,
@@ -835,10 +856,10 @@ impl PeerNetworkService {
     }
 
     fn spawn_announce_yourself_to_all_peers_task(
-        known_peers: HashMap<IrysAddress, PeerListItem>,
+        known_peers: HashMap<IrysPeerId, PeerListItem>,
         sender: PeerNetworkSender,
     ) {
-        for (_mining_addr, peer) in known_peers {
+        for (_peer_id, peer) in known_peers {
             send_message_and_log_error(
                 &sender,
                 PeerNetworkServiceMessage::AnnounceYourselfToPeer(peer),
@@ -849,8 +870,7 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         api_address: SocketAddr,
         gossip_address: SocketAddr,
-        handshake_request: HandshakeRequest,
-        config: Config,
+        inner: Arc<PeerNetworkServiceInner>,
         sender: PeerNetworkSender,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
@@ -861,8 +881,7 @@ impl PeerNetworkService {
             gossip_client,
             api_address,
             gossip_address,
-            handshake_request,
-            config,
+            inner,
             sender.clone(),
             is_trusted_peer,
             peer_filter_mode,
@@ -887,8 +906,7 @@ impl PeerNetworkService {
         gossip_client: GossipClient,
         api_address: SocketAddr,
         gossip_address: SocketAddr,
-        mut handshake_request: HandshakeRequest,
-        config: Config,
+        inner: Arc<PeerNetworkServiceInner>,
         sender: PeerNetworkSender,
         is_trusted_peer: bool,
         peer_filter_mode: PeerFilterMode,
@@ -943,29 +961,28 @@ impl PeerNetworkService {
 
         let protocol_version: irys_types::ProtocolVersion = negotiated_protocol_version.into();
 
-        if handshake_request.protocol_version != protocol_version {
-            // The initiator adopts the negotiated highest common protocol version after version
-            // negotiation. The negotiated_protocol_version is computed from the intersection of
-            // peer_protocol_versions (advertised by the peer) and our_supported_versions (what
-            // this node supports). The handshake_request is then re-signed via
-            // config.irys_signer().sign_p2p_handshake to authenticate the updated protocol version.
-            handshake_request.protocol_version = protocol_version;
-            config
-                .irys_signer()
-                .sign_p2p_handshake(&mut handshake_request)
-                .expect("Failed to sign handshake request");
+        // Create the appropriate handshake based on a negotiated version
+        let peer_response_result = match protocol_version {
+            ProtocolVersion::V1 => {
+                let handshake_request = inner.create_handshake_request_v1().await;
+                gossip_client
+                    .post_handshake_v1(gossip_address, handshake_request)
+                    .await
+            }
+            ProtocolVersion::V2 => {
+                let handshake_request = inner.create_handshake_request_v2().await;
+                gossip_client
+                    .post_handshake_v2(gossip_address, handshake_request)
+                    .await
+            }
         }
-
-        let peer_response_result = gossip_client
-            .post_handshake(gossip_address, handshake_request.clone())
-            .await
-            .map_err(|e| {
-                warn!(
-                    "Failed to announce yourself to gossip address {}: {}",
-                    gossip_address, e
-                );
-                PeerListServiceError::PostVersionError(e.to_string())
-            });
+        .map_err(|e| {
+            warn!(
+                "Failed to announce yourself to gossip address {}: {}",
+                gossip_address, e
+            );
+            PeerListServiceError::PostVersionError(e.to_string())
+        });
 
         let peer_response = match peer_response_result {
             Ok(peer_response) => {
@@ -1101,7 +1118,9 @@ mod tests {
     use irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::peer_list::PeerScore;
-    use irys_types::{Config, IrysAddress, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo};
+    use irys_types::{
+        Config, IrysAddress, IrysPeerId, NodeConfig, PeerNetworkServiceMessage, RethPeerInfo,
+    };
     use std::collections::{HashMap, HashSet};
     use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr as _;
@@ -1125,7 +1144,11 @@ mod tests {
             api: api_addr,
             execution: RethPeerInfo::default(),
         };
+        // Generate a different peer_id to ensure we don't rely on peer_id == mining_addr
+        let peer_id = IrysPeerId::random();
         let peer = PeerListItem {
+            peer_id,
+            mining_address: mining_addr,
             address: peer_addr,
             reputation_score: PeerScore::new(50),
             response_time: 100,
@@ -1184,7 +1207,7 @@ mod tests {
     #[test]
     async fn test_add_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1194,13 +1217,13 @@ mod tests {
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
         )
         .expect("peer list");
-        let (mining_addr, peer) = create_test_peer(
+        let (_mining_addr, peer) = create_test_peer(
             "0x1234567890123456789012345678901234567890",
             8080,
             true,
             None,
         );
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
         assert_eq!(
             peer_list
                 .peer_by_gossip_address(peer.address.gossip)
@@ -1213,7 +1236,7 @@ mod tests {
     #[test]
     async fn test_active_peers_request() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1223,19 +1246,19 @@ mod tests {
             tokio::sync::broadcast::channel::<irys_domain::PeerEvent>(100).0,
         )
         .expect("peer list");
-        let (mining_addr1, mut peer1) = create_test_peer(
+        let (_mining_addr1, mut peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
             8081,
             true,
             None,
         );
-        let (mining_addr2, mut peer2) = create_test_peer(
+        let (_mining_addr2, mut peer2) = create_test_peer(
             "0x2222222222222222222222222222222222222222",
             8082,
             true,
             None,
         );
-        let (mining_addr3, peer3) = create_test_peer(
+        let (_mining_addr3, peer3) = create_test_peer(
             "0x3333333333333333333333333333333333333333",
             8083,
             false,
@@ -1244,9 +1267,9 @@ mod tests {
         peer1.reputation_score.increase_online();
         peer1.reputation_score.increase_online();
         peer2.reputation_score.increase_online();
-        peer_list.add_or_update_peer(mining_addr1, peer1.clone(), true);
-        peer_list.add_or_update_peer(mining_addr2, peer2.clone(), true);
-        peer_list.add_or_update_peer(mining_addr3, peer3, true);
+        peer_list.add_or_update_peer(peer1.clone(), true);
+        peer_list.add_or_update_peer(peer2.clone(), true);
+        peer_list.add_or_update_peer(peer3, true);
         let active = peer_list.top_active_peers(Some(2), Some(HashSet::new()));
         assert_eq!(active.len(), 2);
         assert_eq!(active[0].1, peer1);
@@ -1300,8 +1323,14 @@ mod tests {
         )
         .1;
         let known_peers = HashMap::from([
-            (IrysAddress::repeat_byte(0xAA), peer1.clone()),
-            (IrysAddress::repeat_byte(0xBB), peer2.clone()),
+            (
+                IrysPeerId::from(IrysAddress::repeat_byte(0xAA)),
+                peer1.clone(),
+            ),
+            (
+                IrysPeerId::from(IrysAddress::repeat_byte(0xBB)),
+                peer2.clone(),
+            ),
         ]);
         PeerNetworkService::spawn_announce_yourself_to_all_peers_task(known_peers, sender);
         let mut api_addrs = Vec::new();
@@ -1322,7 +1351,7 @@ mod tests {
     #[test]
     async fn test_handshake_blacklist_after_max_retries() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let harness = TestHarness::new(temp_dir.path(), config);
         let target: SocketAddr = "127.0.0.1:18080".parse().unwrap();
         let max_retries = harness.config.node_config.p2p_handshake.max_retries;
@@ -1352,7 +1381,7 @@ mod tests {
     //     let temp_dir = setup_tracing_and_temp_dir(None, false);
     //     let mut node_config = NodeConfig::testing();
     //     node_config.trusted_peers = vec![];
-    //     let config = Config::new(node_config);
+    //     let config = Config::new_with_random_peer_id(node_config);
     //     let harness = TestHarness::new(temp_dir.path(), config);
     //     let peer = create_test_peer(
     //         "0x1234567890123456789012345678901234567890",
@@ -1363,7 +1392,7 @@ mod tests {
     //     .1;
     //     harness
     //         .peer_list()
-    //         .add_or_update_peer(IrysAddress::repeat_byte(0xAA), peer.clone(), true);
+    //         .add_or_update_peer(peer.clone(), true);
     //     harness
     //         .api_client
     //         .push_response(Ok(PeerResponse::Accepted(AcceptedResponse::default())))
@@ -1408,7 +1437,7 @@ mod tests {
     // #[test]
     // async fn test_reth_sender_receives_reth_peer_info() {
     //     let temp_dir = setup_tracing_and_temp_dir(None, false);
-    //     let config: Config = NodeConfig::testing().into();
+    //     let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
     //     let harness = TestHarness::new(temp_dir.path(), config);
     //     harness
     //         .api_client
@@ -1432,7 +1461,7 @@ mod tests {
     #[test]
     async fn test_periodic_flush() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let reth_calls = Arc::new(AsyncMutex::new(Vec::new()));
@@ -1456,13 +1485,13 @@ mod tests {
             tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle,
         );
-        let (addr, peer) = create_test_peer(
+        let (_addr, peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9100,
             true,
             None,
         );
-        peer_list.add_or_update_peer(addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
         sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
         let TokioServiceHandle {
             shutdown_signal,
@@ -1474,13 +1503,17 @@ mod tests {
         let read_tx = db.tx().expect("tx");
         let items = walk_all::<PeerListItems, _>(&read_tx).expect("walk");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].1 .0.address.api, peer.address.api);
+        // Convert from the database format back to PeerListItem
+        let peer_id = items[0].0;
+        let inner: irys_types::PeerListItemInner = items[0].1.clone().into();
+        let peer_item = PeerListItem::from_inner(inner, peer_id);
+        assert_eq!(peer_item.address.api, peer.address.api);
     }
 
     #[test]
     async fn test_load_from_database() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, receiver) = PeerNetworkSender::new_with_receiver();
         let runtime_handle = tokio::runtime::Handle::current();
@@ -1494,20 +1527,20 @@ mod tests {
             tokio::sync::broadcast::channel::<PeerEvent>(100).0,
             runtime_handle.clone(),
         );
-        let (addr1, peer1) = create_test_peer(
+        let (_addr1, peer1) = create_test_peer(
             "0x1111111111111111111111111111111111111111",
             9200,
             true,
             None,
         );
-        let (addr2, peer2) = create_test_peer(
+        let (_addr2, peer2) = create_test_peer(
             "0x2222222222222222222222222222222222222222",
             9202,
             true,
             None,
         );
-        peer_list.add_or_update_peer(addr1, peer1.clone(), true);
-        peer_list.add_or_update_peer(addr2, peer2.clone(), true);
+        peer_list.add_or_update_peer(peer1.clone(), true);
+        peer_list.add_or_update_peer(peer2.clone(), true);
         sleep(FLUSH_INTERVAL + Duration::from_millis(100)).await;
         let TokioServiceHandle {
             shutdown_signal,
@@ -1544,7 +1577,7 @@ mod tests {
     #[test]
     async fn test_wait_for_active_peer() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1559,13 +1592,13 @@ mod tests {
             wait_list.wait_for_active_peers().await;
         });
         sleep(Duration::from_millis(50)).await;
-        let (mining_addr, peer) = create_test_peer(
+        let (_mining_addr, peer) = create_test_peer(
             "0x4444444444444444444444444444444444444444",
             9300,
             true,
             None,
         );
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), true);
+        peer_list.add_or_update_peer(peer.clone(), true);
         wait_handle.await.expect("wait task");
         let active = peer_list.top_active_peers(None, None);
         assert_eq!(active.len(), 1);
@@ -1575,7 +1608,7 @@ mod tests {
     #[test]
     async fn test_wait_for_active_peer_no_peers() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1598,44 +1631,46 @@ mod tests {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
         let mut node_config = NodeConfig::testing();
         node_config.trusted_peers = vec![];
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let harness = TestHarness::new(temp_dir.path(), config);
-        let (staked_addr, staked_peer) = create_test_peer(
+        let (_staked_mining_addr, staked_peer) = create_test_peer(
             "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             9400,
             true,
             None,
         );
-        let (unstaked_addr, unstaked_peer) = create_test_peer(
+        let (unstaked_mining_addr, unstaked_peer) = create_test_peer(
             "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             9402,
             true,
             None,
         );
+        let staked_peer_id = staked_peer.peer_id;
+        let unstaked_peer_id = unstaked_peer.peer_id;
         harness
             .peer_list()
-            .add_or_update_peer(staked_addr, staked_peer.clone(), true);
+            .add_or_update_peer(staked_peer.clone(), true);
         harness
             .peer_list()
-            .add_or_update_peer(unstaked_addr, unstaked_peer.clone(), false);
+            .add_or_update_peer(unstaked_peer.clone(), false);
         harness.inner.flush().await.expect("flush");
         let persistable = harness.peer_list().persistable_peers();
-        assert!(persistable.contains_key(&staked_addr));
-        assert!(!persistable.contains_key(&unstaked_addr));
+        assert!(persistable.contains_key(&staked_peer_id));
+        assert!(!persistable.contains_key(&unstaked_peer_id));
         for _ in 0..31 {
             harness
                 .peer_list()
-                .increase_peer_score(&unstaked_addr, ScoreIncreaseReason::Online);
+                .increase_peer_score(&unstaked_mining_addr, ScoreIncreaseReason::Online);
         }
         harness.inner.flush().await.expect("second flush");
         let persistable_after = harness.peer_list().persistable_peers();
-        assert!(persistable_after.contains_key(&unstaked_addr));
+        assert!(persistable_after.contains_key(&unstaked_peer_id));
     }
 
     #[test]
     async fn should_be_able_to_handshake_if_removed_from_purgatory() {
         let temp_dir = setup_tracing_and_temp_dir(None, false);
-        let config: Config = NodeConfig::testing().into();
+        let config: Config = Config::new_with_random_peer_id(NodeConfig::testing());
         let db = open_db(temp_dir.path());
         let (sender, _receiver) = PeerNetworkSender::new_with_receiver();
         let peer_list = PeerList::new(
@@ -1651,11 +1686,12 @@ mod tests {
             true,
             None,
         );
-        peer_list.add_or_update_peer(mining_addr, peer.clone(), false);
-        assert!(peer_list.temporary_peers().contains(&mining_addr));
+        let peer_id = peer.peer_id;
+        peer_list.add_or_update_peer(peer.clone(), false);
+        assert!(peer_list.temporary_peers().contains(&peer_id));
         peer_list.decrease_peer_score(&mining_addr, ScoreDecreaseReason::BogusData("test".into()));
-        assert!(!peer_list.temporary_peers().contains(&mining_addr));
-        peer_list.add_or_update_peer(mining_addr, peer, false);
-        assert!(peer_list.temporary_peers().contains(&mining_addr));
+        assert!(!peer_list.temporary_peers().contains(&peer_id));
+        peer_list.add_or_update_peer(peer, false);
+        assert!(peer_list.temporary_peers().contains(&peer_id));
     }
 }
