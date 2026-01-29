@@ -40,7 +40,7 @@ pub(crate) fn record_peer_count(count: u64) {
     PEER_COUNT
         .get_or_init(|| {
             meter()
-                .u64_gauge("irys.p2p.peer_count")
+                .u64_gauge("irys.chain.peer_count")
                 .with_description("Number of connected peers")
                 .build()
         })

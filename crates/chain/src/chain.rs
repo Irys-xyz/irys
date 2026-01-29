@@ -166,7 +166,7 @@ impl IrysNodeCtx {
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn stop(self, reason: ShutdownReason) {
         info!("stop function called, shutting down due to: {}", reason);
-        metrics::record_node_shutdown(&reason.to_string());
+        metrics::record_node_shutdown(reason.as_label());
 
         // Cancel the backfill task for graceful shutdown
         self.backfill_cancel.cancel();

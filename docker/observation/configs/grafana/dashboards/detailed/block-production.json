@@ -416,7 +416,7 @@
             "uid": "prometheus"
           },
           "expr": "rate(irys_block_producer_blocks_produced_total{job=~\"$node\"}[5m])",
-          "legendFormat": "blocks/s",
+          "legendFormat": "{{job}} blocks/s",
           "refId": "A"
         }
       ],
@@ -451,7 +451,7 @@
             "uid": "prometheus"
           },
           "expr": "rate(irys_block_producer_retry_attempts_total{job=~\"$node\"}[5m])",
-          "legendFormat": "retries",
+          "legendFormat": "{{job}} retries",
           "refId": "A"
         },
         {
@@ -460,7 +460,7 @@
             "uid": "prometheus"
           },
           "expr": "rate(irys_block_producer_rebuilds_total{job=~\"$node\"}[5m])",
-          "legendFormat": "rebuilds",
+          "legendFormat": "{{job}} rebuilds",
           "refId": "B"
         }
       ],
@@ -495,7 +495,7 @@
             "uid": "prometheus"
           },
           "expr": "increase(irys_block_tree_reorgs_total{job=~\"$node\"}[5m])",
-          "legendFormat": "reorgs",
+          "legendFormat": "{{job}} reorgs",
           "refId": "A"
         }
       ],
