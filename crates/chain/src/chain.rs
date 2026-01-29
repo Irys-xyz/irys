@@ -910,8 +910,7 @@ impl IrysNode {
             });
         }
 
-        // spawn a task to periodically log system info, but not in tests
-        #[cfg(not(test))]
+        // spawn a task to periodically log system info
         {
             use irys_actors::MempoolServiceMessage;
 
@@ -968,6 +967,7 @@ impl IrysNode {
                     metrics::record_pending_data_txs(mempool_status.data_tx_count as u64);
                     metrics::record_sync_state(!info.is_syncing);
                     metrics::record_node_up();
+                    metrics::record_node_uptime();
                     metrics::record_vdf_mining_enabled(
                         is_vdf_mining_enabled.load(std::sync::atomic::Ordering::Relaxed),
                     );

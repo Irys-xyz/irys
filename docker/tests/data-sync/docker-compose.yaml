@@ -1,7 +1,7 @@
 # Data Sync Test Environment
 #
-# Uses debug image with shell (required for test scripts).
-# Release image (irys:release) is incompatible here because peers use bash entrypoints.
+# Uses the image built by build_image.sh (localhost/irys-test:latest by default).
+# Override with IMAGE_NAME env var if needed.
 # Sends telemetry to remote observability stack.
 #
 # OTEL_REMOTE_HOST: defaults to 51.38.53.126 (external OVH collector).
@@ -13,7 +13,7 @@ services:
   # Irys Test Nodes
   # ==========================================================================
   test-irys-1:
-    image: ${IMAGE_NAME:-irys:debug}
+    image: ${IMAGE_NAME:-localhost/irys-test:latest}
     pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
@@ -30,7 +30,7 @@ services:
       - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
     volumes:
       - ./configs/irys-1.toml:/app/config.toml:ro
-      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./configs/.irys_submodules.toml:/app/staged/.irys_submodules.toml:ro
     cap_add:
       - NET_ADMIN
     networks:
@@ -38,7 +38,7 @@ services:
         ipv4_address: 172.23.0.2
 
   test-irys-2:
-    image: ${IMAGE_NAME:-irys:debug}
+    image: ${IMAGE_NAME:-localhost/irys-test:latest}
     pull_policy: never
     container_name: test-irys-2
     restart: unless-stopped
@@ -60,7 +60,7 @@ services:
       - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
     volumes:
       - ./configs/irys-2.toml:/app/config.toml:ro
-      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./configs/.irys_submodules.toml:/app/staged/.irys_submodules.toml:ro
       - ./scripts/start_peer_with_auto_restart.sh:/app/start_peer_with_auto_restart.sh:ro
     cap_add:
       - NET_ADMIN
@@ -70,7 +70,7 @@ services:
         ipv4_address: 172.23.0.3
 
   test-irys-3:
-    image: ${IMAGE_NAME:-irys:debug}
+    image: ${IMAGE_NAME:-localhost/irys-test:latest}
     pull_policy: never
     container_name: test-irys-3
     restart: unless-stopped
@@ -92,7 +92,7 @@ services:
       - OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://${OTEL_REMOTE_HOST:-51.38.53.126}:4318/v1/logs
     volumes:
       - ./configs/irys-3.toml:/app/config.toml:ro
-      - ./configs/.irys_submodules.toml:/app/data/.irys_submodules.toml:ro
+      - ./configs/.irys_submodules.toml:/app/staged/.irys_submodules.toml:ro
       - ./scripts/start_peer_with_auto_restart.sh:/app/start_peer_with_auto_restart.sh:ro
     cap_add:
       - NET_ADMIN

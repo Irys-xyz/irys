@@ -25,11 +25,12 @@ else
     echo "Building without telemetry (set ENABLE_TELEMETRY=true to enable)"
 fi
 
-# Use DOCKER_BUILDKIT=0 to avoid buildx issues
-DOCKER_BUILDKIT=0 docker build \
+docker build \
     "${BUILD_ARGS[@]}" \
+    --platform linux/amd64 \
+    --load \
     -t "$IMAGE_NAME" \
-    -f docker/Dockerfile.release \
+    -f docker/Dockerfile.debug \
     .
 
 echo ""
