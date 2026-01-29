@@ -667,8 +667,7 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
         .expect("Signer should have stake in epoch snapshot");
 
     assert_eq!(
-        stake_entry.reward_address,
-        Some(signer_address),
+        stake_entry.reward_address, signer_address,
         "Initial reward_address should equal signer address"
     );
 
@@ -700,8 +699,7 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
         .expect("Signer should still have stake after update");
 
     assert_eq!(
-        stake_entry.reward_address,
-        Some(new_reward_address),
+        stake_entry.reward_address, new_reward_address,
         "reward_address should be updated after epoch boundary"
     );
 
@@ -865,7 +863,7 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
         .stake_commitments
         .get(&signer_address)
         .expect("stake");
-    assert_eq!(stake_entry.reward_address, Some(reward_address_4));
+    assert_eq!(stake_entry.reward_address, reward_address_4);
 
     // New epoch resets nonce tracking
     let reward_address_5 = IrysSigner::random_signer(&config.consensus_config()).address();
@@ -886,7 +884,7 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
         .stake_commitments
         .get(&signer_address)
         .expect("stake");
-    assert_eq!(stake_entry.reward_address, Some(reward_address_5));
+    assert_eq!(stake_entry.reward_address, reward_address_5);
 
     node.stop().await;
     Ok(())
@@ -1004,8 +1002,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
         .expect("Genesis should have stake after epoch boundary");
 
     assert_eq!(
-        stake_entry.reward_address,
-        Some(reward_recipient),
+        stake_entry.reward_address, reward_recipient,
         "reward_address should be updated to reward_recipient after epoch boundary"
     );
 
@@ -1075,8 +1072,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
         .expect("Genesis should still have stake at end of test");
 
     assert_eq!(
-        final_stake_entry.reward_address,
-        Some(reward_recipient),
+        final_stake_entry.reward_address, reward_recipient,
         "reward_address configuration should persist through mining operations"
     );
 

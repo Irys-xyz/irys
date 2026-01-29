@@ -453,7 +453,7 @@ impl CommitmentSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::super::epoch_snapshot::commitment_state::CommitmentStateEntry;
+    use super::super::epoch_snapshot::commitment_state::{PledgeEntry, StakeEntry};
     use super::*;
     use irys_types::CommitmentStatus;
     use irys_types::{partition::PartitionAssignment, IrysSignature, H256, U256};
@@ -575,25 +575,23 @@ mod tests {
             signer,
             partition_hashes
                 .iter()
-                .map(|hash| CommitmentStateEntry {
+                .map(|hash| PledgeEntry {
                     id: H256::random(),
                     commitment_status: CommitmentStatus::Active,
-                    partition_hash: Some(*hash),
                     signer,
                     amount: U256::from(1_000_u64),
-                    reward_address: Some(signer),
+                    partition_hash: Some(*hash),
                 })
                 .collect(),
         );
         epoch_snapshot.commitment_state.stake_commitments.insert(
             signer,
-            CommitmentStateEntry {
+            StakeEntry {
                 id: H256::random(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer,
                 amount: U256::from(5_000_u64),
-                reward_address: Some(signer),
+                reward_address: signer,
             },
         );
         for hash in &partition_hashes {
@@ -651,25 +649,23 @@ mod tests {
             signer,
             partition_hashes
                 .iter()
-                .map(|hash| CommitmentStateEntry {
+                .map(|hash| PledgeEntry {
                     id: H256::random(),
                     commitment_status: CommitmentStatus::Active,
-                    partition_hash: Some(*hash),
                     signer,
                     amount: U256::from(1_000_u64),
-                    reward_address: Some(signer),
+                    partition_hash: Some(*hash),
                 })
                 .collect(),
         );
         epoch_snapshot.commitment_state.stake_commitments.insert(
             signer,
-            CommitmentStateEntry {
+            StakeEntry {
                 id: H256::random(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer,
                 amount: U256::from(5_000_u64),
-                reward_address: Some(signer),
+                reward_address: signer,
             },
         );
         for hash in &partition_hashes {
@@ -749,13 +745,12 @@ mod tests {
         let mut epoch_snapshot = EpochSnapshot::default();
         epoch_snapshot.commitment_state.stake_commitments.insert(
             signer,
-            CommitmentStateEntry {
+            StakeEntry {
                 id: H256::random(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer,
                 amount: U256::from(1000),
-                reward_address: Some(signer),
+                reward_address: signer,
             },
         );
         let status = snapshot.add_commitment(&pledge, &epoch_snapshot);

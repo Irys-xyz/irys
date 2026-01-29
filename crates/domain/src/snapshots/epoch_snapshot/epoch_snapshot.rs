@@ -1,4 +1,4 @@
-use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
+use super::{CommitmentState, PartitionAssignments, PledgeEntry, StakeEntry};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
@@ -11,10 +11,10 @@ use irys_types::{
 };
 use irys_types::{
     partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
-    PartitionChunkOffset, U256,
+    PartitionChunkOffset,
 };
 use openssl::sha;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use tracing::{debug, error, trace, warn};
 
@@ -146,12 +146,12 @@ impl EpochSnapshot {
 
     /// Resolves a miner address to their configured reward address.
     /// Returns the reward_address from the stake entry if present, falling back to miner_address
-    /// if the stake entry has no reward_address configured or if there is no stake entry.
+    /// if there is no stake entry.
     pub fn resolve_reward_address(&self, miner_address: IrysAddress) -> IrysAddress {
         self.commitment_state
             .stake_commitments
             .get(&miner_address)
-            .and_then(|entry| entry.reward_address)
+            .map(|entry| entry.reward_address)
             .unwrap_or(miner_address)
     }
 
@@ -364,16 +364,14 @@ impl EpochSnapshot {
     /// Applies update reward address operations found in a set of epoch commitments.
     ///
     /// Behavior:
-    /// - For each UpdateRewardAddress commitment, tracks the highest nonce per signer.
-    /// - Only the UpdateRewardAddress with the highest nonce per signer is applied.
     /// - Verifies the signer has an active stake before applying.
     /// - Updates the stake entry's reward_address field to the new address.
+    /// - Panics if duplicate signers are detected (CommitmentSnapshot guarantees uniqueness).
     pub fn apply_update_reward_addresses(
         &mut self,
         commitments: &[CommitmentTransaction],
     ) -> Result<(), EpochSnapshotError> {
-        // Build a map tracking the highest nonce per signer
-        let mut highest_nonce_map: HashMap<IrysAddress, (U256, IrysAddress)> = HashMap::new();
+        let mut seen_signers: HashSet<IrysAddress> = HashSet::new();
 
         for commitment in commitments {
             let irys_types::CommitmentTypeV2::UpdateRewardAddress {
@@ -385,29 +383,20 @@ impl EpochSnapshot {
             };
             let signer = commitment.signer();
 
-            // Update map if this nonce is higher than what we've seen for this signer
-            highest_nonce_map
-                .entry(signer)
-                .and_modify(|(existing_nonce, existing_addr)| {
-                    if nonce > existing_nonce {
-                        *existing_nonce = *nonce;
-                        *existing_addr = *new_reward_address;
-                    }
-                })
-                .or_insert((*nonce, *new_reward_address));
-        }
+            // Panic on duplicate - CommitmentSnapshot should guarantee uniqueness
+            assert!(
+                seen_signers.insert(signer),
+                "Data consistency fault: multiple UpdateRewardAddress transactions for signer {}",
+                signer
+            );
 
-        // Now apply the updates from the map
-        for (signer, (nonce, new_reward_address)) in highest_nonce_map {
-            // Get mutable reference to stake entry; error if not found
             let stake_entry = self
                 .commitment_state
                 .stake_commitments
                 .get_mut(&signer)
                 .ok_or(EpochSnapshotError::UpdateRewardAddressSignerNotStaked { signer })?;
 
-            // Update the reward address
-            stake_entry.reward_address = Some(new_reward_address);
+            stake_entry.reward_address = *new_reward_address;
 
             debug!(
                 tx.signer = %signer,
@@ -840,14 +829,13 @@ impl EpochSnapshot {
         for stake_commitment in stake_commitments {
             // Register the commitment in the state
             // Assumption: Commitments are pre-validated, so we don't check for duplicates
-            let value = CommitmentStateEntry {
+            let value = StakeEntry {
                 id: stake_commitment.id(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer: stake_commitment.signer(),
                 amount: stake_commitment.value(),
                 // Initialize reward_address to signer - can be updated via UpdateRewardAddress tx
-                reward_address: Some(stake_commitment.signer()),
+                reward_address: stake_commitment.signer(),
             };
             self.commitment_state
                 .stake_commitments
@@ -870,14 +858,12 @@ impl EpochSnapshot {
             }
 
             // Create the state entry for the pledge commitment
-            let value = CommitmentStateEntry {
+            let value = PledgeEntry {
                 id: pledge_commitment.id(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: None,
                 signer: pledge_commitment.signer(),
                 amount: pledge_commitment.value(),
-                // Pledges don't have their own reward_address - they use the stake's reward_address
-                reward_address: None,
+                partition_hash: None, // Assigned later via assign_partition_hashes_to_pledges
             };
 
             // Add the pledge state to the signer's collection (or create a new collection if first pledge)
@@ -1009,7 +995,7 @@ impl EpochSnapshot {
         let mut unassigned_parts: VecDeque<H256> = unassigned_partition_hashes.into();
 
         // Make a list of all the active pledges with no assigned partition hash
-        let mut unassigned_pledges: Vec<CommitmentStateEntry> = self
+        let mut unassigned_pledges: Vec<PledgeEntry> = self
             .commitment_state
             .pledge_commitments
             .values()
@@ -1561,13 +1547,12 @@ mod tests {
             snapshot.all_active_partitions.push(ph);
 
             // Seed a pledge entry tied to the partition hash
-            let pledge_entry = CommitmentStateEntry {
+            let pledge_entry = PledgeEntry {
                 id: H256::zero(),
                 commitment_status: CommitmentStatus::Active,
-                partition_hash: Some(ph),
                 signer: miner,
                 amount: U256::zero(),
-                reward_address: None,
+                partition_hash: Some(ph),
             };
             snapshot
                 .commitment_state

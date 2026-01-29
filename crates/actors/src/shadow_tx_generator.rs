@@ -796,18 +796,17 @@ mod tests {
     /// Creates an epoch snapshot with stake entries for the given miner addresses.
     /// Each miner gets a stake entry with their address as the reward address.
     fn test_epoch_snapshot_with_miners(miners: &[IrysAddress]) -> EpochSnapshot {
-        use irys_domain::CommitmentStateEntry;
+        use irys_domain::StakeEntry;
         let mut snapshot = EpochSnapshot::default();
         for miner in miners {
             snapshot.commitment_state.stake_commitments.insert(
                 *miner,
-                CommitmentStateEntry {
+                StakeEntry {
                     id: H256::random(),
                     commitment_status: CommitmentStatus::Active,
-                    partition_hash: None,
                     signer: *miner,
                     amount: U256::from(1000),
-                    reward_address: Some(*miner),
+                    reward_address: *miner,
                 },
             );
         }
