@@ -370,10 +370,9 @@ impl PeerNetworkService {
             let client = gossip_client.clone();
             let peer_list = self.inner.peer_list();
             let inner_clone = sender_inner.clone();
-            let mining_addr = peer.mining_address;
             tokio::spawn(async move {
                 match client
-                    .check_health(&mining_addr, peer.address, &peer_list)
+                    .check_health(&peer_id, peer.address, &peer_list)
                     .await
                 {
                     Ok(true) => {
@@ -399,10 +398,7 @@ impl PeerNetworkService {
                         );
                     }
                     Err(err) => {
-                        error!(
-                            "Failed to check health of peer {:?}: {:?}",
-                            mining_addr, err
-                        );
+                        error!("Failed to check health of peer {:?}: {:?}", peer_id, err);
                     }
                 }
             });

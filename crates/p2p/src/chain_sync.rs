@@ -41,8 +41,8 @@ impl From<GossipError> for ChainSyncError {
         match err {
             GossipError::Advisory(err) => Self::Internal(format!("Advisory error: {}", &err)),
             GossipError::Network(msg) => Self::Network(msg),
-            GossipError::CircuitBreakerOpen(addr) => {
-                Self::Network(format!("Circuit breaker open for peer {}", addr))
+            GossipError::CircuitBreakerOpen(peer_id) => {
+                Self::Network(format!("Circuit breaker open for peer {}", peer_id))
             }
             GossipError::InvalidPeer(msg) => Self::Network(format!("Invalid peer: {}", msg)),
             GossipError::Cache(msg) => Self::Internal(format!("Cache error: {}", msg)),
