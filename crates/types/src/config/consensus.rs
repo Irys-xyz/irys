@@ -412,6 +412,9 @@ impl ConsensusConfig {
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
 
+    // 20TB, with ~10% overhead, aligned to the nearest recall range (400 chunks)
+    pub const CHUNKS_PER_PARTITION_20TB: u64 = 75_534_400;
+
     /// Calculate the number of epochs in one year based on network parameters
     pub fn epochs_per_year(&self) -> u64 {
         const SECONDS_PER_YEAR: u64 = 365 * 24 * 60 * 60;
@@ -741,9 +744,9 @@ impl ConsensusConfig {
             )),
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
             chunk_size: Self::CHUNK_SIZE,
-            num_chunks_in_partition: 51_872_000,
-            num_chunks_in_recall_range: 800,
-            num_partitions_per_slot: 1,
+            num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
+            num_chunks_in_recall_range: 400,
+            num_partitions_per_slot: 10,
             block_migration_depth: 6,
             block_tree_depth: 50,
             entropy_packing_iterations: 1000,
@@ -771,7 +774,7 @@ impl ConsensusConfig {
             mempool: MempoolConsensusConfig {
                 max_data_txs_per_block: 100,
                 max_commitment_txs_per_block: 100,
-                tx_anchor_expiry_depth: 59,
+                tx_anchor_expiry_depth: 50,
                 ingress_proof_anchor_expiry_depth: 200,
                 commitment_fee: 100,
             },
@@ -816,7 +819,7 @@ impl ConsensusConfig {
                 aurora: Some(Aurora {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(
                         StringDeserializer::<serde::de::value::Error>::new(
-                            "2026-01-15T11:30:00+00:00".to_owned(),
+                            "2026-01-29T16:30:00+00:00".to_owned(),
                         ),
                     )
                     .unwrap(),
