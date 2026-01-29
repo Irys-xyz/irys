@@ -345,12 +345,20 @@ impl CommitmentSnapshot {
                 CommitmentSnapshotStatus::Accepted
             }
             CommitmentTypeV2::UpdateRewardAddress { nonce, .. } => {
-                // Require staked or pending local stake
                 if !self.has_stake(signer, epoch_snapshot) {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
 
-                // Allow replacement only if new nonce is strictly greater
+                // Idempotency: if the same tx is already stored, return Accepted
+                if self
+                    .commitments
+                    .get(signer)
+                    .and_then(|c| c.update_reward_address.as_ref())
+                    .is_some_and(|existing| existing.id() == commitment_tx.id())
+                {
+                    return CommitmentSnapshotStatus::Accepted;
+                }
+
                 if self.should_reject_update_reward_address(signer, nonce) {
                     return CommitmentSnapshotStatus::UpdateRewardAddressPending;
                 }
