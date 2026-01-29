@@ -750,7 +750,7 @@ mod tests {
     fn test_aggregate_miner_fees_handles_duplicates() {
         // Setup config
         let node_config = irys_types::NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create test transactions
         let tx1 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {

@@ -1510,8 +1510,8 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, PeerAddress,
-            PeerListItem, PeerNetworkSender, PeerScore,
+            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, IrysPeerId, NodeConfig,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1592,7 +1592,7 @@ mod tests {
             node_config.sync_mode = SyncMode::Full;
             node_config.trusted_peers = vec![fake_peer_address];
             node_config.genesis_peer_discovery_timeout_millis = 10;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
@@ -1702,7 +1702,7 @@ mod tests {
             node_config.node_mode = NodeMode::Genesis;
             node_config.trusted_peers = vec![];
             node_config.genesis_peer_discovery_timeout_millis = 10;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let runtime_handle = tokio::runtime::Handle::current();
@@ -1832,7 +1832,7 @@ mod tests {
             // Config and services
             let mut node_config = NodeConfig::testing();
             node_config.sync_mode = SyncMode::Full;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
 
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
@@ -1964,7 +1964,7 @@ mod tests {
 
             let mut node_config = NodeConfig::testing();
             node_config.sync_mode = SyncMode::Full;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();

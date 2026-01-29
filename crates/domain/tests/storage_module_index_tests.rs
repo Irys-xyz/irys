@@ -35,7 +35,7 @@ fn tx_path_overlap_tests() -> eyre::Result<()> {
         ..node_config.consensus_config()
     });
     node_config.base_directory = base_path;
-    let config = Config::new(node_config);
+    let config = Config::new_with_random_peer_id(node_config);
 
     // Configure 3 storage modules that are assigned to the submit ledger in
     // slots 0, 1, and 2

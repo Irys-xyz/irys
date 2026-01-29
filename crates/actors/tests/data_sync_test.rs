@@ -408,7 +408,7 @@ impl TestSetup {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create mining addresses for all the mocked up peers
         let slow_peer_addr = IrysAddress::from([1_u8; 20]);
