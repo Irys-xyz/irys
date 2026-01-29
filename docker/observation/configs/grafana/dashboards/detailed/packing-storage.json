@@ -509,8 +509,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Storage Modules by Node",
-      "description": "Number of storage modules per node over time",
+      "title": "Storage Modules Total",
+      "description": "Number of storage modules over time",
       "gridPos": {
         "x": 0,
         "y": 26,

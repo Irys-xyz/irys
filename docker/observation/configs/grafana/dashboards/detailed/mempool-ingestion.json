@@ -420,8 +420,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
-          "legendFormat": "{{service_name}} p50",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
+          "legendFormat": "p50",
           "refId": "A"
         },
         {
@@ -429,8 +429,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
-          "legendFormat": "{{service_name}} p95",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
+          "legendFormat": "p95",
           "refId": "B"
         },
         {
@@ -438,8 +438,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
-          "legendFormat": "{{service_name}} p99",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"handle_chunk_ingress\"}[5m])))",
+          "legendFormat": "p99",
           "refId": "C"
         }
       ],
@@ -625,8 +625,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(irys_mempool_chunks_duplicates_total{job=~\"$node\"}[1m]))",
-          "legendFormat": "duplicates",
+          "expr": "rate(irys_mempool_chunks_duplicates_total{job=~\"$node\"}[1m])",
+          "legendFormat": "{{job}} duplicates",
           "refId": "A"
         },
         {
@@ -634,8 +634,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (job, error_type) (rate(irys_mempool_chunks_errors_total{job=~\"$node\"}[1m]))",
-          "legendFormat": "{{job}} {{error_type}}",
+          "expr": "sum by (error_type) (rate(irys_mempool_chunks_errors_total{job=~\"$node\"}[5m]))",
+          "legendFormat": "error: {{error_type}}",
           "refId": "B"
         }
       ],

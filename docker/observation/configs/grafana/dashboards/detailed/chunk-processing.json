@@ -121,7 +121,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(irys_api_chunks_errors_total{job=~\"$node\"}[5m]) or vector(0)) + sum(rate(irys_gossip_chunks_errors_total{job=~\"$node\"}[5m]) or vector(0))",
+          "expr": "sum(rate(irys_api_chunks_errors_total{job=~\"$node\"}[5m])) + sum(rate(irys_gossip_chunks_errors_total{job=~\"$node\"}[5m]))",
           "legendFormat": "errors/s",
           "refId": "A"
         }
@@ -195,12 +195,12 @@
     {
       "type": "stat",
       "title": "Processing Latency (p50)",
-      "description": "Median chunk processing time (API + Gossip ingress)",
+      "description": "Median chunk processing time (API + Gossip)",
       "gridPos": { "x": 8, "y": 5, "w": 8, "h": 4 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"POST /v1/chunk\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         }
@@ -239,7 +239,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(irys_api_chunks_received_total{job=~\"$node\"}[1m]) or vector(0)) + sum(rate(irys_gossip_chunks_received_total{job=~\"$node\"}[1m]) or vector(0))",
+          "expr": "sum(rate(irys_api_chunks_received_total{job=~\"$node\"}[1m])) + sum(rate(irys_gossip_chunks_received_total{job=~\"$node\"}[1m]))",
           "legendFormat": "chunks",
           "refId": "A"
         }
@@ -394,25 +394,25 @@
     },
     {
       "type": "timeseries",
-      "title": "Chunk Processing Latency (p50, p95, p99)",
-      "description": "API + Gossip chunk processing latency percentiles",
+      "title": "API Chunk Processing Latency (p50, p95, p99)",
+      "description": "API chunk processing latency percentiles",
       "gridPos": { "x": 0, "y": 23, "w": 12, "h": 6 },
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"POST /v1/chunk\"}[5m])))",
           "legendFormat": "p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"POST /v1/chunk\"}[5m])))",
           "legendFormat": "p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"POST /v1/chunk\"}[5m])))",
           "legendFormat": "p99",
           "refId": "C"
         }
