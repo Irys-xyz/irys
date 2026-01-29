@@ -1,6 +1,7 @@
 use opentelemetry::metrics::{Counter, Gauge};
 use opentelemetry::{global, KeyValue};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 fn meter() -> opentelemetry::metrics::Meter {
     global::meter("irys-chain")
@@ -12,9 +13,11 @@ static PENDING_CHUNKS: OnceLock<Gauge<u64>> = OnceLock::new();
 static PENDING_DATA_TXS: OnceLock<Gauge<u64>> = OnceLock::new();
 static SYNC_STATE: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_UP: OnceLock<Gauge<u64>> = OnceLock::new();
-static VDF_GLOBAL_STEP: OnceLock<Gauge<u64>> = OnceLock::new();
+static NODE_UPTIME: OnceLock<Gauge<u64>> = OnceLock::new();
+static NODE_START_TIME: OnceLock<Instant> = OnceLock::new();
 static VDF_MINING_ENABLED: OnceLock<Gauge<u64>> = OnceLock::new();
 static STORAGE_MODULES_TOTAL: OnceLock<Gauge<u64>> = OnceLock::new();
+static VDF_GLOBAL_STEP: OnceLock<Gauge<u64>> = OnceLock::new();
 static NODE_SHUTDOWN: OnceLock<Counter<u64>> = OnceLock::new();
 static PLEDGE_TX_POSTED: OnceLock<Counter<u64>> = OnceLock::new();
 static PEER_FETCH_ERRORS: OnceLock<Counter<u64>> = OnceLock::new();
@@ -84,6 +87,18 @@ pub(crate) fn record_node_up() {
                 .build()
         })
         .record(1, &[]);
+}
+
+pub(crate) fn record_node_uptime() {
+    let start = NODE_START_TIME.get_or_init(Instant::now);
+    NODE_UPTIME
+        .get_or_init(|| {
+            meter()
+                .u64_gauge("irys.node.uptime_seconds")
+                .with_description("Node uptime in seconds")
+                .build()
+        })
+        .record(start.elapsed().as_secs(), &[]);
 }
 
 pub(crate) fn record_vdf_global_step(step: u64) {
