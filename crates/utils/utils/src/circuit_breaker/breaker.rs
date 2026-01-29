@@ -103,7 +103,7 @@ impl CircuitBreaker {
     #[inline]
     fn increment_trial_count(&self) -> Result<u32, u32> {
         self.half_open_trial_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |x| {
                 (x < self.config.recovery_attempts.get()).then_some(x + 1)
             })
     }

@@ -127,25 +127,25 @@ where
     }
 
     pub fn cleanup_stale(&self) {
-        let stale_keys: Vec<K> = self
-            .breakers
-            .iter()
-            .filter(|entry| entry.value().is_stale())
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in &stale_keys {
-            if self.breakers.remove(key).is_some() {
+        let mut removed = 0;
+        self.breakers.retain(|_key, breaker| {
+            if breaker.is_stale() {
                 self.active_count.fetch_sub(1, Ordering::Relaxed);
+                removed += 1;
+                false
+            } else {
+                true
             }
-        }
+        });
 
-        let removed = stale_keys.len();
         if removed > 0 {
             tracing::debug!(removed, "cleaned up stale circuit breakers");
         }
     }
 
+    /// Returns the approximate number of active circuit breakers.
+    ///
+    /// Due to concurrent operations, this may temporarily differ from the actual map size.
     #[must_use]
     pub fn len(&self) -> usize {
         self.active_count.load(Ordering::Relaxed)
