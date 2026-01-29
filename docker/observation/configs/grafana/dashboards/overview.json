@@ -199,7 +199,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND log.level: ERROR",
+          "query": "service.name.keyword: ${node:lucene} AND log.level: ERROR",
           "metrics": [
             {
               "type": "count",
@@ -274,7 +274,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND message: panic",
+          "query": "service.name.keyword: ${node:lucene} AND message: panic",
           "metrics": [
             {
               "type": "count",
@@ -345,7 +345,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND message: \"starting the node\"",
+          "query": "service.name.keyword: ${node:lucene} AND message: \"starting the node\"",
           "metrics": [
             {
               "type": "count",
@@ -420,7 +420,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND message: deadlock",
+          "query": "service.name.keyword: ${node:lucene} AND message: deadlock",
           "metrics": [
             {
               "type": "count",
@@ -528,7 +528,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND log.level: ERROR",
+          "query": "service.name.keyword: ${node:lucene} AND log.level: ERROR",
           "metrics": [
             {
               "type": "count",
@@ -593,7 +593,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node",
+          "query": "service.name.keyword: ${node:lucene}",
           "metrics": [
             {
               "type": "count",
@@ -667,7 +667,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND message: (mark_tip OR add_block)",
+          "query": "service.name.keyword: ${node:lucene} AND message: (mark_tip OR add_block)",
           "metrics": [
             {
               "type": "raw_data",
@@ -766,7 +766,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node AND log.level: ERROR",
+          "query": "service.name.keyword: ${node:lucene} AND log.level: ERROR",
           "metrics": [
             {
               "type": "raw_data",
@@ -969,7 +969,7 @@
             "type": "elasticsearch",
             "uid": "elasticsearch"
           },
-          "query": "service.name.keyword: $node",
+          "query": "service.name.keyword: ${node:lucene}",
           "metrics": [
             {
               "type": "raw_data",

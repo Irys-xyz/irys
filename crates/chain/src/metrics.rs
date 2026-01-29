@@ -38,7 +38,7 @@ pub(crate) fn record_peer_count(count: u64) {
     PEER_COUNT
         .get_or_init(|| {
             meter()
-                .u64_gauge("irys.p2p.peer_count")
+                .u64_gauge("irys.chain.peer_count")
                 .with_description("Number of connected peers")
                 .build()
         })
@@ -134,7 +134,7 @@ pub(crate) fn record_storage_modules_total(count: u64) {
         .record(count, &[]);
 }
 
-pub(crate) fn record_node_shutdown(reason: &str) {
+pub(crate) fn record_node_shutdown(reason: &'static str) {
     NODE_SHUTDOWN
         .get_or_init(|| {
             meter()
@@ -142,7 +142,7 @@ pub(crate) fn record_node_shutdown(reason: &str) {
                 .with_description("Node shutdown events by reason")
                 .build()
         })
-        .add(1, &[KeyValue::new("reason", reason.to_owned())]);
+        .add(1, &[KeyValue::new("reason", reason)]);
 }
 
 pub(crate) fn record_pledge_tx_posted() {
