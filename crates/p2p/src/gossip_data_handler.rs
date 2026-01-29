@@ -1,7 +1,7 @@
 use crate::{
     block_pool::BlockPool,
     cache::GossipCache,
-    metrics::{record_gossip_chunk_error, record_gossip_chunk_received},
+    metrics::{record_gossip_chunk_received, record_gossip_inbound_error},
     rate_limiting::{DataRequestTracker, RequestCheckResult},
     types::{AdvisoryGossipError, InternalGossipError, InvalidDataError},
     GossipClient, GossipError, GossipResult,
@@ -106,7 +106,7 @@ where
                     .record_seen(source_peer_id, GossipCacheKey::Chunk(chunk_path_hash))
             }
             Err(error) => {
-                record_gossip_chunk_error(error.error_type(), error.is_advisory());
+                record_gossip_inbound_error(error.error_type(), error.is_advisory());
 
                 Err(match error {
                     ChunkIngressError::Critical(err) => match err {
