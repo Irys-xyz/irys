@@ -634,8 +634,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (error_type) (rate(irys_mempool_chunks_errors_total{job=~\"$node\"}[5m]))",
-          "legendFormat": "error: {{error_type}}",
+          "expr": "sum by (job, error_type) (rate(irys_mempool_chunks_errors_total{job=~\"$node\"}[1m]))",
+          "legendFormat": "{{job}} {{error_type}}",
           "refId": "B"
         }
       ],
