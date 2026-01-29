@@ -21,6 +21,20 @@ processors:
     timeout: 1s
     send_batch_size: 1024
 
+connectors:
+  # Derives R.E.D (Rate, Errors, Duration) metrics from trace spans.
+  # Every #[instrument]-annotated function produces:
+  #   span_metrics_duration_ms_{bucket,sum,count} histogram
+  #   span_metrics_calls_total counter
+  # Dimensions: service.name, span.name, span.kind, status.code
+  spanmetrics:
+    namespace: span.metrics
+    histogram:
+      explicit:
+    dimensions_cache_size: 1000
+    aggregation_temporality: AGGREGATION_TEMPORALITY_CUMULATIVE
+    metrics_flush_interval: 15s
+
 exporters:
   # Elasticsearch for logs - uses irys-logs index with ILM retention
   elasticsearch:
