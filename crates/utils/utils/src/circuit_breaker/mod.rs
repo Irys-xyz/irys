@@ -44,7 +44,7 @@ fn get_current_time_nanos() -> u64 {
 #[inline]
 fn handle_instant_before_base(instant: Instant, base: Instant) -> u64 {
     match instant.checked_duration_since(base) {
-        Some(duration) => duration.as_nanos() as u64,
+        Some(duration) => duration.as_nanos().min(u64::MAX as u128) as u64,
         None => 0,
     }
 }
