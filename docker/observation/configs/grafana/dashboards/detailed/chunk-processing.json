@@ -314,7 +314,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=~\"POST /v1/chunk|POST /gossip/v2/chunk\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"POST /v1/chunk\"}[5m])))",
           "legendFormat": "API p95",
           "refId": "A"
         },
@@ -394,8 +394,8 @@
     },
     {
       "type": "timeseries",
-      "title": "API Chunk Processing Latency (p50, p95, p99)",
-      "description": "API chunk processing latency percentiles",
+      "title": "Chunk Processing Latency (p50, p95, p99)",
+      "description": "API + Gossip chunk processing latency percentiles",
       "gridPos": { "x": 0, "y": 23, "w": 12, "h": 6 },
       "targets": [
         {
