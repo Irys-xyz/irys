@@ -12,7 +12,7 @@ use crate::utils::IrysNodeTest;
 
 #[test_log::test(tokio::test)]
 async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<()> {
-    let num_blocks_in_epoch: usize = 2;
+    let num_blocks_in_epoch: usize = 5;
     let submit_ledger_epoch_length: u64 = 2;
     let chunk_size = 32_u64;
     let num_chunks_in_partition = 10_u64;
@@ -33,14 +33,13 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
     let signer = node.cfg.signer();
     let custom_reward_address = IrysAddress::random();
 
-    // Set custom reward address
+    // Epoch 0: Set custom reward address and post data
     let update_tx = node
         .post_update_reward_address(&signer, custom_reward_address, U256::from(1))
         .await?;
     node.wait_for_mempool(update_tx.id(), 30).await?;
     node.mine_block().await?;
 
-    // Post data to fill at least one slot
     let anchor = node.get_anchor().await?;
     let num_txs = (num_chunks_in_partition + 2) as usize;
     for i in 0..num_txs {
@@ -50,24 +49,17 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
     }
     let data_block = node.mine_block().await?;
 
-    // Verify data included in Submit ledger
     let tx_ids = data_block.get_data_ledger_tx_ids();
     assert!(tx_ids
         .get(&DataLedger::Submit)
         .map(|t| !t.is_empty())
         .unwrap_or(false));
 
-    // Calculate expiry height
-    let data_epoch = data_block.height / num_blocks_in_epoch as u64;
-    let expiry_height = (data_epoch + submit_ledger_epoch_length) * num_blocks_in_epoch as u64;
-
-    // Mine to reward address activation epoch
+    // Epoch 1: Reward address takes effect
     node.mine_until_next_epoch().await?;
 
-    // Mine to expiry
-    while node.get_canonical_chain_height().await < expiry_height {
-        node.mine_block().await?;
-    }
+    // Epoch 2: Data expires (data_epoch=0 + submit_ledger_epoch_length=2)
+    let (_, expiry_height) = node.mine_until_next_epoch().await?;
 
     // Verify TermFeeReward goes to custom reward address
     let expiry_block = node.get_block_by_height(expiry_height).await?;
@@ -105,7 +97,7 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
 /// Test that UnpledgeRefund goes to miner_address, not custom reward_address.
 #[test_log::test(tokio::test)]
 async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
-    let num_blocks_in_epoch: usize = 2;
+    let num_blocks_in_epoch: usize = 5;
 
     let mut config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
     config.consensus.get_mut().block_migration_depth = 1;
@@ -118,17 +110,16 @@ async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
     let miner_address = signer.address();
     let custom_reward_address = IrysAddress::random();
 
-    // Set custom reward address
+    // Epoch 0: Set custom reward address
     let update_tx = node
         .post_update_reward_address(&signer, custom_reward_address, U256::from(1))
         .await?;
     node.wait_for_mempool(update_tx.id(), 30).await?;
     node.mine_block().await?;
 
-    // Mine to next epoch so reward address takes effect
+    // Epoch 1: Reward address takes effect, post unpledge
     node.mine_until_next_epoch().await?;
 
-    // Get a partition to unpledge
     let assignments = node.get_partition_assignments(miner_address);
     assert!(
         !assignments.is_empty(),
@@ -136,7 +127,6 @@ async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
     );
     let partition_to_unpledge = assignments[0].partition_hash;
 
-    // Post unpledge commitment
     let pledge_count = node
         .node_ctx
         .mempool_pledge_provider
@@ -157,7 +147,7 @@ async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
     node.wait_for_mempool(unpledge_tx.id(), 30).await?;
     node.mine_block().await?;
 
-    // Mine to next epoch for refund
+    // Epoch 2: Unpledge refund issued
     let (_, refund_height) = node.mine_until_next_epoch().await?;
 
     // Verify UnpledgeRefund goes to miner address

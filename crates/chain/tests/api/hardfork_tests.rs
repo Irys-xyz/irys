@@ -701,9 +701,7 @@ mod epoch_block_filtering {
 #[cfg(test)]
 mod borealis_hardfork {
     use super::*;
-    use irys_types::{
-        hardfork_config::Borealis, CommitmentV2WithMetadata, IrysAddress, H256, U256,
-    };
+    use irys_types::{hardfork_config::Borealis, IrysAddress, U256};
 
     fn create_borealis_config(borealis: Option<Borealis>, aurora: Option<Aurora>) -> NodeConfig {
         let mut config = NodeConfig::testing();
@@ -738,126 +736,48 @@ mod borealis_hardfork {
         borealis_config_with_timestamp(now_secs().saturating_sub(ONE_HOUR_SECS))
     }
 
-    fn create_update_reward_address_tx(
-        consensus: &ConsensusConfig,
-        anchor: H256,
-        new_reward_address: IrysAddress,
-        nonce: U256,
-        signer: &IrysSigner,
-    ) -> CommitmentTransaction {
-        let mut tx = CommitmentTransaction::V2(CommitmentV2WithMetadata {
-            tx: CommitmentTransactionV2 {
-                commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                    new_reward_address,
-                    nonce,
-                },
-                anchor,
-                fee: consensus.mempool.commitment_fee,
-                value: U256::zero(),
-                ..CommitmentTransactionV2::new(consensus)
-            },
-            metadata: Default::default(),
-        });
-        signer.sign_commitment(&mut tx).unwrap();
-        tx
-    }
-
-    /// Test UpdateRewardAddress rejection pre-activation, acceptance post-activation.
-    #[rstest]
-    #[case::pre_activation_rejected(true, false)]
-    #[case::post_activation_accepted(false, true)]
+    /// Test that UpdateRewardAddress is rejected before Borealis activation.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_borealis_update_reward_address_acceptance(
-        #[case] pre_activation: bool,
-        #[case] expect_accepted: bool,
-    ) -> eyre::Result<()> {
-        initialize_tracing();
-
-        let mut config = if pre_activation {
-            borealis_config_future()
-        } else {
-            borealis_config_past()
-        };
-
+    async fn heavy_test_borealis_rejects_update_reward_address_pre_activation() -> eyre::Result<()>
+    {
+        let mut config = borealis_config_future();
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 
-        // First stake so we have a valid staker
-        let stake_tx = create_stake_tx(&node, &signer, TxVersion::V2).await;
-        node.post_commitment_tx(&stake_tx).await?;
-        node.mine_blocks(1).await?;
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
 
-        // Now try UpdateRewardAddress
-        let anchor = node.get_anchor().await?;
-        let new_reward_address =
-            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
-        let tx = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
+        let new_address = IrysAddress::random();
+        let result = node
+            .post_update_reward_address(&signer, new_address, U256::zero())
+            .await;
 
-        let result = node.post_commitment_tx(&tx).await;
-
-        if expect_accepted {
-            assert!(
-                result.is_ok(),
-                "UpdateRewardAddress should be accepted post-activation: {:?}",
-                result.err()
-            );
-        } else {
-            assert!(
-                result.is_err(),
-                "UpdateRewardAddress should be rejected pre-activation"
-            );
-            assert_http_bad_request(&result.unwrap_err());
-        }
+        assert!(result.is_err());
+        assert_http_bad_request(&result.unwrap_err());
 
         node.stop().await;
         Ok(())
     }
 
-    /// Test that UpdateRewardAddress transactions are allowed and included by the block
-    /// producer when Borealis is active from the start.
+    /// Test that UpdateRewardAddress is accepted and mined after Borealis activation.
     #[test_log::test(tokio::test)]
-    async fn heavy_test_borealis_block_producer_allows_post_activation_update_reward_address(
-    ) -> eyre::Result<()> {
-        initialize_tracing();
-
-        // Start with Borealis already active so we can submit the tx
-        let borealis_activation = now_secs().saturating_sub(ONE_HOUR_SECS);
-        let mut config = borealis_config_with_timestamp(borealis_activation);
+    async fn heavy_test_borealis_accepts_update_reward_address_post_activation() -> eyre::Result<()>
+    {
+        let mut config = borealis_config_past();
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 
-        // Stake first
-        let stake_tx = create_stake_tx(&node, &signer, TxVersion::V2).await;
-        node.post_commitment_tx(&stake_tx).await?;
-        node.mine_blocks(1).await?;
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
 
-        // Submit UpdateRewardAddress (should be accepted since Borealis is active)
-        let anchor = node.get_anchor().await?;
-        let new_reward_address =
-            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
-        let update_tx = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-        node.post_commitment_tx(&update_tx).await?;
+        let new_address = IrysAddress::random();
+        let tx = node
+            .post_update_reward_address(&signer, new_address, U256::zero())
+            .await?;
 
-        // Mine blocks and verify the UpdateRewardAddress tx is included
         node.mine_blocks(2).await?;
-
-        let found_height = find_tx_in_blocks(&node, &update_tx.id(), MAX_BLOCKS_TO_SEARCH).await;
-        assert!(
-            found_height.is_some(),
-            "UpdateRewardAddress tx should be mined when Borealis is active"
-        );
+        let found = find_tx_in_blocks(&node, &tx.id(), MAX_BLOCKS_TO_SEARCH).await;
+        assert!(found.is_some(), "UpdateRewardAddress should be mined");
 
         node.stop().await;
         Ok(())
@@ -868,12 +788,8 @@ mod borealis_hardfork {
     /// created with timestamp >= activation.
     #[test_log::test(tokio::test)]
     async fn heavy_test_borealis_epoch_boundary_activation() -> eyre::Result<()> {
-        initialize_tracing();
-
-        const NUM_BLOCKS_IN_EPOCH: usize = 2;
-
         let borealis_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
-        let mut config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
+        let mut config = NodeConfig::testing_with_epochs(2);
         // Set up Aurora (already active) and Borealis (activating soon)
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
@@ -891,22 +807,14 @@ mod borealis_hardfork {
         let node = IrysNodeTest::new_genesis(config).start().await;
 
         // Stake first (block 1, still in epoch 0 with genesis as epoch block)
-        let stake_tx = create_stake_tx(&node, &signer, TxVersion::V2).await;
-        node.post_commitment_tx(&stake_tx).await?;
-        node.mine_blocks(1).await?;
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
 
         // Before activation timestamp: UpdateRewardAddress should be rejected
-        let anchor = node.get_anchor().await?;
-        let new_reward_address =
-            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
-        let tx_pre = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-        let result_pre = node.post_commitment_tx(&tx_pre).await;
+        let new_reward_address = IrysAddress::random();
+        let result_pre = node
+            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .await;
         assert!(
             result_pre.is_err(),
             "UpdateRewardAddress should be rejected before activation timestamp"
@@ -918,15 +826,9 @@ mod borealis_hardfork {
         // KEY TEST: Wall clock has passed activation, but we haven't mined a new epoch block yet.
         // The current epoch block (genesis) has timestamp < activation, so hardfork should
         // still be disabled even though wall clock has passed activation.
-        let anchor = node.get_anchor().await?;
-        let tx_after_wallclock = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-        let result_after_wallclock = node.post_commitment_tx(&tx_after_wallclock).await;
+        let result_after_wallclock = node
+            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .await;
         assert!(
             result_after_wallclock.is_err(),
             "UpdateRewardAddress should still be rejected after wall clock passes activation \
@@ -934,18 +836,12 @@ mod borealis_hardfork {
         );
 
         // Mine to next epoch boundary - this creates a new epoch block with timestamp >= activation
-        node.mine_blocks(NUM_BLOCKS_IN_EPOCH).await?;
+        node.mine_until_next_epoch().await?;
 
         // Now hardfork should be active because the new epoch block has timestamp >= activation
-        let anchor = node.get_anchor().await?;
-        let tx_post = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-        let result_post = node.post_commitment_tx(&tx_post).await;
+        let result_post = node
+            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .await;
         assert!(
             result_post.is_ok(),
             "UpdateRewardAddress should be accepted after epoch block with timestamp >= activation: {:?}",
@@ -959,8 +855,6 @@ mod borealis_hardfork {
     /// Test that Borealis disabled (None) rejects UpdateRewardAddress.
     #[test_log::test(tokio::test)]
     async fn heavy_test_borealis_disabled_rejects_update_reward_address() -> eyre::Result<()> {
-        initialize_tracing();
-
         // Aurora active (V2 required), but Borealis disabled
         let mut config = create_borealis_config(
             None,
@@ -973,24 +867,13 @@ mod borealis_hardfork {
         let signer = create_funded_signer(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
 
-        // Stake first
-        let stake_tx = create_stake_tx(&node, &signer, TxVersion::V2).await;
-        node.post_commitment_tx(&stake_tx).await?;
-        node.mine_blocks(1).await?;
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
 
-        // Try UpdateRewardAddress - should be rejected since Borealis is disabled
-        let anchor = node.get_anchor().await?;
-        let new_reward_address =
-            IrysSigner::random_signer(&node.node_ctx.config.consensus).address();
-        let tx = create_update_reward_address_tx(
-            &node.node_ctx.config.consensus,
-            anchor,
-            new_reward_address,
-            U256::zero(),
-            &signer,
-        );
-
-        let result = node.post_commitment_tx(&tx).await;
+        let new_reward_address = IrysAddress::random();
+        let result = node
+            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .await;
         assert!(
             result.is_err(),
             "UpdateRewardAddress should be rejected when Borealis is disabled"
