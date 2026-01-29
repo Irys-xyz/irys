@@ -82,7 +82,7 @@ use std::sync::Arc;
 /// - `ledger_type`: The type of ledger to process (e.g., Submit, or future expiring ledgers)
 ///
 /// # Returns
-/// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
+/// LedgerExpiryBalanceDelta containing reward address to fee mappings and user refunds
 #[tracing::instrument(skip_all, fields(block.height = block_height, ledger.type = ?ledger_type))]
 pub async fn calculate_expired_ledger_fees(
     parent_epoch_snapshot: &EpochSnapshot,
@@ -242,7 +242,7 @@ pub async fn calculate_expired_ledger_fees(
         .fold(U256::from(0), |acc, (fee, _)| acc.saturating_add(*fee));
 
     tracing::info!(
-        "Calculated fees for {} miners, total fees: {}",
+        "Calculated fees for {} reward addresses, total fees: {}",
         fees.reward_balance_increment.len(),
         total_fees
     );
@@ -625,7 +625,7 @@ async fn process_middle_blocks(
 /// - User refunds for permanent fees when transactions were not promoted to permanent storage
 #[derive(Debug, Default, Clone)]
 pub struct LedgerExpiryBalanceDelta {
-    /// Rewards for miners who stored the expired data, mapped by miner address.
+    /// Rewards for miners who stored the expired data, keyed by reward/payout address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
     pub reward_balance_increment: BTreeMap<IrysAddress, (U256, RollingHash)>,
 
