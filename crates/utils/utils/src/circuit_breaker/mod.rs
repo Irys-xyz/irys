@@ -30,7 +30,7 @@ fn get_current_time_nanos() -> u64 {
         override_time
     } else {
         let base = BASE_TIME.get_or_init(Instant::now);
-        handle_instant_before_base(Instant::now(), *base)
+        handle_instant_before_base(Instant::now(), *base).saturating_add(1)
     }
 }
 
@@ -38,7 +38,7 @@ fn get_current_time_nanos() -> u64 {
 #[inline]
 fn get_current_time_nanos() -> u64 {
     let base = BASE_TIME.get_or_init(Instant::now);
-    handle_instant_before_base(Instant::now(), *base)
+    handle_instant_before_base(Instant::now(), *base).saturating_add(1)
 }
 
 #[inline]
@@ -66,9 +66,11 @@ mod time_tests {
     use super::*;
     use crate::circuit_breaker::test_utils::{instant_to_nanos, reset_test_time};
     use proptest::prelude::*;
+    use serial_test::serial;
 
     proptest! {
         #[test]
+        #[serial]
         fn prop_instant_nanos_roundtrip_lossless(
             offset_nanos in 0_u64..1_000_000_000_000  // 0 to ~16 minutes
         ) {
@@ -84,6 +86,7 @@ mod time_tests {
         }
 
         #[test]
+        #[serial]
         fn prop_zero_nanos_never_times_out(timeout_ms in 1_u64..10000) {
             reset_test_time();
             prop_assert!(!has_timeout_elapsed(0, Duration::from_millis(timeout_ms)));
@@ -91,6 +94,7 @@ mod time_tests {
     }
 
     #[test]
+    #[serial]
     fn test_base_time_initialization_is_consistent() {
         reset_test_time();
         let nanos1 = instant_to_nanos(Instant::now());

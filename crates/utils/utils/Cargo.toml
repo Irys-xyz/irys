@@ -26,6 +26,7 @@ tracing-error = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = "1.6"
+serial_test = "3"
 tokio = { workspace = true, features = ["rt", "macros"] }
 
 [features]

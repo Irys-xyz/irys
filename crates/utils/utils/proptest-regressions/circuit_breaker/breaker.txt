@@ -12,3 +12,7 @@ cc 13602c4cab42fcb44334ca73f2b2f27dd25e63f254266fbdfc61f2df3b0d4126 # shrinks to
 cc 8847b67b0750c7d42f6f59cf8a7d7521c2957b75f07593942b11b835617a0f8f # shrinks to failure_threshold = 17
 cc c2692ea9d15380879782dd5d069295f9df8ac596ba2d603bf6d61e953be6db38 # shrinks to failure_threshold = 13
 cc f573e7b0f489aafa75172036a2981b416c21200e7acbe45009655692c25d5a37 # shrinks to failure_threshold = 4, recovery_attempts = 1, extra_attempts = 5
+cc bc6c0875edbc4bf9b8980bda3c93171a9ee9daa3aa50ed94d3bbe78c0b3eac2b # shrinks to failure_threshold = 19
+cc db80a14dcf75c0377925deddd48c93778937d3bef4c792d099ebb06c269baa39 # shrinks to failure_threshold = 14, recovery_attempts = 7, extra_attempts = 19
+cc e88d535bd6c5bfb0dce3494f97b772450396687167c60b8fdbd5eba79ae71cd6 # shrinks to failure_threshold = 12
+cc e5cff9f8ee1f6e807c8e7f4aeb28bd1fc1a5dfea98ac62a3de1cc11b3f01d09c # shrinks to failure_threshold = 5, recovery_attempts = 9, extra_attempts = 13
