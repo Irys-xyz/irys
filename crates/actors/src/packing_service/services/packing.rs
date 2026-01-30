@@ -496,7 +496,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let infos = [StorageModuleInfo {
             id: 0,
@@ -887,7 +887,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        Config::new(node_config)
+        Config::new_with_random_peer_id(node_config)
     }
 
     fn create_test_storage_module(

@@ -391,7 +391,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        Config::new(node_config)
+        Config::new_with_random_peer_id(node_config)
     }
 
     #[tokio::test]
