@@ -606,8 +606,9 @@ impl BlockTreeServiceInner {
             );
 
             // Record validation error for diagnostics
+            let error_message = format!("block={} error={}", block_hash, validation_error);
             self.chain_sync_state
-                .record_block_validation_error(validation_error.to_string());
+                .record_block_validation_error(error_message);
 
             let mut cache = self
                 .cache
