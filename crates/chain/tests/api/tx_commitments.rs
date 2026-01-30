@@ -673,7 +673,7 @@ async fn heavy_test_update_reward_address() -> eyre::Result<()> {
 
     // Submit UpdateRewardAddress and mine to include it
     let update_tx = node
-        .post_update_reward_address(&signer, new_reward_address, U256::from(1))
+        .post_update_reward_address(&signer, new_reward_address)
         .await?;
 
     // Status is Unknown until mined
@@ -728,10 +728,7 @@ async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<
 
     let mut update_tx = CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
         tx: CommitmentTransactionV2 {
-            commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                new_reward_address,
-                nonce: U256::from(1),
-            },
+            commitment_type: CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
             anchor,
             fee: consensus.mempool.commitment_fee,
             value: U256::zero(),
@@ -753,6 +750,11 @@ async fn heavy_test_update_reward_address_without_stake_fails() -> eyre::Result<
     Ok(())
 }
 
+/// Test that verifies fee-based ordering and winner selection for UpdateRewardAddress.
+///
+/// With multiple updates in the same block:
+/// - They are ordered by fee ascending (lowest fee first, highest fee last)
+/// - The highest-fee update wins and takes effect at epoch boundary
 #[test_log::test(tokio::test)]
 async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     initialize_tracing();
@@ -765,110 +767,80 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
     let signer_address = signer.address();
     config.fund_genesis_accounts(vec![&signer]);
 
-    let reward_address_1 = IrysSigner::random_signer(&config.consensus_config()).address();
-    let reward_address_2 = IrysSigner::random_signer(&config.consensus_config()).address();
-    let reward_address_3 = IrysSigner::random_signer(&config.consensus_config()).address();
+    let reward_address_low_fee = IrysSigner::random_signer(&config.consensus_config()).address();
+    let reward_address_mid_fee = IrysSigner::random_signer(&config.consensus_config()).address();
+    let reward_address_high_fee = IrysSigner::random_signer(&config.consensus_config()).address();
 
     let node = IrysNodeTest::new_genesis(config.clone())
         .start_and_wait_for_packing("MULTI_UPDATE_TEST", 10)
         .await;
 
     let block_tree_guard = &node.node_ctx.block_tree_guard;
+    let base_fee = node.node_ctx.config.consensus.mempool.commitment_fee;
 
     let _stake_tx = post_stake_commitment(&node, &signer).await;
     node.mine_until_next_epoch().await?;
 
-    // Submit updates out of order (3, 1, 2) - should be included in one block sorted by nonce
-    info!("Submitting 3 UpdateRewardAddress txs with nonces 3, 1, 2 (out of order)");
+    // Submit updates with different fees (out of order by fee)
+    // Fees: high=300, low=100, mid=200
+    info!("Submitting 3 UpdateRewardAddress txs with fees 300, 100, 200 (out of order)");
 
-    let update_tx_nonce_3 = node
-        .post_update_reward_address(&signer, reward_address_3, U256::from(3))
+    let update_tx_high_fee = node
+        .post_update_reward_address_with_fee(&signer, reward_address_high_fee, base_fee + 300)
         .await?;
-    node.wait_for_mempool(update_tx_nonce_3.id(), 5).await?;
+    node.wait_for_mempool(update_tx_high_fee.id(), 5).await?;
 
-    let update_tx_nonce_1 = node
-        .post_update_reward_address(&signer, reward_address_1, U256::from(1))
+    let update_tx_low_fee = node
+        .post_update_reward_address_with_fee(&signer, reward_address_low_fee, base_fee + 100)
         .await?;
-    node.wait_for_mempool(update_tx_nonce_1.id(), 5).await?;
+    node.wait_for_mempool(update_tx_low_fee.id(), 5).await?;
 
-    let update_tx_nonce_2 = node
-        .post_update_reward_address(&signer, reward_address_2, U256::from(2))
+    let update_tx_mid_fee = node
+        .post_update_reward_address_with_fee(&signer, reward_address_mid_fee, base_fee + 200)
         .await?;
-    node.wait_for_mempool(update_tx_nonce_2.id(), 5).await?;
+    node.wait_for_mempool(update_tx_mid_fee.id(), 5).await?;
 
     let block = node.mine_block().await?;
     let commitment_tx_ids = block.get_commitment_ledger_tx_ids();
 
-    // Verify nonce-ascending order: idx 0=nonce1, idx 1=nonce2, idx 2=nonce3
-    assert_eq!(commitment_tx_ids[0], update_tx_nonce_1.id());
-    assert_eq!(commitment_tx_ids[1], update_tx_nonce_2.id());
-    assert_eq!(commitment_tx_ids[2], update_tx_nonce_3.id());
+    // Verify fee-ascending order: idx 0=low fee, idx 1=mid fee, idx 2=high fee
+    assert_eq!(commitment_tx_ids[0], update_tx_low_fee.id());
+    assert_eq!(commitment_tx_ids[1], update_tx_mid_fee.id());
+    assert_eq!(commitment_tx_ids[2], update_tx_high_fee.id());
 
-    // Status reflects current state: nonce=3 is stored, so lower nonces show as pending
+    // Only the highest-fee update is stored in the snapshot (last one wins due to fee ordering)
+    // Replaced txs return Unknown - they were valid but not the winner
     assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_nonce_1),
-        CommitmentSnapshotStatus::UpdateRewardAddressPending
+        node.get_commitment_snapshot_status(&update_tx_low_fee),
+        CommitmentSnapshotStatus::Unknown
     );
     assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_nonce_2),
-        CommitmentSnapshotStatus::UpdateRewardAddressPending
+        node.get_commitment_snapshot_status(&update_tx_mid_fee),
+        CommitmentSnapshotStatus::Unknown
     );
     assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_nonce_3),
+        node.get_commitment_snapshot_status(&update_tx_high_fee),
         CommitmentSnapshotStatus::Accepted
     );
-
-    // Same nonce=3 should show as pending
-    let consensus = &node.node_ctx.config.consensus;
-    let anchor = node.get_anchor().await?;
-    let mut update_tx_same_nonce =
-        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
-            tx: CommitmentTransactionV2 {
-                commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                    new_reward_address: reward_address_1,
-                    nonce: U256::from(3),
-                },
-                anchor,
-                fee: consensus.mempool.commitment_fee,
-                value: U256::zero(),
-                ..CommitmentTransactionV2::new(consensus)
-            },
-            metadata: Default::default(),
-        });
-    signer.sign_commitment(&mut update_tx_same_nonce).unwrap();
-
-    let status = node.get_commitment_snapshot_status(&update_tx_same_nonce);
-    assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
-
-    // Higher nonce=4 replaces previous
-    let reward_address_4 = IrysSigner::random_signer(&config.consensus_config()).address();
-    let update_tx_nonce_4 = node
-        .post_update_reward_address(&signer, reward_address_4, U256::from(4))
-        .await?;
-    node.mine_blocks(1).await?;
-    assert_eq!(
-        node.get_commitment_snapshot_status(&update_tx_nonce_4),
-        CommitmentSnapshotStatus::Accepted
-    );
-
-    // nonce=3 now pending since nonce=4 exists
-    let status = node.get_commitment_snapshot_status(&update_tx_nonce_3);
-    assert_eq!(status, CommitmentSnapshotStatus::UpdateRewardAddressPending);
 
     node.mine_until_next_epoch().await?;
 
+    // Verify highest-fee update wins at epoch boundary
     let epoch_snapshot = block_tree_guard.read().canonical_epoch_snapshot();
     let stake_entry = epoch_snapshot
         .commitment_state
         .stake_commitments
         .get(&signer_address)
         .expect("stake");
-    assert_eq!(stake_entry.reward_address, reward_address_4);
+    assert_eq!(
+        stake_entry.reward_address, reward_address_high_fee,
+        "Highest-fee update should win at epoch boundary"
+    );
 
-    // New epoch resets nonce tracking
-    let reward_address_5 = IrysSigner::random_signer(&config.consensus_config()).address();
+    // New epoch: verify we can update again
+    let reward_address_new_epoch = IrysSigner::random_signer(&config.consensus_config()).address();
     let update_tx_new_epoch = node
-        .post_update_reward_address(&signer, reward_address_5, U256::from(1))
+        .post_update_reward_address(&signer, reward_address_new_epoch)
         .await?;
     node.mine_blocks(1).await?;
     assert_eq!(
@@ -884,7 +856,7 @@ async fn heavy_test_multiple_update_reward_address() -> eyre::Result<()> {
         .stake_commitments
         .get(&signer_address)
         .expect("stake");
-    assert_eq!(stake_entry.reward_address, reward_address_5);
+    assert_eq!(stake_entry.reward_address, reward_address_new_epoch);
 
     node.stop().await;
     Ok(())
@@ -944,7 +916,7 @@ async fn heavy_test_rewards_go_to_reward_address() -> eyre::Result<()> {
 
     // Update reward_address to different address
     let _update_tx = node
-        .post_update_reward_address(&genesis_signer, reward_recipient, U256::from(1))
+        .post_update_reward_address(&genesis_signer, reward_recipient)
         .await?;
     node.wait_for_mempool(_update_tx.id(), 10).await?;
     node.mine_block().await?;

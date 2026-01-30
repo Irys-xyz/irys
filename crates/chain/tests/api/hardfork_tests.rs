@@ -701,7 +701,7 @@ mod epoch_block_filtering {
 #[cfg(test)]
 mod borealis_hardfork {
     use super::*;
-    use irys_types::{hardfork_config::Borealis, IrysAddress, U256};
+    use irys_types::{hardfork_config::Borealis, IrysAddress};
 
     fn create_borealis_config(borealis: Option<Borealis>, aurora: Option<Aurora>) -> NodeConfig {
         let mut config = NodeConfig::testing();
@@ -748,9 +748,7 @@ mod borealis_hardfork {
         node.mine_block().await?;
 
         let new_address = IrysAddress::random();
-        let result = node
-            .post_update_reward_address(&signer, new_address, U256::zero())
-            .await;
+        let result = node.post_update_reward_address(&signer, new_address).await;
 
         assert!(result.is_err());
         assert_http_bad_request(&result.unwrap_err());
@@ -772,7 +770,7 @@ mod borealis_hardfork {
 
         let new_address = IrysAddress::random();
         let tx = node
-            .post_update_reward_address(&signer, new_address, U256::zero())
+            .post_update_reward_address(&signer, new_address)
             .await?;
 
         node.mine_blocks(2).await?;
@@ -813,7 +811,7 @@ mod borealis_hardfork {
         // Before activation timestamp: UpdateRewardAddress should be rejected
         let new_reward_address = IrysAddress::random();
         let result_pre = node
-            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .post_update_reward_address(&signer, new_reward_address)
             .await;
         assert!(
             result_pre.is_err(),
@@ -827,7 +825,7 @@ mod borealis_hardfork {
         // The current epoch block (genesis) has timestamp < activation, so hardfork should
         // still be disabled even though wall clock has passed activation.
         let result_after_wallclock = node
-            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .post_update_reward_address(&signer, new_reward_address)
             .await;
         assert!(
             result_after_wallclock.is_err(),
@@ -840,7 +838,7 @@ mod borealis_hardfork {
 
         // Now hardfork should be active because the new epoch block has timestamp >= activation
         let result_post = node
-            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .post_update_reward_address(&signer, new_reward_address)
             .await;
         assert!(
             result_post.is_ok(),
@@ -872,7 +870,7 @@ mod borealis_hardfork {
 
         let new_reward_address = IrysAddress::random();
         let result = node
-            .post_update_reward_address(&signer, new_reward_address, U256::zero())
+            .post_update_reward_address(&signer, new_reward_address)
             .await;
         assert!(
             result.is_err(),

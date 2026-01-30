@@ -2494,19 +2494,30 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         signer: &IrysSigner,
         new_reward_address: IrysAddress,
-        nonce: U256,
+    ) -> eyre::Result<CommitmentTransaction> {
+        self.post_update_reward_address_with_fee(
+            signer,
+            new_reward_address,
+            self.node_ctx.config.consensus.mempool.commitment_fee,
+        )
+        .await
+    }
+
+    /// Helper to post an UpdateRewardAddress commitment transaction with a custom fee.
+    pub async fn post_update_reward_address_with_fee(
+        &self,
+        signer: &IrysSigner,
+        new_reward_address: IrysAddress,
+        fee: u64,
     ) -> eyre::Result<CommitmentTransaction> {
         let consensus = &self.node_ctx.config.consensus;
         let anchor = self.get_anchor().await.expect("anchor should be available");
 
         let mut update_tx = CommitmentTransaction::V2(CommitmentV2WithMetadata {
             tx: CommitmentTransactionV2 {
-                commitment_type: CommitmentTypeV2::UpdateRewardAddress {
-                    new_reward_address,
-                    nonce,
-                },
+                commitment_type: CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
                 anchor,
-                fee: consensus.mempool.commitment_fee,
+                fee,
                 value: U256::zero(),
                 ..CommitmentTransactionV2::new(consensus)
             },

@@ -374,10 +374,8 @@ impl EpochSnapshot {
         let mut seen_signers: HashSet<IrysAddress> = HashSet::new();
 
         for commitment in commitments {
-            let irys_types::CommitmentTypeV2::UpdateRewardAddress {
-                new_reward_address,
-                nonce,
-            } = &commitment.commitment_type()
+            let irys_types::CommitmentTypeV2::UpdateRewardAddress { new_reward_address } =
+                &commitment.commitment_type()
             else {
                 continue;
             };
@@ -401,7 +399,6 @@ impl EpochSnapshot {
             debug!(
                 tx.signer = %signer,
                 tx.new_reward_address = %new_reward_address,
-                tx.nonce = %nonce,
                 "update_reward_address_applied"
             );
         }

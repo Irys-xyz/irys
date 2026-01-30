@@ -136,8 +136,7 @@ impl Inner {
             | CommitmentSnapshotStatus::Unowned
             | CommitmentSnapshotStatus::UnpledgePending
             | CommitmentSnapshotStatus::UnstakePending
-            | CommitmentSnapshotStatus::HasActivePledges
-            | CommitmentSnapshotStatus::UpdateRewardAddressPending => {
+            | CommitmentSnapshotStatus::HasActivePledges => {
                 // Add to valid set and mark recent
                 self.mempool_state
                     .insert_commitment_and_mark_valid(commitment_tx)
@@ -418,8 +417,7 @@ impl Inner {
             | CommitmentSnapshotStatus::HasActivePledges
             | CommitmentSnapshotStatus::InvalidPledgeCount
             | CommitmentSnapshotStatus::Unowned
-            | CommitmentSnapshotStatus::UnpledgePending
-            | CommitmentSnapshotStatus::UpdateRewardAddressPending => {
+            | CommitmentSnapshotStatus::UnpledgePending => {
                 warn!(
                     "Commitment rejected: {:?} id={} ",
                     cache_status,

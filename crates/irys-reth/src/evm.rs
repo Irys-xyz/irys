@@ -1206,7 +1206,6 @@ where
                         vec![
                             DynSolValue::Address(update_reward_address_debit.target),
                             DynSolValue::Address(update_reward_address_debit.new_reward_address),
-                            DynSolValue::Uint(update_reward_address_debit.nonce, 256),
                         ],
                     );
                     let target = update_reward_address_debit.target;

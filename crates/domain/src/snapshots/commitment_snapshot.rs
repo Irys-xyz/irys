@@ -1,5 +1,5 @@
 use super::EpochSnapshot;
-use irys_types::{CommitmentTransaction, CommitmentTypeV2, IrysAddress, U256};
+use irys_types::{CommitmentTransaction, CommitmentTypeV2, IrysAddress};
 
 #[cfg(test)]
 use irys_types::CommitmentTypeV1;
@@ -11,15 +11,14 @@ use tracing::debug;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitmentSnapshotStatus {
-    Accepted,                   // The commitment is valid and was added to the snapshot
-    Unknown,                    // The commitment has no status in the snapshot
-    Unstaked,                   // The pledge commitment doesn't have a corresponding stake
-    InvalidPledgeCount,         // The pledge count doesn't match the actual number of pledges
-    Unowned,                    // Target capacity partition is not owned by signer
-    UnpledgePending,            // Duplicate unpledge for same partition in this snapshot
-    UnstakePending,             // Duplicate unstake for the signer within this snapshot
-    HasActivePledges,           // Unstake not allowed because signer still has pledges
-    UpdateRewardAddressPending, // Duplicate update reward address for the signer within this snapshot
+    Accepted,           // The commitment is valid and was added to the snapshot
+    Unknown,            // The commitment has no status in the snapshot
+    Unstaked,           // The pledge commitment doesn't have a corresponding stake
+    InvalidPledgeCount, // The pledge count doesn't match the actual number of pledges
+    Unowned,            // Target capacity partition is not owned by signer
+    UnpledgePending,    // Duplicate unpledge for same partition in this snapshot
+    UnstakePending,     // Duplicate unstake for the signer within this snapshot
+    HasActivePledges,   // Unstake not allowed because signer still has pledges
 }
 
 #[derive(Debug, Default, Clone, Hash)]
@@ -44,20 +43,6 @@ impl CommitmentSnapshot {
                 .commitments
                 .get(signer)
                 .is_some_and(|mc| mc.stake.is_some())
-    }
-
-    /// Returns true if the given nonce would be rejected due to an existing update with equal or higher nonce
-    fn should_reject_update_reward_address(&self, signer: &IrysAddress, nonce: &U256) -> bool {
-        self.commitments
-            .get(signer)
-            .and_then(|mc| mc.update_reward_address.as_ref())
-            .is_some_and(|existing_tx| {
-                matches!(
-                    existing_tx.commitment_type(),
-                    CommitmentTypeV2::UpdateRewardAddress { nonce: existing_nonce, .. }
-                        if nonce <= &existing_nonce
-                )
-            })
     }
 
     pub fn new_from_commitments(commitment_txs: Option<Vec<CommitmentTransaction>>) -> Self {
@@ -160,25 +145,22 @@ impl CommitmentSnapshot {
                     CommitmentSnapshotStatus::Unknown
                 }
             }
-            CommitmentTypeV2::UpdateRewardAddress { nonce, .. } => {
+            CommitmentTypeV2::UpdateRewardAddress { .. } => {
                 // UpdateRewardAddress requires signer to be staked (epoch or local)
                 if !self.has_stake(signer, epoch_snapshot) {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
+                // Check if this is the currently stored update
                 if let Some(commitments) = self.commitments.get(signer) {
-                    if let Some(existing_tx) = &commitments.update_reward_address {
-                        if existing_tx.id() == txid {
-                            return CommitmentSnapshotStatus::Accepted;
-                        }
-                        // Check if this nonce would be rejected
-                        if self.should_reject_update_reward_address(signer, nonce) {
-                            return CommitmentSnapshotStatus::UpdateRewardAddressPending;
-                        }
+                    if commitments
+                        .update_reward_address
+                        .as_ref()
+                        .is_some_and(|u| u.id() == txid)
+                    {
+                        return CommitmentSnapshotStatus::Accepted;
                     }
-                    CommitmentSnapshotStatus::Unknown
-                } else {
-                    CommitmentSnapshotStatus::Unknown
                 }
+                CommitmentSnapshotStatus::Unknown
             }
         };
 
@@ -344,27 +326,25 @@ impl CommitmentSnapshot {
                 miner_commitments.unstake = Some(commitment_tx.clone());
                 CommitmentSnapshotStatus::Accepted
             }
-            CommitmentTypeV2::UpdateRewardAddress { nonce, .. } => {
+            CommitmentTypeV2::UpdateRewardAddress { .. } => {
                 if !self.has_stake(signer, epoch_snapshot) {
                     return CommitmentSnapshotStatus::Unstaked;
                 }
 
-                // Idempotency: if the same tx is already stored, return Accepted
-                if self
-                    .commitments
-                    .get(signer)
-                    .and_then(|c| c.update_reward_address.as_ref())
-                    .is_some_and(|existing| existing.id() == commitment_tx.id())
+                let miner_commitments = self.commitments.entry(*signer).or_default();
+
+                // Idempotency: if this exact tx is already stored, return Accepted
+                if miner_commitments
+                    .update_reward_address
+                    .as_ref()
+                    .is_some_and(|u| u.id() == commitment_tx.id())
                 {
                     return CommitmentSnapshotStatus::Accepted;
                 }
 
-                if self.should_reject_update_reward_address(signer, nonce) {
-                    return CommitmentSnapshotStatus::UpdateRewardAddressPending;
-                }
-
-                let miner_commitments = self.commitments.entry(*signer).or_default();
+                // Store the update (block producer ensures correct ordering, last one wins)
                 miner_commitments.update_reward_address = Some(commitment_tx.clone());
+
                 CommitmentSnapshotStatus::Accepted
             }
         }
@@ -811,10 +791,7 @@ mod tests {
         // Try to update reward address without stake
         let update_tx = create_test_commitment_v2(
             signer,
-            CommitmentTypeV2::UpdateRewardAddress {
-                new_reward_address,
-                nonce: U256::from(1),
-            },
+            CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
             U256::zero(),
         );
         let status = snapshot.add_commitment(&update_tx, &EpochSnapshot::default());

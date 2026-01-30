@@ -4,7 +4,7 @@ use alloy_eips::HashOrNumber;
 use alloy_rpc_types_eth::TransactionTrait as _;
 use irys_reth_node_bridge::irys_reth::shadow_tx::{ShadowTransaction, TransactionPacket};
 use irys_types::{
-    CommitmentTransaction, DataLedger, IrysAddress, NodeConfig, PledgeDataProvider as _, U256,
+    CommitmentTransaction, DataLedger, IrysAddress, NodeConfig, PledgeDataProvider as _,
 };
 use reth::providers::TransactionsProvider as _;
 
@@ -35,7 +35,7 @@ async fn heavy_test_ledger_expiry_uses_custom_reward_address() -> eyre::Result<(
 
     // Epoch 0: Set custom reward address and post data
     let update_tx = node
-        .post_update_reward_address(&signer, custom_reward_address, U256::from(1))
+        .post_update_reward_address(&signer, custom_reward_address)
         .await?;
     node.wait_for_mempool(update_tx.id(), 30).await?;
     node.mine_block().await?;
@@ -112,7 +112,7 @@ async fn heavy_test_unpledge_refund_uses_miner_address() -> eyre::Result<()> {
 
     // Epoch 0: Set custom reward address
     let update_tx = node
-        .post_update_reward_address(&signer, custom_reward_address, U256::from(1))
+        .post_update_reward_address(&signer, custom_reward_address)
         .await?;
     node.wait_for_mempool(update_tx.id(), 30).await?;
     node.mine_block().await?;
