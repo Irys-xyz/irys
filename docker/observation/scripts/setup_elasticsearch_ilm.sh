@@ -15,7 +15,7 @@ echo "Configuring Elasticsearch with ${RETENTION_DAYS}-day retention, ${ES_REPLI
 echo "Waiting for Elasticsearch to be ready..."
 i=1
 while [ "$i" -le "$MAX_RETRIES" ]; do
-    if curl -s "$ES_HOST/_cluster/health" | grep -q '"status":"green"\|"status":"yellow"'; then
+    if curl -s "$ES_HOST/_cluster/health" | grep -qE '"status":"(green|yellow)"'; then
         echo "Elasticsearch is ready"
         break
     fi
