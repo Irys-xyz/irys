@@ -689,7 +689,10 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::ParentIsAPartOfAPrunedFork),
                 )
                 .await;
-            let error_msg = format!("ForkedBlock: parent {} is part of pruned fork", prev_block_hash);
+            let error_msg = format!(
+                "ForkedBlock: parent {} is part of pruned fork",
+                prev_block_hash
+            );
             self.sync_state.record_block_processing_error(error_msg);
             return Err(CriticalBlockPoolError::ForkedBlock(block_header.block_hash).into());
         }
@@ -717,7 +720,10 @@ where
                             BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                         )
                         .await;
-                    self.sync_state.record_block_processing_error(format!("HeaderBodyMismatch: orphan block {}", block_hash));
+                    self.sync_state.record_block_processing_error(format!(
+                        "HeaderBodyMismatch: orphan block {}",
+                        block_hash
+                    ));
                     return Err(e);
                 }
                 Err(e) => return Err(e),
@@ -848,7 +854,8 @@ where
                         ),
                     )
                     .await;
-                self.sync_state.record_block_processing_error(format!("RethPayloadFetchError: {:?}", err));
+                self.sync_state
+                    .record_block_processing_error(format!("RethPayloadFetchError: {:?}", err));
                 return Err(CriticalBlockPoolError::BlockError(format!("{:?}", err)).into());
             }
         }
@@ -885,7 +892,10 @@ where
                         BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                     )
                     .await;
-                self.sync_state.record_block_processing_error(format!("HeaderBodyMismatch: block {}", block_hash));
+                self.sync_state.record_block_processing_error(format!(
+                    "HeaderBodyMismatch: block {}",
+                    block_hash
+                ));
                 return Err(e);
             }
             Err(e) => return Err(e),
@@ -948,7 +958,10 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
                 )
                 .await;
-            self.sync_state.record_block_processing_error(format!("BlockPrevalidationFailed: {:?}", block_discovery_error));
+            self.sync_state.record_block_processing_error(format!(
+                "BlockPrevalidationFailed: {:?}",
+                block_discovery_error
+            ));
             return Err(
                 CriticalBlockPoolError::BlockError(format!("{:?}", block_discovery_error)).into(),
             );

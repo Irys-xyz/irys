@@ -360,7 +360,10 @@ where
         {
             Ok(result) => result,
             Err(e) => {
-                self.sync_state.record_data_pull_error(format!("pull_block_header_from_network failed for {}: {:?}", block_hash, e));
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_network failed for {}: {:?}",
+                    block_hash, e
+                ));
                 return Err(e.into());
             }
         };
@@ -371,7 +374,10 @@ where
                 "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
                 source_address
             );
-            self.sync_state.record_data_pull_error(format!("InvalidPeer: peer {} not in peer list for block {}", source_address, block_hash));
+            self.sync_state.record_data_pull_error(format!(
+                "InvalidPeer: peer {} not in peer list for block {}",
+                source_address, block_hash
+            ));
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
@@ -407,7 +413,10 @@ where
         {
             Ok(result) => result,
             Err(e) => {
-                self.sync_state.record_data_pull_error(format!("pull_block_header_from_peer failed for {}: {:?}", block_hash, e));
+                self.sync_state.record_data_pull_error(format!(
+                    "pull_block_header_from_peer failed for {}: {:?}",
+                    block_hash, e
+                ));
                 return Err(e.into());
             }
         };
@@ -417,7 +426,10 @@ where
                 "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
                 source_peer_id
             );
-            self.sync_state.record_data_pull_error(format!("InvalidPeer: peer {} not in peer list for block {}", source_peer_id, block_hash));
+            self.sync_state.record_data_pull_error(format!(
+                "InvalidPeer: peer {} not in peer list for block {}",
+                source_peer_id, block_hash
+            ));
             return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
         };
 
@@ -786,7 +798,10 @@ where
             }
         }
         let err = last_err.expect("Error must be set after 3 attempts");
-        self.sync_state.record_data_pull_error(format!("pull_payload_from_network failed for {}: {:?}", evm_block_hash, err));
+        self.sync_state.record_data_pull_error(format!(
+            "pull_payload_from_network failed for {}: {:?}",
+            evm_block_hash, err
+        ));
         Err(err)
     }
 
