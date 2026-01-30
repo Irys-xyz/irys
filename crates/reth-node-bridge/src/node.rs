@@ -153,17 +153,17 @@ pub async fn run_node(
 
     reth_config.txpool.additional_validation_tasks = 2;
 
-    // Enable Prometheus metrics endpoint on port 9001 for local scraping by OTEL collector sidecar.
-    // The sidecar will scrape these metrics and push them to the central OTEL collector.
+    // Enable Prometheus metrics endpoint for local scraping by OTEL collector sidecar.
+    let metrics_port = if random_ports { "0" } else { "9001" };
     let metrics_addr: SocketAddr = format!(
-        "{}:9001",
+        "{}:{}",
         node_config
             .reth
             .network
-            .bind_ip(&node_config.network_defaults)
+            .bind_ip(&node_config.network_defaults),
+        metrics_port
     )
-    .parse()
-    .expect("valid metrics socket address");
+    .parse()?;
     reth_config.metrics = MetricArgs {
         prometheus: Some(metrics_addr),
         ..Default::default()
