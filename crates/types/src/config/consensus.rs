@@ -860,7 +860,7 @@ impl ConsensusConfig {
                 aurora: Some(Aurora {
                     activation_timestamp: unix_timestamp_string_serde::deserialize(
                         StringDeserializer::<serde::de::value::Error>::new(
-                            "2026-01-29T16:30:00+00:00".to_owned(),
+                            "2026-01-30T16:30:00+00:00".to_owned(),
                         ),
                     )
                     .unwrap(),
