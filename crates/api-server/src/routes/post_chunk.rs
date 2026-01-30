@@ -69,18 +69,18 @@ pub async fn post_chunk(
         return if err.is_advisory() {
             Ok(ApiStatusResponse(format!("{err:?}"), StatusCode::OK).into())
         } else {
-            let status = match err {
-                ChunkIngressError::Critical(ref e) => match e {
-                    irys_actors::CriticalChunkIngressError::InvalidProof
-                    | irys_actors::CriticalChunkIngressError::InvalidDataHash
-                    | irys_actors::CriticalChunkIngressError::InvalidChunkSize
-                    | irys_actors::CriticalChunkIngressError::InvalidDataSize
-                    | irys_actors::CriticalChunkIngressError::InvalidOffset(_) => {
-                        StatusCode::BAD_REQUEST
-                    }
-                    _ => StatusCode::INTERNAL_SERVER_ERROR,
-                },
-                ChunkIngressError::Advisory(_) => StatusCode::OK,
+            let ChunkIngressError::Critical(ref e) = err else {
+                unreachable!("advisory errors handled above")
+            };
+            let status = match e {
+                irys_actors::CriticalChunkIngressError::InvalidProof
+                | irys_actors::CriticalChunkIngressError::InvalidDataHash
+                | irys_actors::CriticalChunkIngressError::InvalidChunkSize
+                | irys_actors::CriticalChunkIngressError::InvalidDataSize
+                | irys_actors::CriticalChunkIngressError::InvalidOffset(_) => {
+                    StatusCode::BAD_REQUEST
+                }
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
             Err((format!("{err:?}"), status).into())
         };
