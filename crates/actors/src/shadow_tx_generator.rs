@@ -791,20 +791,22 @@ mod tests {
         EpochSnapshot::default()
     }
 
-    /// Creates an epoch snapshot with stake entries for the given miner addresses.
-    /// Each miner gets a stake entry with their address as the reward address.
-    fn test_epoch_snapshot_with_miners(miners: &[IrysAddress]) -> EpochSnapshot {
+    /// Creates an epoch snapshot with stake entries where reward_address can differ from signer.
+    /// miners_with_rewards is a slice of (signer, reward_address) tuples.
+    fn test_epoch_snapshot_with_reward_addresses(
+        miners_with_rewards: &[(IrysAddress, IrysAddress)],
+    ) -> EpochSnapshot {
         use irys_domain::StakeEntry;
         let mut snapshot = EpochSnapshot::default();
-        for miner in miners {
+        for (signer, reward_address) in miners_with_rewards {
             snapshot.commitment_state.stake_commitments.insert(
-                *miner,
+                *signer,
                 StakeEntry {
                     id: H256::random(),
                     commitment_status: CommitmentStatus::Active,
-                    signer: *miner,
+                    signer: *signer,
                     amount: U256::from(1000),
-                    reward_address: *miner,
+                    reward_address: *reward_address,
                 },
             );
         }
@@ -1189,7 +1191,7 @@ mod tests {
     }
 
     #[test]
-    fn test_one_publish_tx_with_aggregated_proofs() {
+    fn test_publish_tx_with_reward_address_redirection() {
         let mut config = ConsensusConfig::testing();
         // Use custom hardfork params with 4 proofs for this test
         config.hardforks.frontier.number_of_ingress_proofs_total = 4;
@@ -1250,7 +1252,7 @@ mod tests {
         let term_charges = TermFeeCharges::new(term_fee.into(), &config).unwrap();
 
         // Since perm_fee was calculated with 4 proofs in mind
-        let number_of_ingress_proofs_total = 4; // matches config.hardforks.frontier.number_of_ingress_proofs_total
+        let number_of_ingress_proofs_total = 4;
         let publish_charges = PublishFeeCharges::new(
             perm_fee.into(),
             term_fee.into(),
@@ -1271,10 +1273,27 @@ mod tests {
         let signer2_reward = base_reward_per_proof * U256::from(2);
         let signer3_reward = base_reward_per_proof;
 
-        // Sort signers by address for deterministic ordering
+        // Key difference: Create separate reward addresses for signers 1 and 2
+        let reward_dest1 = IrysAddress::random(); // Different from signer1
+        let reward_dest2 = IrysAddress::random(); // Different from signer2
+                                                  // signer3 keeps reward_address = signer (tests mixed scenario)
+
+        // Create epoch snapshot with reward redirection
+        let epoch_snapshot = test_epoch_snapshot_with_reward_addresses(&[
+            (proof_signer1.address(), reward_dest1),
+            (proof_signer2.address(), reward_dest2),
+            (proof_signer3.address(), proof_signer3.address()), // No redirection
+        ]);
+
+        // Build expected shadow txs with redirected addresses:
+        // - signer1's reward → reward_dest1
+        // - signer2's reward → reward_dest2
+        // - signer3's reward → proof_signer3.address()
+
+        // Sort by reward destination address for deterministic ordering
         let mut signer_rewards = [
-            (proof_signer1.address(), signer1_reward),
-            (proof_signer2.address(), signer2_reward),
+            (reward_dest1, signer1_reward),
+            (reward_dest2, signer2_reward),
             (proof_signer3.address(), signer3_reward),
         ];
         signer_rewards.sort_by_key(|(addr, _)| *addr);
@@ -1306,7 +1325,7 @@ mod tests {
                     .try_into()
                     .expect("Block producer reward should fit in u128"),
             },
-            // Ingress proof rewards (aggregated by signer, sorted by address)
+            // Ingress proof rewards (aggregated by reward_address, sorted by address)
             ShadowMetadata {
                 shadow_tx: ShadowTransaction::new_v1(
                     TransactionPacket::IngressProofReward(BalanceIncrement {
@@ -1347,12 +1366,6 @@ mod tests {
             user_perm_fee_refunds: Vec::new(),
         };
         let solution_hash = H256::zero();
-        // Create epoch snapshot with stake entries for all proof signers
-        let epoch_snapshot = test_epoch_snapshot_with_miners(&[
-            proof_signer1.address(),
-            proof_signer2.address(),
-            proof_signer3.address(),
-        ]);
         let generator = ShadowTxGenerator::new(
             &block_height,
             &reward_address,
