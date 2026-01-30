@@ -146,6 +146,7 @@ impl CircuitBreaker {
 mod tests {
     use super::super::test_utils::TestConfigBuilder;
     use super::*;
+    use serial_test::serial;
     use std::time::Duration;
 
     fn test_config_with_recovery_attempts(attempts: u32) -> CircuitBreakerConfig {
@@ -159,6 +160,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_half_open_transition_after_cooldown() {
         use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
@@ -179,6 +181,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_half_open_limits_recovery_attempts() {
         use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
@@ -202,6 +205,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_is_stale_after_timeout() {
         use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
@@ -218,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_is_available_updates_access_time() {
         use super::super::test_utils::{advance_test_time, TestTimeGuard};
 
@@ -237,6 +242,7 @@ mod tests {
         use super::super::super::test_utils::TestConfigBuilder;
         use super::*;
         use proptest::prelude::*;
+        use serial_test::serial;
 
         fn proptest_config(failure_threshold: u32) -> CircuitBreakerConfig {
             TestConfigBuilder::default()
@@ -297,6 +303,7 @@ mod tests {
             }
 
             #[test]
+            #[serial]
             fn prop_half_open_single_failure_reopens(
                 failure_threshold in 1_u32..20,
             ) {
@@ -322,6 +329,7 @@ mod tests {
             }
 
             #[test]
+            #[serial]
             fn prop_recovery_attempts_bounded(
                 failure_threshold in 1_u32..20,
                 recovery_attempts in 1_u32..10,

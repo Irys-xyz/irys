@@ -193,6 +193,7 @@ where
 mod tests {
     use super::super::test_utils::TestConfigBuilder;
     use super::*;
+    use serial_test::serial;
     use std::time::Duration;
 
     #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -248,8 +249,12 @@ mod tests {
         assert!(manager.is_available(&key));
     }
 
-    #[tokio::test]
-    async fn test_cleanup_removes_stale_breakers() {
+    #[test]
+    #[serial]
+    fn test_cleanup_removes_stale_breakers() {
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        let _guard = TestTimeGuard::new(1_000_000_000);
+
         let config = test_config_with_stale_timeout(Duration::from_millis(100));
         let manager = CircuitBreakerManager::<TestKey>::new(config);
 
@@ -260,14 +265,18 @@ mod tests {
         let _ = manager.is_available(&key2);
         assert_eq!(manager.len(), 2);
 
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        advance_test_time(Duration::from_millis(150));
 
         manager.cleanup_stale();
         assert_eq!(manager.len(), 0);
     }
 
-    #[tokio::test]
-    async fn test_cleanup_keeps_active_breakers() {
+    #[test]
+    #[serial]
+    fn test_cleanup_keeps_active_breakers() {
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        let _guard = TestTimeGuard::new(1_000_000_000);
+
         let config = test_config_with_stale_timeout(Duration::from_millis(200));
         let manager = CircuitBreakerManager::<TestKey>::new(config);
 
@@ -277,12 +286,13 @@ mod tests {
         let _ = manager.is_available(&key1);
         let _ = manager.is_available(&key2);
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        advance_test_time(Duration::from_millis(100));
 
+        // Refresh key1's access time
         let _ = manager.is_available(&key1);
 
-        // Wait for key2 to become stale
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Advance past key2's stale timeout (key2 last accessed at t=1s, now t=1.35s)
+        advance_test_time(Duration::from_millis(150));
 
         // Cleanup should only remove key2
         manager.cleanup_stale();
@@ -317,8 +327,12 @@ mod tests {
         assert_eq!(manager.len(), 3);
     }
 
-    #[tokio::test]
-    async fn test_capacity_enforcement_allows_after_cleanup() {
+    #[test]
+    #[serial]
+    fn test_capacity_enforcement_allows_after_cleanup() {
+        use super::super::test_utils::{advance_test_time, TestTimeGuard};
+        let _guard = TestTimeGuard::new(1_000_000_000);
+
         let config = TestConfigBuilder::default()
             .capacity(2)
             .stale_timeout(Duration::from_millis(100))
@@ -333,8 +347,8 @@ mod tests {
         let _ = manager.is_available(&key2);
         assert_eq!(manager.len(), 2);
 
-        // Wait for them to become stale
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Advance past stale timeout
+        advance_test_time(Duration::from_millis(150));
 
         // New key should trigger cleanup and succeed
         let key3 = TestKey("test3".to_string());
