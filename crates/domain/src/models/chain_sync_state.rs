@@ -96,7 +96,10 @@ impl SyncDiagnosticInfo {
             self.total_block_validation_errors
         ));
         if !self.last_block_validation_errors.is_empty() {
-            output.push_str(&format!("Last validation errors (most recent {}):\n", MAX_LAST_BLOCK_VALIDATION_ERRORS));
+            output.push_str(&format!(
+                "Last validation errors (most recent {}):\n",
+                MAX_LAST_BLOCK_VALIDATION_ERRORS
+            ));
             for (error, timestamp) in self.last_block_validation_errors.iter().rev() {
                 output.push_str(&format!(
                     "  - [{}] {}\n",
@@ -113,7 +116,10 @@ impl SyncDiagnosticInfo {
             self.total_block_processing_errors
         ));
         if !self.last_block_processing_errors.is_empty() {
-            output.push_str(&format!("Last processing errors (most recent {}):\n", MAX_LAST_BLOCK_VALIDATION_ERRORS));
+            output.push_str(&format!(
+                "Last processing errors (most recent {}):\n",
+                MAX_LAST_BLOCK_VALIDATION_ERRORS
+            ));
             for (error, timestamp) in self.last_block_processing_errors.iter().rev() {
                 output.push_str(&format!(
                     "  - [{}] {}\n",
@@ -130,7 +136,10 @@ impl SyncDiagnosticInfo {
             self.total_data_pull_errors
         ));
         if !self.last_data_pull_errors.is_empty() {
-            output.push_str(&format!("Last data pull errors (most recent {}):\n", MAX_LAST_BLOCK_VALIDATION_ERRORS));
+            output.push_str(&format!(
+                "Last data pull errors (most recent {}):\n",
+                MAX_LAST_BLOCK_VALIDATION_ERRORS
+            ));
             for (error, timestamp) in self.last_data_pull_errors.iter().rev() {
                 output.push_str(&format!(
                     "  - [{}] {}\n",
