@@ -104,6 +104,13 @@ impl Config {
             prune_at_capacity_percent
         );
 
+        ensure!(
+            self.consensus
+                .num_chunks_in_partition
+                .is_multiple_of(self.consensus.num_chunks_in_recall_range),
+            "num_chunks_in_partition must be a multiple of num_chunks_in_recall_range"
+        );
+
         Ok(())
     }
 }
