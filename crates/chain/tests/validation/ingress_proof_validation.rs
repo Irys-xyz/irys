@@ -9,9 +9,10 @@ use irys_actors::{
 };
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
-use irys_types::ingress::IngressProofV1;
+use irys_types::ingress::{generate_ingress_proof, IngressProofV1};
 use irys_types::{
-    DataTransactionHeader, IngressProof, IngressProofsList, IrysBlockHeader, NodeConfig,
+    CommitmentTransaction, DataTransactionHeader, IngressProof, IngressProofsList, IrysBlockHeader,
+    NodeConfig,
 };
 use reth_db::Database as _;
 
@@ -152,6 +153,162 @@ async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre:
         "block with ingress proof from unstaked signer should be rejected, got: {:?}",
         result
     );
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// This test verifies that the mempool filters out ingress proofs from unstaked signers
+/// when collecting unassigned proofs for block production.
+///
+/// Scenario:
+/// 1. Create genesis node with staked genesis signer
+/// 2. Create signer B, stake them, mine to next epoch (so B is in snapshot)
+/// 3. Post a data transaction and upload chunks
+/// 4. Generate and store ingress proofs from both signers
+/// 5. Unstake signer B and mine to next epoch (B is no longer staked)
+/// 6. Query mempool's proof collection and verify only 1 proof is returned
+#[test_log::test(tokio::test)]
+async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()> {
+    let num_blocks_in_epoch = 4;
+    let seconds_to_wait = 20;
+
+    // 1. Configure test network with short epochs
+    let mut genesis_config = NodeConfig::testing_with_epochs(num_blocks_in_epoch);
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    // Set ingress proof requirements to 1 so we can test with fewer proofs
+    genesis_config
+        .consensus
+        .get_mut()
+        .hardforks
+        .frontier
+        .number_of_ingress_proofs_total = 1;
+    genesis_config
+        .consensus
+        .get_mut()
+        .hardforks
+        .frontier
+        .number_of_ingress_proofs_from_assignees = 0;
+
+    // Create signer B and fund them
+    let signer_b = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&signer_b]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", seconds_to_wait)
+        .await;
+    genesis_node.mine_block().await?;
+
+    // 2. Stake signer B
+    genesis_node
+        .post_stake_commitment_with_signer(&signer_b)
+        .await?;
+
+    // Mine to next epoch so signer B's stake is in the epoch snapshot
+    genesis_node.mine_until_next_epoch().await?;
+
+    // Verify signer B is now staked in the epoch snapshot
+    let epoch_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot();
+    assert!(
+        epoch_snapshot.is_staked(signer_b.address()),
+        "Signer B should be staked after mining to next epoch"
+    );
+
+    // 3. Post a data transaction and upload chunks
+    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    let genesis_signer = genesis_config.signer();
+    let tx = genesis_node
+        .post_publish_data_tx(&genesis_signer, data.clone())
+        .await?;
+
+    genesis_node.upload_chunks(&tx).await?;
+
+    // Wait for chunks to be cached and the genesis node to auto-generate its ingress proof
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
+    // Wait for genesis node to generate its ingress proof
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], seconds_to_wait)
+        .await?;
+
+    // 4. Generate and store an ingress proof from signer B (currently staked, will be unstaked later)
+    let consensus_config = genesis_config.consensus_config();
+    let chain_id = consensus_config.chain_id;
+    let anchor = genesis_node.get_anchor().await?;
+    let chunk_size = consensus_config.chunk_size as usize;
+    let chunks: Vec<Vec<u8>> = data.chunks(chunk_size).map(Vec::from).collect();
+
+    // Generate proof from signer B
+    let signer_b_proof = generate_ingress_proof(
+        &signer_b,
+        tx.header.data_root,
+        chunks.iter().map(|c| Ok(c.as_slice())),
+        chain_id,
+        anchor,
+    )?;
+
+    // Ingest signer B's proof through proper mempool channel (same path as gossip)
+    genesis_node.ingest_ingress_proof(signer_b_proof).await?;
+
+    // 5. Unstake signer B
+    let node_consensus_config = &genesis_node.node_ctx.config.consensus;
+    let unstake_anchor = genesis_node.get_anchor().await?;
+    let mut unstake_tx = CommitmentTransaction::new_unstake(node_consensus_config, unstake_anchor);
+    signer_b.sign_commitment(&mut unstake_tx)?;
+    genesis_node.post_commitment_tx(&unstake_tx).await?;
+
+    // Mine to include the unstake and then to next epoch so it takes effect
+    genesis_node.mine_block().await?;
+    genesis_node.mine_until_next_epoch().await?;
+
+    // Verify signer B is now unstaked
+    let epoch_snapshot = genesis_node
+        .node_ctx
+        .block_tree_guard
+        .read()
+        .canonical_epoch_snapshot();
+    assert!(
+        !epoch_snapshot.is_staked(signer_b.address()),
+        "Signer B should be unstaked after mining past the unstake epoch"
+    );
+
+    // Verify genesis signer is still staked
+    assert!(
+        epoch_snapshot.is_staked(genesis_signer.address()),
+        "Genesis signer should still be staked"
+    );
+
+    // 6. Query mempool's proof collection and verify filtering
+    let canonical_tip = genesis_node.get_canonical_chain().last().unwrap().block_hash;
+    let mempool_txs = genesis_node.get_best_mempool_tx(canonical_tip).await?;
+
+    // The publish_tx should contain proofs, and they should only be from staked signers
+    if let Some(proofs) = &mempool_txs.publish_tx.proofs {
+        // Verify all returned proofs are from staked signers
+        for proof in proofs.0.iter() {
+            let signer = proof.recover_signer()?;
+            assert!(
+                epoch_snapshot.is_staked(signer),
+                "Mempool should only return proofs from staked signers, but got proof from {:?}",
+                signer
+            );
+            // Specifically, signer B's proof should NOT be included
+            assert_ne!(
+                signer,
+                signer_b.address(),
+                "Signer B's proof should be filtered out since they are unstaked"
+            );
+        }
+        // We should have at least 1 proof (from genesis signer)
+        assert!(
+            !proofs.0.is_empty(),
+            "Should have at least one proof from genesis signer"
+        );
+    }
 
     genesis_node.stop().await;
     Ok(())

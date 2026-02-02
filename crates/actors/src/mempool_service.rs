@@ -1318,9 +1318,18 @@ impl Inner {
                     .map(|p| &p.proof.0) // Use signature as unique identifier
                     .collect();
 
+                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
                     .filter(|p| !assigned_proof_set.contains(&p.proof.0))
+                    .filter(|p| {
+                        // Filter out proofs from unstaked signers
+                        match p.recover_signer() {
+                            Ok(signer) => epoch_snapshot.is_staked(signer),
+                            Err(_) => false,
+                        }
+                    })
                     .cloned()
                     .collect();
 
