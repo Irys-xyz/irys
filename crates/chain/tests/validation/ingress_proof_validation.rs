@@ -291,28 +291,32 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
     let mempool_txs = genesis_node.get_best_mempool_tx(canonical_tip).await?;
 
     // The publish_tx should contain proofs, and they should only be from staked signers
-    if let Some(proofs) = &mempool_txs.publish_tx.proofs {
-        // Verify all returned proofs are from staked signers
-        for proof in proofs.0.iter() {
-            let signer = proof.recover_signer()?;
-            assert!(
-                epoch_snapshot.is_staked(signer),
-                "Mempool should only return proofs from staked signers, but got proof from {:?}",
-                signer
-            );
-            // Specifically, signer B's proof should NOT be included
-            assert_ne!(
-                signer,
-                signer_b.address(),
-                "Signer B's proof should be filtered out since they are unstaked"
-            );
-        }
-        // We should have at least 1 proof (from genesis signer)
+    assert!(
+        mempool_txs.publish_tx.proofs.is_some(),
+        "publish_tx.proofs should be Some - expected proofs from staked signers"
+    );
+    let proofs = mempool_txs.publish_tx.proofs.as_ref().unwrap();
+
+    // Verify all returned proofs are from staked signers
+    for proof in proofs.0.iter() {
+        let signer = proof.recover_signer()?;
         assert!(
-            !proofs.0.is_empty(),
-            "Should have at least one proof from genesis signer"
+            epoch_snapshot.is_staked(signer),
+            "Mempool should only return proofs from staked signers, but got proof from {:?}",
+            signer
+        );
+        // Specifically, signer B's proof should NOT be included
+        assert_ne!(
+            signer,
+            signer_b.address(),
+            "Signer B's proof should be filtered out since they are unstaked"
         );
     }
+    // We should have at least 1 proof (from genesis signer)
+    assert!(
+        !proofs.0.is_empty(),
+        "Should have at least one proof from genesis signer"
+    );
 
     genesis_node.stop().await;
     Ok(())

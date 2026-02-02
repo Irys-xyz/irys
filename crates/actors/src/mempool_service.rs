@@ -2918,16 +2918,16 @@ pub enum IngressProofGenerationError {
     #[error("Cache service error: {0}")]
     CacheServiceError(String),
     /// Invalid data size for the transaction.
-    #[error("Invalid data size")]
-    InvalidDataSize,
+    #[error("Invalid data size: {0}")]
+    InvalidDataSize(String),
     /// Failed to generate the proof.
     #[error("Proof generation failed: {0}")]
     GenerationFailed(String),
 }
 
 impl IngressProofGenerationError {
-    /// Returns true if this error represents expected behavior that should be logged at debug level.
-    pub fn is_expected(&self) -> bool {
+    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
+    pub fn is_benign(&self) -> bool {
         matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
     }
 }

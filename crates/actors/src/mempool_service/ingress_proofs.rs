@@ -295,8 +295,7 @@ pub fn generate_and_store_ingress_proof(
     let chain_id = config.consensus.chain_id;
     let chunk_size = config.consensus.chunk_size;
 
-    let data_size = calculate_and_validate_data_size(db, data_root, chunk_size)
-        .map_err(|_| IngressProofGenerationError::InvalidDataSize)?;
+    let data_size = calculate_and_validate_data_size(db, data_root, chunk_size)?;
 
     // Pick anchor: hint or latest canonical block
     let latest_anchor = block_tree_guard
@@ -407,11 +406,11 @@ pub fn reanchor_and_store_ingress_proof(
         proof.data_root,
     ));
 
-    if calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size).is_err() {
+    if let Err(e) = calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size) {
         let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
         ));
-        return Err(IngressProofGenerationError::InvalidDataSize);
+        return Err(e);
     }
 
     let latest_anchor = block_tree_guard
@@ -470,25 +469,30 @@ pub fn calculate_and_validate_data_size(
     db: &DatabaseProvider,
     data_root: DataRoot,
     chunk_size: u64,
-) -> eyre::Result<u64> {
-    // Load data_size & confirm we have metadata for this root
-    let (data_size, chunk_count) = db.view_eyre(|tx| {
-        let data_size = cached_data_root_by_data_root(tx, data_root)
-            .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
-            .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
-            .data_size;
-        let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
-        let count = cursor
-            .dup_count(data_root)?
-            .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
-        Ok((data_size, count))
-    })?;
+) -> Result<u64, IngressProofGenerationError> {
+    let err = |msg: String| IngressProofGenerationError::InvalidDataSize(msg);
 
-    let expected = data_size_to_chunk_count(data_size, chunk_size)?;
+    // Load data_size & confirm we have metadata for this root
+    let (data_size, chunk_count) = db
+        .view_eyre(|tx| {
+            let data_size = cached_data_root_by_data_root(tx, data_root)
+                .map_err(|e| eyre::eyre!("Failed to load cached_data_root: {e}"))?
+                .ok_or_else(|| eyre::eyre!("Missing cached_data_root for {data_root:?}"))?
+                .data_size;
+            let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
+            let count = cursor
+                .dup_count(data_root)?
+                .ok_or_else(|| eyre::eyre!("No chunks found for data_root {data_root:?}"))?;
+            Ok((data_size, count))
+        })
+        .map_err(|e| err(e.to_string()))?;
+
+    let expected =
+        data_size_to_chunk_count(data_size, chunk_size).map_err(|e| err(e.to_string()))?;
     if chunk_count != expected {
-        return Err(eyre::eyre!(
-            "Cannot generate ingress proof: have {chunk_count} chunks expected {expected}"
-        ));
+        return Err(err(format!(
+            "have {chunk_count} chunks, expected {expected}"
+        )));
     }
 
     Ok(data_size)
