@@ -136,6 +136,9 @@ pub async fn post_tx(
             TxIngressError::InvalidVersion { version, minimum } => {
                 Err(ApiError::InvalidTransactionVersion { version, minimum })
             }
+            TxIngressError::UpdateRewardAddressNotAllowed => {
+                Err((err.to_string(), StatusCode::BAD_REQUEST).into())
+            }
         };
     }
 

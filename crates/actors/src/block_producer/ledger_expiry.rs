@@ -82,7 +82,7 @@ use std::sync::Arc;
 /// - `ledger_type`: The type of ledger to process (e.g., Submit, or future expiring ledgers)
 ///
 /// # Returns
-/// HashMap mapping miner addresses to their total fees and a rolling hash of transaction IDs
+/// LedgerExpiryBalanceDelta containing reward address to fee mappings and user refunds
 #[tracing::instrument(skip_all, fields(block.height = block_height, ledger.type = ?ledger_type))]
 pub async fn calculate_expired_ledger_fees(
     parent_epoch_snapshot: &EpochSnapshot,
@@ -231,18 +231,19 @@ pub async fn calculate_expired_ledger_fees(
     let fees = aggregate_balance_deltas(
         transactions,
         &tx_to_miners,
+        parent_epoch_snapshot,
         config,
         expect_txs_to_be_promoted,
     )?;
 
     let total_fees = fees
-        .miner_balance_increment
+        .reward_balance_increment
         .values()
         .fold(U256::from(0), |acc, (fee, _)| acc.saturating_add(*fee));
 
     tracing::info!(
-        "Calculated fees for {} miners, total fees: {}",
-        fees.miner_balance_increment.len(),
+        "Calculated fees for {} reward addresses, total fees: {}",
+        fees.reward_balance_increment.len(),
         total_fees
     );
 
@@ -308,6 +309,10 @@ fn collect_expired_partitions(
                 partition.miner_address
             );
 
+            // Store miner_address (not reward_address) to preserve unique miner identities
+            // for correct fee distribution. Reward address resolution is deferred to
+            // aggregate_balance_deltas to ensure pooled miners (sharing a reward address)
+            // are counted individually for fee splitting.
             expired_ledger_slot_indexes
                 .entry(slot_index)
                 .and_modify(|miners: &mut Vec<IrysAddress>| {
@@ -620,9 +625,9 @@ async fn process_middle_blocks(
 /// - User refunds for permanent fees when transactions were not promoted to permanent storage
 #[derive(Debug, Default, Clone)]
 pub struct LedgerExpiryBalanceDelta {
-    /// Rewards for miners who stored the expired data, mapped by miner address.
+    /// Rewards for miners who stored the expired data, keyed by reward/payout address.
     /// The tuple contains (total_reward, rolling_hash_of_tx_ids).
-    pub miner_balance_increment: BTreeMap<IrysAddress, (U256, RollingHash)>,
+    pub reward_balance_increment: BTreeMap<IrysAddress, (U256, RollingHash)>,
 
     /// Refunds of permanent fees for users whose transactions were not promoted.
     /// Sorted by transaction ID. Each tuple contains (transaction_id, refund_amount, user_address).
@@ -630,9 +635,17 @@ pub struct LedgerExpiryBalanceDelta {
 }
 
 /// Calculates and aggregates fees for each miner
+///
+/// # Parameters
+/// - `transactions`: The transactions to process
+/// - `tx_to_miners`: Mapping of transaction IDs to miner addresses that stored them
+/// - `epoch_snapshot`: Used to resolve miner addresses to reward addresses at payout time
+/// - `config`: Node configuration
+/// - `expect_txs_to_be_promoted`: Whether transactions are expected to be promoted
 fn aggregate_balance_deltas(
     mut transactions: Vec<DataTransactionHeader>,
     tx_to_miners: &BTreeMap<IrysTransactionId, Arc<Vec<IrysAddress>>>,
+    epoch_snapshot: &EpochSnapshot,
     config: &Config,
     expect_txs_to_be_promoted: bool,
 ) -> eyre::Result<LedgerExpiryBalanceDelta> {
@@ -658,9 +671,13 @@ fn aggregate_balance_deltas(
             let fee_distribution_per_miner = fee_charges.distribution_on_expiry(&unique_miners)?;
 
             for (miner, fee) in unique_miners.iter().zip(fee_distribution_per_miner) {
+                // Resolve miner_address to reward_address at payout time.
+                // This ensures pooled miners (multiple miner addresses sharing a reward address)
+                // are counted individually for fee splitting, then aggregated at payout.
+                let reward_addr = epoch_snapshot.resolve_reward_address(*miner);
                 balance_delta
-                    .miner_balance_increment
-                    .entry(*miner)
+                    .reward_balance_increment
+                    .entry(reward_addr)
                     .and_modify(|(current_fee, hash)| {
                         *current_fee = current_fee.saturating_add(fee);
                         hash.xor_assign(U256::from_le_bytes(data_tx.id.0));
@@ -743,7 +760,8 @@ struct BlockRange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::DataTransactionHeaderV1;
+    use irys_domain::StakeEntry;
+    use irys_types::{CommitmentStatus, DataTransactionHeaderV1};
 
     #[test]
     fn test_aggregate_miner_fees_handles_duplicates() {
@@ -787,9 +805,19 @@ mod tests {
         tx_to_miners.insert(tx1.id, Arc::new(tx1_miners_with_dup));
         tx_to_miners.insert(tx2.id, Arc::new(tx2_miners));
 
+        // Create a default epoch snapshot (resolve_reward_address will return miner_address
+        // unchanged when there's no stake entry)
+        let epoch_snapshot = EpochSnapshot::default();
+
         // Call aggregate_miner_fees
-        let result =
-            aggregate_balance_deltas(vec![tx1, tx2], &tx_to_miners, &config, false).unwrap();
+        let result = aggregate_balance_deltas(
+            vec![tx1, tx2],
+            &tx_to_miners,
+            &epoch_snapshot,
+            &config,
+            false,
+        )
+        .unwrap();
 
         // Calculate expected fees
         // For tx1: term_fee = 1000, treasury = 950 (95%)
@@ -807,19 +835,19 @@ mod tests {
         let miner2_total = tx1_fee_per_miner + tx2_fee_per_miner;
 
         assert_eq!(
-            result.miner_balance_increment.get(&miner1).unwrap().0,
+            result.reward_balance_increment.get(&miner1).unwrap().0,
             miner1_total,
             "Miner1 should receive correct deduplicated fee"
         );
         assert_eq!(
-            result.miner_balance_increment.get(&miner2).unwrap().0,
+            result.reward_balance_increment.get(&miner2).unwrap().0,
             miner2_total,
             "Miner2 should receive correct fee"
         );
 
         // Verify total fees distributed equals treasury amounts
         let total_distributed: U256 = result
-            .miner_balance_increment
+            .reward_balance_increment
             .values()
             .map(|(fee, _)| *fee)
             .fold(U256::from(0), |acc, fee| acc + fee);
@@ -828,6 +856,70 @@ mod tests {
         assert_eq!(
             total_distributed, expected_total,
             "Total distributed should equal sum of treasury amounts"
+        );
+    }
+
+    #[test]
+    fn test_aggregate_balance_deltas_with_pooled_miners() {
+        let node_config = irys_types::NodeConfig::testing();
+        let config = Config::new_with_random_peer_id(node_config);
+
+        // term_fee = 3000 → treasury = 2850 (95%) → 950 per miner with 3 miners
+        let tx1 = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                term_fee: U256::from(3000).into(),
+                data_size: 100,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
+        });
+
+        let miner1 = IrysAddress::random();
+        let miner2 = IrysAddress::random();
+        let miner3 = IrysAddress::random();
+        let pool_reward_address = IrysAddress::random();
+
+        let mut epoch_snapshot = EpochSnapshot::default();
+
+        // miner1 and miner2 share pool_reward_address, miner3 is independent
+        for (miner, reward_addr) in [
+            (miner1, pool_reward_address),
+            (miner2, pool_reward_address),
+            (miner3, miner3),
+        ] {
+            epoch_snapshot.commitment_state.stake_commitments.insert(
+                miner,
+                StakeEntry {
+                    id: H256::random(),
+                    commitment_status: CommitmentStatus::Active,
+                    signer: miner,
+                    amount: U256::from(10_000_u64),
+                    reward_address: reward_addr,
+                },
+            );
+        }
+
+        let mut tx_to_miners = BTreeMap::new();
+        tx_to_miners.insert(tx1.id, Arc::new(vec![miner1, miner2, miner3]));
+
+        let result =
+            aggregate_balance_deltas(vec![tx1], &tx_to_miners, &epoch_snapshot, &config, false)
+                .unwrap();
+
+        // 2850 split 3 ways = 950 each; pool gets 2x (1900), miner3 gets 1x (950)
+        assert_eq!(result.reward_balance_increment.len(), 2);
+        assert_eq!(
+            result
+                .reward_balance_increment
+                .get(&pool_reward_address)
+                .unwrap()
+                .0,
+            U256::from(1900)
+        );
+        assert_eq!(
+            result.reward_balance_increment.get(&miner3).unwrap().0,
+            U256::from(950)
         );
     }
 }
