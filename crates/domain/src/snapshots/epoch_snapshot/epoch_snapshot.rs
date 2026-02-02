@@ -47,7 +47,7 @@ pub struct EpochSnapshot {
 impl Default for EpochSnapshot {
     fn default() -> Self {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         Self {
             ledgers: Ledgers::new(&config.consensus),
             partition_assignments: PartitionAssignments::new(),
@@ -1339,7 +1339,7 @@ mod tests {
             num_partitions_per_slot: 2,
             ..node_config.consensus_config()
         });
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let mut snapshot = EpochSnapshot {
             ledgers: Ledgers::new(&config.consensus),
             partition_assignments: PartitionAssignments::new(),

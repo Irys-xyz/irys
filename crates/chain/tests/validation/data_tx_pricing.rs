@@ -103,7 +103,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
-                config: Config::new(evil_config),
+                config: Config::new_with_random_peer_id(evil_config),
                 db: genesis_block_prod.db.clone(),
                 block_discovery: genesis_block_prod.block_discovery.clone(),
                 mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
@@ -224,7 +224,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
-                config: Config::new(evil_config),
+                config: Config::new_with_random_peer_id(evil_config),
                 db: genesis_block_prod.db.clone(),
                 block_discovery: genesis_block_prod.block_discovery.clone(),
                 mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),

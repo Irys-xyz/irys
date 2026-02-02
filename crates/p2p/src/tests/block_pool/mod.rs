@@ -34,7 +34,7 @@ fn create_test_config() -> Config {
     let mut node_config = NodeConfig::testing();
     node_config.base_directory = temp_dir.path().to_path_buf();
     node_config.trusted_peers = vec![];
-    Config::new(node_config)
+    Config::new_with_random_peer_id(node_config)
 }
 
 fn create_test_block_body(block_hash: irys_types::BlockHash) -> BlockBody {

@@ -2955,7 +2955,7 @@ mod tests {
             base_directory: data_dir.path().to_path_buf(),
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let mut genesis_block = IrysBlockHeader::new_mock_header();
         genesis_block.height = 0;

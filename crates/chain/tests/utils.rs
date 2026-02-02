@@ -465,8 +465,6 @@ impl IrysNodeTest<IrysNodeCtx> {
         let mut peer_config = node_config.clone();
         peer_config.mining_key = peer_signer.signer.clone();
         peer_config.reward_address = peer_signer.address();
-        // Generate a distinct peer_id (separate from mining address) for test isolation
-        peer_config.peer_id = Some(IrysPeerId::random());
 
         // Set peer mode and expected genesis hash via consensus config
         peer_config.node_mode = NodeMode::Peer;
@@ -2371,7 +2369,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         GossipClient::new(
             Duration::from_secs(5),
             self.node_ctx.config.node_config.miner_address(),
-            self.node_ctx.config.node_config.peer_id(),
+            self.node_ctx.config.peer_id(),
         )
     }
 
@@ -2405,7 +2403,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             chain_id: self.node_ctx.config.consensus.chain_id,
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
-            peer_id: self.node_ctx.config.node_config.peer_id(),
+            peer_id: self.node_ctx.config.peer_id(),
             ..HandshakeRequestV2::default()
         };
         self.node_ctx
