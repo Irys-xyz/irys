@@ -997,7 +997,9 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // mine a single block, and let everyone sync so future txs use this block's height as anchor.
     node_a.mine_block().await?; // mine block a1
     let block1_height = base_height + 1;
-    node_a.wait_until_height(block1_height, seconds_to_wait).await?;
+    node_a
+        .wait_until_height(block1_height, seconds_to_wait)
+        .await?;
     let a_block1 = node_a.get_block_by_height(block1_height).await?; // get block a1
     node_b
         .wait_for_block(&a_block1.block_hash, seconds_to_wait)
@@ -1005,9 +1007,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     node_c
         .wait_for_block(&a_block1.block_hash, seconds_to_wait)
         .await?;
-    node_b.wait_until_height(block1_height, seconds_to_wait).await?;
+    node_b
+        .wait_until_height(block1_height, seconds_to_wait)
+        .await?;
     let b_block1 = node_b.get_block_by_height(block1_height).await?; // get block b1
-    node_c.wait_until_height(block1_height, seconds_to_wait).await?;
+    node_c
+        .wait_until_height(block1_height, seconds_to_wait)
+        .await?;
     let c_block1 = node_c.get_block_by_height(block1_height).await?; // get block c1
 
     assert_eq!(
@@ -1332,7 +1338,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Node C will choose to include these txs in block C4
     let block3_height = block1_height + 2;
     let block4_height = block1_height + 3;
-    if let Err(does_not_reach_height) = node_c.wait_until_height(block3_height, seconds_to_wait).await {
+    if let Err(does_not_reach_height) = node_c
+        .wait_until_height(block3_height, seconds_to_wait)
+        .await
+    {
         tracing::error!(
             "Node C Failed to reach block height {}: {:?}",
             block3_height,
@@ -1341,14 +1350,21 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         Err(does_not_reach_height)?
     }
     let (c_block4, c_block4_payload, c_block4_txs) = node_c.mine_block_without_gossip().await?;
-    if let Err(does_not_reach_height) = node_c.wait_until_height(block4_height, seconds_to_wait).await {
+    if let Err(does_not_reach_height) = node_c
+        .wait_until_height(block4_height, seconds_to_wait)
+        .await
+    {
         tracing::error!(
             "Node C Failed to reach block height {}: {:?}",
             block4_height,
             does_not_reach_height
         );
     }
-    assert_eq!(c_block4.height, block4_height, "Node C Failed to reach block height {}", block4_height); // block c4
+    assert_eq!(
+        c_block4.height, block4_height,
+        "Node C Failed to reach block height {}",
+        block4_height
+    ); // block c4
 
     //
     // Stage 8: FINAL SYNC / RE-ORGs

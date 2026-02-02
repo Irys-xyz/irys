@@ -404,8 +404,7 @@ pub fn reanchor_and_store_ingress_proof(
         proof.data_root,
     ));
 
-    if let Err(_) =
-        calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size)
+    if calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size).is_err()
     {
         let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,

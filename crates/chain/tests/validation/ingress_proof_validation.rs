@@ -283,7 +283,11 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
     );
 
     // 6. Query mempool's proof collection and verify filtering
-    let canonical_tip = genesis_node.get_canonical_chain().last().unwrap().block_hash;
+    let canonical_tip = genesis_node
+        .get_canonical_chain()
+        .last()
+        .unwrap()
+        .block_hash;
     let mempool_txs = genesis_node.get_best_mempool_tx(canonical_tip).await?;
 
     // The publish_tx should contain proofs, and they should only be from staked signers

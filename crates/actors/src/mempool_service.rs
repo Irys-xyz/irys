@@ -2928,11 +2928,7 @@ pub enum IngressProofGenerationError {
 impl IngressProofGenerationError {
     /// Returns true if this error represents expected behavior that should be logged at debug level.
     pub fn is_expected(&self) -> bool {
-        matches!(
-            self,
-            IngressProofGenerationError::NodeNotStaked
-                | IngressProofGenerationError::AlreadyGenerating
-        )
+        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
     }
 }
 
