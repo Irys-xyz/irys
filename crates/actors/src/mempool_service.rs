@@ -1318,9 +1318,18 @@ impl Inner {
                     .map(|p| &p.proof.0) // Use signature as unique identifier
                     .collect();
 
+                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
                     .filter(|p| !assigned_proof_set.contains(&p.proof.0))
+                    .filter(|p| {
+                        // Filter out proofs from unstaked signers
+                        match p.recover_signer() {
+                            Ok(signer) => epoch_snapshot.is_staked(signer),
+                            Err(_) => false,
+                        }
+                    })
                     .cloned()
                     .collect();
 
@@ -2894,6 +2903,33 @@ pub enum IngressProofError {
     /// Catch-all variant for other errors.
     #[error("Ingress proof error: {0}")]
     Other(String),
+}
+
+/// Errors that can occur when generating an ingress proof locally.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofGenerationError {
+    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
+    #[error("Node is not staked in current epoch")]
+    NodeNotStaked,
+    /// Proof generation is already in progress for this data root.
+    #[error("Proof generation already in progress")]
+    AlreadyGenerating,
+    /// Failed to communicate with cache service.
+    #[error("Cache service error: {0}")]
+    CacheServiceError(String),
+    /// Invalid data size for the transaction.
+    #[error("Invalid data size: {0}")]
+    InvalidDataSize(String),
+    /// Failed to generate the proof.
+    #[error("Proof generation failed: {0}")]
+    GenerationFailed(String),
+}
+
+impl IngressProofGenerationError {
+    /// Returns true if this error is benign (e.g., node not staked) and should be logged at debug level.
+    pub fn is_benign(&self) -> bool {
+        matches!(self, Self::NodeNotStaked | Self::AlreadyGenerating)
+    }
 }
 
 /// The Mempool oversees pending transactions and validation of incoming tx.
