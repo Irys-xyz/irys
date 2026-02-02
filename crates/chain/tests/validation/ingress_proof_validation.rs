@@ -11,8 +11,8 @@ use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
 use irys_types::ingress::{generate_ingress_proof, IngressProofV1};
 use irys_types::{
-    CommitmentTransaction, DataTransactionHeader, IngressProof, IngressProofsList, IrysBlockHeader,
-    NodeConfig,
+    irys::IrysSigner, CommitmentTransaction, DataTransactionHeader, IngressProof,
+    IngressProofsList, IrysBlockHeader, NodeConfig,
 };
 use reth_db::Database as _;
 
@@ -313,6 +313,69 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
             "Should have at least one proof from genesis signer"
         );
     }
+
+    genesis_node.stop().await;
+    Ok(())
+}
+
+/// This test verifies that the mempool rejects ingress proofs from completely unstaked
+/// signers (spam protection), but accepts proofs from signers with pending stake commitments.
+#[test_log::test(tokio::test)]
+async fn slow_heavy_mempool_rejects_unstaked_but_accepts_pending_stake_ingress_proofs(
+) -> eyre::Result<()> {
+    // 1. Setup: genesis node + two funded signers
+    let mut genesis_config = NodeConfig::testing();
+    genesis_config.consensus.get_mut().chunk_size = 32;
+    let test_signer = genesis_config.new_random_signer();
+    let pending_stake_signer = genesis_config.new_random_signer();
+    genesis_config.fund_genesis_accounts(vec![&test_signer, &pending_stake_signer]);
+
+    let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+        .start_and_wait_for_packing("GENESIS", 20)
+        .await;
+    genesis_node.mine_block().await?;
+
+    // 2. Post tx and upload chunks
+    let data = vec![42_u8; 96];
+    let tx = genesis_node
+        .post_publish_data_tx(&test_signer, data.clone())
+        .await?;
+    genesis_node.upload_chunks(&tx).await?;
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
+    // 3. Helper to generate proof
+    let consensus = genesis_config.consensus_config();
+    let chunk_size = consensus.chunk_size as usize;
+    let chunks: Vec<Vec<u8>> = data.chunks(chunk_size).map(Vec::from).collect();
+    let make_proof = |signer: &IrysSigner, anchor| {
+        generate_ingress_proof(
+            signer,
+            tx.header.data_root,
+            chunks.iter().map(|c| Ok(c.as_slice())),
+            consensus.chain_id,
+            anchor,
+        )
+    };
+
+    // 4. Unstaked signer's proof should be REJECTED
+    let anchor = genesis_node.get_anchor().await?;
+    let result = genesis_node
+        .ingest_ingress_proof(make_proof(&pending_stake_signer, anchor)?)
+        .await;
+    assert!(result.is_err(), "Should reject proof from unstaked signer");
+
+    // 5. Signer stakes
+    genesis_node
+        .post_stake_commitment_with_signer(&pending_stake_signer)
+        .await?;
+    genesis_node.mine_block().await?;
+
+    // 6. Now in commitment snapshot - proof should be ACCEPTED
+    let new_anchor = genesis_node.get_anchor().await?;
+    genesis_node
+        .ingest_ingress_proof(make_proof(&pending_stake_signer, new_anchor)?)
+        .await
+        .expect("Should accept proof from signer with pending stake");
 
     genesis_node.stop().await;
     Ok(())

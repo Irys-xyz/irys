@@ -24,10 +24,13 @@ impl Inner {
             .pre_validate(&ingress_proof.data_root)
             .map_err(|_| IngressProofError::InvalidSignature)?;
 
-        // Validate the proof address is a staked address (only check epoch snapshot, not commitment snapshot)
-        let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+        // Reject proofs from addresses not staked or pending stake (spam protection)
+        let block_tree = self.block_tree_read_guard.read();
+        let epoch_snapshot = block_tree.canonical_epoch_snapshot();
+        let commitment_snapshot = block_tree.canonical_commitment_snapshot();
+        drop(block_tree);
 
-        if !epoch_snapshot.is_staked(address) {
+        if !epoch_snapshot.is_staked(address) && !commitment_snapshot.is_staked(address) {
             return Err(IngressProofError::UnstakedAddress);
         }
 
@@ -404,8 +407,7 @@ pub fn reanchor_and_store_ingress_proof(
         proof.data_root,
     ));
 
-    if calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size).is_err()
-    {
+    if calculate_and_validate_data_size(db, proof.data_root, config.consensus.chunk_size).is_err() {
         let _ = cache_sender.send(CacheServiceAction::NotifyProofGenerationCompleted(
             proof.data_root,
         ));
