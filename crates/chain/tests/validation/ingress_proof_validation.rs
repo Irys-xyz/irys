@@ -218,43 +218,9 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
         "Signer B should be staked after mining to next epoch"
     );
 
-    // 3. Post a data transaction and upload chunks
-    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    // 3. Unstake signer B BEFORE creating the transaction
+    // This ensures the tx won't be auto-promoted while signer B is still staked
     let genesis_signer = genesis_config.signer();
-    let tx = genesis_node
-        .post_publish_data_tx(&genesis_signer, data.clone())
-        .await?;
-
-    genesis_node.upload_chunks(&tx).await?;
-
-    // Wait for chunks to be cached and the genesis node to auto-generate its ingress proof
-    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
-
-    // Wait for genesis node to generate its ingress proof
-    genesis_node
-        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], seconds_to_wait)
-        .await?;
-
-    // 4. Generate and store an ingress proof from signer B (currently staked, will be unstaked later)
-    let consensus_config = genesis_config.consensus_config();
-    let chain_id = consensus_config.chain_id;
-    let anchor = genesis_node.get_anchor().await?;
-    let chunk_size = consensus_config.chunk_size as usize;
-    let chunks: Vec<Vec<u8>> = data.chunks(chunk_size).map(Vec::from).collect();
-
-    // Generate proof from signer B
-    let signer_b_proof = generate_ingress_proof(
-        &signer_b,
-        tx.header.data_root,
-        chunks.iter().map(|c| Ok(c.as_slice())),
-        chain_id,
-        anchor,
-    )?;
-
-    // Ingest signer B's proof through proper mempool channel (same path as gossip)
-    genesis_node.ingest_ingress_proof(signer_b_proof).await?;
-
-    // 5. Unstake signer B
     let node_consensus_config = &genesis_node.node_ctx.config.consensus;
     let unstake_anchor = genesis_node.get_anchor().await?;
     let mut unstake_tx = CommitmentTransaction::new_unstake(node_consensus_config, unstake_anchor);
@@ -282,29 +248,106 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
         "Genesis signer should still be staked"
     );
 
-    // 6. Query mempool's proof collection and verify filtering
-    let canonical_tip = genesis_node
-        .get_canonical_chain()
-        .last()
-        .unwrap()
-        .block_hash;
-    let mempool_txs = genesis_node.get_best_mempool_tx(canonical_tip).await?;
+    // 4. NOW create the data transaction and upload chunks
+    // The tx is created after signer B unstakes, so it won't be auto-promoted with signer B's proof
+    let data = vec![42_u8; 96]; // 3 chunks of 32 bytes
+    let tx = genesis_node
+        .post_publish_data_tx(&genesis_signer, data.clone())
+        .await?;
 
-    // The publish_tx should contain proofs, and they should only be from staked signers
+    genesis_node.upload_chunks(&tx).await?;
+
+    // Wait for chunks to be cached and the genesis node to auto-generate its ingress proof
+    genesis_node.wait_for_chunk_cache_count(3, 10).await?;
+
+    // Wait for genesis node to generate its ingress proof
+    genesis_node
+        .wait_for_ingress_proofs_no_mining(vec![tx.header.id], seconds_to_wait)
+        .await?;
+
+    // 5. Generate and inject a proof from signer B (who is NOW unstaked)
+    // This simulates having an old proof from when they were staked
+    let consensus_config = genesis_config.consensus_config();
+    let chain_id = consensus_config.chain_id;
+    let anchor = genesis_node.get_anchor().await?;
+    let chunk_size = consensus_config.chunk_size as usize;
+    let chunks: Vec<Vec<u8>> = data.chunks(chunk_size).map(Vec::from).collect();
+
+    // Generate proof from signer B (currently unstaked, but proof is still valid structurally)
+    let signer_b_proof = generate_ingress_proof(
+        &signer_b,
+        tx.header.data_root,
+        chunks.iter().map(|c| Ok(c.as_slice())),
+        chain_id,
+        anchor,
+    )?;
+
+    // Directly store signer B's proof in the database (bypassing the mempool ingestion check
+    // which now rejects proofs from unstaked signers). This simulates a proof that was
+    // stored when signer B was staked but is now in the DB after they unstaked.
+    genesis_node.node_ctx.db.update(|rw_tx| {
+        irys_database::store_external_ingress_proof_checked(
+            rw_tx,
+            &signer_b_proof,
+            signer_b.address(),
+        )
+    })??;
+
+    // Mine additional blocks to ensure tx anchor is old enough for inclusion
+    // (tx anchor must be at least block_migration_depth=6 blocks behind current tip)
+    // The tx will be auto-promoted during this mining when the anchor becomes valid
+    genesis_node.mine_blocks(6).await?;
+
+    // 6. Verify the tx was promoted and only staked signer's proof was included
+    // Find the block that contains our tx in the publish ledger by searching the canonical chain
+    let canonical_chain = genesis_node.get_canonical_chain();
+    let promoted_entry = canonical_chain
+        .iter()
+        .find(|entry| {
+            entry
+                .data_ledgers
+                .get(&irys_types::DataLedger::Publish)
+                .map(|ledger| ledger.0.contains(&tx.header.id))
+                .unwrap_or(false)
+        })
+        .expect("Transaction should have been promoted to a block");
+
+    // Get the full block header to access the proofs
+    let promoted_block = genesis_node
+        .get_block_by_height(promoted_entry.height)
+        .await
+        .expect("Block at promoted height should exist");
+
+    // Check that the block has publish ledger entries
+    let publish_ledger = &promoted_block.data_ledgers[irys_types::DataLedger::Publish];
     assert!(
-        mempool_txs.publish_tx.proofs.is_some(),
-        "publish_tx.proofs should be Some - expected proofs from staked signers"
+        publish_ledger.tx_ids.0.contains(&tx.header.id),
+        "Transaction should be in the publish ledger of the promoting block"
     );
-    let proofs = mempool_txs.publish_tx.proofs.as_ref().unwrap();
 
-    // Verify all returned proofs are from staked signers
-    for proof in proofs.0.iter() {
+    // Verify the proofs in the block are only from staked signers
+    let block_proofs = publish_ledger
+        .proofs
+        .as_ref()
+        .expect("Block should have ingress proofs for the promoted transaction");
+
+    for proof in block_proofs.0.iter() {
         let signer = proof.recover_signer()?;
+
+        // Refresh epoch snapshot at the promoted height
+        let epoch_snapshot_at_promotion = genesis_node
+            .node_ctx
+            .block_tree_guard
+            .read()
+            .get_epoch_snapshot(&promoted_block.block_hash())
+            .expect("Should have epoch snapshot at promotion height");
+
         assert!(
-            epoch_snapshot.is_staked(signer),
-            "Mempool should only return proofs from staked signers, but got proof from {:?}",
+            epoch_snapshot_at_promotion.is_staked(signer),
+            "Block should only contain proofs from staked signers, but got proof from {:?}",
             signer
         );
+
         // Specifically, signer B's proof should NOT be included
         assert_ne!(
             signer,
@@ -312,9 +355,10 @@ async fn slow_heavy_mempool_filters_unstaked_ingress_proofs() -> eyre::Result<()
             "Signer B's proof should be filtered out since they are unstaked"
         );
     }
+
     // We should have at least 1 proof (from genesis signer)
     assert!(
-        !proofs.0.is_empty(),
+        !block_proofs.0.is_empty(),
         "Should have at least one proof from genesis signer"
     );
 
