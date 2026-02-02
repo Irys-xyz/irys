@@ -903,10 +903,6 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Stage 0: SETUP AND STARTUP
     //
 
-    // config variables
-    // Use shorter epochs (3 blocks) to ensure peer stakes are active in epoch snapshot
-    // before the fork phase. With full validation, ingress proof signers must be staked
-    // in the parent epoch snapshot.
     let num_blocks_in_epoch = 3;
     let seconds_to_wait = 15;
     const DATA_CHUNK_SIZE: usize = 32;
@@ -935,14 +931,10 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
         .start_and_wait_for_packing("NODE_A", seconds_to_wait)
         .await;
 
-    // additional configs for peers - use testing_peer_with_assignments_and_name to ensure
-    // peers are properly staked in the epoch snapshot before generating ingress proofs
+    // additional configs for peers
     let config_b = node_a.testing_peer_with_signer(&b_signer);
     let config_c = node_a.testing_peer_with_signer(&c_signer);
 
-    // Start peer nodes and ensure they stake and get partition assignments.
-    // This method posts stake/pledge commitments, mines to include them, and mines to the
-    // next epoch boundary so the stakes are active in the epoch snapshot.
     let node_b = node_a
         .testing_peer_with_assignments_and_name(config_b, "NODE_B")
         .await?;
@@ -953,7 +945,6 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
     // Expected state at end of stage 0:
     //  Nodes A, B, C started
     //  Nodes B, C are staked and have partition assignments
-    //  Chain is at or past the first epoch boundary
 
     //
     // Stage 1: STARTING STATE CHECKS
@@ -971,7 +962,7 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
 
     // get the block at base_height to use for balance checks
     // Note: After testing_peer_with_assignments_and_name, peers B and C have staked and
-    // spent fees, so we capture their balances at base_height (after staking) instead of genesis
+    // spent fees, so we capture their balances at base_height (after staking)
     let base_block = node_a.get_block_by_height(base_height).await?;
 
     // get starting balances after staking (from base_height block)
