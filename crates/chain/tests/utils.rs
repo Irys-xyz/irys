@@ -48,7 +48,7 @@ use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
     partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
-    EvmBlockHash, H256List, IrysAddress, IrysPeerId, NetworkConfigWithDefaults as _, SealedBlock,
+    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock,
     SyncMode, H256, U256,
 };
 use irys_types::{
