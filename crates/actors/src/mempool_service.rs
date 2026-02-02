@@ -2896,6 +2896,37 @@ pub enum IngressProofError {
     Other(String),
 }
 
+/// Errors that can occur when generating an ingress proof locally.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum IngressProofGenerationError {
+    /// Node is not staked in the current epoch - this is expected behavior for unstaked nodes.
+    #[error("Node is not staked in current epoch")]
+    NodeNotStaked,
+    /// Proof generation is already in progress for this data root.
+    #[error("Proof generation already in progress")]
+    AlreadyGenerating,
+    /// Failed to communicate with cache service.
+    #[error("Cache service error: {0}")]
+    CacheServiceError(String),
+    /// Invalid data size for the transaction.
+    #[error("Invalid data size")]
+    InvalidDataSize,
+    /// Failed to generate the proof.
+    #[error("Proof generation failed: {0}")]
+    GenerationFailed(String),
+}
+
+impl IngressProofGenerationError {
+    /// Returns true if this error represents expected behavior that should be logged at debug level.
+    pub fn is_expected(&self) -> bool {
+        matches!(
+            self,
+            IngressProofGenerationError::NodeNotStaked
+                | IngressProofGenerationError::AlreadyGenerating
+        )
+    }
+}
+
 /// The Mempool oversees pending transactions and validation of incoming tx.
 #[derive(Debug)]
 pub struct MempoolService {

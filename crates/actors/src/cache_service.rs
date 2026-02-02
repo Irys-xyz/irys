@@ -572,7 +572,11 @@ impl InnerCacheTask {
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                    if e.is_expected() {
+                        debug!(ingress_proof.data_root = ?proof, "Skipped ingress proof reanchoring: {e}");
+                    } else {
+                        warn!(ingress_proof.data_root = ?proof, "Failed to regenerate ingress proof: {e}");
+                    }
                 }
             } else {
                 debug!(
@@ -587,7 +591,7 @@ impl InnerCacheTask {
 
         for proof in to_regen.iter() {
             if REGENERATE_PROOFS {
-                if let Err(report) = generate_and_store_ingress_proof(
+                if let Err(e) = generate_and_store_ingress_proof(
                     &self.block_tree_guard,
                     &self.db,
                     &self.config,
@@ -596,7 +600,11 @@ impl InnerCacheTask {
                     &self.gossip_broadcast,
                     &self.cache_sender,
                 ) {
-                    warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {report}");
+                    if e.is_expected() {
+                        debug!(ingress_proof.data_root = ?proof.data_root, "Skipped ingress proof regeneration: {e}");
+                    } else {
+                        warn!(ingress_proof.data_root = ?proof.data_root, "Failed to regenerate ingress proof: {e}");
+                    }
                 }
             } else {
                 debug!(

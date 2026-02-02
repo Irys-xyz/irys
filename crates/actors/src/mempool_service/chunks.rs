@@ -527,7 +527,11 @@ impl Inner {
                     &gossip_sender,
                     &cache_sender,
                 ) {
-                    tracing::warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {e}");
+                    if e.is_expected() {
+                        debug!(proof.data_root = ?chunk_data_root, "Skipped ingress proof generation: {e}");
+                    } else {
+                        warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {e}");
+                    }
                 }
             }).in_current_span();
         }
