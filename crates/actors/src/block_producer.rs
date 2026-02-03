@@ -556,19 +556,17 @@ pub trait BlockProdStrategy {
     /// Selects the parent block for new block production.
     ///
     /// Targets the block with highest cumulative difficulty, but only if fully validated.
-    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
-    /// the latest validated block on timeout to ensure production continues.
+    /// Waits indefinitely for validation to complete, switching targets if a new block
+    /// with higher cumulative difficulty appears.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
     #[tracing::instrument(skip_all, level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
         // Use BlockValidationTracker to select the parent block
         let parent_block_hash = BlockValidationTracker::new(
             inner.block_tree_guard.clone(),
             inner.service_senders.clone(),
-            MAX_WAIT_TIME,
         )
         .wait_for_validation()
         .await?;
