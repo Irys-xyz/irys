@@ -1,4 +1,5 @@
 use irys_types::BlockHash;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -14,12 +15,12 @@ const MAX_LAST_BLOCK_VALIDATION_ERRORS: usize = 10;
 #[derive(Clone, Debug, Default)]
 pub struct SyncDiagnosticInfo {
     total_block_validation_errors: usize,
-    last_block_validation_errors: Vec<(String, SystemTime)>,
+    last_block_validation_errors: VecDeque<(String, SystemTime)>,
     last_vdf_step: Option<(u64, SystemTime)>,
     total_block_processing_errors: usize,
-    last_block_processing_errors: Vec<(String, SystemTime)>,
+    last_block_processing_errors: VecDeque<(String, SystemTime)>,
     total_data_pull_errors: usize,
-    last_data_pull_errors: Vec<(String, SystemTime)>,
+    last_data_pull_errors: VecDeque<(String, SystemTime)>,
     latest_successfully_processed_block_info: (BlockHash, Option<SystemTime>),
 }
 
@@ -27,12 +28,12 @@ impl SyncDiagnosticInfo {
     pub fn new() -> Self {
         Self {
             total_block_validation_errors: 0,
-            last_block_validation_errors: Vec::new(),
+            last_block_validation_errors: VecDeque::new(),
             last_vdf_step: None,
-            last_block_processing_errors: Vec::new(),
+            last_block_processing_errors: VecDeque::new(),
             total_block_processing_errors: 0,
             total_data_pull_errors: 0,
-            last_data_pull_errors: Vec::new(),
+            last_data_pull_errors: VecDeque::new(),
             latest_successfully_processed_block_info: (BlockHash::default(), None),
         }
     }
@@ -40,9 +41,9 @@ impl SyncDiagnosticInfo {
     pub fn record_block_validation_error(&mut self, error: String) {
         self.total_block_validation_errors += 1;
         let now = SystemTime::now();
-        self.last_block_validation_errors.push((error, now));
+        self.last_block_validation_errors.push_back((error, now));
         if self.last_block_validation_errors.len() > MAX_LAST_BLOCK_VALIDATION_ERRORS {
-            self.last_block_validation_errors.remove(0);
+            self.last_block_validation_errors.pop_front();
         }
     }
 
@@ -54,18 +55,18 @@ impl SyncDiagnosticInfo {
     pub fn record_block_processing_error(&mut self, error: String) {
         let now = SystemTime::now();
         self.total_block_processing_errors += 1;
-        self.last_block_processing_errors.push((error, now));
+        self.last_block_processing_errors.push_back((error, now));
         if self.last_block_processing_errors.len() > MAX_LAST_BLOCK_VALIDATION_ERRORS {
-            self.last_block_processing_errors.remove(0);
+            self.last_block_processing_errors.pop_front();
         }
     }
 
     pub fn record_data_pull_error(&mut self, error: String) {
         let now = SystemTime::now();
         self.total_data_pull_errors += 1;
-        self.last_data_pull_errors.push((error, now));
+        self.last_data_pull_errors.push_back((error, now));
         if self.last_data_pull_errors.len() > MAX_LAST_BLOCK_VALIDATION_ERRORS {
-            self.last_data_pull_errors.remove(0);
+            self.last_data_pull_errors.pop_front();
         }
     }
 
