@@ -9,7 +9,8 @@ const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 const MAX_LAST_BLOCK_VALIDATION_ERRORS: usize = 10;
 
 /// Diagnostic information about chain synchronization errors and events.
-/// This struct is public but all fields are private - access via methods on `ChainSyncState`.
+/// This struct is public with private fields and provides public methods for recording
+/// and retrieving diagnostic information.
 #[derive(Clone, Debug, Default)]
 pub struct SyncDiagnosticInfo {
     total_block_validation_errors: usize,
