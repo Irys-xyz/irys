@@ -718,8 +718,7 @@ where
                             BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                         )
                         .await;
-                    self.sync_state
-                        .record_block_processing_error(e.to_string());
+                    self.sync_state.record_block_processing_error(e.to_string());
                     return Err(e);
                 }
                 Err(e) => return Err(e),
@@ -888,8 +887,7 @@ where
                         BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                     )
                     .await;
-                self.sync_state
-                    .record_block_processing_error(e.to_string());
+                self.sync_state.record_block_processing_error(e.to_string());
                 return Err(e);
             }
             Err(e) => return Err(e),
