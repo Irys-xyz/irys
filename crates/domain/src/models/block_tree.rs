@@ -881,6 +881,23 @@ impl BlockTree {
         self.max_cumulative_difficulty
     }
 
+    /// Returns max-difficulty block info: (hash, height, can_build_upon)
+    ///
+    /// # Panics
+    /// Panics if the max difficulty block is not in the tree (invariant violation).
+    pub fn get_max_block_info(&self) -> (BlockHash, u64, bool) {
+        let (_, hash) = self.max_cumulative_difficulty;
+        let entry = self
+            .blocks
+            .get(&hash)
+            .expect("max difficulty block must exist in tree");
+        let can_build = matches!(
+            entry.chain_state,
+            ChainState::Onchain | ChainState::Validated(BlockState::ValidBlock)
+        );
+        (hash, entry.block.height, can_build)
+    }
+
     /// Check if a block can be built upon
     pub fn can_be_built_upon(&self, block_hash: &BlockHash) -> bool {
         self.blocks.get(block_hash).is_some_and(|entry| {
