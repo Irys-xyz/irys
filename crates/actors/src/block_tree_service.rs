@@ -551,6 +551,11 @@ impl BlockTreeServiceInner {
                     *block_hash,
                 ));
             }
+
+            // Record validation started for diagnostics
+            self.chain_sync_state
+                .record_validation_started(*block_hash);
+
             self.service_senders
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
@@ -597,6 +602,10 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
+        // Record validation finished for diagnostics (regardless of result)
+        self.chain_sync_state
+            .record_validation_finished(&block_hash);
+
         // Handle a failed validation first
         if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
