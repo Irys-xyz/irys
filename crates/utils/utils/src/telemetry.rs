@@ -15,7 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use tracing::level_filters::LevelFilter;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{
-    layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter, Layer as _, Registry,
+    fmt::format::FmtSpan, layer::SubscriberExt as _, util::SubscriberInitExt as _, EnvFilter,
+    Layer as _, Registry,
 };
 
 static LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
@@ -172,7 +173,8 @@ fn setup_tracing_subscriber(
         .with_line_number(true)
         .with_ansi(true)
         .with_file(true)
-        .with_writer(std::io::stdout);
+        .with_writer(std::io::stdout)
+        .with_span_events(FmtSpan::NONE);
 
     let subscriber = subscriber
         .with(filter)
