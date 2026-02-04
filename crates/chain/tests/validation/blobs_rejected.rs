@@ -136,7 +136,7 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
         data_transactions: vec![],
         commitment_transactions: vec![],
     };
-    let sealed_block = Arc::new(IrysSealedBlock::new(header, body).unwrap());
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
 
@@ -197,12 +197,13 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
         data_transactions: vec![],
         commitment_transactions: vec![],
     };
-    let sealed_block = Arc::new(IrysSealedBlock::new(header, body).unwrap());
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block, false).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -267,12 +268,13 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
         data_transactions: vec![],
         commitment_transactions: vec![],
     };
-    let sealed_block = Arc::new(IrysSealedBlock::new(header, body).unwrap());
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block, false).await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
