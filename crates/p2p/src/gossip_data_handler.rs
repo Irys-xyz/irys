@@ -732,6 +732,7 @@ where
                 source_peer_id, block_hash
             );
             error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
             return Err(GossipError::InvalidPeer(error_msg));
         };
 
