@@ -370,15 +370,13 @@ where
 
         let Some(peer_info) = self.peer_list.get_peer(&source_address) else {
             // This shouldn't happen, but we still should have a safeguard just in case
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_address
-            );
-            self.sync_state.record_data_pull_error(format!(
-                "InvalidPeer: peer {} not in peer list for block {}",
+            let error_msg = format!(
+                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
                 source_address, block_hash
-            ));
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+            );
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         debug!(
@@ -422,15 +420,13 @@ where
         };
 
         let Some(peer_info) = self.peer_list.get_peer(&source_peer_id) else {
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from it",
-                source_peer_id
-            );
-            self.sync_state.record_data_pull_error(format!(
-                "InvalidPeer: peer {} not in peer list for block {}",
+            let error_msg = format!(
+                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from it (block {})",
                 source_peer_id, block_hash
-            ));
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block from it, but it was not found".into()));
+            );
+            error!("Sync task: {}", error_msg);
+            self.sync_state.record_data_pull_error(error_msg.clone());
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         // Get miner_address from the peer item
@@ -731,11 +727,12 @@ where
             .await?;
 
         let Some(_peer_info) = self.peer_list.get_peer(&source_peer_id) else {
-            error!(
-                "Sync task: Peer with address {:?} is not found in the peer list, which should never happen, as we just fetched the data from that peer",
-                source_peer_id
+            let error_msg = format!(
+                "Peer with address {} is not found in the peer list, which should never happen, as we just fetched the data from that peer (block {})",
+                source_peer_id, block_hash
             );
-            return Err(GossipError::InvalidPeer("Expected peer to be in the peer list since we just fetched the block header from it, but it was not found".into()));
+            error!("Sync task: {}", error_msg);
+            return Err(GossipError::InvalidPeer(error_msg));
         };
 
         debug!(
