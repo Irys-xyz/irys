@@ -213,7 +213,7 @@ pub fn read_partial_byte_range(
         },
     )?;
 
-    let chunk_size = context.chunk_provider().config().chunk_size;
+    let chunk_size = context.config().chunk_size;
     bytes_range
         .translate_offset(chunk_size, offset as u64)
         .map_err(|e| PdPrecompileError::OffsetTranslationFailed {
@@ -254,8 +254,7 @@ pub fn read_bytes_range(
         chunk_count,
     } = chunk_read_range;
 
-    let chunk_provider = context.chunk_provider();
-    let config = chunk_provider.config();
+    let config = context.config();
     let chunk_size = config.chunk_size;
 
     let ledger_range = calculate_chunk_offsets(
@@ -274,24 +273,24 @@ pub fn read_bytes_range(
         chunk_count = chunk_count,
         ledger_start = *ledger_start,
         ledger_end = *ledger_end,
-        "Fetching chunks from storage"
+        "Fetching chunks from cache"
     );
 
-    // Fetch and collect all chunks
+    // Fetch and collect all chunks from cache
     let mut bytes = Vec::with_capacity((*chunk_count as u64 * chunk_size) as usize);
 
     for ledger_offset in *ledger_start..*ledger_end {
-        let unpacked_chunk = chunk_provider
-            .get_unpacked_chunk_by_ledger_offset(0, ledger_offset)
+        let unpacked_chunk = context
+            .get_chunk(0, ledger_offset)
             .map_err(|e| {
-                warn!(ledger_offset, error = %e, "Failed to fetch chunk");
+                warn!(ledger_offset, error = %e, "Failed to fetch chunk from cache");
                 PdPrecompileError::ChunkFetchFailed {
                     offset: ledger_offset,
                     reason: e.to_string(),
                 }
             })?
             .ok_or_else(|| {
-                warn!(ledger_offset, "Chunk not found");
+                warn!(ledger_offset, "Chunk not found in cache");
                 PdPrecompileError::ChunkNotFound {
                     offset: ledger_offset,
                 }
@@ -303,7 +302,7 @@ pub fn read_bytes_range(
     debug!(
         total_bytes_fetched = bytes.len(),
         chunks_fetched = chunk_count,
-        "Successfully fetched all chunks"
+        "Successfully fetched all chunks from cache"
     );
 
     let offset_usize = calculate_byte_offset(chunk_offset, byte_offset.to(), chunk_size)?;
@@ -359,10 +358,10 @@ mod tests {
     use irys_types::range_specifier::{ByteRangeSpecifier, ChunkRangeSpecifier};
     use std::sync::Arc;
 
-    /// Creates a test PD context with a mock chunk provider.
+    /// Creates a test PD context with a mock chunk provider (storage mode).
     fn create_test_context() -> PdContext {
-        let mock_chunk_provider = Arc::new(MockChunkProvider::new());
-        PdContext::new(mock_chunk_provider)
+        let mock_provider = Arc::new(MockChunkProvider::new());
+        PdContext::new(mock_provider)
     }
 
     /// Creates parsed access lists from chunk and byte range specifiers.

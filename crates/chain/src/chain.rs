@@ -25,7 +25,7 @@ use irys_actors::{
         PartitionMiningController, PartitionMiningService, PartitionMiningServiceInner,
     },
     pledge_provider::MempoolPledgeProvider,
-    reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
+    reth_service::{ForkChoiceUpdateMessage, PdChunkManager, RethServiceMessage},
     services::ServiceSenders,
     validation_service::ValidationService,
     BlockValidationTracker, DataSyncService, StorageModuleService,
@@ -358,6 +358,7 @@ async fn start_reth_node(
     sender: oneshot::Sender<RethNode>,
     latest_block: u64,
     chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
+    pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
 ) -> eyre::Result<RethNodeHandle> {
     let random_ports = config.node_config.reth.network.use_random_ports;
     let (node_handle, _reth_node_adapter) = irys_reth_node_bridge::node::run_node(
@@ -367,6 +368,7 @@ async fn start_reth_node(
         latest_block,
         random_ports,
         chunk_provider,
+        pd_chunk_sender,
     )
     .in_current_span()
     .await?;
@@ -859,9 +861,25 @@ impl IrysNode {
         let irys_provider = reth_provider::create_provider();
         let shutdown_token = CancellationToken::new();
 
+        // Create PD chunk manager channel
+        // The manager handles chunk provisioning for PD transactions
+        let (pd_chunk_tx, pd_chunk_rx) = tokio::sync::mpsc::unbounded_channel();
+
         // read the latest block info
         let (latest_block_height, latest_block) = read_latest_block_data(&block_index, &irys_db);
         let task_executor = reth_runtime.clone();
+
+        // Spawn PD chunk manager
+        // Use the chunk_provider from IrysNodeCtx as storage backend
+        let _chunk_provider = self.config.node_config.clone();
+        let pd_chunk_rx_for_manager = pd_chunk_rx;
+        tokio_runtime.handle().spawn(async move {
+            // TODO: Use real ChunkProvider (aka PD Chunk Cache) instead of mock
+            let mock_provider =
+                Arc::new(irys_types::chunk_provider::MockChunkProvider::new());
+            let mut manager = PdChunkManager::new(mock_provider);
+            manager.run(pd_chunk_rx_for_manager).await;
+        });
         // vdf gets started here...
         // init the services
         let actor_done_rx = Self::init_services_thread(
@@ -897,6 +915,7 @@ impl IrysNode {
             reth_runtime,
             tokio_runtime,
             service_set_rx,
+            pd_chunk_tx,
         )?;
 
         let mut ctx = irys_node_ctx_rx.await?;
@@ -1192,6 +1211,7 @@ impl IrysNode {
         reth_runtime: reth::tasks::Runtime,
         tokio_runtime: Runtime,
         service_set: oneshot::Receiver<ServiceSet>,
+        pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
     ) -> eyre::Result<oneshot::Receiver<ShutdownReason>> {
         let span = tracing::Span::current();
         let span2 = span.clone();
@@ -1214,6 +1234,7 @@ impl IrysNode {
                         reth_handle_sender,
                         latest_block_height,
                         Arc::new(mock_provider),
+                        pd_chunk_sender,
                     )
                     .in_current_span()
                     .await
@@ -1367,7 +1388,7 @@ impl IrysNode {
         let supply_state = Arc::new(SupplyState::new(&config.node_config)?);
         let supply_state_guard = SupplyStateReadGuard::new(supply_state.clone());
 
-        // start reth service
+        // start reth service with external provisioner
         let reth_service_task = init_reth_service(
             &irys_db,
             reth_node_adapter.clone(),

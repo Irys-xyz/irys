@@ -97,6 +97,10 @@ pub struct IrysEthereumNode {
     pub max_pd_chunks_per_block: u64,
     pub chunk_provider: Arc<dyn irys_types::chunk_provider::RethChunkProvider>,
     pub hardfork_config: Arc<irys_types::hardfork_config::IrysHardforkConfig>,
+    /// PD chunk sender for unified chunk management.
+    /// - PD transactions in the payload builder will be skipped if their chunks are not ready
+    /// - The mempool will monitor for PD transactions and send messages to the PdChunkManager
+    pub pd_chunk_sender: irys_types::chunk_provider::PdChunkSender,
 }
 
 impl std::fmt::Debug for IrysEthereumNode {
@@ -104,6 +108,7 @@ impl std::fmt::Debug for IrysEthereumNode {
         f.debug_struct("IrysEthereumNode")
             .field("chunk_provider", &"<Arc<dyn RethChunkProvider>>")
             .field("hardfork_config", &self.hardfork_config)
+            .field("pd_chunk_sender", &"<sender>")
             .finish()
     }
 }
@@ -136,9 +141,13 @@ impl IrysEthereumNode {
                 PayloadBuilderAttributes = IrysPayloadBuilderAttributes,
             >,
     {
+        // Create pool builder with PD chunk sender
+        let pool_builder =
+            IrysPoolBuilder::new(self.hardfork_config.clone(), self.pd_chunk_sender.clone());
+
         ComponentsBuilder::default()
             .node_types::<Node>()
-            .pool(IrysPoolBuilder::new(self.hardfork_config.clone()))
+            .pool(pool_builder)
             .executor(IrysExecutorBuilder {
                 chunk_provider: self.chunk_provider.clone(),
                 hardfork_config: self.hardfork_config.clone(),
@@ -146,6 +155,7 @@ impl IrysEthereumNode {
             .payload(IyrsPayloadServiceBuilder::new(IrysPayloadBuilderBuilder {
                 max_pd_chunks_per_block: self.max_pd_chunks_per_block,
                 hardforks: self.hardfork_config.clone(),
+                pd_chunk_sender: self.pd_chunk_sender.clone(),
             }))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -3332,16 +3342,22 @@ pub mod test_utils {
                 node_exit_future: _,
             } = NodeBuilder::new(node_config.clone())
                 .testing_node(tasks.clone())
-                .node(IrysEthereumNode {
-                    // Use default value for tests
-                    max_pd_chunks_per_block: 7_500,
-                    chunk_provider: chunk_provider.clone(),
-                    // Use testing hardfork config with Sprite enabled from genesis
-                    hardfork_config: std::sync::Arc::new(
-                        irys_types::config::ConsensusConfig::testing()
-                            .hardforks
-                            .clone(),
-                    ),
+                .node({
+                    // Create a dummy PD chunk sender for testing
+                    let (pd_chunk_sender, _pd_chunk_receiver) =
+                        tokio::sync::mpsc::unbounded_channel();
+                    IrysEthereumNode {
+                        // Use default value for tests
+                        max_pd_chunks_per_block: 7_500,
+                        chunk_provider: chunk_provider.clone(),
+                        // Use testing hardfork config with Sprite enabled from genesis
+                        hardfork_config: std::sync::Arc::new(
+                            irys_types::config::ConsensusConfig::testing()
+                                .hardforks
+                                .clone(),
+                        ),
+                        pd_chunk_sender,
+                    }
                 })
                 .launch()
                 .await?;

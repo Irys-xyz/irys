@@ -31,6 +31,7 @@
 use crate::IrysPayloadBuilderAttributes;
 use crate::pd_tx::{detect_and_decode_pd_header, sum_pd_chunks_in_access_list};
 use alloy_consensus::Transaction as _;
+use irys_types::chunk_provider::{PdChunkMessage, PdChunkSender};
 use irys_types::hardfork_config::IrysHardforkConfig;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -328,7 +329,7 @@ where
 }
 
 /// Ethereum payload builder
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     /// Client providing access to node state.
     client: Client,
@@ -342,6 +343,28 @@ pub struct IrysPayloadBuilder<Pool, Client, EvmConfig = EthEvmConfig> {
     max_pd_chunks_per_block: u64,
     /// Hardfork configuration for determining Sprite activation.
     hardforks: Arc<IrysHardforkConfig>,
+    /// PD chunk sender for querying readiness.
+    /// PD transactions will be skipped if their chunks are not provisioned.
+    pd_chunk_sender: PdChunkSender,
+}
+
+impl<Pool, Client, EvmConfig> std::fmt::Debug for IrysPayloadBuilder<Pool, Client, EvmConfig>
+where
+    Pool: std::fmt::Debug,
+    Client: std::fmt::Debug,
+    EvmConfig: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IrysPayloadBuilder")
+            .field("client", &self.client)
+            .field("pool", &self.pool)
+            .field("evm_config", &self.evm_config)
+            .field("builder_config", &self.builder_config)
+            .field("max_pd_chunks_per_block", &self.max_pd_chunks_per_block)
+            .field("hardforks", &self.hardforks)
+            .field("pd_chunk_sender", &"<sender>")
+            .finish()
+    }
 }
 
 /// Combined iterator that yields shadow transactions first, then pool transactions
@@ -351,6 +374,9 @@ pub struct CombinedTransactionIterator {
     pool_iter: BestTransactionsIter,
     /// Whether the Sprite hardfork is active (enables PD chunk budgeting)
     is_sprite_active: bool,
+    /// PD chunk sender for querying readiness.
+    /// PD transactions will be skipped if their chunks are not ready.
+    pd_chunk_sender: PdChunkSender,
 }
 
 struct ShadowTxQueue {
@@ -476,18 +502,22 @@ impl CombinedTransactionIterator {
         }
     }
 
+    /// Create a new iterator with a PD chunk sender.
+    /// PD transactions will be skipped if their chunks are not provisioned yet.
     pub fn new(
         timestamp: Instant,
         shadow_txs: Vec<EthPooledTransaction>,
         pool_iter: BestTransactionsIter,
         max_pd_chunks_per_block: u64,
         is_sprite_active: bool,
+        pd_chunk_sender: PdChunkSender,
     ) -> Self {
         Self {
             shadow: ShadowTxQueue::from_shadow_transactions(timestamp, shadow_txs),
             pd_budget: PdChunkBudget::new(max_pd_chunks_per_block),
             pool_iter,
             is_sprite_active,
+            pd_chunk_sender,
         }
     }
 
@@ -524,11 +554,45 @@ impl Iterator for CombinedTransactionIterator {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(tx) = self.next_candidate() {
             let chunks = self.pd_chunks_for_transaction(tx.as_ref());
-            if chunks == 0 || self.pd_budget.try_consume(&tx, chunks) {
+
+            // For PD transactions, check if chunks are ready
+            if chunks > 0 {
+                // Check chunk readiness
+                let tx_hash = revm_primitives::B256::from_slice(tx.hash().as_slice());
+
+                // Query readiness via channel (blocking)
+                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                if self
+                    .pd_chunk_sender
+                    .send(PdChunkMessage::IsReady {
+                        tx_hash,
+                        response: resp_tx,
+                    })
+                    .is_ok()
+                {
+                    // Use blocking recv since we're in a sync iterator context
+                    if let Ok(ready) = resp_rx.blocking_recv() {
+                        if !ready {
+                            tracing::debug!(
+                                tx_hash = %tx_hash,
+                                "Skipping PD transaction: chunks not ready"
+                            );
+                            continue; // Skip this transaction, try next
+                        }
+                    }
+                }
+
+                // Check PD budget
+                if !self.pd_budget.try_consume(&tx, chunks) {
+                    self.pd_budget.defer(tx);
+                    continue;
+                }
+
                 return Some(tx);
             }
 
-            self.pd_budget.defer(tx);
+            // Non-PD transaction, always include
+            return Some(tx);
         }
 
         None
@@ -569,6 +633,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
         builder_config: EthereumBuilderConfig,
         max_pd_chunks_per_block: u64,
         hardforks: Arc<IrysHardforkConfig>,
+        pd_chunk_sender: PdChunkSender,
     ) -> Self {
         Self {
             client,
@@ -577,6 +642,7 @@ impl<Pool, Client, EvmConfig> IrysPayloadBuilder<Pool, Client, EvmConfig> {
             builder_config,
             max_pd_chunks_per_block,
             hardforks,
+            pd_chunk_sender,
         }
     }
 }
@@ -602,13 +668,14 @@ where
         // Get pool transactions iterator
         let pool_txs = self.pool.best_transactions_with_attributes(attributes);
 
-        // Create combined iterator with shadow txs from attributes
+        // Create combined iterator with shadow txs from attributes and PD chunk sender
         Box::new(CombinedTransactionIterator::new(
             timestamp,
             shadow_txs,
             pool_txs,
             self.max_pd_chunks_per_block,
             is_sprite_active,
+            self.pd_chunk_sender.clone(),
         ))
     }
 }
@@ -840,9 +907,18 @@ mod tests {
             make_valid(normal_tx, 13, timestamp),
         ]));
 
+        // Create a dummy PD chunk sender for testing (receiver is dropped, send will fail)
+        let (pd_chunk_sender, _) = tokio::sync::mpsc::unbounded_channel();
+
         // is_sprite_active = true to enable PD chunk budgeting for this test
-        let mut iterator =
-            CombinedTransactionIterator::new(timestamp, vec![shadow_tx], pool_iter, 7_500, true);
+        let mut iterator = CombinedTransactionIterator::new(
+            timestamp,
+            vec![shadow_tx],
+            pool_iter,
+            7_500,
+            true,
+            pd_chunk_sender,
+        );
 
         let collected: Vec<_> = (&mut iterator).take(3).collect();
 
