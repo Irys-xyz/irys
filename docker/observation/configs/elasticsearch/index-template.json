@@ -1,0 +1,19 @@
+{
+  "index_patterns": ["irys-logs*"],
+  "template": {
+    "settings": {
+      "index.lifecycle.name": "logs-retention",
+      "index.highlight.max_analyzed_offset": 10000000,
+      "number_of_shards": 1,
+      "number_of_replicas": __ES_REPLICAS__
+    },
+    "mappings": {
+      "properties": {
+        "log.level": {
+          "type": "keyword"
+        }
+      }
+    }
+  },
+  "priority": 200
+}
