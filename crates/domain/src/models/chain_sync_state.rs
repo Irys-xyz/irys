@@ -1,5 +1,5 @@
 use irys_types::BlockHash;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -8,6 +8,35 @@ use tracing::{debug, warn};
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 
 const MAX_LAST_BLOCK_VALIDATION_ERRORS: usize = 10;
+
+/// Error type for waiting for an empty queue slot with validation awareness
+#[derive(Debug, Clone)]
+pub enum WaitForQueueSlotError {
+    /// All retry attempts were exhausted with no active validations running
+    MaxAttemptsExceeded {
+        attempts: usize,
+        queue_depth: usize,
+    },
+}
+
+impl std::fmt::Display for WaitForQueueSlotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WaitForQueueSlotError::MaxAttemptsExceeded {
+                attempts,
+                queue_depth,
+            } => {
+                write!(
+                    f,
+                    "Failed to get queue slot after {} attempts with no active validations (queue depth: {})",
+                    attempts, queue_depth
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for WaitForQueueSlotError {}
 
 /// Diagnostic information about chain synchronization errors and events.
 /// This struct is public with private fields and provides public methods for recording
@@ -22,6 +51,8 @@ pub struct SyncDiagnosticInfo {
     total_data_pull_errors: usize,
     last_data_pull_errors: VecDeque<(String, SystemTime)>,
     latest_successfully_processed_block_info: (BlockHash, Option<SystemTime>),
+    /// Currently running block validations: block_hash -> start_time
+    active_validations: HashMap<BlockHash, SystemTime>,
 }
 
 impl SyncDiagnosticInfo {
@@ -35,7 +66,34 @@ impl SyncDiagnosticInfo {
             total_data_pull_errors: 0,
             last_data_pull_errors: VecDeque::new(),
             latest_successfully_processed_block_info: (BlockHash::default(), None),
+            active_validations: HashMap::new(),
         }
+    }
+
+    /// Record that a block validation has started
+    pub fn record_validation_started(&mut self, block_hash: BlockHash) {
+        let now = SystemTime::now();
+        self.active_validations.insert(block_hash, now);
+    }
+
+    /// Record that a block validation has finished (success or failure)
+    pub fn record_validation_finished(&mut self, block_hash: &BlockHash) {
+        self.active_validations.remove(block_hash);
+    }
+
+    /// Get the number of currently active validations
+    pub fn active_validations_count(&self) -> usize {
+        self.active_validations.len()
+    }
+
+    /// Check if there are any active validations
+    pub fn has_active_validations(&self) -> bool {
+        !self.active_validations.is_empty()
+    }
+
+    /// Get all active validations with their start times
+    pub fn get_active_validations(&self) -> &HashMap<BlockHash, SystemTime> {
+        &self.active_validations
     }
 
     pub fn record_block_validation_error(&mut self, error: String) {
@@ -175,6 +233,26 @@ impl SyncDiagnosticInfo {
             ));
         } else {
             output.push_str("Last successful block: None\n");
+        }
+        output.push('\n');
+
+        // Active validations
+        output.push_str(&format!(
+            "Active validations: {}\n",
+            self.active_validations.len()
+        ));
+        if !self.active_validations.is_empty() {
+            output.push_str("Currently validating blocks:\n");
+            for (block_hash, start_time) in &self.active_validations {
+                let elapsed = start_time
+                    .elapsed()
+                    .map(|d| format!("{:.1}s ago", d.as_secs_f64()))
+                    .unwrap_or_else(|_| "unknown".to_string());
+                output.push_str(&format!(
+                    "  - {} (started {})\n",
+                    block_hash, elapsed
+                ));
+            }
         }
 
         output.push_str("===");
@@ -371,6 +449,87 @@ impl ChainSyncState {
         .await
     }
 
+    /// Waits until the length of the validation queue is less than the maximum
+    /// allowed size, with retry logic that considers active validations.
+    ///
+    /// This method will:
+    /// 1. Wait for an empty queue slot with the given timeout per attempt
+    /// 2. If timeout occurs but there are active validations, continue waiting
+    /// 3. Only fail after `max_attempts` consecutive timeouts AND no active validations
+    ///
+    /// Returns Ok(()) when a slot becomes available, or Err if max attempts reached
+    /// with no active validations.
+    pub async fn wait_for_an_empty_queue_slot_with_validation_awareness(
+        &self,
+        timeout_per_attempt: Duration,
+        max_attempts: usize,
+    ) -> Result<(), WaitForQueueSlotError> {
+        for attempt in 1..=max_attempts {
+            debug!(
+                "Wait attempt {} of {} for empty queue slot",
+                attempt, max_attempts
+            );
+
+            match self
+                .wait_for_an_empty_queue_slot_with_timeout(timeout_per_attempt)
+                .await
+            {
+                Ok(()) => {
+                    debug!("Queue slot became available on attempt {}", attempt);
+                    return Ok(());
+                }
+                Err(_elapsed) => {
+                    let active_count = self.active_validations_count();
+                    let queue_depth = self
+                        .sync_target_height()
+                        .saturating_sub(self.highest_processed_block());
+
+                    warn!(
+                        "Timeout on attempt {} waiting for queue slot. Queue depth: {}, active validations: {}, trusted_sync: {}",
+                        attempt,
+                        queue_depth,
+                        active_count,
+                        self.is_trusted_sync()
+                    );
+
+                    // If there are active validations, we should keep waiting
+                    // as they may complete and free up the queue
+                    if active_count > 0 {
+                        debug!(
+                            "Active validations in progress ({}), continuing to wait...",
+                            active_count
+                        );
+                        // Wait a bit before next attempt
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+
+                    // No active validations - this is the failure condition
+                    // but only fail on the last attempt
+                    if attempt == max_attempts {
+                        warn!(
+                            "All {} attempts failed with no active validations. Diagnostic info:\n{}",
+                            max_attempts,
+                            self.get_diagnostic_summary()
+                        );
+                        return Err(WaitForQueueSlotError::MaxAttemptsExceeded {
+                            attempts: max_attempts,
+                            queue_depth,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Should not reach here, but handle it
+        Err(WaitForQueueSlotError::MaxAttemptsExceeded {
+            attempts: max_attempts,
+            queue_depth: self
+                .sync_target_height()
+                .saturating_sub(self.highest_processed_block()),
+        })
+    }
+
     /// Waits for the highest pre-validated block to reach target sync height
     /// This has a progress/time based early out - if we don't make at least a block's worth of progress in `progress_timeout`, we return early
     pub async fn wait_for_processed_block_to_reach_target(&self) {
@@ -474,5 +633,33 @@ impl ChainSyncState {
     pub fn get_diagnostic_summary(&self) -> String {
         let diagnostic = self.diagnostic_info.read().unwrap();
         diagnostic.format_summary()
+    }
+
+    // =========================================================================
+    // Active Validation Tracking Methods
+    // =========================================================================
+
+    /// Record that a block validation has started
+    pub fn record_validation_started(&self, block_hash: BlockHash) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_validation_started(block_hash);
+    }
+
+    /// Record that a block validation has finished (success or failure)
+    pub fn record_validation_finished(&self, block_hash: &BlockHash) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_validation_finished(block_hash);
+    }
+
+    /// Get the number of currently active validations
+    pub fn active_validations_count(&self) -> usize {
+        let diagnostic = self.diagnostic_info.read().unwrap();
+        diagnostic.active_validations_count()
+    }
+
+    /// Check if there are any active validations in progress
+    pub fn has_active_validations(&self) -> bool {
+        let diagnostic = self.diagnostic_info.read().unwrap();
+        diagnostic.has_active_validations()
     }
 }

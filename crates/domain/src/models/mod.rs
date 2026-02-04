@@ -14,6 +14,7 @@ pub mod supply_state;
 
 pub use block_index::*;
 pub use block_tree::*;
+pub use chain_sync_state::{ChainSyncState, SyncDiagnosticInfo, WaitForQueueSlotError};
 pub use chunk_provider::*;
 pub use circular_buffer::*;
 pub use execution_payload_cache::*;
