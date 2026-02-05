@@ -700,6 +700,7 @@ mod peer_sync_recovery {
     use std::time::Duration;
 
     use super::*;
+    use irys_database::db::IrysDatabaseExt;
 
     const NUM_BLOCKS_IN_EPOCH: usize = 3;
     const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 3; // Increased to ensure 2+ epochs migrate
@@ -1012,7 +1013,9 @@ mod peer_sync_recovery {
             post_aurora_migrated_height
         );
 
-        // Verify peer's block index matches genesis
+        // Verify peer's block index matches genesis AND transactions are in DB (not mempool)
+        let mut peer_data_tx_count = 0;
+        let mut peer_commitment_tx_count = 0;
         for height in 1..=post_aurora_migrated_height {
             let genesis_block = genesis_node.get_block_by_height_from_index(height, true)?;
             let peer_block = peer_node.get_block_by_height_from_index(height, true)?;
@@ -1026,11 +1029,61 @@ mod peer_sync_recovery {
                 "Peer migrated block at height {} should have PoA chunk",
                 height
             );
+            // Verify all data txs in this block are in the peer's database (direct DB read, not mempool)
+            for tx_ids in peer_block.get_data_ledger_tx_ids().values() {
+                for tx_id in tx_ids {
+                    let tx_header = peer_node
+                        .node_ctx
+                        .db
+                        .view_eyre(|tx| irys_database::tx_header_by_txid(tx, tx_id))?
+                        .ok_or_else(|| eyre::eyre!("Data tx {} from block {} not found in peer's DB", tx_id, height))?;
+                    assert_eq!(
+                        &tx_header.id, tx_id,
+                        "Data tx {} from block {} should be in peer's DB",
+                        tx_id, height
+                    );
+                    peer_data_tx_count += 1;
+                }
+            }
+            // Verify all commitment txs in this block are in the peer's database
+            for tx_id in peer_block.get_commitment_ledger_tx_ids() {
+                let commitment_tx = peer_node
+                    .node_ctx
+                    .db
+                    .view_eyre(|tx| irys_database::commitment_tx_by_txid(tx, &tx_id))?
+                    .ok_or_else(|| eyre::eyre!("Commitment tx {} from block {} not found in peer's DB", tx_id, height))?;
+                assert_eq!(
+                    commitment_tx.id(), tx_id,
+                    "Commitment tx {} from block {} should be in peer's DB",
+                    tx_id, height
+                );
+                peer_commitment_tx_count += 1;
+            }
         }
         info!(
-            "Peer block index validated for {} migrated blocks",
-            post_aurora_migrated_height
+            "Peer block index validated for {} migrated blocks with {} data txs and {} commitment txs",
+            post_aurora_migrated_height, peer_data_tx_count, peer_commitment_tx_count
         );
+
+        // === Step 8: Additional Peer Restart After Sync ===
+        let stopped_peer = peer_node.stop().await;
+        info!("Peer stopped for additional restart test");
+
+        let peer_node = IrysNodeTest {
+            node_ctx: (),
+            cfg: stopped_peer.cfg.clone(),
+            temp_dir: stopped_peer.temp_dir,
+            name: stopped_peer.name,
+        }
+        .start()
+        .await;
+        info!("Peer restarted after sync");
+
+        // Wait for peer to reach the same height after restart
+        peer_node
+            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .await?;
+        info!("Peer synced to height {} after restart", final_height);
 
         // Cleanup
         peer_node.stop().await;
