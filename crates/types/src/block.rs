@@ -1275,7 +1275,7 @@ impl SealedBlock {
         if commitment_txs.len() != commitment_ids.len() {
             let missing_ids: Vec<H256> = commitment_ids
                 .iter()
-                .filter(|id| !commitment_txs.iter().any(|tx| &tx.id() == *id))
+                .filter(|id| !commitment_txs.iter().any(|tx| tx.id() == **id))
                 .copied()
                 .collect();
             eyre::bail!(

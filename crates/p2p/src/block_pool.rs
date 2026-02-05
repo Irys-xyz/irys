@@ -1212,7 +1212,9 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{CommitmentTransactionV2, DataTransactionHeader, IrysBlockHeaderV1};
+    use irys_types::{
+        CommitmentTransactionV2, DataTransactionHeader, IrysBlockHeaderV1, SystemLedger,
+    };
     use std::sync::Arc;
 
     fn make_sealed_block(
