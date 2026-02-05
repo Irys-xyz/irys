@@ -1221,7 +1221,7 @@ mod tests {
         block_byte: u8,
         parent_byte: u8,
         height: u64,
-        body: BlockBody,
+        mut body: BlockBody,
     ) -> Arc<SealedBlock> {
         let header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
@@ -1229,6 +1229,8 @@ mod tests {
             previous_block_hash: BlockHash::repeat_byte(parent_byte),
             ..IrysBlockHeaderV1::default()
         });
+        // Ensure body.block_hash matches header.block_hash for consistency
+        body.block_hash = header.block_hash();
         Arc::new(SealedBlock::new(header, body).expect("Failed to create SealedBlock"))
     }
 
