@@ -701,9 +701,10 @@ mod peer_sync_recovery {
 
     use super::*;
 
-    const NUM_BLOCKS_IN_EPOCH: usize = 2;
+    const NUM_BLOCKS_IN_EPOCH: usize = 3;
     const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 3; // Increased to ensure 2+ epochs migrate
     const NUM_EPOCHS_AFTER_ACTIVATION: usize = 3; // 3 epochs after Aurora
+    const BLOCK_MIGRATION_DEPTH: usize = 2;
     const SECONDS_TO_WAIT: usize = 30;
 
     /// Tests that a peer node can sync through an Aurora hardfork activation boundary.
@@ -715,7 +716,7 @@ mod peer_sync_recovery {
         initialize_tracing();
 
         // === Step 1: Setup Configuration (Aurora disabled initially) ===
-        let block_migration_depth = NUM_BLOCKS_IN_EPOCH - 1;
+        let block_migration_depth = BLOCK_MIGRATION_DEPTH;
         let mut genesis_config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         genesis_config.consensus.get_mut().chunk_size = 32;
         genesis_config
@@ -728,9 +729,9 @@ mod peer_sync_recovery {
             next_name_tbd: None,
         };
 
-        // Fund signers: 6 for V1 (3 epochs * 2 blocks), 6 for V2 (3 epochs * 2 blocks), 1 for peer
-        let signers: [IrysSigner; 13] = create_funded_signers(&mut genesis_config);
-        let peer_signer = &signers[12];
+        // Fund signers: 9 for V1 (3 epochs * 3 blocks), 9 for V2 (3 epochs * 3 blocks), 1 for peer
+        let signers: [IrysSigner; 19] = create_funded_signers(&mut genesis_config);
+        let peer_signer = &signers[18];
 
         // === Step 2: Start Genesis and Peer ===
         let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())

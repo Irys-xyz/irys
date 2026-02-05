@@ -266,29 +266,9 @@ impl BlockTree {
 
         let arc_commitment_snapshot = Arc::new(commitment_snapshot.clone());
 
-        // Get the latest block from index for EMA snapshot
-        let latest_block_hash = {
-            let block_index = block_index_guard.read();
-            block_index
-                .get_item(end - 1)
-                .ok_or_else(|| {
-                    eyre::eyre!("missing latest block index entry at height {}", end - 1)
-                })?
-                .block_hash
-        };
-        // note: we need the poa chunk so that it's available in the tree for gossip purposes
-        let latest_block = block_header_by_hash(&tx, &latest_block_hash, true)
-            .map_err(|e| eyre::eyre!("db error loading latest block {}: {}", latest_block_hash, e))?
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "latest block header not found for hash {}",
-                    latest_block_hash
-                )
-            })?;
-
         // Create EMA cache for start block
         let ema_snapshot =
-            build_current_ema_snapshot_from_index(&latest_block, db.clone(), consensus_config);
+            build_current_ema_snapshot_from_index(&start_block, db.clone(), consensus_config);
 
         // Load transactions for the start block from DB
         let start_block_commitment_txs = load_commitment_transactions(&start_block, &db)?;
