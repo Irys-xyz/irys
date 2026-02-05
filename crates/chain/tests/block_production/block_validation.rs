@@ -253,7 +253,7 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     let ctx = PrevalidationTestContext::new().await?;
 
     // Tamper the VDF seeds (make them parent-inconsistent)
-    let mut tampered_header = ctx.block.header().clone();
+    let mut tampered_header = (**ctx.block.header()).clone();
     let mut seed_bytes = tampered_header.vdf_limiter_info.seed.0;
     seed_bytes[0] ^= 0xFF;
     tampered_header.vdf_limiter_info.seed.0 = seed_bytes;
@@ -288,7 +288,7 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     body.data_transactions = excessive_txs.clone();
 
     // Update header to match new transactions (so SealedBlock accepts it)
-    let mut header = ctx.block.header().clone();
+    let mut header = (**ctx.block.header()).clone();
     use irys_types::H256List;
     let tx_ids: H256List = H256List(excessive_txs.iter().map(|tx| tx.id).collect());
 
@@ -347,7 +347,7 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
     let mut body = ctx.block.body().clone();
     body.commitment_transactions = excessive_txs.clone();
 
-    let mut header = ctx.block.header().clone();
+    let mut header = (**ctx.block.header()).clone();
     use irys_types::H256List;
     let tx_ids: H256List = H256List(
         excessive_txs

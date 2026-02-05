@@ -1252,7 +1252,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             .unwrap();
         let (sealed_block, eth_payload) = maybe.ok_or_eyre("block not returned")?;
         Ok((
-            Arc::new(sealed_block.header().clone()),
+            sealed_block.header().clone(),
             eth_payload,
             sealed_block.transactions().clone(),
         ))

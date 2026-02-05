@@ -33,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::sync::Arc;
 use tracing::debug;
 
 pub type BlockHash = H256;
@@ -1126,7 +1127,7 @@ impl BlockBody {
 
 #[derive(Debug)]
 pub struct SealedBlock {
-    header: IrysBlockHeader,
+    header: Arc<IrysBlockHeader>,
     body: BlockBody,
     transactions: BlockTransactions,
 }
@@ -1147,13 +1148,13 @@ impl SealedBlock {
         )?;
 
         Ok(Self {
-            header,
+            header: Arc::new(header),
             body,
             transactions,
         })
     }
 
-    pub fn header(&self) -> &IrysBlockHeader {
+    pub fn header(&self) -> &Arc<IrysBlockHeader> {
         &self.header
     }
 

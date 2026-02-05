@@ -1075,7 +1075,7 @@ where
         block_hash: &BlockHash,
     ) -> Result<Option<Arc<IrysBlockHeader>>, BlockPoolError> {
         if let Some(cached) = self.blocks_cache.get_block_cloned(block_hash).await {
-            return Ok(Some(Arc::new(cached.block.header().clone())));
+            return Ok(Some(Arc::clone(cached.block.header())));
         }
 
         match self.mempool.get_block_header(*block_hash, true).await {

@@ -30,7 +30,7 @@ async fn produce_block(
         .await?
         .ok_or_else(|| eyre::eyre!("no block produced"))?;
 
-    Ok((Arc::new(block.header().clone()), eth_payload))
+    Ok((block.header().clone(), eth_payload))
 }
 
 // Mutates the sealed block's header in-place via unseal/modify/seal, returns the new sealed block.

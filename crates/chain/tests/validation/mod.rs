@@ -352,7 +352,7 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
         .unwrap();
 
     // Manually set the commitment IDs in wrong order in the block
-    let mut header = block.header().clone();
+    let mut header = (**block.header()).clone();
     header.system_ledgers = vec![SystemTransactionLedger {
         ledger_id: SystemLedger::Commitment as u32,
         tx_ids: H256List(vec![pledge.id(), stake.id()]), // Wrong order!
@@ -512,7 +512,7 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
         .unwrap();
 
     // Manually override commitment order in block
-    let mut header = block.header().clone();
+    let mut header = (**block.header()).clone();
     header.system_ledgers = vec![SystemTransactionLedger {
         ledger_id: SystemLedger::Commitment as u32,
         tx_ids: H256List(vec![unstake_low_fee.id(), unstake_high_fee.id()]), // WRONG order!
@@ -666,7 +666,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         .await?
         .unwrap();
     // Tamper with last_epoch_hash to make it invalid
-    let mut header = block.header().clone();
+    let mut header = (**block.header()).clone();
     header.last_epoch_hash = H256::random(); // Use random hash to ensure it's invalid
     genesis_config.signer().sign_block_header(&mut header)?;
     let block = Arc::new(SealedBlock::new(header, block.body().clone()).unwrap());
@@ -727,7 +727,7 @@ async fn block_with_invalid_last_epoch_hash_gets_rejected() -> eyre::Result<()> 
         .get_block_by_hash(&block_after_epoch.header().previous_block_hash)
         .expect("prev header");
 
-    let mut header = block_after_epoch.header().clone();
+    let mut header = (**block_after_epoch.header()).clone();
     header.last_epoch_hash = prev.last_epoch_hash;
     genesis_config.signer().sign_block_header(&mut header)?;
     let block_after_epoch =

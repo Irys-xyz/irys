@@ -1254,7 +1254,7 @@ pub trait BlockProdStrategy {
         if is_difficulty_updated {
             self.inner()
                 .mining_broadcaster
-                .send_difficulty(BroadcastDifficultyUpdate(Arc::new(block.header().clone())));
+                .send_difficulty(BroadcastDifficultyUpdate(Arc::clone(block.header())));
         }
 
         info!(

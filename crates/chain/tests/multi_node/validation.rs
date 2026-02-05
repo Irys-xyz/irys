@@ -105,11 +105,11 @@ async fn heavy_block_invalid_evm_block_reward_gets_rejected() -> eyre::Result<()
     insert_block_header_for_gossip_test(
         &peer_node,
         block.header().block_hash,
-        block.header().clone(),
+        (**block.header()).clone(),
     )?;
     peer_node.gossip_enable();
 
-    peer_node.gossip_block_to_peers(&Arc::new(block.header().clone()))?;
+    peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
@@ -172,7 +172,7 @@ async fn slow_heavy_block_invalid_reth_hash_gets_rejected() -> eyre::Result<()> 
         "eth payloads must have different hashes"
     );
 
-    let mut irys_block = block.header().clone();
+    let mut irys_block = (**block.header()).clone();
     irys_block.evm_block_hash = eth_payload_other.block().header().hash_slow();
     peer_signer.sign_block_header(&mut irys_block)?;
     // Re-signing actually changes the block hash, so we need to manually insert the header to the db
@@ -276,12 +276,12 @@ async fn heavy_block_shadow_txs_misalignment_block_rejected() -> eyre::Result<()
     insert_block_header_for_gossip_test(
         &peer_node,
         block.header().block_hash,
-        block.header().clone(),
+        (**block.header()).clone(),
     )?;
 
     peer_node.gossip_enable();
 
-    peer_node.gossip_block_to_peers(&Arc::new(block.header().clone()))?;
+    peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 
@@ -379,11 +379,11 @@ async fn heavy_block_shadow_txs_different_order_of_txs() -> eyre::Result<()> {
     insert_block_header_for_gossip_test(
         &peer_node,
         block.header().block_hash,
-        block.header().clone(),
+        (**block.header()).clone(),
     )?;
     peer_node.gossip_enable();
 
-    peer_node.gossip_block_to_peers(&Arc::new(block.header().clone()))?;
+    peer_node.gossip_block_to_peers(block.header())?;
     let eth_block = eth_payload.block();
     peer_node.gossip_eth_block_to_peers(eth_block)?;
 

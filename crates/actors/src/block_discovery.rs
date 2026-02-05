@@ -725,7 +725,7 @@ impl BlockDiscoveryServiceInner {
                 info!("Block is valid, sending to block tree");
 
                 let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel();
-                let header_for_broadcast = Arc::new(new_block_header.clone());
+                let header_for_broadcast = Arc::clone(new_block_header);
                 block_tree_sender
                     .send(BlockTreeServiceMessage::BlockPreValidated {
                         block,

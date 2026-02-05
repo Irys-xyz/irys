@@ -255,7 +255,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
         block: Arc<SealedBlock>,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
-        let header = Arc::new(block.header().clone());
+        let header = Arc::clone(block.header());
         self.block_status_provider
             .add_block_to_index_and_tree_for_testing(&header);
         self.blocks
