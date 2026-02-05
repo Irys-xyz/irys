@@ -19,7 +19,7 @@ use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;

@@ -512,7 +512,7 @@ pub(crate) async fn wait_for_nodes_to_pack(
                 if let (Some(ledger_id), Some(slot_index)) =
                     (assignment.ledger_id, assignment.slot_index)
                 {
-                    let ledger = if ledger_id == DataLedger::Publish.into() {
+                    let ledger = if ledger_id == u32::from(DataLedger::Publish) {
                         "Publish"
                     } else {
                         "Submit"
