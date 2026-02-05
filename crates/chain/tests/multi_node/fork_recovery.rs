@@ -2,7 +2,7 @@ use crate::utils::IrysNodeTest;
 use irys_chain::IrysNodeCtx;
 use irys_testing_utils::*;
 use irys_types::{
-    BlockBody, DataLedger, DataTransaction, NodeConfig, SealedBlock, UnixTimestamp, H256, U256,
+    DataLedger, DataTransaction, NodeConfig, UnixTimestamp, H256, U256,
 };
 use reth::rpc::types::BlockNumberOrTag;
 use std::sync::Arc;
