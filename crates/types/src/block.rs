@@ -794,7 +794,7 @@ impl IrysBlockHeaderV1 {
             data_ledgers: vec![
                 // Permanent Publish Ledger
                 DataTransactionLedger {
-                    ledger_id: 0, // Publish ledger_id
+                    ledger_id: DataLedger::Publish.into(),
                     tx_root: H256::zero(),
                     tx_ids,
                     total_chunks: 0,
@@ -804,7 +804,7 @@ impl IrysBlockHeaderV1 {
                 },
                 // Term Submit Ledger
                 DataTransactionLedger {
-                    ledger_id: 1, // Submit ledger_id
+                    ledger_id: DataLedger::Submit.into(),
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
                     total_chunks: 0,
@@ -1381,7 +1381,7 @@ mod tests {
     fn test_storage_transaction_ledger_rlp_round_trip() {
         // setup
         let data = DataTransactionLedger {
-            ledger_id: 1,
+            ledger_id: DataLedger::Submit.into(),
             tx_root: H256::random(),
             tx_ids: H256List(vec![]),
             total_chunks: 55,
@@ -1409,7 +1409,7 @@ mod tests {
     fn test_system_transaction_ledger_rlp_round_trip() {
         // setup
         let system = SystemTransactionLedger {
-            ledger_id: 0, // System Ledger
+            ledger_id: SystemLedger::Commitment.into(),
             tx_ids: H256List(vec![H256::random(), H256::random()]),
         };
 

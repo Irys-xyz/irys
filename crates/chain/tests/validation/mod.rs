@@ -24,12 +24,12 @@ use irys_actors::{
     BlockProdStrategy, BlockProducerInner, ProductionStrategy,
 };
 use irys_chain::IrysNodeCtx;
-use irys_types::SystemLedger;
 use irys_types::{
     BlockBody, CommitmentTransaction, DataTransactionHeader, DataTransactionHeaderV1, H256List,
     IrysBlockHeader, IrysTransactionCommon as _, NodeConfig, SealedBlock, SystemTransactionLedger,
     H256,
 };
+use irys_types::{DataLedger, SystemLedger};
 
 // Helper function to send a block directly to the block tree service for validation
 pub async fn send_block_to_block_tree(
@@ -870,7 +870,7 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
             header_size: 0,
             term_fee: U256::from(1000).into(),
             perm_fee: Some(U256::from(1000).into()), // Increased to cover 2 ingress proofs + base storage
-            ledger_id: 0,
+            ledger_id: DataLedger::Publish.into(),
             bundle_format: Some(0),
             chain_id: 1,
             signature: Default::default(),

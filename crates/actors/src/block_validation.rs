@@ -3234,7 +3234,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Some(Base64(poa_chunk.clone())),
-            ledger_id: Some(1),
+            ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
@@ -3493,7 +3493,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(hacked_data_path.clone())),
             chunk: Some(Base64(hacked_data.clone())), // Use RAW data, PoA validation will entropy-pack it
-            ledger_id: Some(1),
+            ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),

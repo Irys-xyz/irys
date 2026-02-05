@@ -19,7 +19,7 @@ use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     BlockBody, BlockHash, Config, DataLedger, DatabaseProvider, EvmBlockHash, IrysBlockHeader,
-    IrysTransactionResponse, PeerNetworkError, SealedBlock, H256,
+    IrysTransactionResponse, PeerNetworkError, SealedBlock, SystemLedger, H256,
 };
 use lru::LruCache;
 use reth::revm::primitives::B256;
@@ -1449,7 +1449,7 @@ mod tests {
                 },
             ],
             system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: 0, // SystemLedger::Commitment
+                ledger_id: SystemLedger::Commitment.into(),
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1]),
             }],
             ..Default::default()
@@ -1689,7 +1689,7 @@ mod tests {
             height: 53,
             data_ledgers: vec![],
             system_ledgers: vec![SystemTransactionLedger {
-                ledger_id: 0, // SystemLedger::Commitment
+                ledger_id: SystemLedger::Commitment.into(),
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1, commitment_tx_id2]),
             }],
             ..Default::default()

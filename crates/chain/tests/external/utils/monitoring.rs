@@ -512,7 +512,11 @@ pub(crate) async fn wait_for_nodes_to_pack(
                 if let (Some(ledger_id), Some(slot_index)) =
                     (assignment.ledger_id, assignment.slot_index)
                 {
-                    let ledger = if ledger_id == 0 { "Publish" } else { "Submit" };
+                    let ledger = if ledger_id == DataLedger::Publish.into() {
+                        "Publish"
+                    } else {
+                        "Submit"
+                    };
 
                     match get_chunk_counts(client, ledger, slot_index).await {
                         Ok(counts) if counts.packed_chunks > 0 => {
