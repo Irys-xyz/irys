@@ -41,7 +41,7 @@ impl TryFrom<u32> for SystemLedger {
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Commitment),
-            _ => Err(eyre!("Invalid ledger number")),
+            _ => Err(eyre!("Invalid ledger number: {}", value)),
         }
     }
 }
