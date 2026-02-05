@@ -3410,3 +3410,18 @@ pub async fn gossip_data_tx_to_node(
     resp_rx.await??;
     Ok(())
 }
+
+/// Helper function to construct a SealedBlock from a header and transactions.
+/// This centralizes the BlockBody construction and SealedBlock::new validation
+/// for consistent usage across tests.
+pub fn build_sealed_block(
+    header: IrysBlockHeader,
+    txs: &BlockTransactions,
+) -> eyre::Result<Arc<SealedBlock>> {
+    let block_body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: txs.all_data_txs().cloned().collect(),
+        commitment_transactions: txs.commitment_txs.clone(),
+    };
+    Ok(Arc::new(SealedBlock::new(header, block_body)?))
+}
