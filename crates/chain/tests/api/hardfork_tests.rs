@@ -702,7 +702,8 @@ mod peer_sync_recovery {
     use super::*;
 
     const NUM_BLOCKS_IN_EPOCH: usize = 2;
-    const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 2;
+    const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 3; // Increased to ensure 2+ epochs migrate
+    const NUM_EPOCHS_AFTER_ACTIVATION: usize = 3; // 3 epochs after Aurora
     const SECONDS_TO_WAIT: usize = 30;
 
     /// Tests that a peer node can sync through an Aurora hardfork activation boundary.
@@ -727,9 +728,9 @@ mod peer_sync_recovery {
             next_name_tbd: None,
         };
 
-        // Fund signers: 4 for V1 (2 epochs * 2 blocks), 2 for V2 (1 epoch), 1 for peer
-        let signers: [IrysSigner; 7] = create_funded_signers(&mut genesis_config);
-        let peer_signer = &signers[6];
+        // Fund signers: 6 for V1 (3 epochs * 2 blocks), 6 for V2 (3 epochs * 2 blocks), 1 for peer
+        let signers: [IrysSigner; 13] = create_funded_signers(&mut genesis_config);
+        let peer_signer = &signers[12];
 
         // === Step 2: Start Genesis and Peer ===
         let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
@@ -787,16 +788,55 @@ mod peer_sync_recovery {
             }
         }
 
-        // Wait for peer to sync pre-activation blocks
         let pre_activation_height = genesis_node.get_canonical_chain_height().await;
-        // peer_node
-        //     .wait_until_height(pre_activation_height, SECONDS_TO_WAIT)
-        //     .await?;
-        // info!(
-        //     "Mined {} pre-activation blocks (height: {}), peer synced",
-        //     NUM_EPOCHS_BEFORE_ACTIVATION * NUM_BLOCKS_IN_EPOCH,
-        //     pre_activation_height
-        // );
+        info!(
+            "Mined {} pre-activation blocks (height: {}), block_migration_depth={}",
+            NUM_EPOCHS_BEFORE_ACTIVATION * NUM_BLOCKS_IN_EPOCH,
+            pre_activation_height,
+            block_migration_depth
+        );
+
+        // === Step 3.5: Wait for Pre-Aurora Block Migration ===
+        // Calculate expected migrated height (current - migration_depth)
+        let pre_aurora_migrated_height = pre_activation_height - block_migration_depth as u64;
+        info!(
+            "Waiting for block index to reach height {} (chain={} - depth={})",
+            pre_aurora_migrated_height, pre_activation_height, block_migration_depth
+        );
+        genesis_node
+            .wait_until_block_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
+            .await?;
+        info!(
+            "Pre-Aurora blocks migrated to height {}",
+            pre_aurora_migrated_height
+        );
+
+        // Validate pre-aurora blocks are in the index with PoA chunks and their txs are in DB
+        let mut pre_aurora_tx_count = 0;
+        for height in 1..=pre_aurora_migrated_height {
+            let block = genesis_node.get_block_by_height_from_index(height, true)?;
+            assert!(
+                block.poa.chunk.is_some(),
+                "Pre-aurora migrated block at height {} should have PoA chunk",
+                height
+            );
+            // Verify all data txs in this block are in the database
+            for tx_ids in block.get_data_ledger_tx_ids().values() {
+                for tx_id in tx_ids {
+                    let tx_header = genesis_node.get_tx_header(tx_id)?;
+                    assert_eq!(
+                        &tx_header.id, tx_id,
+                        "Data tx {} from block {} should be in DB",
+                        tx_id, height
+                    );
+                    pre_aurora_tx_count += 1;
+                }
+            }
+        }
+        info!(
+            "Validated {} pre-Aurora blocks with {} data txs in index",
+            pre_aurora_migrated_height, pre_aurora_tx_count
+        );
 
         // === Step 4: Stop Both Nodes, Activate Aurora, Restart ===
         let stopped_peer = peer_node;
@@ -830,41 +870,107 @@ mod peer_sync_recovery {
         }
         .start()
         .await;
-        genesis_node.wait_for_packing(SECONDS_TO_WAIT).await;
 
-        // Restart peer with Aurora enabled
-        // peer_node.wait_for_packing(SECONDS_TO_WAIT).await;
+        info!("Genesis node restarted with Aurora enabled");
 
-        info!("Both nodes restarted with Aurora enabled");
+        // === Step 5: Mine V2 Commitments + Data Txs after Aurora ===
+        // Continue signer index from pre-Aurora
+        let mut v2_signer_idx = NUM_EPOCHS_BEFORE_ACTIVATION * NUM_BLOCKS_IN_EPOCH;
+        for epoch in 0..NUM_EPOCHS_AFTER_ACTIVATION {
+            for block_in_epoch in 0..NUM_BLOCKS_IN_EPOCH {
+                let anchor = genesis_node.get_anchor().await?;
+                let signer = &signers[v2_signer_idx];
 
-        // === Step 5: Mine 1 Epoch with V2 Commitments + Data Txs ===
-        for block_in_epoch in 0..NUM_BLOCKS_IN_EPOCH {
-            let anchor = genesis_node.get_anchor().await?;
-            let signer = &signers[4 + block_in_epoch]; // V2 signers pool
+                // Post V2 commitment (V1 would be rejected now)
+                let v2_tx = create_stake_tx(&genesis_node, signer, TxVersion::V2).await;
+                genesis_node.post_commitment_tx(&v2_tx).await?;
 
-            // Post V2 commitment (V1 would be rejected now)
-            let v2_tx = create_stake_tx(&genesis_node, signer, TxVersion::V2).await;
-            genesis_node.post_commitment_tx(&v2_tx).await?;
+                // Verify V1 is rejected after activation (only check once per epoch)
+                if block_in_epoch == 0 {
+                    let v1_tx = create_stake_tx(&genesis_node, signer, TxVersion::V1).await;
+                    assert!(
+                        genesis_node.post_commitment_tx(&v1_tx).await.is_err(),
+                        "V1 should be rejected after Aurora activation"
+                    );
+                }
 
-            // Verify V1 is rejected after activation
-            let v1_tx = create_stake_tx(&genesis_node, signer, TxVersion::V1).await;
-            assert!(
-                genesis_node.post_commitment_tx(&v1_tx).await.is_err(),
-                "V1 should be rejected after Aurora activation"
-            );
+                // Post data tx
+                let data = format!("post-aurora-epoch{}-block{}", epoch, block_in_epoch);
+                genesis_node
+                    .post_data_tx(anchor, data.into_bytes(), signer)
+                    .await;
 
-            // Post data tx
-            let data = format!("post-aurora-block{}", block_in_epoch);
-            genesis_node
-                .post_data_tx(anchor, data.into_bytes(), signer)
-                .await;
-
-            genesis_node.mine_block().await?;
+                genesis_node.mine_block().await?;
+                v2_signer_idx += 1;
+            }
         }
+
+        // Mine one additional block to ensure post-Aurora blocks are pushed past migration depth
+        genesis_node.mine_block().await?;
+
         let final_height = genesis_node.get_canonical_chain_height().await;
         info!(
-            "Mined {} post-activation blocks (final height: {})",
-            NUM_BLOCKS_IN_EPOCH, final_height
+            "Mined {} post-activation blocks + 1 extra (final height: {}), pre_activation_height was {}",
+            NUM_EPOCHS_AFTER_ACTIVATION * NUM_BLOCKS_IN_EPOCH,
+            final_height,
+            pre_activation_height
+        );
+
+        // === Step 5.5: Wait for Post-Aurora Block Migration ===
+        let post_aurora_migrated_height = final_height - block_migration_depth as u64;
+        info!(
+            "Waiting for post-Aurora block index to reach height {} (final={} - depth={})",
+            post_aurora_migrated_height, final_height, block_migration_depth
+        );
+        genesis_node
+            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
+            .await?;
+        info!(
+            "Post-Aurora blocks migrated to height {}",
+            post_aurora_migrated_height
+        );
+
+        // Validate all blocks (including post-aurora) are in the index with PoA chunks and their txs are in DB
+        let mut total_tx_count = 0;
+        for height in 1..=post_aurora_migrated_height {
+            let block = genesis_node.get_block_by_height_from_index(height, true)?;
+            assert!(
+                block.poa.chunk.is_some(),
+                "Migrated block at height {} should have PoA chunk",
+                height
+            );
+            // Verify all data txs in this block are in the database
+            let mut block_tx_count = 0;
+            for tx_ids in block.get_data_ledger_tx_ids().values() {
+                for tx_id in tx_ids {
+                    let tx_header = genesis_node.get_tx_header(tx_id)?;
+                    assert_eq!(
+                        &tx_header.id, tx_id,
+                        "Data tx {} from block {} should be in DB",
+                        tx_id, height
+                    );
+                    block_tx_count += 1;
+                }
+            }
+            total_tx_count += block_tx_count;
+        }
+        info!(
+            "Validated {} blocks with {} total data txs in genesis block index",
+            post_aurora_migrated_height, total_tx_count
+        );
+
+        // Verify that we have at least one post-Aurora block migrated
+        // Pre-activation height was recorded before restart, post-Aurora blocks start after that
+        assert!(
+            post_aurora_migrated_height > pre_aurora_migrated_height,
+            "Should have at least one post-Aurora block migrated: pre={}, post={}",
+            pre_aurora_migrated_height,
+            post_aurora_migrated_height
+        );
+        info!(
+            "Post-Aurora blocks validated: {} blocks migrated after pre-Aurora height {}",
+            post_aurora_migrated_height - pre_aurora_migrated_height,
+            pre_aurora_migrated_height
         );
 
         // === Step 6: Wait for Peer to Sync and Verify ===
@@ -894,6 +1000,35 @@ mod peer_sync_recovery {
         info!(
             "Verified all {} blocks match between genesis and peer",
             final_height
+        );
+
+        // === Step 7: Wait for Peer Block Migration and Validate ===
+        peer_node
+            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
+            .await?;
+        info!(
+            "Peer block index migrated to height {}",
+            post_aurora_migrated_height
+        );
+
+        // Verify peer's block index matches genesis
+        for height in 1..=post_aurora_migrated_height {
+            let genesis_block = genesis_node.get_block_by_height_from_index(height, true)?;
+            let peer_block = peer_node.get_block_by_height_from_index(height, true)?;
+            assert_eq!(
+                genesis_block.block_hash, peer_block.block_hash,
+                "Block index hash mismatch at height {}",
+                height
+            );
+            assert!(
+                peer_block.poa.chunk.is_some(),
+                "Peer migrated block at height {} should have PoA chunk",
+                height
+            );
+        }
+        info!(
+            "Peer block index validated for {} migrated blocks",
+            post_aurora_migrated_height
         );
 
         // Cleanup
