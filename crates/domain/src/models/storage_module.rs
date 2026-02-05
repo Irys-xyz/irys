@@ -317,6 +317,16 @@ impl StorageModule {
                         params.last_updated_height = Some(0);
                         params.write_to_disk(&params_path);
                     }
+                } else {
+                    // No assignment from epoch snapshot, but disk may have stale values
+                    // Clear the disk file to match the current state
+                    if params.partition_hash.is_some() {
+                        params.partition_hash = None;
+                        params.ledger = None;
+                        params.slot = None;
+                        params.last_updated_height = Some(0);
+                        params.write_to_disk(&params_path);
+                    }
                 }
             }
 
