@@ -1134,7 +1134,10 @@ pub struct SealedBlock {
 impl SealedBlock {
     pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
         // Verifies all tx signatures and that the tx ids in the body match those in the header
-        body.tx_ids_match_the_header(&header)?;
+        eyre::ensure!(
+            body.tx_ids_match_the_header(&header)?,
+            "Transaction IDs do not match the header"
+        );
 
         // Order transactions according to header specification
         let transactions = Self::order_transactions(
