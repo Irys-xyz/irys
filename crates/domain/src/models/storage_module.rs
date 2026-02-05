@@ -308,6 +308,14 @@ impl StorageModule {
                             pa.partition_hash,
                             ph,
                         );
+                        // Partition hash matches, but ledger/slot may have changed
+                        // (e.g., capacity -> ledger slot or ledger slot -> capacity)
+                        if params.ledger != pa.ledger_id || params.slot != pa.slot_index {
+                            params.ledger = pa.ledger_id;
+                            params.slot = pa.slot_index;
+                            params.last_updated_height = Some(0);
+                            params.write_to_disk(&params_path);
+                        }
                     } else {
                         // we don't have the partition hash on disk
                         // so we need to write the new params to disk
