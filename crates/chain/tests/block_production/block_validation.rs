@@ -363,6 +363,9 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
         .expect("Commitment ledger should exist");
     ledger.tx_ids = tx_ids;
 
+    // Re-sign the header after modification
+    ctx.config.signer().sign_block_header(&mut header)?;
+
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
     let result = ctx.prevalidate(&bad_block).await;
