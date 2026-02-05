@@ -6,7 +6,8 @@ use crate::services::ServiceSenders;
 use crate::{CriticalChunkIngressError, MempoolReadGuard};
 use eyre::eyre;
 use irys_types::{
-    chunk::UnpackedChunk, CommitmentTransaction, DataTransactionHeader, IrysBlockHeader, H256,
+    chunk::UnpackedChunk, BlockTransactions, CommitmentTransaction, DataTransactionHeader,
+    IrysBlockHeader, H256,
 };
 use irys_types::{IngressProof, IrysAddress, TxKnownStatus};
 use std::collections::HashSet;
@@ -279,6 +280,7 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
         self.migration_sender
             .send(BlockMigratedEvent {
                 block: irys_block_header,
+                transactions: Arc::new(BlockTransactions::default()),
             })
             .map_err(|e| TxIngressError::Other(format!("Failed to send BlockMigratedEvent: {}", e)))
     }
