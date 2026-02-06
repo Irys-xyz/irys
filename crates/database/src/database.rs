@@ -72,6 +72,28 @@ pub fn open_or_create_cache_db<P: AsRef<Path>, T: TableSet + TableInfo>(
 
 /// Inserts a [`IrysBlockHeader`] into [`IrysBlockHeaders`]
 pub fn insert_block_header<T: DbTxMut>(tx: &T, block: &IrysBlockHeader) -> eyre::Result<()> {
+    // === DEBUG LOGGING FOR BLOCK 50793 START ===
+    if block.height == 50793 {
+        tracing::error!(
+            "DB_WRITE Block {}: data_ledgers={}, publish_tx_ids={}, proofs={}",
+            block.height,
+            block.data_ledgers.len(),
+            block.data_ledgers
+                .iter()
+                .find(|l| l.ledger_id == irys_types::DataLedger::Publish as u32)
+                .map(|l| l.tx_ids.0.len())
+                .unwrap_or(0),
+            block
+                .data_ledgers
+                .iter()
+                .find(|l| l.ledger_id == irys_types::DataLedger::Publish as u32)
+                .and_then(|l| l.proofs.as_ref())
+                .map(|p| p.0.len())
+                .unwrap_or(0)
+        );
+    }
+    // === DEBUG LOGGING FOR BLOCK 50793 END ===
+
     if let Some(chunk) = &block.poa.chunk {
         tx.put::<IrysPoAChunks>(block.block_hash, chunk.clone().into())?;
     } else {
@@ -102,6 +124,31 @@ pub fn block_header_by_hash<T: DbTx>(
             }
         }
     }
+
+    // === DEBUG LOGGING FOR BLOCK 50793 START ===
+    if let Some(ref header) = block {
+        if header.height == 50793 {
+            tracing::error!(
+                "DB_READ Block {}: data_ledgers={}, publish_tx_ids={}, proofs={}",
+                header.height,
+                header.data_ledgers.len(),
+                header
+                    .data_ledgers
+                    .iter()
+                    .find(|l| l.ledger_id == irys_types::DataLedger::Publish as u32)
+                    .map(|l| l.tx_ids.0.len())
+                    .unwrap_or(0),
+                header
+                    .data_ledgers
+                    .iter()
+                    .find(|l| l.ledger_id == irys_types::DataLedger::Publish as u32)
+                    .and_then(|l| l.proofs.as_ref())
+                    .map(|p| p.0.len())
+                    .unwrap_or(0)
+            );
+        }
+    }
+    // === DEBUG LOGGING FOR BLOCK 50793 END ===
 
     Ok(block)
 }

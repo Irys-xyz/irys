@@ -467,8 +467,10 @@ where
         // === DEBUG LOGGING FOR BLOCK 50793 START ===
         if block_header.height == 50793 {
             error!(
-                "BLOCK_RECEPTION Block {}: data_ledgers count={}, publish_ledger tx_ids={}, proofs={}",
+                "BLOCK_RECEPTION Block {}: FROM peer={:?} miner={:?}, data_ledgers count={}, publish_ledger tx_ids={}, proofs={}",
                 block_header.height,
+                source_peer_id,
+                source_miner_address,
                 block_header.data_ledgers.len(),
                 block_header.data_ledgers.iter()
                     .find(|l| l.ledger_id == DataLedger::Publish as u32)

@@ -994,14 +994,39 @@ impl GossipClient {
         peer_list: &PeerList,
     ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
-        self.pull_data_from_network(
-            data_request,
-            None,
-            use_trusted_peers_only,
-            peer_list,
-            Self::block,
-        )
-        .await
+        let result = self
+            .pull_data_from_network(
+                data_request,
+                None,
+                use_trusted_peers_only,
+                peer_list,
+                Self::block,
+            )
+            .await;
+
+        // === DEBUG LOGGING FOR BLOCK 50793 START ===
+        if let Ok((peer_id, ref header)) = result {
+            if header.height == 50793 {
+                tracing::error!(
+                    "P2P_NETWORK_PULL Block {}: from_peer={:?}, data_ledgers={}, publish_tx_ids={}, proofs={}",
+                    header.height,
+                    peer_id,
+                    header.data_ledgers.len(),
+                    header.data_ledgers.iter()
+                        .find(|l| l.ledger_id == irys_types::DataLedger::Publish as u32)
+                        .map(|l| l.tx_ids.0.len())
+                        .unwrap_or(0),
+                    header.data_ledgers.iter()
+                        .find(|l| l.ledger_id == irys_types::DataLedger::Publish as u32)
+                        .and_then(|l| l.proofs.as_ref())
+                        .map(|p| p.0.len())
+                        .unwrap_or(0)
+                );
+            }
+        }
+        // === DEBUG LOGGING FOR BLOCK 50793 END ===
+
+        result
     }
 
     pub async fn pull_block_body_from_network(
