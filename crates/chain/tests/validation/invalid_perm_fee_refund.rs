@@ -77,24 +77,25 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_config = genesis_node.testing_peer_with_signer(&test_signer);
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
-    // Create a data transaction that appears promoted
-    let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
-        tx: DataTransactionHeaderV1 {
-            id: H256::random(),
-            anchor: H256::zero(),
-            signer: test_signer.address(),
-            data_root: H256::random(),
-            data_size: 1024,
-            header_size: 0,
-            term_fee: U256::from(1000).into(),
-            perm_fee: Some(U256::from(2000).into()),
-            ledger_id: DataLedger::Submit as u32,
-            bundle_format: Some(0),
-            chain_id: 1,
-            signature: Default::default(),
-        },
-        metadata: irys_types::DataTransactionMetadata::with_promoted_height(2), // Mark as promoted!
-    });
+    // Create a properly signed data transaction that appears promoted
+    use irys_types::IrysTransactionCommon;
+    let mut data_tx = DataTransactionHeader::new(&genesis_config.consensus_config());
+    data_tx.data_root = H256::random();
+    data_tx.data_size = 1024;
+    data_tx.term_fee = U256::from(1000).into();
+    data_tx.perm_fee = Some(U256::from(2000).into());
+    data_tx.ledger_id = DataLedger::Submit as u32;
+
+    // Sign the transaction
+    data_tx = data_tx.sign(&test_signer).expect("Failed to sign transaction");
+
+    // Wrap in V1 with promoted metadata
+    let data_tx = if let DataTransactionHeader::V1(mut tx_with_meta) = data_tx {
+        tx_with_meta.metadata = irys_types::DataTransactionMetadata::with_promoted_height(2);
+        DataTransactionHeader::V1(tx_with_meta)
+    } else {
+        panic!("Expected V1 transaction");
+    };
 
     // Create an invalid refund for this promoted transaction
     let invalid_refund = (

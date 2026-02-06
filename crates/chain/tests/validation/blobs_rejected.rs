@@ -78,9 +78,12 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear transaction ledgers to match the empty body
+    header.data_ledgers.clear();
+    header.system_ledgers.clear();
     signer.sign_block_header(&mut header)?;
 
-    // Create new SealedBlock with mutated header
+    // Create new SealedBlock with mutated header and matching body.block_hash
     let body = BlockBody {
         block_hash: header.block_hash,
         data_transactions: vec![],
@@ -128,9 +131,12 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear transaction ledgers to match the empty body
+    header.data_ledgers.clear();
+    header.system_ledgers.clear();
     signer.sign_block_header(&mut header)?;
 
-    // Create new SealedBlock with mutated header
+    // Create new SealedBlock with mutated header and matching body.block_hash
     let body = BlockBody {
         block_hash: header.block_hash,
         data_transactions: vec![],
@@ -189,9 +195,12 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear transaction ledgers to match the empty body
+    header.data_ledgers.clear();
+    header.system_ledgers.clear();
     signer.sign_block_header(&mut header)?;
 
-    // Create new SealedBlock with mutated header
+    // Create new SealedBlock with mutated header and matching body.block_hash
     let body = BlockBody {
         block_hash: header.block_hash,
         data_transactions: vec![],
@@ -260,9 +269,12 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear transaction ledgers to match the empty body
+    header.data_ledgers.clear();
+    header.system_ledgers.clear();
     signer.sign_block_header(&mut header)?;
 
-    // Create new SealedBlock with mutated header
+    // Create new SealedBlock with mutated header and matching body.block_hash
     let body = BlockBody {
         block_hash: header.block_hash,
         data_transactions: vec![],

@@ -79,21 +79,35 @@ impl PrevalidationTestContext {
 }
 
 fn mock_data_txs(count: usize) -> Vec<DataTransactionHeader> {
+    use irys_types::{IrysTransactionCommon, NodeConfig};
+
+    let config = NodeConfig::testing();
+    let signer = config.signer();
+    let consensus = config.consensus_config();
+
     (0..count)
         .map(|i| {
-            let mut tx = DataTransactionHeader::default();
-            tx.id = H256::from_low_u64_be(i as u64);
-            tx
+            let mut tx = DataTransactionHeader::new(&consensus);
+            // Make each transaction unique by setting different data_root
+            tx.data_root = H256::from_low_u64_be(i as u64);
+            tx.sign(&signer).expect("Failed to sign test transaction")
         })
         .collect()
 }
 
 fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
+    use irys_types::{IrysTransactionCommon, NodeConfig};
+
+    let config = NodeConfig::testing();
+    let signer = config.signer();
+    let consensus = config.consensus_config();
+
     (0..count)
         .map(|i| {
-            let mut tx = CommitmentTransaction::default();
-            tx.set_id(H256::from_low_u64_be(i as u64));
-            tx
+            // Make each transaction unique by using different anchor
+            let anchor = H256::from_low_u64_be(i as u64);
+            let tx = CommitmentTransaction::new_stake(&consensus, anchor);
+            tx.sign(&signer).expect("Failed to sign test transaction")
         })
         .collect()
 }
@@ -258,8 +272,13 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     seed_bytes[0] ^= 0xFF;
     tampered_header.vdf_limiter_info.seed.0 = seed_bytes;
 
-    // Reconstruct SealedBlock
-    let tampered_block = Arc::new(SealedBlock::new(tampered_header, ctx.block.body().clone())?);
+    // Re-sign the header after tampering
+    ctx.config.signer().sign_block_header(&mut tampered_header)?;
+
+    // Reconstruct SealedBlock with updated body.block_hash
+    let mut tampered_body = ctx.block.body().clone();
+    tampered_body.block_hash = tampered_header.block_hash;
+    let tampered_block = Arc::new(SealedBlock::new(tampered_header, tampered_body)?);
 
     let result = ctx.prevalidate(&tampered_block).await;
 
@@ -301,6 +320,9 @@ async fn heavy_test_prevalidation_rejects_too_many_data_txs() -> Result<()> {
     ledger.tx_ids = tx_ids;
 
     ctx.config.signer().sign_block_header(&mut header)?;
+
+    // Update body.block_hash to match the re-signed header
+    body.block_hash = header.block_hash;
 
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 
@@ -365,6 +387,9 @@ async fn heavy_test_prevalidation_rejects_too_many_commitment_txs() -> Result<()
 
     // Re-sign the header after modification
     ctx.config.signer().sign_block_header(&mut header)?;
+
+    // Update body.block_hash to match the re-signed header
+    body.block_hash = header.block_hash;
 
     let bad_block = Arc::new(SealedBlock::new(header, body)?);
 

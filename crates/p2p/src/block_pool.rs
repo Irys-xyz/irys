@@ -1217,16 +1217,82 @@ mod tests {
     };
     use std::sync::Arc;
 
+    /// Helper to create a test data transaction with proper signature
+    fn make_test_data_tx() -> DataTransactionHeader {
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
+
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create transaction and sign it properly
+        let mut tx = DataTransactionHeader::new(&consensus);
+        tx.sign(&signer).expect("Failed to sign test transaction")
+    }
+
+    /// Helper to create a test commitment transaction with proper signature
+    fn make_test_commitment_tx() -> irys_types::CommitmentTransaction {
+        use irys_types::{CommitmentTransaction, IrysTransactionCommon, NodeConfig, H256};
+
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create a commitment transaction and sign it properly
+        let tx = CommitmentTransaction::new_stake(&consensus, H256::zero());
+        tx.sign(&signer).expect("Failed to sign test commitment transaction")
+    }
+
     fn make_sealed_block(
         block_byte: u8,
         parent_byte: u8,
         height: u64,
         mut body: BlockBody,
     ) -> Arc<SealedBlock> {
+        use irys_types::{DataTransactionLedger, SystemTransactionLedger, H256List};
+
+        // Build data_ledgers based on body content
+        let mut data_ledgers = vec![];
+        if !body.data_transactions.is_empty() {
+            // For simplicity, put all data transactions in Submit ledger
+            let tx_ids: H256List = H256List(
+                body.data_transactions
+                    .iter()
+                    .map(|tx| tx.id)
+                    .collect()
+            );
+            data_ledgers.push(DataTransactionLedger {
+                ledger_id: DataLedger::Submit as u32,
+                tx_root: H256::zero(),
+                tx_ids,
+                total_chunks: body.data_transactions.len() as u64,
+                expires: None,
+                proofs: None,
+                required_proof_count: None,
+            });
+        }
+
+        // Build system_ledgers based on body content
+        let mut system_ledgers = vec![];
+        if !body.commitment_transactions.is_empty() {
+            let tx_ids: H256List = H256List(
+                body.commitment_transactions
+                    .iter()
+                    .map(|tx| tx.id())
+                    .collect()
+            );
+            system_ledgers.push(SystemTransactionLedger {
+                ledger_id: SystemLedger::Commitment.into(),
+                tx_ids,
+            });
+        }
+
         let header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
             block_hash: BlockHash::repeat_byte(block_byte),
             previous_block_hash: BlockHash::repeat_byte(parent_byte),
+            data_ledgers,
+            system_ledgers,
             ..IrysBlockHeaderV1::default()
         });
         // Ensure body.block_hash matches header.block_hash for consistency
@@ -1369,10 +1435,10 @@ mod tests {
         let _parent = BlockHash::repeat_byte(0xFA);
         let block_hash = BlockHash::repeat_byte(0x50);
 
-        // Create a non-empty BlockBody
+        // Create a non-empty BlockBody with a valid test transaction
         let block_body = BlockBody {
             block_hash,
-            data_transactions: vec![DataTransactionHeader::default()],
+            data_transactions: vec![make_test_data_tx()],
             commitment_transactions: vec![],
         };
 
@@ -1401,7 +1467,7 @@ mod tests {
         let child1 = make_sealed_block(0x51, 0xFB, 101, Default::default());
 
         // Add block with Default::default() BlockBody (as used in existing call sites)
-        cache.add_block(child1, false);
+        cache.add_block(child1.clone(), false);
 
         // Retrieve the cached block
         let cached = cache
@@ -1409,8 +1475,8 @@ mod tests {
             .get(&block_hash)
             .expect("child1 should be stored in blocks cache");
 
-        // Verify default BlockBody is stored
-        assert_eq!(cached.block.body().block_hash, BlockHash::default());
+        // Verify BlockBody is stored (block_hash will be set to header's block_hash by make_sealed_block)
+        assert_eq!(cached.block.body().block_hash, child1.header().block_hash);
         assert_eq!(cached.block.body().data_transactions.len(), 0);
         assert_eq!(cached.block.body().commitment_transactions.len(), 0);
     }
@@ -1418,15 +1484,34 @@ mod tests {
     #[test]
     fn order_transactions_matching_header_body() {
         use irys_types::{
-            CommitmentTransaction, CommitmentV2WithMetadata, DataTransactionHeaderV1,
-            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, SystemTransactionLedger,
+            CommitmentTransaction, DataTransactionHeader,
+            IrysTransactionCommon, NodeConfig, SystemTransactionLedger,
         };
 
-        // Create test transaction IDs
-        let submit_tx_id1 = H256::repeat_byte(0x11);
-        let submit_tx_id2 = H256::repeat_byte(0x12);
-        let publish_tx_id1 = H256::repeat_byte(0x21);
-        let commitment_tx_id1 = H256::repeat_byte(0x31);
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create 3 data transactions (2 for submit, 1 for publish) and sign them
+        // Make them unique by setting different data_roots
+        let mut submit_tx1 = DataTransactionHeader::new(&consensus);
+        submit_tx1.data_root = H256::repeat_byte(0x01);
+        submit_tx1 = submit_tx1.sign(&signer).expect("Failed to sign");
+        let submit_tx_id1 = submit_tx1.id();
+
+        let mut submit_tx2 = DataTransactionHeader::new(&consensus);
+        submit_tx2.data_root = H256::repeat_byte(0x02);
+        submit_tx2 = submit_tx2.sign(&signer).expect("Failed to sign");
+        let submit_tx_id2 = submit_tx2.id();
+
+        // For publish, we'll use submit_tx1 (same transaction can be in multiple ledgers)
+        let publish_tx_id1 = submit_tx_id1;
+
+        // Create 1 commitment transaction
+        let mut commitment_tx = CommitmentTransaction::new_stake(&consensus, H256::zero());
+        commitment_tx = commitment_tx.sign(&signer).expect("Failed to sign");
+        let commitment_tx_id1 = commitment_tx.id();
 
         // Create block header with specific transaction ordering
         let header = IrysBlockHeaderV1 {
@@ -1462,38 +1547,14 @@ mod tests {
         let header = IrysBlockHeader::V1(header);
 
         // Create matching transactions (deliberately in different order than header)
+        // Note: submit_tx1 appears in both submit and publish ledgers
         let data_txs = vec![
-            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: submit_tx_id1,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: submit_tx_id2,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: publish_tx_id1,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            }),
+            submit_tx1.clone(),
+            submit_tx2.clone(),
+            // publish_tx1 is the same as submit_tx1, so we don't need to add it separately
         ];
 
-        let commitment_tx = CommitmentTransactionV2 {
-            id: commitment_tx_id1,
-            ..Default::default()
-        };
-        let commitment_txs = vec![CommitmentTransaction::V2(CommitmentV2WithMetadata {
-            tx: commitment_tx,
-            metadata: Default::default(),
-        })];
+        let commitment_txs = vec![commitment_tx];
 
         // Create BlockBody
         let body = BlockBody {
@@ -1524,12 +1585,23 @@ mod tests {
     #[test]
     fn order_transactions_header_body_mismatch_missing_tx() {
         use irys_types::{
-            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            DataTransactionHeader, IrysTransactionCommon, NodeConfig,
         };
 
-        // Create test transaction IDs
-        let submit_tx_id1 = H256::repeat_byte(0x11);
-        let submit_tx_id2 = H256::repeat_byte(0x12); // This will be missing from body
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        let mut submit_tx1 = DataTransactionHeader::new(&consensus);
+        submit_tx1.data_root = H256::repeat_byte(0x11);
+        submit_tx1 = submit_tx1.sign(&signer).expect("Failed to sign");
+        let submit_tx_id1 = submit_tx1.id();
+
+        let mut submit_tx2 = DataTransactionHeader::new(&consensus);
+        submit_tx2.data_root = H256::repeat_byte(0x12);
+        submit_tx2 = submit_tx2.sign(&signer).expect("Failed to sign");
+        let submit_tx_id2 = submit_tx2.id();
 
         // Create block header expecting two submit transactions
         let header = IrysBlockHeaderV1 {
@@ -1563,16 +1635,8 @@ mod tests {
 
         let header = IrysBlockHeader::V1(header);
 
-        // Create body with only ONE transaction (mismatch)
-        let data_txs = vec![DataTransactionHeader::V1(
-            DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: submit_tx_id1,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            },
-        )];
+        // Create body with only ONE transaction (mismatch - header expects 2)
+        let data_txs = vec![submit_tx1];
 
         let commitment_txs = vec![];
 
@@ -1595,21 +1659,33 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        assert!(err_msg.contains("Header/body mismatch"));
-        assert!(err_msg.contains("submit ledger expects 2 txs but found 1"));
-        assert!(err_msg.contains(&format!("{:?}", submit_tx_id2)));
+        // The error message is now from tx_ids_match_the_header check
+        assert!(err_msg.contains("Transaction IDs do not match the header"));
     }
 
     #[test]
     fn order_transactions_header_body_mismatch_wrong_ledger() {
         use irys_types::{
-            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            DataTransactionHeader, IrysTransactionCommon, NodeConfig,
         };
 
-        // Create test transaction IDs
-        let tx_id1 = H256::repeat_byte(0x13);
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
 
-        // Create block header expecting transaction in Submit ledger
+        // Create a transaction that we'll claim should be in Submit ledger
+        let mut expected_tx = DataTransactionHeader::new(&consensus);
+        expected_tx.data_root = H256::repeat_byte(0x13);
+        expected_tx = expected_tx.sign(&signer).expect("Failed to sign");
+        let expected_tx_id = expected_tx.id();
+
+        // Create a different transaction that we'll actually put in the body
+        let mut actual_tx = DataTransactionHeader::new(&consensus);
+        actual_tx.data_root = H256::repeat_byte(0x99);
+        actual_tx = actual_tx.sign(&signer).expect("Failed to sign");
+
+        // Create block header expecting expected_tx_id in Submit ledger
         let header = IrysBlockHeaderV1 {
             block_hash: BlockHash::repeat_byte(0xCC),
             height: 52,
@@ -1627,7 +1703,7 @@ mod tests {
                 irys_types::DataTransactionLedger {
                     ledger_id: DataLedger::Submit as u32,
                     tx_root: H256::zero(),
-                    tx_ids: irys_types::H256List(vec![tx_id1]),
+                    tx_ids: irys_types::H256List(vec![expected_tx_id]),
                     total_chunks: 1,
                     expires: None,
                     proofs: None,
@@ -1640,17 +1716,9 @@ mod tests {
 
         let header = IrysBlockHeader::V1(header);
 
-        // Create body with transaction that has a different ID than expected
+        // Create body with actual_tx that has a different ID than expected
         // (simulating the transaction being missing from expected ledger)
-        let data_txs = vec![DataTransactionHeader::V1(
-            DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: H256::repeat_byte(0x99), // Different ID, not in any expected ledger
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            },
-        )];
+        let data_txs = vec![actual_tx];
 
         let commitment_txs = vec![];
 
@@ -1675,17 +1743,27 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        assert!(err_msg.contains("Header/body mismatch"));
-        assert!(err_msg.contains("submit ledger expects 1 txs but found 0"));
+        // The error message is now from tx_ids_match_the_header check
+        assert!(err_msg.contains("Transaction IDs do not match the header"));
     }
 
     #[test]
     fn order_transactions_commitment_mismatch() {
-        use irys_types::{CommitmentTransaction, CommitmentTransactionV2, SystemTransactionLedger};
+        use irys_types::{CommitmentTransaction, IrysTransactionCommon, NodeConfig, SystemTransactionLedger};
 
-        // Create test commitment transaction IDs
-        let commitment_tx_id1 = H256::repeat_byte(0x41);
-        let commitment_tx_id2 = H256::repeat_byte(0x42); // This will be missing
+        // Create properly signed transactions
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        // Create two commitment transactions
+        let commitment_tx1 = CommitmentTransaction::new_stake(&consensus, H256::repeat_byte(0x41));
+        let commitment_tx1 = commitment_tx1.sign(&signer).expect("Failed to sign");
+        let commitment_tx_id1 = commitment_tx1.id();
+
+        let commitment_tx2 = CommitmentTransaction::new_stake(&consensus, H256::repeat_byte(0x42));
+        let commitment_tx2 = commitment_tx2.sign(&signer).expect("Failed to sign");
+        let commitment_tx_id2 = commitment_tx2.id();
 
         // Create block header expecting two commitment transactions
         let header = IrysBlockHeaderV1 {
@@ -1701,19 +1779,9 @@ mod tests {
 
         let header = IrysBlockHeader::V1(header);
 
-        // Create body with only ONE commitment transaction
+        // Create body with only ONE commitment transaction (mismatch)
         let data_txs = vec![];
-
-        let commitment_tx = CommitmentTransactionV2 {
-            id: commitment_tx_id1,
-            ..Default::default()
-        };
-        let commitment_txs = vec![CommitmentTransaction::V2(
-            irys_types::CommitmentV2WithMetadata {
-                tx: commitment_tx,
-                metadata: Default::default(),
-            },
-        )];
+        let commitment_txs = vec![commitment_tx1];
 
         // Create BlockBody
         let body = BlockBody {
@@ -1734,19 +1802,25 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
 
-        assert!(err_msg.contains("Header/body mismatch"));
-        assert!(err_msg.contains("commitment ledger expects 2 txs but found 1"));
-        assert!(err_msg.contains(&format!("{:?}", commitment_tx_id2)));
+        // The error message is now from tx_ids_match_the_header check
+        assert!(err_msg.contains("Transaction IDs do not match the header"));
     }
 
     #[test]
     fn order_transactions_tx_in_both_ledgers() {
         use irys_types::{
-            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+            DataTransactionHeader, IrysTransactionCommon, NodeConfig,
         };
 
-        // Create a transaction ID that appears in both Submit and Publish
-        let dual_tx_id = H256::repeat_byte(0x77);
+        // Create properly signed transaction
+        let config = NodeConfig::testing();
+        let signer = config.signer();
+        let consensus = config.consensus_config();
+
+        let mut dual_tx = DataTransactionHeader::new(&consensus);
+        dual_tx.data_root = H256::repeat_byte(0x77);
+        dual_tx = dual_tx.sign(&signer).expect("Failed to sign");
+        let dual_tx_id = dual_tx.id();
 
         // Create block header with transaction in BOTH ledgers (Publish at index 0, Submit at index 1)
         let header = IrysBlockHeaderV1 {
@@ -1779,15 +1853,7 @@ mod tests {
         let header = IrysBlockHeader::V1(header);
 
         // Provide the transaction once in the body
-        let data_txs = vec![DataTransactionHeader::V1(
-            DataTransactionHeaderV1WithMetadata {
-                tx: DataTransactionHeaderV1 {
-                    id: dual_tx_id,
-                    ..Default::default()
-                },
-                metadata: DataTransactionMetadata::new(),
-            },
-        )];
+        let data_txs = vec![dual_tx];
 
         let commitment_txs = vec![];
 
