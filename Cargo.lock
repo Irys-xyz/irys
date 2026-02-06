@@ -5371,6 +5371,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "itertools 0.13.0",
  "lru 0.14.0",
  "nodit",
  "openssl",

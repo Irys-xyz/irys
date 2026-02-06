@@ -7,7 +7,9 @@ use irys_domain::{
     dummy_ema_snapshot, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
     EpochSnapshot,
 };
-use irys_types::{storage_pricing::TOKEN_SCALE, Config, IrysBlockHeader, IrysTokenPrice, H256};
+use irys_types::{
+    storage_pricing::TOKEN_SCALE, BlockTransactions, Config, IrysBlockHeader, IrysTokenPrice, H256,
+};
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
 
@@ -82,6 +84,7 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
             .add_common(
                 block.block_hash,
                 block,
+                BlockTransactions::default(),
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -244,6 +247,7 @@ pub fn create_and_apply_fork(
             tree.add_common(
                 header.block_hash,
                 &header,
+                BlockTransactions::default(),
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),

@@ -207,6 +207,7 @@ impl MempoolFacade for MempoolStub {
     async fn migrate_block(
         &self,
         irys_block_header: Arc<IrysBlockHeader>,
+        _transactions: Arc<BlockTransactions>,
     ) -> std::result::Result<usize, TxIngressError> {
         self.migrated_blocks
             .write()
