@@ -391,12 +391,12 @@ pub(crate) async fn validate_partition_assignments(
     let publish_count = assignments_resp
         .assignments
         .iter()
-        .filter(|pa| pa.ledger_id == Some(0)) // DataLedger::Publish = 0
+        .filter(|pa| pa.ledger_id == Some(DataLedger::Publish.into()))
         .count();
     let submit_count = assignments_resp
         .assignments
         .iter()
-        .filter(|pa| pa.ledger_id == Some(1)) // DataLedger::Submit = 1
+        .filter(|pa| pa.ledger_id == Some(DataLedger::Submit.into()))
         .count();
     let capacity_count = assignments_resp
         .assignments

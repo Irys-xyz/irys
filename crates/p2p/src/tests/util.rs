@@ -27,14 +27,14 @@ use irys_testing_utils::utils::setup_tracing_and_temp_dir;
 use irys_types::irys::IrysSigner;
 use irys_types::v1::GossipDataRequestV1;
 use irys_types::v2::{GossipBroadcastMessageV2, GossipDataRequestV2, GossipDataV2};
+use irys_types::IrysAddress;
 use irys_types::{
     Base64, BlockHash, BlockIndexItem, BlockIndexQuery, CommitmentTransaction, Config,
     DataTransaction, DataTransactionHeader, DatabaseProvider, GossipRequest, IngressProof,
     IrysBlockHeader, IrysPeerId, MempoolConfig, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
-    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, TokioServiceHandle, TxChunkOffset,
-    TxKnownStatus, UnpackedChunk, H256,
+    PeerNetworkSender, PeerScore, ProtocolVersion, RethPeerInfo, SealedBlock, TokioServiceHandle,
+    TxChunkOffset, TxKnownStatus, UnpackedChunk, H256,
 };
-use irys_types::{BlockTransactions, IrysAddress};
 use irys_vdf::state::{VdfState, VdfStateReadonly};
 use reth_tasks::{TaskExecutor, TaskManager};
 use std::collections::{HashMap, HashSet};
@@ -252,16 +252,16 @@ impl BlockDiscoveryStub {
 impl BlockDiscoveryFacade for BlockDiscoveryStub {
     async fn handle_block(
         &self,
-        block: Arc<IrysBlockHeader>,
-        _transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         _skip_vdf: bool,
     ) -> std::result::Result<(), BlockDiscoveryError> {
+        let header = Arc::clone(block.header());
         self.block_status_provider
-            .add_block_to_index_and_tree_for_testing(&block);
+            .add_block_to_index_and_tree_for_testing(&header);
         self.blocks
             .write()
             .expect("to unlock blocks")
-            .push(block.clone());
+            .push(header.clone());
 
         let sender = self.internal_message_bus.clone();
 
@@ -269,7 +269,7 @@ impl BlockDiscoveryFacade for BlockDiscoveryStub {
             // Pretend that we've validated the block and we're ready to gossip it
             tokio::runtime::Handle::current().spawn(async move {
                 sender
-                    .send(GossipBroadcastMessageV2::from(block))
+                    .send(GossipBroadcastMessageV2::from(header))
                     .expect("to send block");
             });
         }

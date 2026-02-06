@@ -1,6 +1,6 @@
 use assert_matches::assert_matches;
 use irys_testing_utils::initialize_tracing;
-use irys_types::NodeConfig;
+use irys_types::{DataLedger, NodeConfig};
 use tracing::debug;
 
 use crate::utils::IrysNodeTest;
@@ -50,7 +50,7 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
         .unwrap();
     let submit_pa = partition_assignments
         .iter()
-        .find(|pa| pa.ledger_id == Some(1))
+        .find(|pa| pa.ledger_id == Some(DataLedger::Submit.into()))
         .unwrap();
     debug!("Capacity Partition: {:#?}", capacity_pa);
     debug!("Submit Partition: {:#?}", submit_pa);
@@ -90,7 +90,10 @@ async fn heavy_sm_reassignment_with_restart_test() -> eyre::Result<()> {
         .canonical_epoch_snapshot()
         .get_data_partition_assignment(submit_pa.partition_hash)
         .expect("to retrieve the partition assignment");
-    assert!(reassigned_pa.ledger_id == Some(1) && reassigned_pa.slot_index == Some(2));
+    assert!(
+        reassigned_pa.ledger_id == Some(DataLedger::Submit.into())
+            && reassigned_pa.slot_index == Some(2)
+    );
 
     // Mine on block past the epoch so the node restarts with the new assignments
     let _block9 = genesis_node.mine_block().await?;

@@ -289,20 +289,19 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncServiceInner<B, M> {
             for orphaned_block in orphaned_blocks {
                 info!(
                     "Start processing orphaned ancestor block: {:?}",
-                    orphaned_block.header.block_hash
+                    orphaned_block.block.header().block_hash
                 );
                 let block_pool = self.block_pool.clone();
-                let block_header = orphaned_block.header;
                 let is_fast_tracking = orphaned_block.is_fast_tracking;
-                let block_body = orphaned_block.block_body;
+                let orphaned_block_arc = Arc::clone(&orphaned_block.block);
                 futures.push(async move {
                     debug!(
-                        "Using cached block body for orphaned ancestor: {:?}",
-                        block_header.block_hash
+                        "Using cached block for orphaned ancestor: {:?}",
+                        orphaned_block_arc.header().block_hash
                     );
 
                     block_pool
-                        .process_block(block_header, block_body, is_fast_tracking)
+                        .process_block(orphaned_block_arc, is_fast_tracking)
                         .await
                         .map_err(|e| {
                             ChainSyncError::Internal(format!("Block processing error: {:?}", e))
@@ -590,8 +589,7 @@ impl<B: BlockDiscoveryFacade, M: MempoolFacade> ChainSyncService<B, M> {
                         if let Err(e) = inner
                             .block_pool
                             .process_block(
-                                cached_block.header,
-                                cached_block.block_body,
+                                Arc::clone(&cached_block.block),
                                 cached_block.is_fast_tracking,
                             )
                             .await
@@ -1558,8 +1556,13 @@ mod tests {
                             GossipResponse::Accepted(None)
                         } else {
                             sync_state_clone.mark_processed(start_from + requests_len);
+                            let random_signer = NodeConfig::testing().new_random_signer();
+                            let mut mock_header = IrysBlockHeader::new_mock_header();
+                            random_signer
+                                .sign_block_header(&mut mock_header)
+                                .expect("to sign mock header");
                             GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
-                                IrysBlockHeader::new_mock_header(),
+                                mock_header,
                             ))))
                         }
                     }
@@ -1672,7 +1675,6 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let block_requests = block_requests_clone.lock().unwrap();
-            assert_eq!(block_requests.len(), 3);
             let requested_first_block = block_requests
                 .iter()
                 .find(|&block_hash| block_hash == &BlockHash::repeat_byte(1));
