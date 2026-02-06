@@ -4,6 +4,7 @@ use irys_types::{
     BlockHash, BlockTransactions, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SystemLedger, H256, U256,
 };
+use itertools::{EitherOrBoth, Itertools as _};
 use reth_db::Database as _;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -432,24 +433,47 @@ impl BlockTree {
                 actual_commitment_ids
             );
 
-            // Check data transactions
-            let expected_data_ids: HashSet<H256> = block
-                .data_ledgers
-                .iter()
-                .flat_map(|ledger| ledger.tx_ids.0.iter().copied())
-                .collect();
-            let actual_data_ids: HashSet<H256> = transactions
+            // Check data transactions per-ledger
+            // Verify no extra ledgers in transactions that aren't in header
+            let extra_ledger = transactions
                 .data_txs
-                .values()
-                .flat_map(|txs| txs.iter().map(|tx| tx.id))
-                .collect();
+                .keys()
+                .find(|k| !block.data_ledgers.iter().any(|l| l.ledger_id == **k as u32));
             eyre::ensure!(
-                expected_data_ids == actual_data_ids,
-                "Data tx IDs in BlockTransactions don't match header for block {}: expected {:?}, got {:?}",
-                hash,
-                expected_data_ids,
-                actual_data_ids
+                extra_ledger.is_none(),
+                "Extra ledger {:?} in BlockTransactions not in header for block {}",
+                extra_ledger,
+                hash
             );
+
+            // Check each ledger's tx IDs match
+            for ledger in &block.data_ledgers {
+                let ledger_type = DataLedger::try_from(ledger.ledger_id).map_err(|_| {
+                    eyre::eyre!("Invalid ledger_id {} in block {}", ledger.ledger_id, hash)
+                })?;
+
+                let actual_txs = transactions
+                    .data_txs
+                    .get(&ledger_type)
+                    .map(std::vec::Vec::as_slice)
+                    .unwrap_or(&[]);
+
+                // Single-pass check: length and content match
+                let mismatch = ledger
+                    .tx_ids
+                    .0
+                    .iter()
+                    .zip_longest(actual_txs.iter())
+                    .find(|pair| !matches!(pair, EitherOrBoth::Both(expected, actual) if **expected == actual.id));
+
+                eyre::ensure!(
+                    mismatch.is_none(),
+                    "Data tx mismatch for ledger {:?} in block {}: {:?}",
+                    ledger_type,
+                    hash,
+                    mismatch
+                );
+            }
         }
 
         let prev_hash = block.previous_block_hash;

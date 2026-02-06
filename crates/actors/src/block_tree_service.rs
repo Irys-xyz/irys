@@ -263,7 +263,6 @@ impl BlockTreeServiceInner {
         block_header: Arc<IrysBlockHeader>,
         transactions: &BlockTransactions,
     ) -> eyre::Result<()> {
-        // Use transactions directly from the block tree instead of fetching from mempool
         let submit_txs = transactions
             .data_txs
             .get(&DataLedger::Submit)

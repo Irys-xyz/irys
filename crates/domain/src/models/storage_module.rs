@@ -298,9 +298,10 @@ impl StorageModule {
 
                 // If disk has a partition hash that conflicts with the epoch
                 // snapshot, the submodule was packed against a different genesis.
-                if let (Some(ph), Some(pa)) =
-                    (params.partition_hash, storage_module_info.partition_assignment)
-                {
+                if let (Some(ph), Some(pa)) = (
+                    params.partition_hash,
+                    storage_module_info.partition_assignment,
+                ) {
                     ensure!(
                         ph == pa.partition_hash,
                         "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
