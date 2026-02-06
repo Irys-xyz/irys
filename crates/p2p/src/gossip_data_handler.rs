@@ -931,7 +931,7 @@ where
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
 
                 if let Some(block_body) = block_body {
-                    let data = Arc::new(GossipDataV2::BlockBody(Arc::new(block_body)));
+                    let data = Arc::new(GossipDataV2::BlockBody(Arc::clone(&block_body)));
                     self.send_gossip_data((&request.miner_address, peer_info), data, &check_result);
                     Ok(true)
                 } else {
@@ -1041,7 +1041,7 @@ where
             GossipDataRequestV2::BlockBody(block_hash) => {
                 let maybe_block_body =
                     get_block_body(&block_hash, &self.block_pool, &self.mempool).await?;
-                Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::new(body))))
+                Ok(maybe_block_body.map(|body| GossipDataV2::BlockBody(Arc::clone(&body))))
             }
             GossipDataRequestV2::ExecutionPayload(evm_block_hash) => {
                 let maybe_evm_block = self
@@ -1300,7 +1300,7 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
     block_hash: &BlockHash,
     block_pool: &BlockPool<B, M>,
     mempool: &M,
-) -> GossipResult<Option<BlockBody>> {
+) -> GossipResult<Option<Arc<BlockBody>>> {
     let maybe_block_body =
         if let Some(block_body) = block_pool.get_cached_block_body(block_hash).await {
             Some(block_body)
@@ -1324,7 +1324,7 @@ async fn get_block_body<M: MempoolFacade, B: BlockDiscoveryFacade>(
                     )))
                 })?;
                 debug!("Successfully built block body for block {:?}", block_hash);
-                Some(block_body)
+                Some(Arc::new(block_body))
             } else {
                 warn!(
                     "Didn't find the block header to build the block body for the block {:?}",

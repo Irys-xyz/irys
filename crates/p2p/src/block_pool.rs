@@ -1107,11 +1107,11 @@ where
             .map(|block| block.map(Arc::new))
     }
 
-    pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<BlockBody> {
+    pub async fn get_cached_block_body(&self, block_hash: &BlockHash) -> Option<Arc<BlockBody>> {
         self.blocks_cache
             .get_block_cloned(block_hash)
             .await
-            .map(|cached| cached.block.body().clone())
+            .map(|cached| Arc::clone(cached.block.body()))
     }
 
     /// Get orphaned block by parent hash - for orphan block processing

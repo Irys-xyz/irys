@@ -1128,7 +1128,7 @@ impl BlockBody {
 #[derive(Debug)]
 pub struct SealedBlock {
     header: Arc<IrysBlockHeader>,
-    body: BlockBody,
+    body: Arc<BlockBody>,
     transactions: BlockTransactions,
 }
 
@@ -1149,7 +1149,7 @@ impl SealedBlock {
 
         Ok(Self {
             header: Arc::new(header),
-            body,
+            body: Arc::new(body),
             transactions,
         })
     }
@@ -1158,7 +1158,7 @@ impl SealedBlock {
         &self.header
     }
 
-    pub fn body(&self) -> &BlockBody {
+    pub fn body(&self) -> &Arc<BlockBody> {
         &self.body
     }
 
