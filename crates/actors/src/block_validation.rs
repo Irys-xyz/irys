@@ -1562,6 +1562,7 @@ async fn generate_expected_shadow_transactions(
     // === TREASURY DEBUG LOGGING START ===
     if block.height == 50793 {
         let publish_txs_for_log = transactions.get_ledger_txs(DataLedger::Publish);
+        let submit_txs_for_log = transactions.get_ledger_txs(DataLedger::Submit);
         tracing::error!(
             "TREASURY_DEBUG Block {}: publish_ledger from header: tx_ids={:?}, proofs_count={}",
             block.height,
@@ -1569,10 +1570,17 @@ async fn generate_expected_shadow_transactions(
             publish_ledger.proofs.as_ref().map(|p| p.0.len()).unwrap_or(0)
         );
         tracing::error!(
-            "TREASURY_DEBUG Block {}: BlockTransactions has {} publish txs",
+            "TREASURY_DEBUG Block {}: BlockTransactions has {} publish txs, {} submit txs",
             block.height,
-            publish_txs_for_log.len()
+            publish_txs_for_log.len(),
+            submit_txs_for_log.len()
         );
+        for (i, tx) in submit_txs_for_log.iter().enumerate() {
+            tracing::error!(
+                "TREASURY_DEBUG Block {}: submit_tx[{}] id={:x} perm_fee={:?} term_fee={}",
+                block.height, i, tx.id, tx.perm_fee, tx.term_fee
+            );
+        }
         for (i, tx) in publish_txs_for_log.iter().enumerate() {
             tracing::error!(
                 "TREASURY_DEBUG Block {}: publish_tx[{}] id={:x} perm_fee={:?} term_fee={}",
@@ -1659,6 +1667,22 @@ async fn generate_expected_shadow_transactions(
 
     // Get final treasury balance after processing all transactions
     let expected_treasury = shadow_tx_generator.treasury_balance();
+
+    // === TREASURY DEBUG LOGGING ===
+    if block.height == 50793 {
+        let diff = if expected_treasury > block.treasury {
+            expected_treasury - block.treasury
+        } else {
+            block.treasury - expected_treasury
+        };
+        tracing::error!(
+            "TREASURY_FINAL Block {}: calculated_treasury={}, block_treasury={}, diff={}",
+            block.height,
+            expected_treasury,
+            block.treasury,
+            diff
+        );
+    }
 
     // Validate that the block's treasury matches the expected value
     ensure!(

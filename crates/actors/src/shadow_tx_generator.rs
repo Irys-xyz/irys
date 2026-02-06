@@ -542,11 +542,33 @@ impl<'a> ShadowTxGenerator<'a> {
             .checked_add(term_charges.term_fee_treasury)
             .ok_or_else(|| eyre!("Treasury balance overflow when adding term fee treasury"))?;
 
+        // === TREASURY DEBUG LOGGING ===
+        if *self.block_height == 50793 {
+            tracing::error!(
+                "TREASURY_DEBUG Block {}: submit_tx[{}] term_fee_treasury={}, treasury_after={}",
+                self.block_height,
+                index,
+                term_charges.term_fee_treasury,
+                self.treasury_balance
+            );
+        }
+
         if let Some(ref charges) = perm_charges {
             self.treasury_balance = self
                 .treasury_balance
                 .checked_add(charges.perm_fee_treasury)
                 .ok_or_else(|| eyre!("Treasury balance overflow when adding perm fee treasury"))?;
+
+            // === TREASURY DEBUG LOGGING ===
+            if *self.block_height == 50793 {
+                tracing::error!(
+                    "TREASURY_DEBUG Block {}: submit_tx[{}] perm_fee_treasury={}, treasury_after={}",
+                    self.block_height,
+                    index,
+                    charges.perm_fee_treasury,
+                    self.treasury_balance
+                );
+            }
         }
 
         Ok(shadow_metadata)
