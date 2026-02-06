@@ -457,7 +457,12 @@ impl BlockTreeServiceInner {
                     .blocks
                     .get(&block_to_migrate.block_hash)
                     .map(|meta| meta.transactions.clone())
-                    .unwrap_or_default()
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "missing cache entry for block {} during block migration",
+                            block_to_migrate.block_hash
+                        )
+                    })?
             };
 
             // NOTE: order of events is very important! block migration event

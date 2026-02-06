@@ -1495,11 +1495,17 @@ fn load_data_transactions(
     for (ledger, tx_ids) in data_tx_ids_by_ledger {
         let mut ledger_txs = Vec::new();
         for tx_id in tx_ids {
-            if let Some(header) =
-                tx_header_by_txid(&db_tx, &tx_id).expect("to retrieve tx header from db")
-            {
-                ledger_txs.push(header);
-            }
+            let header = tx_header_by_txid(&db_tx, &tx_id)
+                .expect("to retrieve tx header from db")
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Missing data transaction in DB: tx_id={}, ledger={:?}. \
+                        This may indicate DB corruption.",
+                        tx_id,
+                        ledger
+                    )
+                })?;
+            ledger_txs.push(header);
         }
         if !ledger_txs.is_empty() {
             data_txs.insert(ledger, ledger_txs);
@@ -2589,10 +2595,8 @@ mod tests {
 
         for data_ledger in &block.data_ledgers {
             // Map ledger_id to DataLedger enum
-            let ledger = match data_ledger.ledger_id {
-                0 => DataLedger::Publish,
-                1 => DataLedger::Submit,
-                _ => continue, // Skip unknown ledgers
+            let Ok(ledger) = DataLedger::try_from(data_ledger.ledger_id) else {
+                continue; // Skip unknown ledgers
             };
             let mut ledger_txs = Vec::new();
 

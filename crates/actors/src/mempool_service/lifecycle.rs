@@ -889,7 +889,7 @@ impl Inner {
         let publish_tx_ids: Vec<H256> = publish_txs.iter().map(|tx| tx.id).collect();
         {
             self.irys_db.update_eyre(|mut_tx| {
-                for mut header in publish_txs.clone() {
+                for mut header in publish_txs {
                     if header.promoted_height().is_none() {
                         // Set promoted_height in metadata
                         header.metadata_mut().promoted_height = Some(event.block.height);
