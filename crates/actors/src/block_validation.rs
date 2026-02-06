@@ -1507,6 +1507,22 @@ async fn generate_expected_shadow_transactions(
     block_index: Arc<std::sync::RwLock<BlockIndex>>,
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
+    // === DEBUG: Log block data at function entry ===
+    if block.height == 50793 {
+        tracing::error!(
+            "VALIDATE_ENTRY Block 50793: block_hash={:?}, data_ledgers_count={}",
+            block.block_hash,
+            block.data_ledgers.len()
+        );
+        for ledger in &block.data_ledgers {
+            tracing::error!(
+                "VALIDATE_ENTRY Block 50793: ledger_id={}, tx_ids_count={}, tx_ids={:?}",
+                ledger.ledger_id,
+                ledger.tx_ids.len(),
+                ledger.tx_ids
+            );
+        }
+    }
     // Look up previous block to get EVM hash
     let prev_block = {
         let (tx_prev, rx_prev) = tokio::sync::oneshot::channel();

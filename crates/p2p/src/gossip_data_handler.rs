@@ -781,6 +781,18 @@ where
             block_hash, source_peer_id
         );
 
+        // === DEBUG: Log txIds after pulling block header ===
+        if irys_block_header.height == 50793 {
+            for ledger in &irys_block_header.data_ledgers {
+                tracing::error!(
+                    "PULL_BLOCK_HEADER Block 50793: ledger_id={}, tx_ids_count={}, tx_ids={:?}",
+                    ledger.ledger_id,
+                    ledger.tx_ids.len(),
+                    ledger.tx_ids
+                );
+            }
+        }
+
         Ok((source_peer_id, irys_block_header))
     }
 

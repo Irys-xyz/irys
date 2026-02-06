@@ -808,15 +808,15 @@ impl GossipClient {
                     return Err(GossipError::Network(format!("Empty response from {}", url)));
                 }
 
-                // === DEBUG LOGGING FOR RAW JSON START ===
+                // === DEBUG LOGGING FOR RAW JSON (FULL) ===
                 // Check if this is a block header response containing block 50793
                 if text.contains("\"height\":\"50793\"") || text.contains("\"height\": \"50793\"") {
                     tracing::error!(
-                        "RAW_JSON_RESPONSE Block 50793: from={}, route={:?}, json_len={}, json_preview={}",
+                        "RAW_JSON_RESPONSE Block 50793: from={}, route={:?}, json_len={}, full_json={}",
                         gossip_address,
                         route,
                         text.len(),
-                        if text.len() > 2000 { &text[..2000] } else { &text }
+                        &text
                     );
                 }
                 // === DEBUG LOGGING FOR RAW JSON END ===
@@ -1237,7 +1237,20 @@ impl GossipClient {
 
     fn block(gossip_data: GossipDataV2) -> Result<Arc<IrysBlockHeader>, PeerNetworkError> {
         match gossip_data {
-            GossipDataV2::BlockHeader(block) => Ok(block),
+            GossipDataV2::BlockHeader(block) => {
+                // === DEBUG: Log txIds after extracting BlockHeader ===
+                if block.height == 50793 {
+                    for ledger in &block.data_ledgers {
+                        tracing::error!(
+                            "BLOCK_EXTRACT Block 50793: ledger_id={}, tx_ids_count={}, tx_ids={:?}",
+                            ledger.ledger_id,
+                            ledger.tx_ids.len(),
+                            ledger.tx_ids
+                        );
+                    }
+                }
+                Ok(block)
+            }
             _ => Err(PeerNetworkError::UnexpectedData(format!(
                 "Expected IrysBlockHeader, got {:?}",
                 gossip_data.data_type_and_id()
