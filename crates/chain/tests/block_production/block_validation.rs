@@ -79,7 +79,7 @@ impl PrevalidationTestContext {
 }
 
 fn mock_data_txs(count: usize) -> Vec<DataTransactionHeader> {
-    use irys_types::{IrysTransactionCommon, NodeConfig};
+    use irys_types::{IrysTransactionCommon as _, NodeConfig};
 
     let config = NodeConfig::testing();
     let signer = config.signer();
@@ -96,7 +96,7 @@ fn mock_data_txs(count: usize) -> Vec<DataTransactionHeader> {
 }
 
 fn mock_commitment_txs(count: usize) -> Vec<CommitmentTransaction> {
-    use irys_types::{IrysTransactionCommon, NodeConfig};
+    use irys_types::{IrysTransactionCommon as _, NodeConfig};
 
     let config = NodeConfig::testing();
     let signer = config.signer();

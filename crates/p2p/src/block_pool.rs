@@ -668,7 +668,7 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::ParentIsAPartOfAPrunedFork),
                 )
                 .await;
-            let err = CriticalBlockPoolError::ForkedBlock(block_header.block_hash);
+            let err = CriticalBlockPoolError::ForkedBlock(block.header().block_hash);
             self.sync_state
                 .record_block_processing_error(err.to_string());
             return Err(err.into());
@@ -1221,36 +1221,20 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::{
-        CommitmentTransactionV2, DataTransactionHeader, IrysBlockHeaderV1, SystemLedger,
-    };
+    use irys_types::{DataTransactionHeader, IrysBlockHeaderV1, SystemLedger};
     use std::sync::Arc;
 
     /// Helper to create a test data transaction with proper signature
     fn make_test_data_tx() -> DataTransactionHeader {
-        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
         let config = NodeConfig::testing();
         let signer = config.signer();
         let consensus = config.consensus_config();
 
         // Create transaction and sign it properly
-        let mut tx = DataTransactionHeader::new(&consensus);
+        let tx = DataTransactionHeader::new(&consensus);
         tx.sign(&signer).expect("Failed to sign test transaction")
-    }
-
-    /// Helper to create a test commitment transaction with proper signature
-    fn make_test_commitment_tx() -> irys_types::CommitmentTransaction {
-        use irys_types::{CommitmentTransaction, IrysTransactionCommon, NodeConfig, H256};
-
-        let config = NodeConfig::testing();
-        let signer = config.signer();
-        let consensus = config.consensus_config();
-
-        // Create a commitment transaction and sign it properly
-        let tx = CommitmentTransaction::new_stake(&consensus, H256::zero());
-        tx.sign(&signer)
-            .expect("Failed to sign test commitment transaction")
     }
 
     fn make_sealed_block(
@@ -1284,7 +1268,7 @@ mod tests {
             let tx_ids: H256List = H256List(
                 body.commitment_transactions
                     .iter()
-                    .map(|tx| tx.id())
+                    .map(irys_types::CommitmentTransaction::id)
                     .collect(),
             );
             system_ledgers.push(SystemTransactionLedger {
@@ -1490,7 +1474,7 @@ mod tests {
     #[test]
     fn order_transactions_matching_header_body() {
         use irys_types::{
-            CommitmentTransaction, DataTransactionHeader, IrysTransactionCommon, NodeConfig,
+            CommitmentTransaction, DataTransactionHeader, IrysTransactionCommon as _, NodeConfig,
             SystemTransactionLedger,
         };
 
@@ -1590,7 +1574,7 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_missing_tx() {
-        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
         // Create properly signed transactions
         let config = NodeConfig::testing();
@@ -1669,7 +1653,7 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_wrong_ledger() {
-        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
         // Create properly signed transactions
         let config = NodeConfig::testing();
@@ -1752,7 +1736,7 @@ mod tests {
     #[test]
     fn order_transactions_commitment_mismatch() {
         use irys_types::{
-            CommitmentTransaction, IrysTransactionCommon, NodeConfig, SystemTransactionLedger,
+            CommitmentTransaction, IrysTransactionCommon as _, NodeConfig, SystemTransactionLedger,
         };
 
         // Create properly signed transactions
@@ -1812,7 +1796,7 @@ mod tests {
 
     #[test]
     fn order_transactions_tx_in_both_ledgers() {
-        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon as _, NodeConfig};
 
         // Create properly signed transaction
         let config = NodeConfig::testing();

@@ -11,10 +11,7 @@ use irys_actors::{
     ProductionStrategy,
 };
 use irys_types::IrysAddress;
-use irys_types::{
-    DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
-    U256,
-};
+use irys_types::{DataLedger, DataTransactionHeader, IrysBlockHeader, NodeConfig, H256, U256};
 use std::collections::BTreeMap;
 
 // This test verifies that blocks are rejected when they contain a PermFeeRefund
@@ -78,7 +75,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
     // Create a properly signed data transaction that appears promoted
-    use irys_types::IrysTransactionCommon;
+    use irys_types::IrysTransactionCommon as _;
     let mut data_tx = DataTransactionHeader::new(&genesis_config.consensus_config());
     data_tx.data_root = H256::random();
     data_tx.data_size = 1024;
@@ -92,12 +89,9 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         .expect("Failed to sign transaction");
 
     // Wrap in V1 with promoted metadata
-    let data_tx = if let DataTransactionHeader::V1(mut tx_with_meta) = data_tx {
-        tx_with_meta.metadata = irys_types::DataTransactionMetadata::with_promoted_height(2);
-        DataTransactionHeader::V1(tx_with_meta)
-    } else {
-        panic!("Expected V1 transaction");
-    };
+    let DataTransactionHeader::V1(mut tx_with_meta) = data_tx;
+    tx_with_meta.metadata = irys_types::DataTransactionMetadata::with_promoted_height(2);
+    let data_tx = DataTransactionHeader::V1(tx_with_meta);
 
     // Create an invalid refund for this promoted transaction
     let invalid_refund = (
