@@ -51,6 +51,7 @@ pub trait MempoolFacade: Clone + Send + Sync + 'static {
     async fn migrate_block(
         &self,
         irys_block_header: Arc<IrysBlockHeader>,
+        transactions: Arc<BlockTransactions>,
     ) -> Result<usize, TxIngressError>;
 
     async fn remove_from_blacklist(&self, tx_ids: Vec<H256>) -> eyre::Result<()>;
@@ -276,11 +277,12 @@ impl MempoolFacade for MempoolServiceFacadeImpl {
     async fn migrate_block(
         &self,
         irys_block_header: Arc<IrysBlockHeader>,
+        transactions: Arc<BlockTransactions>,
     ) -> Result<usize, TxIngressError> {
         self.migration_sender
             .send(BlockMigratedEvent {
                 block: irys_block_header,
-                transactions: Arc::new(BlockTransactions::default()),
+                transactions,
             })
             .map_err(|e| TxIngressError::Other(format!("Failed to send BlockMigratedEvent: {}", e)))
     }
