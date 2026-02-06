@@ -134,7 +134,7 @@ where
     pub mempool_guard: MempoolReadGuard,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct CachedBlock {
     pub(crate) block: Arc<SealedBlock>,
     pub(crate) is_processing: bool,
