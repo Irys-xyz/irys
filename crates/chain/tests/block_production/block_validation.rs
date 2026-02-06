@@ -273,7 +273,9 @@ async fn heavy_test_prevalidation_rejects_tampered_vdf_seeds() -> Result<()> {
     tampered_header.vdf_limiter_info.seed.0 = seed_bytes;
 
     // Re-sign the header after tampering
-    ctx.config.signer().sign_block_header(&mut tampered_header)?;
+    ctx.config
+        .signer()
+        .sign_block_header(&mut tampered_header)?;
 
     // Reconstruct SealedBlock with updated body.block_hash
     let mut tampered_body = ctx.block.body().clone();

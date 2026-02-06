@@ -87,7 +87,9 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     data_tx.ledger_id = DataLedger::Submit as u32;
 
     // Sign the transaction
-    data_tx = data_tx.sign(&test_signer).expect("Failed to sign transaction");
+    data_tx = data_tx
+        .sign(&test_signer)
+        .expect("Failed to sign transaction");
 
     // Wrap in V1 with promoted metadata
     let data_tx = if let DataTransactionHeader::V1(mut tx_with_meta) = data_tx {

@@ -1240,7 +1240,8 @@ mod tests {
 
         // Create a commitment transaction and sign it properly
         let tx = CommitmentTransaction::new_stake(&consensus, H256::zero());
-        tx.sign(&signer).expect("Failed to sign test commitment transaction")
+        tx.sign(&signer)
+            .expect("Failed to sign test commitment transaction")
     }
 
     fn make_sealed_block(
@@ -1249,18 +1250,14 @@ mod tests {
         height: u64,
         mut body: BlockBody,
     ) -> Arc<SealedBlock> {
-        use irys_types::{DataTransactionLedger, SystemTransactionLedger, H256List};
+        use irys_types::{DataTransactionLedger, H256List, SystemTransactionLedger};
 
         // Build data_ledgers based on body content
         let mut data_ledgers = vec![];
         if !body.data_transactions.is_empty() {
             // For simplicity, put all data transactions in Submit ledger
-            let tx_ids: H256List = H256List(
-                body.data_transactions
-                    .iter()
-                    .map(|tx| tx.id)
-                    .collect()
-            );
+            let tx_ids: H256List =
+                H256List(body.data_transactions.iter().map(|tx| tx.id).collect());
             data_ledgers.push(DataTransactionLedger {
                 ledger_id: DataLedger::Submit as u32,
                 tx_root: H256::zero(),
@@ -1279,7 +1276,7 @@ mod tests {
                 body.commitment_transactions
                     .iter()
                     .map(|tx| tx.id())
-                    .collect()
+                    .collect(),
             );
             system_ledgers.push(SystemTransactionLedger {
                 ledger_id: SystemLedger::Commitment.into(),
@@ -1484,8 +1481,8 @@ mod tests {
     #[test]
     fn order_transactions_matching_header_body() {
         use irys_types::{
-            CommitmentTransaction, DataTransactionHeader,
-            IrysTransactionCommon, NodeConfig, SystemTransactionLedger,
+            CommitmentTransaction, DataTransactionHeader, IrysTransactionCommon, NodeConfig,
+            SystemTransactionLedger,
         };
 
         // Create properly signed transactions
@@ -1584,9 +1581,7 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_missing_tx() {
-        use irys_types::{
-            DataTransactionHeader, IrysTransactionCommon, NodeConfig,
-        };
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
 
         // Create properly signed transactions
         let config = NodeConfig::testing();
@@ -1665,9 +1660,7 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_wrong_ledger() {
-        use irys_types::{
-            DataTransactionHeader, IrysTransactionCommon, NodeConfig,
-        };
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
 
         // Create properly signed transactions
         let config = NodeConfig::testing();
@@ -1749,7 +1742,9 @@ mod tests {
 
     #[test]
     fn order_transactions_commitment_mismatch() {
-        use irys_types::{CommitmentTransaction, IrysTransactionCommon, NodeConfig, SystemTransactionLedger};
+        use irys_types::{
+            CommitmentTransaction, IrysTransactionCommon, NodeConfig, SystemTransactionLedger,
+        };
 
         // Create properly signed transactions
         let config = NodeConfig::testing();
@@ -1808,9 +1803,7 @@ mod tests {
 
     #[test]
     fn order_transactions_tx_in_both_ledgers() {
-        use irys_types::{
-            DataTransactionHeader, IrysTransactionCommon, NodeConfig,
-        };
+        use irys_types::{DataTransactionHeader, IrysTransactionCommon, NodeConfig};
 
         // Create properly signed transaction
         let config = NodeConfig::testing();
