@@ -700,10 +700,10 @@ mod peer_sync_recovery {
     use std::time::Duration;
 
     use super::*;
-    use irys_database::db::IrysDatabaseExt;
+    use irys_database::db::IrysDatabaseExt as _;
 
     const NUM_BLOCKS_IN_EPOCH: usize = 3;
-    const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 3; // Increased to ensure 2+ epochs migrate
+    const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 3;
     const NUM_EPOCHS_AFTER_ACTIVATION: usize = 3; // 3 epochs after Aurora
     const BLOCK_MIGRATION_DEPTH: usize = 2;
     const SECONDS_TO_WAIT: usize = 30;
@@ -716,14 +716,12 @@ mod peer_sync_recovery {
     async fn heavy_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
         initialize_tracing();
 
-        // === Step 1: Setup Configuration (Aurora disabled initially) ===
+        // Step 1: Setup Configuration (Aurora disabled initially)
         let block_migration_depth = BLOCK_MIGRATION_DEPTH;
         let mut genesis_config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
         genesis_config.consensus.get_mut().chunk_size = 32;
-        genesis_config
-            .consensus
-            .get_mut()
-            .block_migration_depth = block_migration_depth.try_into()?;
+        genesis_config.consensus.get_mut().block_migration_depth =
+            block_migration_depth.try_into()?;
         genesis_config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             aurora: None, // Disabled initially
@@ -734,15 +732,13 @@ mod peer_sync_recovery {
         let signers: [IrysSigner; 19] = create_funded_signers(&mut genesis_config);
         let peer_signer = &signers[18];
 
-        // === Step 2: Start Genesis and Peer ===
+        // Step 2: Start Genesis and Peer
         let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
             .start_and_wait_for_packing("GENESIS", SECONDS_TO_WAIT)
             .await;
 
         let peer_config = genesis_node.testing_peer_with_signer(peer_signer);
-        let peer_node = IrysNodeTest::new(peer_config)
-            .start_with_name("PEER")
-            .await;
+        let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
 
         // Peer stakes and pledges to participate in the network
         let peer_stake = peer_node.post_stake_commitment(None).await?;
@@ -767,7 +763,7 @@ mod peer_sync_recovery {
         let peer_node = peer_node.stop().await;
         info!("Peer has partition assignments and is ready");
 
-        // === Step 3: Mine epochs with V1 Commitments + Data Txs ===
+        // Step 3: Mine epochs with V1 Commitments + Data Txs
         let mut signer_idx = 0;
         for epoch in 0..NUM_EPOCHS_BEFORE_ACTIVATION {
             for block_in_epoch in 0..NUM_BLOCKS_IN_EPOCH {
@@ -798,7 +794,7 @@ mod peer_sync_recovery {
             block_migration_depth
         );
 
-        // === Step 3.5: Wait for Pre-Aurora Block Migration ===
+        // Step 3.5: Wait for Pre-Aurora Block Migration
         // Calculate expected migrated height (current - migration_depth)
         let pre_aurora_migrated_height = pre_activation_height - block_migration_depth as u64;
         info!(
@@ -840,7 +836,7 @@ mod peer_sync_recovery {
             pre_aurora_migrated_height, pre_aurora_tx_count
         );
 
-        // === Step 4: Stop Both Nodes, Activate Aurora, Restart ===
+        // Step 4: Stop Both Nodes, Activate Aurora, Restart
         let stopped_peer = peer_node;
         let stopped_genesis = genesis_node.stop().await;
 
@@ -875,7 +871,7 @@ mod peer_sync_recovery {
 
         info!("Genesis node restarted with Aurora enabled");
 
-        // === Step 5: Mine V2 Commitments + Data Txs after Aurora ===
+        // Step 5: Mine V2 Commitments + Data Txs after Aurora
         // Continue signer index from pre-Aurora
         let mut v2_signer_idx = NUM_EPOCHS_BEFORE_ACTIVATION * NUM_BLOCKS_IN_EPOCH;
         for epoch in 0..NUM_EPOCHS_AFTER_ACTIVATION {
@@ -918,7 +914,7 @@ mod peer_sync_recovery {
             pre_activation_height
         );
 
-        // === Step 5.5: Wait for Post-Aurora Block Migration ===
+        // Step 5.5: Wait for Post-Aurora Block Migration
         let post_aurora_migrated_height = final_height - block_migration_depth as u64;
         info!(
             "Waiting for post-Aurora block index to reach height {} (final={} - depth={})",
@@ -975,7 +971,7 @@ mod peer_sync_recovery {
             pre_aurora_migrated_height
         );
 
-        // === Step 6: Wait for Peer to Sync and Verify ===
+        // Step 6: Wait for Peer to Sync and Verify
         let peer_node = IrysNodeTest {
             node_ctx: (),
             cfg: peer_cfg_aurora,
@@ -1004,7 +1000,7 @@ mod peer_sync_recovery {
             final_height
         );
 
-        // === Step 7: Wait for Peer Block Migration and Validate ===
+        // Step 7: Wait for Peer Block Migration and Validate
         peer_node
             .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
             .await?;
@@ -1036,7 +1032,13 @@ mod peer_sync_recovery {
                         .node_ctx
                         .db
                         .view_eyre(|tx| irys_database::tx_header_by_txid(tx, tx_id))?
-                        .ok_or_else(|| eyre::eyre!("Data tx {} from block {} not found in peer's DB", tx_id, height))?;
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Data tx {} from block {} not found in peer's DB",
+                                tx_id,
+                                height
+                            )
+                        })?;
                     assert_eq!(
                         &tx_header.id, tx_id,
                         "Data tx {} from block {} should be in peer's DB",
@@ -1051,11 +1053,19 @@ mod peer_sync_recovery {
                     .node_ctx
                     .db
                     .view_eyre(|tx| irys_database::commitment_tx_by_txid(tx, &tx_id))?
-                    .ok_or_else(|| eyre::eyre!("Commitment tx {} from block {} not found in peer's DB", tx_id, height))?;
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Commitment tx {} from block {} not found in peer's DB",
+                            tx_id,
+                            height
+                        )
+                    })?;
                 assert_eq!(
-                    commitment_tx.id(), tx_id,
+                    commitment_tx.id(),
+                    tx_id,
                     "Commitment tx {} from block {} should be in peer's DB",
-                    tx_id, height
+                    tx_id,
+                    height
                 );
                 peer_commitment_tx_count += 1;
             }
@@ -1065,7 +1075,7 @@ mod peer_sync_recovery {
             post_aurora_migrated_height, peer_data_tx_count, peer_commitment_tx_count
         );
 
-        // === Step 8: Additional Peer Restart After Sync ===
+        // Step 8: Additional Peer Restart After Sync
         let stopped_peer = peer_node.stop().await;
         info!("Peer stopped for additional restart test");
 
@@ -1085,7 +1095,6 @@ mod peer_sync_recovery {
             .await?;
         info!("Peer synced to height {} after restart", final_height);
 
-        // Cleanup
         peer_node.stop().await;
         genesis_node.stop().await;
         Ok(())

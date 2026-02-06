@@ -838,7 +838,10 @@ impl Inner {
         // stage 1: move commitment transactions from tree to index
         // Use commitment transactions directly from the event
         let commitment_txs = &transactions.commitment_txs;
-        let commitment_tx_ids: Vec<H256> = commitment_txs.iter().map(irys_types::CommitmentTransaction::id).collect();
+        let commitment_tx_ids: Vec<H256> = commitment_txs
+            .iter()
+            .map(irys_types::CommitmentTransaction::id)
+            .collect();
 
         // Remove all commitments from mempool in one batch operation
         self.mempool_state
