@@ -288,6 +288,25 @@ impl BlockDiscoveryServiceInner {
         let new_block_header = block;
         let parent_block_hash = new_block_header.previous_block_hash;
 
+        // === DEBUG LOGGING FOR BLOCK 50793 START ===
+        if new_block_header.height == 50793 {
+            error!(
+                "BLOCK_DISCOVERY Block {}: data_ledgers count={}, publish_ledger tx_ids={}, proofs={}",
+                new_block_header.height,
+                new_block_header.data_ledgers.len(),
+                new_block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .map(|l| l.tx_ids.0.len())
+                    .unwrap_or(0),
+                new_block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .and_then(|l| l.proofs.as_ref())
+                    .map(|p| p.0.len())
+                    .unwrap_or(0)
+            );
+        }
+        // === DEBUG LOGGING FOR BLOCK 50793 END ===
+
         //====================================
         // Block header pre-validation
         //------------------------------------

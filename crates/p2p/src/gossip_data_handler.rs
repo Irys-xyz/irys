@@ -19,7 +19,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
+use irys_types::{BlockBody, Config, DataLedger, IrysAddress, IrysPeerId};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
@@ -464,6 +464,25 @@ where
             block_header.height
         );
 
+        // === DEBUG LOGGING FOR BLOCK 50793 START ===
+        if block_header.height == 50793 {
+            error!(
+                "BLOCK_RECEPTION Block {}: data_ledgers count={}, publish_ledger tx_ids={}, proofs={}",
+                block_header.height,
+                block_header.data_ledgers.len(),
+                block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .map(|l| l.tx_ids.0.len())
+                    .unwrap_or(0),
+                block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .and_then(|l| l.proofs.as_ref())
+                    .map(|p| p.0.len())
+                    .unwrap_or(0)
+            );
+        }
+        // === DEBUG LOGGING FOR BLOCK 50793 END ===
+
         let sync_target = self.sync_state.sync_target_height();
         if self.sync_state.is_syncing() && block_header.height > (sync_target + 1) as u64 {
             debug!(
@@ -674,6 +693,25 @@ where
             );
             return Ok(());
         }
+
+        // === DEBUG LOGGING FOR BLOCK 50793 START ===
+        if block_header.height == 50793 {
+            error!(
+                "BLOCK_BODY_RECEPTION Block {}: header data_ledgers count={}, publish_ledger tx_ids={}, proofs={}",
+                block_header.height,
+                block_header.data_ledgers.len(),
+                block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .map(|l| l.tx_ids.0.len())
+                    .unwrap_or(0),
+                block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .and_then(|l| l.proofs.as_ref())
+                    .map(|p| p.0.len())
+                    .unwrap_or(0)
+            );
+        }
+        // === DEBUG LOGGING FOR BLOCK 50793 END ===
 
         let has_block_already_been_processed = self
             .block_pool

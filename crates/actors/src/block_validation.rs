@@ -1544,30 +1544,32 @@ async fn generate_expected_shadow_transactions(
     let (publish_ledger, _submit_ledger) = extract_data_ledgers(block)?;
 
     // === TREASURY DEBUG LOGGING START ===
-    let publish_txs_for_log = transactions.get_ledger_txs(DataLedger::Publish);
-    tracing::error!(
-        "TREASURY_DEBUG Block {}: publish_ledger from header: tx_ids={:?}, proofs_count={}",
-        block.height,
-        publish_ledger.tx_ids.0.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>(),
-        publish_ledger.proofs.as_ref().map(|p| p.0.len()).unwrap_or(0)
-    );
-    tracing::error!(
-        "TREASURY_DEBUG Block {}: BlockTransactions has {} publish txs",
-        block.height,
-        publish_txs_for_log.len()
-    );
-    for (i, tx) in publish_txs_for_log.iter().enumerate() {
+    if block.height == 50793 {
+        let publish_txs_for_log = transactions.get_ledger_txs(DataLedger::Publish);
         tracing::error!(
-            "TREASURY_DEBUG Block {}: publish_tx[{}] id={:x} perm_fee={:?} term_fee={}",
-            block.height, i, tx.id, tx.perm_fee, tx.term_fee
+            "TREASURY_DEBUG Block {}: publish_ledger from header: tx_ids={:?}, proofs_count={}",
+            block.height,
+            publish_ledger.tx_ids.0.iter().map(|id| format!("{:x}", id)).collect::<Vec<_>>(),
+            publish_ledger.proofs.as_ref().map(|p| p.0.len()).unwrap_or(0)
+        );
+        tracing::error!(
+            "TREASURY_DEBUG Block {}: BlockTransactions has {} publish txs",
+            block.height,
+            publish_txs_for_log.len()
+        );
+        for (i, tx) in publish_txs_for_log.iter().enumerate() {
+            tracing::error!(
+                "TREASURY_DEBUG Block {}: publish_tx[{}] id={:x} perm_fee={:?} term_fee={}",
+                block.height, i, tx.id, tx.perm_fee, tx.term_fee
+            );
+        }
+        tracing::error!(
+            "TREASURY_DEBUG Block {}: prev_treasury={}, block.treasury={}",
+            block.height,
+            prev_block.treasury,
+            block.treasury
         );
     }
-    tracing::error!(
-        "TREASURY_DEBUG Block {}: prev_treasury={}, block.treasury={}",
-        block.height,
-        prev_block.treasury,
-        block.treasury
-    );
     // === TREASURY DEBUG LOGGING END ===
 
     let publish_ledger_with_txs = PublishLedgerWithTxs {

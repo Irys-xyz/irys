@@ -624,6 +624,25 @@ where
         block_body: Arc<BlockBody>,
         skip_validation_for_fast_track: bool,
     ) -> Result<ProcessBlockResult, BlockPoolError> {
+        // === DEBUG LOGGING FOR BLOCK 50793 START ===
+        if block_header.height == 50793 {
+            error!(
+                "BLOCK_POOL Block {}: data_ledgers count={}, publish_ledger tx_ids={}, proofs={}",
+                block_header.height,
+                block_header.data_ledgers.len(),
+                block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .map(|l| l.tx_ids.0.len())
+                    .unwrap_or(0),
+                block_header.data_ledgers.iter()
+                    .find(|l| l.ledger_id == DataLedger::Publish as u32)
+                    .and_then(|l| l.proofs.as_ref())
+                    .map(|p| p.0.len())
+                    .unwrap_or(0)
+            );
+        }
+        // === DEBUG LOGGING FOR BLOCK 50793 END ===
+
         check_block_status(
             &self.block_status_provider,
             block_header.block_hash,

@@ -209,16 +209,18 @@ impl<'a> ShadowTxGenerator<'a> {
         )?;
 
         // === TREASURY DEBUG LOGGING START ===
-        tracing::error!(
-            "TREASURY_DEBUG: Aggregated {} unique IngressProofReward recipients",
-            aggregated_rewards.len()
-        );
-        for (addr, (amount, _)) in &aggregated_rewards {
+        if *block_height == 50793 {
             tracing::error!(
-                "TREASURY_DEBUG: IngressProofReward recipient={:?} amount={}",
-                addr,
-                amount.into_inner()
+                "TREASURY_DEBUG: Aggregated {} unique IngressProofReward recipients",
+                aggregated_rewards.len()
             );
+            for (addr, (amount, _)) in &aggregated_rewards {
+                tracing::error!(
+                    "TREASURY_DEBUG: IngressProofReward recipient={:?} amount={}",
+                    addr,
+                    amount.into_inner()
+                );
+            }
         }
         // === TREASURY DEBUG LOGGING END ===
 
@@ -642,11 +644,13 @@ impl<'a> ShadowTxGenerator<'a> {
                                 eyre!("Treasury balance underflow when paying ingress proof reward")
                             })?;
                         // === TREASURY DEBUG LOGGING START ===
-                        tracing::error!(
-                            "TREASURY_DEBUG: Deducting IngressProofReward={} from treasury, new_balance={}",
-                            deduction,
-                            self.treasury_balance
-                        );
+                        if *self.block_height == 50793 {
+                            tracing::error!(
+                                "TREASURY_DEBUG: Deducting IngressProofReward={} from treasury, new_balance={}",
+                                deduction,
+                                self.treasury_balance
+                            );
+                        }
                         // === TREASURY DEBUG LOGGING END ===
                     }
                     _ => {
