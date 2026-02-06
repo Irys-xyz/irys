@@ -207,6 +207,21 @@ impl<'a> ShadowTxGenerator<'a> {
             config,
             parent_block_timestamp_secs,
         )?;
+
+        // === TREASURY DEBUG LOGGING START ===
+        tracing::error!(
+            "TREASURY_DEBUG: Aggregated {} unique IngressProofReward recipients",
+            aggregated_rewards.len()
+        );
+        for (addr, (amount, _)) in &aggregated_rewards {
+            tracing::error!(
+                "TREASURY_DEBUG: IngressProofReward recipient={:?} amount={}",
+                addr,
+                amount.into_inner()
+            );
+        }
+        // === TREASURY DEBUG LOGGING END ===
+
         let publish_ledger_txs = if !aggregated_rewards.is_empty() {
             generator.create_publish_shadow_txs(aggregated_rewards)?
         } else {
@@ -619,12 +634,20 @@ impl<'a> ShadowTxGenerator<'a> {
                         ..
                     } => {
                         // Deduct ingress proof reward from treasury
+                        let deduction = U256::from(increment.amount);
                         self.treasury_balance = self
                             .treasury_balance
-                            .checked_sub(U256::from(increment.amount))
+                            .checked_sub(deduction)
                             .ok_or_else(|| {
                                 eyre!("Treasury balance underflow when paying ingress proof reward")
                             })?;
+                        // === TREASURY DEBUG LOGGING START ===
+                        tracing::error!(
+                            "TREASURY_DEBUG: Deducting IngressProofReward={} from treasury, new_balance={}",
+                            deduction,
+                            self.treasury_balance
+                        );
+                        // === TREASURY DEBUG LOGGING END ===
                     }
                     _ => {
                         return Err(eyre!(
