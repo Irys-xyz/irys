@@ -808,6 +808,19 @@ impl GossipClient {
                     return Err(GossipError::Network(format!("Empty response from {}", url)));
                 }
 
+                // === DEBUG LOGGING FOR RAW JSON START ===
+                // Check if this is a block header response containing block 50793
+                if text.contains("\"height\":\"50793\"") || text.contains("\"height\": \"50793\"") {
+                    tracing::error!(
+                        "RAW_JSON_RESPONSE Block 50793: from={}, route={:?}, json_len={}, json_preview={}",
+                        gossip_address,
+                        route,
+                        text.len(),
+                        if text.len() > 2000 { &text[..2000] } else { &text }
+                    );
+                }
+                // === DEBUG LOGGING FOR RAW JSON END ===
+
                 let body = serde_json::from_str(&text).map_err(|e| {
                     GossipError::Network(format!(
                         "{}: Failed to parse JSON: {} - Response: {}",
