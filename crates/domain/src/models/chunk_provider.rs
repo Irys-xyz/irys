@@ -126,6 +126,44 @@ impl ChunkProvider {
     }
 }
 
+impl irys_types::chunk_provider::RethChunkProvider for ChunkProvider {
+    fn get_unpacked_chunk_by_ledger_offset(
+        &self,
+        ledger: u32,
+        ledger_offset: u64,
+    ) -> eyre::Result<Option<bytes::Bytes>> {
+        let data_ledger = match ledger {
+            0 => DataLedger::Publish,
+            1 => DataLedger::Submit,
+            _ => return Err(eyre::eyre!("Invalid ledger: {}", ledger)),
+        };
+
+        let packed_chunk =
+            self.get_chunk_by_ledger_offset(data_ledger, LedgerChunkOffset::from(ledger_offset))?;
+
+        let unpacked = packed_chunk.map(|chunk| {
+            let unpacked_chunk = irys_packing::unpack(
+                &chunk,
+                self.config.consensus.entropy_packing_iterations,
+                self.config.consensus.chunk_size as usize,
+                self.config.consensus.chain_id,
+            );
+            bytes::Bytes::from(unpacked_chunk.bytes.0)
+        });
+
+        Ok(unpacked)
+    }
+
+    fn config(&self) -> irys_types::chunk_provider::ChunkConfig {
+        irys_types::chunk_provider::ChunkConfig {
+            num_chunks_in_partition: self.config.consensus.num_chunks_in_partition,
+            chunk_size: self.config.consensus.chunk_size,
+            entropy_packing_iterations: self.config.consensus.entropy_packing_iterations as u8,
+            chain_id: self.config.consensus.chain_id as u16,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, RwLock};

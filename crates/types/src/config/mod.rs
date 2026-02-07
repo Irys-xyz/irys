@@ -545,8 +545,6 @@ mod tests {
         ingress_proof_anchor_expiry_depth = 200
         commitment_fee = 100
 
-
-
         [difficulty_adjustment]
         block_time = 1
         difficulty_adjustment_interval = 1209600000
@@ -575,9 +573,22 @@ mod tests {
         number_of_ingress_proofs_total = 1
         number_of_ingress_proofs_from_assignees = 0
 
+        [hardforks.sprite]
+        activation_timestamp = 0
+        max_pd_chunks_per_block = 7500
+
+        [hardforks.sprite.cost_per_mb]
+        amount = "10000000000000000"
+
+        [hardforks.sprite.base_fee_floor]
+        amount = "10000000000000000"
+
+        [hardforks.sprite.min_pd_transaction_cost]
+        amount = "10000000000000000"
+
         [hardforks.aurora]
         minimum_commitment_tx_version = 2
-        activation_timestamp = "2026-01-15T11:30:00+00:00"
+        activation_timestamp = "1970-01-01T00:00:00+00:00"
         "#;
 
         // Create the expected config
@@ -644,6 +655,7 @@ mod tests {
 
         [packing.local]
         cpu_packing_concurrency = 4
+        cpu_unpacking_concurrency = 4
         gpu_packing_batch_size = 1024
 
         [cache]

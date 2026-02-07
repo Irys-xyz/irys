@@ -100,6 +100,7 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
     config.consensus.get_mut().hardforks = IrysHardforkConfig {
         frontier: default_test_frontier(),
         next_name_tbd: None,
+        sprite: None,
         aurora,
     };
     config
@@ -533,6 +534,7 @@ mod epoch_block_filtering {
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             next_name_tbd: None,
+            sprite: None,
             aurora,
         };
         config
@@ -633,6 +635,7 @@ mod epoch_block_filtering {
         config.consensus.get_mut().hardforks = IrysHardforkConfig {
             frontier: default_test_frontier(),
             next_name_tbd: None,
+            sprite: None,
             aurora: Some(Aurora {
                 activation_timestamp: UnixTimestamp::from_secs(aurora_activation),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
