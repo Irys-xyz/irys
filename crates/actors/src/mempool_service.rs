@@ -526,7 +526,7 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-
+        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -1088,9 +1088,11 @@ impl Inner {
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
+        // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
+        let next_block_height = current_height + 1;
 
         // only max anchor age is constrained for ingress proofs
-        let min_ingress_proof_anchor_height = current_height.saturating_sub(
+        let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
             self.config
                 .consensus
                 .mempool
