@@ -660,9 +660,9 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     //   - valid tx anchors from block tree: 7, 6, 5
     //   - bt_finished_height = 4
     //   - valid ingress anchors from block index: for height in [3, 4) = only 3
-    //   - MISSING: height 4
+    //   - MISSING: height 4 <- this is the bug
     //
-    // An ingress proof at height 4 should fail validation since it's not in the valid set
+    // An ingress proof at height 4 should fail validation since it's not in the valid set - if the bug was still present
 
     let current_height = genesis_node.get_canonical_chain_height().await;
 
