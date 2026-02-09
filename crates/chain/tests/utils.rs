@@ -1254,7 +1254,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         Ok((
             sealed_block.header().clone(),
             eth_payload,
-            sealed_block.transactions().clone(),
+            BlockTransactions::clone(sealed_block.transactions()),
         ))
     }
 
