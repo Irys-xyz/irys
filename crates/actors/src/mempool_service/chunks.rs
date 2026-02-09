@@ -467,10 +467,15 @@ impl Inner {
         // if we have, update it's expiry height
 
         // Determine existing proof state and chunk count
+        let local_address = self.config.irys_signer().address();
         let (chunk_count_opt, existing_local_proof) = self
             .irys_db
             .view_eyre(|tx| {
-                let existing_local_proof: Option<IngressProof> = None;
+                let existing_local_proof = irys_database::ingress_proof_by_data_root_address(
+                    tx,
+                    root_hash,
+                    local_address,
+                )?;
 
                 // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
@@ -488,7 +493,7 @@ impl Inner {
             })?;
 
         // Early return if we have a valid existing local proof
-        if chunk_count_opt.is_none() && existing_local_proof.is_some() {
+        if existing_local_proof.is_some() {
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
                 &root_hash

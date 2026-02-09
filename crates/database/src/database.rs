@@ -457,10 +457,21 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
         ));
     }
 
+    // Delete any existing proof for this signer before inserting.
+    // In DupSort tables, `put` does not upsert by subkey — entries with different
+    // encoded values (e.g. different anchor/signature) coexist under the same key+subkey.
+    // Without this delete, re-anchoring produces duplicate signer entries.
+    let address = signer.address();
+    if let Some(existing) =
+        ingress_proof_by_data_root_address(tx, ingress_proof.data_root, address)?
+    {
+        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
+    }
+
     tx.put::<IngressProofs>(
         ingress_proof.data_root,
         CompactCachedIngressProof(CachedIngressProof {
-            address: signer.address(),
+            address,
             proof: ingress_proof.clone(),
         }),
     )?;
@@ -480,6 +491,13 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
             "Data root {} not found in CachedDataRoots",
             ingress_proof.data_root
         ));
+    }
+
+    // Delete any existing proof for this address before inserting (see store_ingress_proof_checked).
+    if let Some(existing) =
+        ingress_proof_by_data_root_address(tx, ingress_proof.data_root, address)?
+    {
+        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
 
     tx.put::<IngressProofs>(
