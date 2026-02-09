@@ -498,10 +498,6 @@ impl BlockDiscoveryServiceInner {
                     parent_block = previous_block_header; // Move instead of borrow
                 }
             }
-            debug!(
-                "JESSEDEBUG-ANCHOR parent block height {} hash {}",
-                &parent_block.block_hash, &parent_block.height
-            );
             parent_block.height
         };
 
@@ -578,8 +574,8 @@ impl BlockDiscoveryServiceInner {
             // Validate the anchors
             for proof in tx_proofs.iter() {
                 if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
-                    debug!(
-                        "JESSEDEBUG-ANCHOR valid ingress anchor blocks: {:?}, anchor {}, sig {:?}",
+                    info!(
+                        "valid ingress anchor blocks: {:?}, anchor {}, ID {}",
                         &valid_ingress_anchor_blocks,
                         &proof.anchor,
                         &proof.id()
