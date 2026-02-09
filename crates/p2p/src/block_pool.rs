@@ -831,34 +831,39 @@ where
             block_transactions.commitment_txs.len()
         );
 
-        // Insert transactions into mempool so validation service can find them later.
-        for commitment_tx in &block_transactions.commitment_txs {
-            if let Err(err) = self
-                .mempool
-                .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
-                .await
-            {
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
-                        commitment_tx.id(), current_block_hash, err
-                    );
+        // Spawn mempool ingestion in the background - validation no longer needs
+        // transactions to be in the mempool, but the mempool lifecycle still saves them to DB.
+        {
+            let mempool = self.mempool.clone();
+            let block_transactions = Arc::clone(block_transactions);
+            tokio::spawn(async move {
+                for commitment_tx in &block_transactions.commitment_txs {
+                    if let Err(err) = mempool
+                        .handle_commitment_transaction_ingress_gossip(commitment_tx.clone())
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to insert commitment tx {} into mempool for block {:?}: {:?}",
+                                commitment_tx.id(), current_block_hash, err
+                            );
+                        }
+                    }
                 }
-            }
-        }
-        for data_tx in block_transactions.all_data_txs() {
-            if let Err(err) = self
-                .mempool
-                .handle_data_transaction_ingress_gossip(data_tx.clone())
-                .await
-            {
-                if !matches!(err, TxIngressError::Skipped) {
-                    warn!(
-                        "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
-                        data_tx.id, current_block_hash, err
-                    );
+                for data_tx in block_transactions.all_data_txs() {
+                    if let Err(err) = mempool
+                        .handle_data_transaction_ingress_gossip(data_tx.clone())
+                        .await
+                    {
+                        if !matches!(err, TxIngressError::Skipped) {
+                            warn!(
+                                "Block pool: Failed to insert data tx {} into mempool for block {:?}: {:?}",
+                                data_tx.id, current_block_hash, err
+                            );
+                        }
+                    }
                 }
-            }
+            });
         }
 
         if let Err(block_discovery_error) = self
