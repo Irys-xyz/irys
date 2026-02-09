@@ -1011,6 +1011,16 @@ impl IrysNodeTest<IrysNodeCtx> {
             .await
     }
 
+    pub async fn wait_for_ingress_proofs_no_mining_with_proof_count(
+        &self,
+        unconfirmed_promotions: Vec<H256>,
+        seconds: usize,
+        num_proofs: usize
+    ) -> eyre::Result<()> {
+        self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, num_proofs)
+            .await
+    }
+
     pub async fn wait_for_multiple_ingress_proofs_no_mining(
         &self,
         unconfirmed_promotions: Vec<H256>,
