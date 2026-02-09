@@ -526,7 +526,7 @@ async fn heavy_promotion_validates_ingress_proof_anchor_edge_does_promote() -> e
 }
 
 /// Helper function to test ingress proof anchor validation edge cases.
-/// Tests regression for a bug where anchors at (current_height - ingress_proof_anchor_expiry_depth - offset)
+/// Tests regression for a bug where ingress proofs with boundary anchor expiry heights
 /// could have inconsistent behavior between mempool and block validation.
 async fn test_ingress_proof_anchor_edge_case(
     anchor_height_offset: u64,
