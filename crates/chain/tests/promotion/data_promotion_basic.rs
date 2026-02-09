@@ -6,13 +6,13 @@ use alloy_core::primitives::U256;
 use alloy_genesis::GenesisAccount;
 use assert_matches::assert_matches;
 use irys_actors::MempoolServiceMessage;
-use irys_database::db::IrysDatabaseExt;
+use irys_database::db::IrysDatabaseExt as _;
 use irys_testing_utils::initialize_tracing;
 use irys_types::ingress::generate_ingress_proof;
 use irys_types::{irys::IrysSigner, DataTransaction, DataTransactionHeader, LedgerChunkOffset};
 use irys_types::{DataLedger, NodeConfig};
 use std::time::Duration;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 #[test_log::test(tokio::test)]
 async fn heavy_data_promotion_test() -> eyre::Result<()> {
@@ -520,7 +520,6 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // - An ingress proof at H-4 passes mempool (H-4 >= H-5) but should fail block validation
 
     let current_height = genesis_node.get_canonical_chain_height().await;
-    let tx_anchor_expiry = config.consensus_config().mempool.tx_anchor_expiry_depth as u64;
     let ingress_anchor_expiry = config
         .consensus_config()
         .mempool
@@ -529,7 +528,7 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
     // calculate the edge case anchor height: current_height - tx_anchor_expiry_depth
     // when we mine the next block (current_height + 1), this will be at exactly
     // min_tx_anchor_height - 1, which is the missing block in valid_ingress_anchor_blocks
-    let edge_case_anchor_height = current_height - tx_anchor_expiry;
+    let edge_case_anchor_height = current_height - ingress_anchor_expiry;
     let edge_case_block = genesis_node
         .get_block_by_height(edge_case_anchor_height)
         .await?;
@@ -635,7 +634,7 @@ async fn heavy_promotion_validates_ingress_proof_anchor() -> eyre::Result<()> {
                 info!("Tx was promoted")
             } else {
                 info!("tx was NOT promoted");
-                eyre::bail(
+                eyre::bail!(
                     "Expected submit tx {} to be promoted by ingress proof {}",
                     &edge_data_tx.header.id,
                     &edge_case_ingress_proof.id(),

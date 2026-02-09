@@ -20,6 +20,7 @@ use irys_types::{
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
 
 fn insert_block_header_for_gossip_test(
     node: &IrysNodeTest<IrysNodeCtx>,
@@ -663,61 +664,61 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     //
     // An ingress proof at height 4 should fail validation since it's not in the valid set
 
+    let current_height = genesis_node.get_canonical_chain_height().await;
+
+    let tx_anchor_expiry = config.consensus_config().mempool.tx_anchor_expiry_depth as u64;
+    let ingress_anchor_expiry = config
+        .consensus_config()
+        .mempool
+        .ingress_proof_anchor_expiry_depth as u64;
+
+    // The edge case anchor height that should NOT be in valid_ingress_anchor_blocks
+    let edge_case_height = current_height - tx_anchor_expiry;
+    let edge_case_block = genesis_node.get_block_by_height(edge_case_height).await?;
+
+    info!(
+        "expected valid ingress anchors: heights {}, {}, {}, {} - edge case {}",
+        current_height,
+        current_height - 1,
+        current_height - 2,
+        (current_height + 1) - ingress_anchor_expiry,
+        edge_case_height
+    );
+
+    // new txs
+    let fresh_submit_tx = genesis_signer.create_publish_transaction(
+        vec![99; 96],
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let fresh_submit_tx = genesis_signer.sign_transaction(fresh_submit_tx)?;
+
+    let fresh_publish_tx = genesis_signer.create_publish_transaction(
+        vec![88; 96],
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let fresh_publish_tx = genesis_signer.sign_transaction(fresh_publish_tx)?;
+
+    // create an ingress proof anchored at the edge case height
+    let edge_case_ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        fresh_publish_tx.header.data_root,
+        [[88; 32], [88; 32], [88; 32]].iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        edge_case_block.block_hash,
+    )?;
+
+    info!(
+        "created ingress proof ID {} with anchor at height {} (anchor block hash: {})",
+        edge_case_ingress_proof.id(),
+        edge_case_height,
+        edge_case_block.block_hash
+    );
+
     {
-        let current_height = genesis_node.get_canonical_chain_height().await;
-
-        let tx_anchor_expiry = config.consensus_config().mempool.tx_anchor_expiry_depth as u64;
-        let ingress_anchor_expiry = config
-            .consensus_config()
-            .mempool
-            .ingress_proof_anchor_expiry_depth as u64;
-
-        // The edge case anchor height that should NOT be in valid_ingress_anchor_blocks
-        let edge_case_height = current_height - tx_anchor_expiry;
-        let edge_case_block = genesis_node.get_block_by_height(edge_case_height).await?;
-
-        info!(
-            "expected valid ingress anchors: heights {}, {}, {}, {} - edge case {}",
-            current_height,
-            current_height - 1,
-            current_height - 2,
-            (current_height + 1) - ingress_anchor_expiry,
-            edge_case_height
-        );
-
-        // new txs
-        let fresh_submit_tx = genesis_signer.create_publish_transaction(
-            vec![99; 96],
-            genesis_node.get_anchor().await?,
-            price_info.perm_fee.into(),
-            price_info.term_fee.into(),
-        )?;
-        let fresh_submit_tx = genesis_signer.sign_transaction(fresh_submit_tx)?;
-
-        let fresh_publish_tx = genesis_signer.create_publish_transaction(
-            vec![88; 96],
-            genesis_node.get_anchor().await?,
-            price_info.perm_fee.into(),
-            price_info.term_fee.into(),
-        )?;
-        let fresh_publish_tx = genesis_signer.sign_transaction(fresh_publish_tx)?;
-
-        // create an ingress proof anchored at the edge case height
-        let edge_case_ingress_proof = generate_ingress_proof(
-            &genesis_signer,
-            fresh_publish_tx.header.data_root,
-            vec![[88; 32], [88; 32], [88; 32]].iter().copied().map(Ok),
-            config.consensus_config().chain_id,
-            edge_case_block.block_hash,
-        )?;
-
-        info!(
-            "created ingress proof ID {} with anchor at height {} (anchor block hash: {})",
-            edge_case_ingress_proof.id(),
-            edge_case_height,
-            edge_case_block.block_hash
-        );
-
         let mut lck = block_prod_strategy.txs.lock().unwrap();
         // set MempoolTxs
         *lck = MempoolTxs {
@@ -728,7 +729,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
                 proofs: Some(IngressProofsList(vec![edge_case_ingress_proof])),
             },
         };
-    };
+    }
 
     genesis_node.gossip_disable();
     let (block, _, transactions, _) = block_prod_strategy
@@ -756,13 +757,13 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         })
     ) {
         info!("bug detected! this is now a regression test, panicking");
-        eyre::bail!("REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {}", &edge_case_height, &preval_res );
+        eyre::bail!("REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {:?}", &edge_case_height, &preval_res );
     } else if preval_res.is_ok() {
         info!("block validation succeeded with edge case anchor");
     } else {
         warn!("got a different error than expected: {:?}", preval_res);
         eyre::bail!(
-            "unexpected error, expected BlockDiscoveryError::InvalidAnchor, got {}",
+            "unexpected error, expected BlockDiscoveryError::InvalidAnchor, got {:?}",
             &preval_res
         );
     }
