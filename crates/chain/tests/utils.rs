@@ -1015,7 +1015,7 @@ impl IrysNodeTest<IrysNodeCtx> {
         &self,
         unconfirmed_promotions: Vec<H256>,
         seconds: usize,
-        num_proofs: usize
+        num_proofs: usize,
     ) -> eyre::Result<()> {
         self.wait_for_ingress_proofs_inner(unconfirmed_promotions, seconds, false, num_proofs)
             .await

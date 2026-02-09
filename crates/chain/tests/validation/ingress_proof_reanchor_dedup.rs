@@ -82,7 +82,7 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
     ];
 
     for (block, eth_block, block_txs) in order.iter() {
-        // sync peer node up to date with genesis, this cuases ingress proof reanchroing
+        // sync peer node up to date with genesis, this causes ingress proof reanchroing
         peer_node
             .node_ctx
             .block_pool
@@ -94,19 +94,24 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
 
     // Peer mines a block with the genesis ingerss proof present in its db
     peer_node.gossip_enable();
-    genesis_node.wait_for_block(&order[5].0.block_hash, 10).await?;
+    genesis_node
+        .wait_for_block(&order[5].0.block_hash, 10)
+        .await?;
     genesis_node.post_chunk_32b(&data_tx, 0, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
-    peer_node.wait_for_ingress_proofs_no_mining_with_proof_count(vec![data_tx.header.id], 10, 2).await?;
+    peer_node
+        .wait_for_ingress_proofs_no_mining_with_proof_count(vec![data_tx.header.id], 10, 2)
+        .await?;
     let peer_block = peer_node.mine_block().await?;
 
-    // Assert the peer's block does not contains any proofs becuase it only has 2/3 ingress proofs
+    // Assert the peer's block does not contains any proofs because it only has 2/3 ingress proofs
     let peer_publish_ledger = &peer_block.data_ledgers[DataLedger::Publish];
-    let peer_proofs = peer_publish_ledger
-        .proofs
-        .as_ref();
-    assert!(peer_proofs.is_none(), "Peer block should not have any proofs becuase required proof count is 3");
+    let peer_proofs = peer_publish_ledger.proofs.as_ref();
+    assert!(
+        peer_proofs.is_none(),
+        "Peer block should not have any proofs because required proof count is 3"
+    );
 
     // Cleanup
     peer_node.stop().await;
