@@ -192,6 +192,7 @@ pub struct HandshakeRequestV2 {
     pub address: PeerAddress,
     pub timestamp: u64,
     pub user_agent: Option<String>,
+    pub consensus_config_hash: H256,
     pub signature: IrysSignature,
 }
 
@@ -230,6 +231,7 @@ impl Default for HandshakeRequestV2 {
             chain_id: 0,
             address: PeerAddress::default(),
             user_agent: None,
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         }
     }
@@ -277,7 +279,8 @@ impl HandshakeRequestV2 {
             + self
                 .user_agent
                 .as_ref()
-                .map_or(1, alloy_rlp::Encodable::length); // empty string for None
+                .map_or(1, alloy_rlp::Encodable::length) // empty string for None
+            + self.consensus_config_hash.length();
 
         alloy_rlp::Header {
             list: true,
@@ -296,6 +299,7 @@ impl HandshakeRequestV2 {
         } else {
             "".encode(out);
         }
+        self.consensus_config_hash.encode(out);
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
@@ -397,6 +401,8 @@ pub struct HandshakeResponse {
     pub peers: Vec<PeerAddress>,
     pub timestamp: u64,
     pub message: Option<String>,
+    #[serde(default)]
+    pub consensus_config_hash: H256,
 }
 
 impl Default for HandshakeResponse {
@@ -410,6 +416,7 @@ impl Default for HandshakeResponse {
                 .unwrap_or_default()
                 .as_millis() as u64,
             message: None,
+            consensus_config_hash: H256::zero(),
         }
     }
 }
@@ -739,6 +746,7 @@ mod tests {
             address: crate::PeerAddress::default(),
             timestamp: 1234567890,
             user_agent: Some("test-agent".to_string()),
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         };
 
@@ -765,7 +773,8 @@ mod tests {
             + handshake
                 .user_agent
                 .as_ref()
-                .map_or(1, alloy_rlp::Encodable::length);
+                .map_or(1, alloy_rlp::Encodable::length)
+            + handshake.consensus_config_hash.length();
 
         assert_eq!(
             calculated_length, header.payload_length,
@@ -863,6 +872,7 @@ mod tests {
             address: crate::PeerAddress::default(),
             timestamp: 1000000000,
             user_agent: Some("stable-test".to_string()),
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         };
 
@@ -896,6 +906,7 @@ mod tests {
             address: crate::PeerAddress::default(),
             timestamp: 1000,
             user_agent: Some("test".to_string()),
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         };
 
@@ -929,6 +940,26 @@ mod tests {
         assert!(
             encoded.contains(&0x64),
             "Encoded data should contain chain_id byte"
+        );
+    }
+
+    #[test]
+    fn test_v2_signature_includes_consensus_hash() {
+        let req_a = HandshakeRequestV2 {
+            consensus_config_hash: H256::from([0xAA; 32]),
+            ..HandshakeRequestV2::default()
+        };
+        let mut req_b = HandshakeRequestV2 {
+            consensus_config_hash: H256::from([0xBB; 32]),
+            ..HandshakeRequestV2::default()
+        };
+        // Force identical timestamps so only the hash field differs
+        req_b.timestamp = req_a.timestamp;
+
+        assert_ne!(
+            req_a.signature_hash(),
+            req_b.signature_hash(),
+            "different consensus_config_hash values should produce different signature hashes"
         );
     }
 }

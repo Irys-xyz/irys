@@ -163,6 +163,7 @@ impl PeerNetworkServiceState {
             peer_id,
             protocol_version: ProtocolVersion::V2,
             user_agent: Some(build_user_agent("Irys-Node", env!("CARGO_PKG_VERSION"))),
+            consensus_config_hash: self.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
         self.config
@@ -1017,6 +1018,15 @@ impl PeerNetworkService {
 
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
+                // Check for consensus config mismatch
+                let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
+                if accepted_peers.consensus_config_hash != our_hash {
+                    error!(
+                        "Consensus config mismatch with peer at {}! ours={} theirs={}",
+                        gossip_address, our_hash, accepted_peers.consensus_config_hash,
+                    );
+                }
+
                 if is_trusted_peer && peer_filter_mode == PeerFilterMode::TrustedAndHandshake {
                     let peer_addresses: Vec<SocketAddr> =
                         accepted_peers.peers.iter().map(|p| p.api).collect();

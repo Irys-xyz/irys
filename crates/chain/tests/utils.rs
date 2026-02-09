@@ -2400,6 +2400,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
             peer_id: self.node_ctx.config.peer_id(),
+            consensus_config_hash: self.node_ctx.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
         self.node_ctx

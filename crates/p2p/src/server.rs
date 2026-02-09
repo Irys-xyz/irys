@@ -1105,6 +1105,7 @@ where
                 .unwrap_or_default()
                 .as_millis() as u64,
             message: Some(format!("Welcome to the network {node_name}")),
+            ..HandshakeResponse::default()
         };
 
         HttpResponse::Ok()
@@ -1163,6 +1164,18 @@ where
             version_request.mining_address
         );
 
+        let our_consensus_hash = server.data_handler.config.consensus.keccak256_hash();
+        if version_request.consensus_config_hash != our_consensus_hash {
+            error!(
+                "Consensus config mismatch with peer! ours={} theirs={} peer_addr={} mining_address={} peer_id={}",
+                our_consensus_hash,
+                version_request.consensus_config_hash,
+                source_addr,
+                version_request.mining_address,
+                version_request.peer_id,
+            );
+        }
+
         let mut peers = server.peer_list.all_known_peers();
         peers.shuffle(&mut rand::thread_rng());
         let cap = server
@@ -1220,6 +1233,7 @@ where
                 .unwrap_or_default()
                 .as_millis() as u64,
             message: Some(format!("Welcome to the network {node_name}")),
+            consensus_config_hash: our_consensus_hash,
         };
 
         HttpResponse::Ok()

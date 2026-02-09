@@ -26,7 +26,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// Defines the core parameters that govern the Irys network consensus rules.
 /// These parameters determine how the network operates, including pricing,
 /// storage requirements, and data validation mechanisms.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
@@ -226,7 +226,7 @@ impl ConsensusOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
     #[serde(
@@ -269,7 +269,25 @@ impl IrysRethConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Hash is manually implemented because GenesisAccount doesn't derive Hash.
+// We hash each field explicitly to avoid relying on any serialization format.
+impl std::hash::Hash for IrysRethConfig {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.gas_limit.hash(state);
+        self.alloc.len().hash(state);
+        // BTreeMap iterates in deterministic (sorted) order
+        for (addr, account) in &self.alloc {
+            addr.hash(state);
+            account.nonce.hash(state);
+            account.balance.hash(state);
+            account.code.hash(state);
+            account.storage.hash(state);
+            account.private_key.hash(state);
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenesisConfig {
     /// The timestamp in milliseconds used for the genesis block
@@ -309,7 +327,7 @@ pub struct GenesisConfig {
 /// # Epoch Configuration
 ///
 /// Controls the timing and parameters for network epochs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
@@ -329,7 +347,7 @@ pub struct EpochConfig {
 /// # EMA (Exponential Moving Average) Configuration
 ///
 /// Controls how token prices are smoothed over time to reduce volatility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaConfig {
     /// Number of blocks between EMA price recalculations
@@ -340,7 +358,7 @@ pub struct EmaConfig {
 /// # VDF (Verifiable Delay Function) Configuration
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VdfConsensusConfig {
     /// VDF reset frequency in global steps
@@ -366,7 +384,7 @@ pub struct VdfConsensusConfig {
 /// # Difficulty Adjustment Configuration
 ///
 /// Controls how mining difficulty changes over time to maintain target block times.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DifficultyAdjustmentConfig {
     /// Target time between blocks in seconds
@@ -385,7 +403,7 @@ pub struct DifficultyAdjustmentConfig {
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MempoolConsensusConfig {
     /// Maximum number of data transactions that can be included in a single block
@@ -406,7 +424,41 @@ pub struct MempoolConsensusConfig {
     pub commitment_fee: u64,
 }
 
+/// A `std::hash::Hasher` that buffers all writes and produces a Keccak256 digest.
+struct Keccak256Hasher {
+    buf: Vec<u8>,
+}
+
+impl Keccak256Hasher {
+    fn new() -> Self {
+        Self { buf: Vec::new() }
+    }
+
+    fn finalize(self) -> H256 {
+        H256(alloy_primitives::keccak256(&self.buf).0)
+    }
+}
+
+impl std::hash::Hasher for Keccak256Hasher {
+    fn write(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
+    fn finish(&self) -> u64 {
+        // Not used — we call finalize() instead
+        unimplemented!("use Keccak256Hasher::finalize() instead")
+    }
+}
+
 impl ConsensusConfig {
+    /// Produce a deterministic Keccak256 hash of this consensus config.
+    pub fn keccak256_hash(&self) -> H256 {
+        use std::hash::Hash;
+        let mut hasher = Keccak256Hasher::new();
+        self.hash(&mut hasher);
+        hasher.finalize()
+    }
+
     // This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
     // TODO: get rid of this hardcoded variable? Otherwise altering the `chunk_size` in the configs may have
     // discrepancies when using GPU mining
@@ -828,5 +880,31 @@ impl ConsensusConfig {
                 next_name_tbd: None,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_consensus_hash_deterministic() {
+        let config = ConsensusConfig::testing();
+        let hash1 = config.keccak256_hash();
+        let hash2 = config.keccak256_hash();
+        assert_eq!(hash1, hash2, "same config should hash to the same value");
+        assert_ne!(hash1, H256::zero(), "hash should not be zero");
+    }
+
+    #[test]
+    fn test_consensus_hash_differs_on_change() {
+        let config_a = ConsensusConfig::testing();
+        let mut config_b = ConsensusConfig::testing();
+        config_b.chunk_size += 1;
+        assert_ne!(
+            config_a.keccak256_hash(),
+            config_b.keccak256_hash(),
+            "configs differing by one field should produce different hashes"
+        );
     }
 }
