@@ -26,13 +26,6 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// Defines the core parameters that govern the Irys network consensus rules.
 /// These parameters determine how the network operates, including pricing,
 /// storage requirements, and data validation mechanisms.
-///
-/// ## Hash Stability Note
-///
-/// The `Hash` implementation relies on the stability of `Hash` implementations
-/// from dependency types (Decimal, U256, Address, etc.). For deterministic
-/// consensus hash results across the network, nodes should use matching Rust
-/// compiler versions and dependency versions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
