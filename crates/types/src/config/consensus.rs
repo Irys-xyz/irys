@@ -33,7 +33,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// from dependency types (Decimal, U256, Address, etc.). For deterministic
 /// consensus hash results across the network, nodes should use matching Rust
 /// compiler versions and dependency versions.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
     /// Unique identifier for the blockchain network
@@ -273,24 +273,6 @@ impl IrysRethConfig {
         accounts: impl IntoIterator<Item = (Address, GenesisAccount)>,
     ) {
         self.alloc.extend(accounts);
-    }
-}
-
-// Hash is manually implemented because GenesisAccount doesn't derive Hash.
-// We hash each field explicitly to avoid relying on any serialization format.
-impl std::hash::Hash for IrysRethConfig {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.gas_limit.hash(state);
-        self.alloc.len().hash(state);
-        // BTreeMap iterates in deterministic (sorted) order
-        for (addr, account) in &self.alloc {
-            addr.hash(state);
-            account.nonce.hash(state);
-            account.balance.hash(state);
-            account.code.hash(state);
-            account.storage.hash(state);
-            account.private_key.hash(state);
-        }
     }
 }
 
