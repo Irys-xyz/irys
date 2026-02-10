@@ -843,19 +843,19 @@ impl Inner {
             .map(irys_types::CommitmentTransaction::id)
             .collect();
 
-        // Remove all commitments from mempool in one batch operation
-        self.mempool_state
-            .remove_commitment_txs(commitment_txs.iter().map(CommitmentTransaction::id))
-            .await;
-
         // stage 1: insert commitment transactions into database
+        // Persist to DB before removing from mempool so txs aren't lost if the DB write fails
         self.irys_db.update_eyre(|tx| {
             for commitment_tx in commitment_txs {
-                // Insert the commitment transaction in to the db, perform migration
                 insert_commitment_tx(tx, commitment_tx)?;
             }
             Ok(())
         })?;
+
+        // Remove all commitments from mempool only after successful DB persist
+        self.mempool_state
+            .remove_commitment_txs(commitment_txs.iter().map(CommitmentTransaction::id))
+            .await;
 
         // stage 2: move submit transactions from tree to index
         // Use submit transactions directly from the event
@@ -868,12 +868,7 @@ impl Inner {
         {
             self.irys_db.update_eyre(|tx| {
                 for header in &submit_txs {
-                    if let Err(err) = insert_tx_header(tx, header) {
-                        error!(
-                            "Could not insert transaction header - txid: {} err: {}",
-                            header.id, err
-                        );
-                    }
+                    insert_tx_header(tx, header)?;
                 }
                 Ok(())
             })?;
@@ -895,12 +890,7 @@ impl Inner {
                         header.metadata_mut().promoted_height = Some(event.block.height);
                     }
 
-                    if let Err(err) = insert_tx_header(mut_tx, &header) {
-                        error!(
-                            "Could not insert transaction header - txid: {} err: {}",
-                            header.id, err
-                        );
-                    }
+                    insert_tx_header(mut_tx, &header)?;
                 }
                 Ok(())
             })?;
