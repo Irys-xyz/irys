@@ -810,9 +810,22 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
                     }
                     Err(_) => {
                         warn!(
-                            "Sync task: Timeout on attempt {} waiting for queue slot",
-                            attempt
+                            "Sync task: Timeout on attempt {} waiting for queue slot. Queue depth: {} (target: {}, processed: {}), trusted_sync: {}",
+                            attempt,
+                            sync_state.sync_target_height().saturating_sub(sync_state.highest_processed_block()),
+                            sync_state.sync_target_height(),
+                            sync_state.highest_processed_block(),
+                            sync_state.is_trusted_sync()
                         );
+
+                        if attempt == retry_attempts {
+                            // Last attempt failed, print full diagnostics
+                            warn!(
+                                "Sync task: All {} attempts failed. Diagnostic info:\n{}",
+                                retry_attempts,
+                                sync_state.get_diagnostic_summary()
+                            );
+                        }
 
                         if attempt < retry_attempts {
                             // Try to request the block at height = last synced + 1 to trigger processing
