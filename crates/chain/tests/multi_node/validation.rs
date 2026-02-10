@@ -20,6 +20,7 @@ use irys_types::{
 use reth::payload::EthBuiltPayload;
 use reth_db::transaction::DbTxMut as _;
 use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
 
 fn insert_block_header_for_gossip_test(
     node: &IrysNodeTest<IrysNodeCtx>,
@@ -571,8 +572,6 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
-    // dbg!(&preval_res);
-
     assert!(matches!(
         preval_res,
         Err(BlockDiscoveryError::InvalidAnchor {
@@ -603,8 +602,6 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .block_discovery
         .handle_block(Arc::clone(&block), transactions, false)
         .await;
-
-    // dbg!(&preval_res);
 
     assert!(matches!(
         preval_res,
@@ -640,19 +637,139 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .handle_block(Arc::clone(&block), transactions, false)
         .await;
 
-    // dbg!(&preval_res);
-
     assert!(matches!(
         preval_res,
         Err(BlockDiscoveryError::InvalidAnchor {
             item_type: AnchorItemType::IngressProof {
-                promotion_target_id: _
+                promotion_target_id: _,
+                id: _
             },
             anchor: _
         })
     ));
 
-    // Wind down test
+    // 4.) edge case: ingress proof anchored at min_tx_anchor_height - 1
+    // this regression tests for a bug where an anchor at exactly (current_height - tx_anchor_expiry_depth)
+    // fails validation because the logic used to collect the set of valid anchor block hashes is exclusive instead of inclusive.
+
+    // Setup:
+    // - current_height: obtained from genesis_node.get_canonical_chain_height()
+    // - When validating a block at height (current_height + 1):
+    //   - min_tx_anchor_height = (current_height + 1) - tx_anchor_expiry
+    //   - min_ingress_proof_anchor_height = (current_height + 1) - ingress_anchor_expiry
+    //   - valid tx anchors from block tree: current_height down to min_tx_anchor_height (inclusive)
+    //   - bt_finished_height = min_tx_anchor_height - 1
+    //   - valid ingress anchors from block index: for height in [min_ingress_proof_anchor_height, bt_finished_height)
+    //   - MISSING: bt_finished_height itself <- this is the bug
+    //   - edge_case_height = current_height - tx_anchor_expiry (which equals min_tx_anchor_height)
+    //
+    // An ingress proof anchored at edge_case_height used to fail validation due to exclusive range logic.
+    // After the fix, the range is inclusive, so edge_case_height must be valid.
+
+    let current_height = genesis_node.get_canonical_chain_height().await;
+
+    let tx_anchor_expiry = config.consensus_config().mempool.tx_anchor_expiry_depth as u64;
+    let ingress_anchor_expiry = config
+        .consensus_config()
+        .mempool
+        .ingress_proof_anchor_expiry_depth as u64;
+
+    // Edge-case anchor height that used to be excluded; after the inclusive fix it must be valid.
+    let edge_case_height = current_height - tx_anchor_expiry;
+    let edge_case_block = genesis_node.get_block_by_height(edge_case_height).await?;
+
+    info!(
+        "expected valid ingress anchors: heights {}, {}, {}, {} - edge case {}",
+        current_height,
+        current_height - 1,
+        current_height - 2,
+        (current_height + 1) - ingress_anchor_expiry,
+        edge_case_height
+    );
+
+    // new txs
+    let fresh_submit_tx = genesis_signer.create_publish_transaction(
+        vec![99; 96],
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let fresh_submit_tx = genesis_signer.sign_transaction(fresh_submit_tx)?;
+
+    let fresh_publish_tx = genesis_signer.create_publish_transaction(
+        vec![88; 96],
+        genesis_node.get_anchor().await?,
+        price_info.perm_fee.into(),
+        price_info.term_fee.into(),
+    )?;
+    let fresh_publish_tx = genesis_signer.sign_transaction(fresh_publish_tx)?;
+
+    // create an ingress proof anchored at the edge case height
+    let edge_case_ingress_proof = generate_ingress_proof(
+        &genesis_signer,
+        fresh_publish_tx.header.data_root,
+        [[88; 32], [88; 32], [88; 32]].iter().copied().map(Ok),
+        config.consensus_config().chain_id,
+        edge_case_block.block_hash,
+    )?;
+
+    info!(
+        "created ingress proof ID {} with anchor at height {} (anchor block hash: {})",
+        edge_case_ingress_proof.id(),
+        edge_case_height,
+        edge_case_block.block_hash
+    );
+
+    {
+        let mut lck = block_prod_strategy.txs.lock().unwrap();
+        // set MempoolTxs
+        *lck = MempoolTxs {
+            commitment_tx: vec![],
+            submit_tx: vec![fresh_submit_tx.header.clone()], // Include submit to trigger first loop
+            publish_tx: PublishLedgerWithTxs {
+                txs: vec![fresh_publish_tx.header.clone()],
+                proofs: Some(IngressProofsList(vec![edge_case_ingress_proof])),
+            },
+        };
+    }
+
+    genesis_node.gossip_disable();
+    let (block, _, transactions, _) = block_prod_strategy
+        .fully_produce_new_block_candidate(solution_context(&genesis_node.node_ctx).await?)
+        .await?
+        .unwrap();
+
+    let preval_res = block_prod_strategy
+        .inner()
+        .block_discovery
+        .handle_block(Arc::clone(&block), transactions, false)
+        .await;
+
+    debug!("validation result: {:?}", preval_res);
+
+    // the bug would manifest as an InvalidAnchor error here
+    if matches!(
+        preval_res,
+        Err(BlockDiscoveryError::InvalidAnchor {
+            item_type: AnchorItemType::IngressProof {
+                promotion_target_id: _,
+                id: _
+            },
+            anchor: _
+        })
+    ) {
+        info!("bug detected! this is now a regression test, panicking");
+        eyre::bail!("REGRESSION: An ingress proof with a valid anchor is now causing block production to fail. edge case height: {}, block production result: {:?}", &edge_case_height, &preval_res );
+    } else if preval_res.is_ok() {
+        info!("block validation succeeded with edge case anchor");
+    } else {
+        warn!("got a different error than expected: {:?}", preval_res);
+        eyre::bail!(
+            "unexpected error, expected BlockDiscoveryError::InvalidAnchor, got {:?}",
+            &preval_res
+        );
+    }
+
     genesis_node.stop().await;
 
     Ok(())
