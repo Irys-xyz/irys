@@ -3,11 +3,16 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 
 const MAX_LAST_BLOCK_VALIDATION_ERRORS: usize = 10;
+
+/// Time-to-live for active validation entries. If a validation task panics and never
+/// sends BlockValidationFinished, entries older than this TTL will be treated as stale
+/// and ignored when querying active validations. Default: 10 minutes.
+const ACTIVE_VALIDATION_TTL_SECS: u64 = 600;
 
 /// Error type for waiting for an empty queue slot with validation awareness
 #[derive(Debug, Clone)]
@@ -71,26 +76,171 @@ impl SyncDiagnosticInfo {
     pub fn record_validation_started(&mut self, block_hash: BlockHash) {
         let now = SystemTime::now();
         self.active_validations.insert(block_hash, now);
+        // Clean up stale entries when adding new ones
+        self.cleanup_stale_validations();
     }
 
     /// Record that a block validation has finished (success or failure)
     pub fn record_validation_finished(&mut self, block_hash: &BlockHash) {
         self.active_validations.remove(block_hash);
+        // Clean up stale entries when removing finished ones
+        self.cleanup_stale_validations();
     }
 
-    /// Get the number of currently active validations
+    /// Remove validation entries older than ACTIVE_VALIDATION_TTL_SECS.
+    /// This prevents panicked validation tasks from causing indefinite waits.
+    fn cleanup_stale_validations(&mut self) {
+        let now = SystemTime::now();
+        let ttl = Duration::from_secs(ACTIVE_VALIDATION_TTL_SECS);
+        let mut stale_count = 0;
+
+        self.active_validations.retain(|block_hash, start_time| {
+            match now.duration_since(*start_time) {
+                Ok(elapsed) => {
+                    if elapsed >= ttl {
+                        stale_count += 1;
+                        error!(
+                            "⚠️  STALE VALIDATION DETECTED: Block {:?} has been in active_validations for {:.1} minutes (TTL: {} seconds). \
+                             This indicates a validation task may have panicked or failed to call record_validation_finished!",
+                            block_hash,
+                            elapsed.as_secs_f64() / 60.0,
+                            ACTIVE_VALIDATION_TTL_SECS
+                        );
+                        false // Remove stale entry
+                    } else {
+                        true // Keep fresh entry
+                    }
+                }
+                Err(_) => {
+                    // SystemTime went backwards (clock adjustment), keep the entry
+                    warn!(
+                        "SystemTime went backwards while checking validation staleness for block {:?}, keeping entry",
+                        block_hash
+                    );
+                    true
+                }
+            }
+        });
+
+        if stale_count > 0 {
+            error!(
+                "⚠️  REMOVED {} STALE VALIDATION(S) - This should not happen under normal operation! \
+                 Investigation recommended: validation tasks may be panicking or hanging.",
+                stale_count
+            );
+        }
+    }
+
+    /// Check if an active validation entry is still valid (not stale)
+    fn is_validation_fresh(start_time: &SystemTime) -> bool {
+        let now = SystemTime::now();
+        let ttl = Duration::from_secs(ACTIVE_VALIDATION_TTL_SECS);
+
+        match now.duration_since(*start_time) {
+            Ok(elapsed) => elapsed < ttl,
+            Err(_) => {
+                // SystemTime went backwards (clock adjustment), treat as fresh
+                true
+            }
+        }
+    }
+
+    /// Get the number of currently active validations (excluding stale entries)
     pub fn active_validations_count(&self) -> usize {
-        self.active_validations.len()
+        let total = self.active_validations.len();
+        let fresh_count = self
+            .active_validations
+            .iter()
+            .filter(|(block_hash, start_time)| {
+                let is_fresh = Self::is_validation_fresh(start_time);
+                if !is_fresh {
+                    let now = SystemTime::now();
+                    if let Ok(elapsed) = now.duration_since(**start_time) {
+                        error!(
+                            "⚠️  STALE VALIDATION in active_validations_count: Block {:?} age: {:.1} minutes",
+                            block_hash,
+                            elapsed.as_secs_f64() / 60.0
+                        );
+                    }
+                }
+                is_fresh
+            })
+            .count();
+
+        if fresh_count < total {
+            error!(
+                "⚠️  Found {} stale validation(s) out of {} total. This indicates panicked validation tasks!",
+                total - fresh_count,
+                total
+            );
+        }
+
+        fresh_count
     }
 
-    /// Check if there are any active validations
+    /// Check if there are any active validations (excluding stale entries)
     pub fn has_active_validations(&self) -> bool {
-        !self.active_validations.is_empty()
+        let total = self.active_validations.len();
+        let has_fresh = self
+            .active_validations
+            .iter()
+            .any(|(block_hash, start_time)| {
+                let is_fresh = Self::is_validation_fresh(start_time);
+                if !is_fresh {
+                    let now = SystemTime::now();
+                    if let Ok(elapsed) = now.duration_since(*start_time) {
+                        error!(
+                            "⚠️  STALE VALIDATION in has_active_validations: Block {:?} age: {:.1} minutes",
+                            block_hash,
+                            elapsed.as_secs_f64() / 60.0
+                        );
+                    }
+                }
+                is_fresh
+            });
+
+        if total > 0 && !has_fresh {
+            error!(
+                "⚠️  All {} validation(s) in active_validations are STALE! This indicates validation tasks panicked!",
+                total
+            );
+        }
+
+        has_fresh
     }
 
-    /// Get all active validations with their start times
-    pub fn get_active_validations(&self) -> &HashMap<BlockHash, SystemTime> {
-        &self.active_validations
+    /// Get all active validations with their start times (excluding stale entries)
+    pub fn get_active_validations(&self) -> HashMap<BlockHash, SystemTime> {
+        let total = self.active_validations.len();
+        let fresh: HashMap<BlockHash, SystemTime> = self
+            .active_validations
+            .iter()
+            .filter(|(block_hash, start_time)| {
+                let is_fresh = Self::is_validation_fresh(start_time);
+                if !is_fresh {
+                    let now = SystemTime::now();
+                    if let Ok(elapsed) = now.duration_since(**start_time) {
+                        error!(
+                            "⚠️  STALE VALIDATION in get_active_validations: Block {:?} age: {:.1} minutes",
+                            block_hash,
+                            elapsed.as_secs_f64() / 60.0
+                        );
+                    }
+                }
+                is_fresh
+            })
+            .map(|(k, v)| (*k, *v))
+            .collect();
+
+        if fresh.len() < total {
+            error!(
+                "⚠️  Filtered out {} stale validation(s) out of {} total in get_active_validations",
+                total - fresh.len(),
+                total
+            );
+        }
+
+        fresh
     }
 
     pub fn record_block_validation_error(&mut self, error: String) {
@@ -657,8 +807,13 @@ impl ChainSyncState {
         diagnostic.has_active_validations()
     }
 
-    /// Atomically check if the queue is full AND there are no active validations.
-    /// This avoids TOCTOU issues when checking both conditions separately.
+    /// Check if the queue is full AND there are no active validations.
+    ///
+    /// This reads diagnostic_info under a read lock to check active validations,
+    /// which reduces the TOCTOU window compared to separate calls. However, it's
+    /// not truly atomic because is_queue_full() reads AtomicUsize fields
+    /// (sync_target_height, highest_processed_block) outside the lock, so a race
+    /// is still possible.
     pub fn queue_full_with_no_active_validations(&self) -> bool {
         let diagnostic = self.diagnostic_info.read().unwrap();
         self.is_queue_full() && !diagnostic.has_active_validations()
