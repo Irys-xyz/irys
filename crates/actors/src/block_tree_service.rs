@@ -553,8 +553,7 @@ impl BlockTreeServiceInner {
             }
 
             // Record validation started for diagnostics
-            self.chain_sync_state
-                .record_validation_started(*block_hash);
+            self.chain_sync_state.record_validation_started(*block_hash);
 
             self.service_senders
                 .validation_service

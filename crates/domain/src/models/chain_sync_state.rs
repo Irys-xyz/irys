@@ -13,16 +13,13 @@ const MAX_LAST_BLOCK_VALIDATION_ERRORS: usize = 10;
 #[derive(Debug, Clone)]
 pub enum WaitForQueueSlotError {
     /// All retry attempts were exhausted with no active validations running
-    MaxAttemptsExceeded {
-        attempts: usize,
-        queue_depth: usize,
-    },
+    MaxAttemptsExceeded { attempts: usize, queue_depth: usize },
 }
 
 impl std::fmt::Display for WaitForQueueSlotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            WaitForQueueSlotError::MaxAttemptsExceeded {
+            Self::MaxAttemptsExceeded {
                 attempts,
                 queue_depth,
             } => {
@@ -248,10 +245,7 @@ impl SyncDiagnosticInfo {
                     .elapsed()
                     .map(|d| format!("{:.1}s ago", d.as_secs_f64()))
                     .unwrap_or_else(|_| "unknown".to_string());
-                output.push_str(&format!(
-                    "  - {} (started {})\n",
-                    block_hash, elapsed
-                ));
+                output.push_str(&format!("  - {} (started {})\n", block_hash, elapsed));
             }
         }
 

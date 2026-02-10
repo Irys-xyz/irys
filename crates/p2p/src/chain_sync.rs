@@ -797,7 +797,7 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
             match sync_state
                 .wait_for_an_empty_queue_slot_with_validation_awareness(
                     Duration::from_secs(30), // timeout per attempt
-                    3,                        // max attempts
+                    3,                       // max attempts
                 )
                 .await
             {
@@ -806,10 +806,16 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
                 }
                 Err(e) => {
                     // All attempts failed with no active validations - try to trigger processing
-                    warn!("Sync task: Wait failed ({}), attempting to trigger block processing", e);
+                    warn!(
+                        "Sync task: Wait failed ({}), attempting to trigger block processing",
+                        e
+                    );
 
                     let retry_height = sync_state.highest_processed_block() + 1;
-                    debug!("Sync task: Attempting to request block at height {} to trigger processing", retry_height);
+                    debug!(
+                        "Sync task: Attempting to request block at height {} to trigger processing",
+                        retry_height
+                    );
 
                     match get_block_index(
                         peer_list,
@@ -849,10 +855,16 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
                             }
                         }
                         Ok(_) => {
-                            warn!("Sync task: Retry attempt returned empty index for height {}", retry_height);
+                            warn!(
+                                "Sync task: Retry attempt returned empty index for height {}",
+                                retry_height
+                            );
                         }
                         Err(err) => {
-                            warn!("Sync task: Failed to get retry block index for height {}: {}", retry_height, err);
+                            warn!(
+                                "Sync task: Failed to get retry block index for height {}: {}",
+                                retry_height, err
+                            );
                         }
                     }
 
