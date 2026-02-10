@@ -1211,7 +1211,7 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = self
+                let mut all_proofs = self
                     .irys_db
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
@@ -1222,6 +1222,21 @@ impl Inner {
                         !expired
                     })
                     .collect::<Vec<_>>();
+
+                // Dedup by signer address in-place, keeping first proof per address
+                let pre_dedup_len = all_proofs.len();
+                let mut seen_addresses = HashSet::new();
+                all_proofs
+                    .retain(|(_, cached_proof)| seen_addresses.insert(cached_proof.0.address));
+                if all_proofs.len() < pre_dedup_len {
+                    warn!(
+                        tx.id = ?tx_header.id,
+                        tx.data_root = ?tx_header.data_root,
+                        before = pre_dedup_len,
+                        after = all_proofs.len(),
+                        "Duplicate ingress proof signers detected for data root, deduplicating"
+                    );
+                }
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self

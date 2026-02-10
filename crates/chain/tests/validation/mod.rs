@@ -2,6 +2,7 @@ mod blobs_rejected;
 mod data_tx_pricing;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
+mod mempool_ingress_proof_dedup;
 mod poa_cases;
 mod unpledge_partition;
 mod unstake_edge_cases;
