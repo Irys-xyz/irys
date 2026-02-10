@@ -1044,6 +1044,7 @@ pub(crate) async fn data_handler_stub(
     ));
 
     info!("Created GossipDataHandler stub");
+    let consensus_config_hash = config.consensus.keccak256_hash();
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         block_pool: block_pool_stub,
@@ -1061,6 +1062,7 @@ pub(crate) async fn data_handler_stub(
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),
         started_at: std::time::Instant::now(),
+        consensus_config_hash,
     })
 }
 
@@ -1090,6 +1092,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
     info!("Created GossipDataHandler stub");
+    let consensus_config_hash = config.consensus.keccak256_hash();
     Arc::new(GossipDataHandler {
         mempool: mempool_stub,
         block_pool,
@@ -1107,6 +1110,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         block_tree: block_tree_read_guard_stub,
         config: config.clone(),
         started_at: std::time::Instant::now(),
+        consensus_config_hash,
     })
 }
 

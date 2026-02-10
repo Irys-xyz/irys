@@ -173,11 +173,11 @@ pub mod phantoms {
     use arbitrary::Arbitrary;
 
     /// The cost of storing a single chunk of data.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct CostPerChunk;
 
     /// The cost of storing 1 GB of data.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct CostPerGb;
 
     /// Currency denominator util type.
@@ -185,18 +185,18 @@ pub mod phantoms {
     pub struct Usd;
 
     /// Currency denominator util type.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct Irys;
 
     /// Decay rate to account for storage hardware getting cheaper.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct DecayRate;
 
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct Percentage;
 
     /// The network fee, that the user would have to pay for storing his data on Irys.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct NetworkFee;
 
     /// Price of the $IRYS token.
@@ -204,7 +204,7 @@ pub mod phantoms {
     pub struct IrysPrice;
 
     /// Cost per storing 1 chunk of data. Includes adjustment for storage duration.
-    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Arbitrary, Hash)]
     pub struct CostPerChunkDurationAdjusted;
 }
 

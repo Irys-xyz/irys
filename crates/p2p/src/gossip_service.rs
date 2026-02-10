@@ -193,6 +193,7 @@ impl P2PService {
 
         let arc_pool = Arc::new(block_pool);
 
+        let consensus_config_hash = config.consensus.keccak256_hash();
         let gossip_data_handler = Arc::new(GossipDataHandler {
             mempool,
             block_pool: Arc::clone(&arc_pool),
@@ -206,6 +207,7 @@ impl P2PService {
             block_tree,
             config: config.clone(),
             started_at,
+            consensus_config_hash,
         });
         let server = GossipServer::new(Arc::clone(&gossip_data_handler), peer_list.clone());
 
