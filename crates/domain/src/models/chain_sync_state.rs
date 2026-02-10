@@ -1,11 +1,189 @@
 use irys_types::BlockHash;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tracing::{debug, warn};
 
 const MAX_PROCESSING_BLOCKS_QUEUE_SIZE: usize = 100;
 
+const MAX_LAST_BLOCK_VALIDATION_ERRORS: usize = 10;
+
+/// Diagnostic information about chain synchronization errors and events.
+/// This struct is public with private fields and provides public methods for recording
+/// and retrieving diagnostic information.
+#[derive(Clone, Debug, Default)]
+pub struct SyncDiagnosticInfo {
+    total_block_validation_errors: usize,
+    last_block_validation_errors: VecDeque<(String, SystemTime)>,
+    last_vdf_step: Option<(u64, SystemTime)>,
+    total_block_processing_errors: usize,
+    last_block_processing_errors: VecDeque<(String, SystemTime)>,
+    total_data_pull_errors: usize,
+    last_data_pull_errors: VecDeque<(String, SystemTime)>,
+    latest_successfully_processed_block_info: (BlockHash, Option<SystemTime>),
+}
+
+impl SyncDiagnosticInfo {
+    pub fn new() -> Self {
+        Self {
+            total_block_validation_errors: 0,
+            last_block_validation_errors: VecDeque::new(),
+            last_vdf_step: None,
+            last_block_processing_errors: VecDeque::new(),
+            total_block_processing_errors: 0,
+            total_data_pull_errors: 0,
+            last_data_pull_errors: VecDeque::new(),
+            latest_successfully_processed_block_info: (BlockHash::default(), None),
+        }
+    }
+
+    pub fn record_block_validation_error(&mut self, error: String) {
+        self.total_block_validation_errors += 1;
+        let now = SystemTime::now();
+        self.last_block_validation_errors.push_back((error, now));
+        if self.last_block_validation_errors.len() > MAX_LAST_BLOCK_VALIDATION_ERRORS {
+            self.last_block_validation_errors.pop_front();
+        }
+    }
+
+    pub fn record_vdf_step(&mut self, step_number: u64) {
+        let now = SystemTime::now();
+        self.last_vdf_step = Some((step_number, now));
+    }
+
+    pub fn record_block_processing_error(&mut self, error: String) {
+        let now = SystemTime::now();
+        self.total_block_processing_errors += 1;
+        self.last_block_processing_errors.push_back((error, now));
+        if self.last_block_processing_errors.len() > MAX_LAST_BLOCK_VALIDATION_ERRORS {
+            self.last_block_processing_errors.pop_front();
+        }
+    }
+
+    pub fn record_data_pull_error(&mut self, error: String) {
+        let now = SystemTime::now();
+        self.total_data_pull_errors += 1;
+        self.last_data_pull_errors.push_back((error, now));
+        if self.last_data_pull_errors.len() > MAX_LAST_BLOCK_VALIDATION_ERRORS {
+            self.last_data_pull_errors.pop_front();
+        }
+    }
+
+    pub fn record_latest_processed_block_success(&mut self, block_hash: BlockHash) {
+        let now = SystemTime::now();
+        self.latest_successfully_processed_block_info = (block_hash, Some(now));
+    }
+
+    /// Format diagnostic information as a human-readable string
+    pub fn format_summary(&self) -> String {
+        fn format_timestamp(time: &SystemTime) -> String {
+            match time.duration_since(SystemTime::UNIX_EPOCH) {
+                Ok(duration) => {
+                    let secs = duration.as_secs();
+                    let millis = duration.subsec_millis();
+                    // Format as Unix timestamp with milliseconds for precision
+                    format!("{}.{:03}", secs, millis)
+                }
+                Err(_) => "invalid_time".to_string(),
+            }
+        }
+
+        let mut output = String::new();
+        output.push_str("=== Chain Sync Diagnostics ===\n");
+
+        // Block validation errors
+        output.push_str(&format!(
+            "Total block validation errors: {}\n",
+            self.total_block_validation_errors
+        ));
+        if !self.last_block_validation_errors.is_empty() {
+            output.push_str(&format!(
+                "Last validation errors (most recent {}):\n",
+                MAX_LAST_BLOCK_VALIDATION_ERRORS
+            ));
+            for (error, timestamp) in self.last_block_validation_errors.iter().rev() {
+                output.push_str(&format!(
+                    "  - [{}] {}\n",
+                    format_timestamp(timestamp),
+                    error
+                ));
+            }
+        }
+        output.push('\n');
+
+        // Block processing errors
+        output.push_str(&format!(
+            "Total block processing errors: {}\n",
+            self.total_block_processing_errors
+        ));
+        if !self.last_block_processing_errors.is_empty() {
+            output.push_str(&format!(
+                "Last processing errors (most recent {}):\n",
+                MAX_LAST_BLOCK_VALIDATION_ERRORS
+            ));
+            for (error, timestamp) in self.last_block_processing_errors.iter().rev() {
+                output.push_str(&format!(
+                    "  - [{}] {}\n",
+                    format_timestamp(timestamp),
+                    error
+                ));
+            }
+        }
+        output.push('\n');
+
+        // Data pull errors
+        output.push_str(&format!(
+            "Total data pull errors: {}\n",
+            self.total_data_pull_errors
+        ));
+        if !self.last_data_pull_errors.is_empty() {
+            output.push_str(&format!(
+                "Last data pull errors (most recent {}):\n",
+                MAX_LAST_BLOCK_VALIDATION_ERRORS
+            ));
+            for (error, timestamp) in self.last_data_pull_errors.iter().rev() {
+                output.push_str(&format!(
+                    "  - [{}] {}\n",
+                    format_timestamp(timestamp),
+                    error
+                ));
+            }
+        }
+        output.push('\n');
+
+        // VDF status
+        output.push_str("VDF Status:\n");
+        if let Some((step_number, timestamp)) = self.last_vdf_step {
+            output.push_str(&format!(
+                "  - Last recorded step: {} at {}\n",
+                step_number,
+                format_timestamp(&timestamp)
+            ));
+        } else {
+            output.push_str("  - No VDF steps recorded yet\n");
+        }
+        output.push('\n');
+
+        // Last successful block
+        let (block_hash, timestamp_opt) = &self.latest_successfully_processed_block_info;
+        if let Some(timestamp) = timestamp_opt {
+            output.push_str(&format!(
+                "Last successful block: {} at {}\n",
+                block_hash,
+                format_timestamp(timestamp)
+            ));
+        } else {
+            output.push_str("Last successful block: None\n");
+        }
+
+        output.push_str("===");
+        output
+    }
+}
+
+/// State tracking for chain synchronization.
+/// Tracks sync progress, validation queue, and diagnostic information.
 #[derive(Clone, Debug, Default)]
 pub struct ChainSyncState {
     syncing: Arc<AtomicBool>,
@@ -16,10 +194,11 @@ pub struct ChainSyncState {
     switch_to_full_validation_at_height: Arc<RwLock<Option<usize>>>,
     gossip_broadcast_enabled: Arc<AtomicBool>,
     gossip_reception_enabled: Arc<AtomicBool>,
+    diagnostic_info: Arc<RwLock<SyncDiagnosticInfo>>,
 }
 
 impl ChainSyncState {
-    /// Creates a new SyncState with a given syncing flag and sync_height = 0
+    /// Creates a new ChainSyncState with a given syncing flag and sync_height = 0
     pub fn new(is_syncing: bool, is_trusted_sync: bool) -> Self {
         Self {
             syncing: Arc::new(AtomicBool::new(is_syncing)),
@@ -30,6 +209,7 @@ impl ChainSyncState {
             switch_to_full_validation_at_height: Arc::new(RwLock::new(None)),
             gossip_broadcast_enabled: Arc::new(AtomicBool::new(true)),
             gossip_reception_enabled: Arc::new(AtomicBool::new(true)),
+            diagnostic_info: Arc::new(RwLock::new(SyncDiagnosticInfo::new())),
         }
     }
 
@@ -254,5 +434,45 @@ impl ChainSyncState {
 
     pub fn is_syncing_from_a_trusted_peer(&self) -> bool {
         self.is_syncing() && self.is_trusted_sync()
+    }
+
+    // =========================================================================
+    // Diagnostic Recording Methods
+    // =========================================================================
+
+    /// Record a block validation error
+    pub fn record_block_validation_error(&self, error: String) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_block_validation_error(error);
+    }
+
+    /// Record a block processing error
+    pub fn record_block_processing_error(&self, error: String) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_block_processing_error(error);
+    }
+
+    /// Record a VDF step
+    pub fn record_vdf_step(&self, step_number: u64) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_vdf_step(step_number);
+    }
+
+    /// Record a data pull error
+    pub fn record_data_pull_error(&self, error: String) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_data_pull_error(error);
+    }
+
+    /// Record successful block processing
+    pub fn record_successful_block_processing(&self, block_hash: BlockHash) {
+        let mut diagnostic = self.diagnostic_info.write().unwrap();
+        diagnostic.record_latest_processed_block_success(block_hash);
+    }
+
+    /// Get a formatted diagnostic summary
+    pub fn get_diagnostic_summary(&self) -> String {
+        let diagnostic = self.diagnostic_info.read().unwrap();
+        diagnostic.format_summary()
     }
 }

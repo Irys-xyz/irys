@@ -13,9 +13,10 @@ use eyre::ensure;
 use eyre::OptionExt as _;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
-    block_index_guard::BlockIndexReadGuard, create_commitment_snapshot_for_block,
-    create_epoch_snapshot_for_block, forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry,
-    BlockState, BlockTree, BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
+    block_index_guard::BlockIndexReadGuard, chain_sync_state::ChainSyncState,
+    create_commitment_snapshot_for_block, create_epoch_snapshot_for_block,
+    forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry, BlockState, BlockTree,
+    BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
     BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
@@ -74,6 +75,8 @@ pub struct BlockTreeServiceInner {
     pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
+    /// Chain sync state for diagnostics
+    pub chain_sync_state: ChainSyncState,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +116,7 @@ impl BlockTreeService {
         storage_submodules_config: &StorageSubmodulesConfig,
         config: &Config,
         service_senders: &ServiceSenders,
+        chain_sync_state: ChainSyncState,
         runtime_handle: tokio::runtime::Handle,
     ) -> TokioServiceHandle {
         info!("Spawning block tree service");
@@ -154,6 +158,7 @@ impl BlockTreeService {
                         config,
                         service_senders,
                         storage_submodules_config: storage_submodules_config.clone(),
+                        chain_sync_state,
                     },
                 };
                 block_tree_service
@@ -621,6 +626,12 @@ impl BlockTreeServiceInner {
                 error = %validation_error,
                 "block validation failed"
             );
+
+            // Record validation error for diagnostics
+            let error_message = format!("block={} error={}", block_hash, validation_error);
+            self.chain_sync_state
+                .record_block_validation_error(error_message);
+
             let mut cache = self
                 .cache
                 .write()
