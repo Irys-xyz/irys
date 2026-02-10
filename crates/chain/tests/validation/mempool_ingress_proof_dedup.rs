@@ -62,6 +62,8 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             chain_id,
             signature: Default::default(),
         },
+        // promoted_height intentionally unset so the publish path falls through
+        // to the tx_header_by_txid DB lookup instead of skipping as already-promoted.
         metadata: irys_types::DataTransactionMetadata::new(),
     })
     .sign(&signer_a)?;
@@ -112,6 +114,8 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             chain_id,
             signature: Default::default(),
         },
+        // promoted_height intentionally unset so the publish path falls through
+        // to the tx_header_by_txid DB lookup instead of skipping as already-promoted.
         metadata: irys_types::DataTransactionMetadata::new(),
     })
     .sign(&signer_a)?;
