@@ -159,8 +159,8 @@ async fn heavy_peer_discovery() -> eyre::Result<()> {
         },
         "timestamp": 0,
         "user_agent": "miner2/0.1.0 (macos/aarch64)",
-        "consensus_config_hash": "EA5geLKSQxVF6yLiLutA5pCuYgMEf3TVhXTQGPpMNq8S",
-        "signature": "JQEDn2qF5MfV3ud7Cs5c5LX4TF4MouqJaywMwzE5uU5Z2x6PJUaZzjoumtpn1qLmS2HXBqn9uVsfWfaFZ9bsLe4E6"
+        "consensus_config_hash": "5dGdi2oSdmpFdBGoUKGfHcWoQD4F6d6p8VhY9t9sZdfe",
+        "signature": "EoXNEmq4E4uoEoNVUcJ8A5VtteamtDtLcWfMJevjwLfLNDzebVQtFHcoqwTJqxDo8tVZBcTuHoqdNyb27RMEFK1wH"
     });
     // spellchecker:on
 

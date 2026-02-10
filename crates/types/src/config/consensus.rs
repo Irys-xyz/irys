@@ -431,99 +431,46 @@ pub struct MempoolConsensusConfig {
     pub commitment_fee: u64,
 }
 
-/// A `std::hash::Hasher` that buffers all writes in little-endian byte order
-/// and produces a Keccak256 digest.
-///
-/// The default `std::hash::Hasher::write_u64` etc. use `to_ne_bytes()` which is
-/// platform-dependent (little-endian on x86/ARM, big-endian on some others).
-/// We override every `write_*` method to use explicit little-endian encoding,
-/// and normalize `usize`/`isize` to 8 bytes, so the hash is identical on all
-/// platforms regardless of endianness or pointer width.
-struct Keccak256Hasher {
-    buf: Vec<u8>,
-}
-
-impl Keccak256Hasher {
-    fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
-    fn finalize(self) -> H256 {
-        H256(alloy_primitives::keccak256(&self.buf).0)
-    }
-}
-
-/// Implement Hasher in a way that doesn't rely on NE byte order and is consistent across platforms.
-impl std::hash::Hasher for Keccak256Hasher {
-    fn write(&mut self, bytes: &[u8]) {
-        self.buf.extend_from_slice(bytes);
-    }
-
-    fn write_u8(&mut self, i: u8) {
-        self.buf.push(i);
-    }
-
-    fn write_u16(&mut self, i: u16) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_u32(&mut self, i: u32) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_u64(&mut self, i: u64) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_u128(&mut self, i: u128) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_usize(&mut self, i: usize) {
-        // Always write as 8 bytes so 32-bit and 64-bit platforms agree.
-        self.buf.extend_from_slice(&(i as u64).to_le_bytes());
-    }
-
-    fn write_i8(&mut self, i: i8) {
-        self.buf.push(i as u8);
-    }
-
-    fn write_i16(&mut self, i: i16) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_i32(&mut self, i: i32) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_i64(&mut self, i: i64) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_i128(&mut self, i: i128) {
-        self.buf.extend_from_slice(&i.to_le_bytes());
-    }
-
-    fn write_isize(&mut self, i: isize) {
-        self.buf.extend_from_slice(&(i as i64).to_le_bytes());
-    }
-
-    fn finish(&self) -> u64 {
-        // Not used — we call finalize() instead
-        unimplemented!("use Keccak256Hasher::finalize() instead")
+/// Recursively sort all object keys in a JSON value for deterministic serialization.
+fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, sort_json_keys(v)))
+                .collect();
+            serde_json::Value::Object(
+                sorted
+                    .into_iter()
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            )
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_keys).collect())
+        }
+        other => other,
     }
 }
 
 impl ConsensusConfig {
     /// Produce a deterministic Keccak256 hash of this consensus config.
     ///
-    /// Uses `std::hash::Hash` with a custom hasher that forces little-endian
-    /// byte order for all integer types, making the output platform-independent.
+    /// Uses canonical JSON serialization with alphabetically sorted keys.
+    /// This ensures platform-independent and deterministic hashing across the network.
     pub fn keccak256_hash(&self) -> H256 {
-        use std::hash::Hash as _;
-        let mut hasher = Keccak256Hasher::new();
-        self.hash(&mut hasher);
-        hasher.finalize()
+        // Serialize to canonical JSON value (camelCase keys, u64/i64 as strings)
+        let json_value = crate::canonical::to_canonical(self)
+            .expect("ConsensusConfig should serialize to canonical JSON");
+
+        // Sort all keys recursively for deterministic ordering
+        let sorted_value = sort_json_keys(json_value);
+
+        // Serialize to compact JSON string (no extra whitespace)
+        let json_string = serde_json::to_string(&sorted_value)
+            .expect("Sorted JSON value should serialize to string");
+
+        // Hash the canonical JSON string
+        H256(alloy_primitives::keccak256(json_string.as_bytes()).0)
     }
 
     // This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
@@ -991,10 +938,10 @@ mod tests {
         // This test verifies that the hash of the testing config remains stable.
         // If this test fails, it indicates a breaking change in either:
         // - The ConsensusConfig structure or field order
-        // - The Hash implementation of a dependency type
-        // - The Rust compiler's Hash derive implementation
+        // - The canonical JSON serialization implementation
+        // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("EJTZxm4vLUBZJEEF5i6SdfFbqCxNbSYEfMVtuaJ76Lzg");
+        let expected_hash = H256::from_base58("4XhdvXXeABvjmMP88tLmgvTpBYaV3mehui984uVvS7p4");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
