@@ -453,7 +453,7 @@ impl std::hash::Hasher for Keccak256Hasher {
 impl ConsensusConfig {
     /// Produce a deterministic Keccak256 hash of this consensus config.
     pub fn keccak256_hash(&self) -> H256 {
-        use std::hash::Hash;
+        use std::hash::Hash as _;
         let mut hasher = Keccak256Hasher::new();
         self.hash(&mut hasher);
         hasher.finalize()

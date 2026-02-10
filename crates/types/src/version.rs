@@ -401,7 +401,6 @@ pub struct HandshakeResponse {
     pub peers: Vec<PeerAddress>,
     pub timestamp: u64,
     pub message: Option<String>,
-    #[serde(default)]
     pub consensus_config_hash: H256,
 }
 
@@ -971,9 +970,9 @@ mod tests {
     fn generate_raw_handshake_json() {
         use crate::irys::IrysSigner;
         use crate::ConsensusConfig;
-        
+
         let mut config = ConsensusConfig::testing();
-        
+
         // NodeConfig::testing() sets these genesis addresses
         let testing_key = k256::ecdsa::SigningKey::from_slice(
             &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
@@ -987,7 +986,7 @@ mod tests {
         };
         config.genesis.miner_address = testing_signer.address();
         config.genesis.reward_address = testing_signer.address();
-        
+
         // Match the consensus config from the test
         config.chunk_size = 32;
         config.num_chunks_in_partition = 10;
@@ -995,36 +994,38 @@ mod tests {
         config.num_partitions_per_slot = 1;
         config.entropy_packing_iterations = 1_000;
         config.block_migration_depth = 1;
-        
+
         // Hardcoded key matching the test node's genesis signer
         let genesis_key_bytes: [u8; 32] = [
-            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11,
-            0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
-            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11,
-            0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0x99,
         ];
-        let genesis_signing_key = k256::ecdsa::SigningKey::from_bytes((&genesis_key_bytes).into()).unwrap();
+        let genesis_signing_key =
+            k256::ecdsa::SigningKey::from_bytes((&genesis_key_bytes).into()).unwrap();
         let genesis_signer = IrysSigner {
             signer: genesis_signing_key,
             chain_id: config.chain_id,
             chunk_size: config.chunk_size,
         };
-        
+
         // Add genesis account to match test
-        use alloy_genesis::GenesisAccount;
         use alloy_core::primitives::U256;
+        use alloy_genesis::GenesisAccount;
         let genesis_account = GenesisAccount {
             balance: U256::from(690000000000000000_u128),
             ..Default::default()
         };
-        config.reth.alloc.insert(genesis_signer.address().into(), genesis_account);
-        
+        config
+            .reth
+            .alloc
+            .insert(genesis_signer.address().into(), genesis_account);
+
         // Fixed private key for the peer handshake (different from genesis)
         let key_bytes: [u8; 32] = [
-            0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88,
-            0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2, 0xf1, 0x00,
-            0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78,
-            0x87, 0x96, 0xa5, 0xb4, 0xc3, 0xd2, 0xe1, 0xf0,
+            0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88, 0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2,
+            0xf1, 0x00, 0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4,
+            0xc3, 0xd2, 0xe1, 0xf0,
         ];
         let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_bytes).into()).unwrap();
         let signer = IrysSigner {
@@ -1034,7 +1035,7 @@ mod tests {
         };
 
         let mining_addr = signer.address();
-        
+
         eprintln!("mining_address = {}", mining_addr);
         eprintln!("consensus_config_hash = {}", config.keccak256_hash());
 
