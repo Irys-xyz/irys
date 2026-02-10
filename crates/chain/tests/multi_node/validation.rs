@@ -672,7 +672,7 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
         .mempool
         .ingress_proof_anchor_expiry_depth as u64;
 
-    // The edge case anchor height that should NOT be in valid_ingress_anchor_blocks
+    // Edge-case anchor height that used to be excluded; after the inclusive fix it must be valid.
     let edge_case_height = current_height - tx_anchor_expiry;
     let edge_case_block = genesis_node.get_block_by_height(edge_case_height).await?;
 
