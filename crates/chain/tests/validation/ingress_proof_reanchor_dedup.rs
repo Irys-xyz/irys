@@ -16,7 +16,11 @@ use irys_types::{DataLedger, NodeConfig};
 async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
     let seconds_to_wait = 30;
 
-    // Configure consensus for short epochs and low expiry depth
+    // Configure consensus for short epochs and low expiry depth.
+    // number_of_ingress_proofs_total = 3 is critical: the test only has two distinct
+    // signers (genesis + peer), so requiring 3 proofs means the threshold can only be
+    // met if reanchored proofs are counted — verifying that reanchoring does not produce
+    // duplicate signer entries that would inflate the count.
     let mut genesis_config = NodeConfig::testing()
         .with_consensus(|c| {
             c.chunk_size = 32;
@@ -82,7 +86,7 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
     ];
 
     for (block, eth_block, block_txs) in order.iter() {
-        // sync peer node up to date with genesis, this causes ingress proof reanchroing
+        // sync peer node up to date with genesis, this causes ingress proof reanchoring
         peer_node
             .node_ctx
             .block_pool
@@ -92,20 +96,20 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
             .await?;
     }
 
-    // Peer mines a block with the genesis ingerss proof present in its db
+    // Peer mines a block with the genesis ingress proof present in its db
     peer_node.gossip_enable();
     genesis_node
-        .wait_for_block(&order[5].0.block_hash, 10)
+        .wait_for_block(&order[5].0.block_hash, seconds_to_wait)
         .await?;
     genesis_node.post_chunk_32b(&data_tx, 0, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
     peer_node
-        .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 2, 10)
+        .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 2, seconds_to_wait)
         .await?;
     let peer_block = peer_node.mine_block().await?;
 
-    // Assert the peer's block does not contains any proofs because it only has 2/3 ingress proofs
+    // Assert the peer's block does not contain any proofs because it only has 2/3 ingress proofs
     let peer_publish_ledger = &peer_block.data_ledgers[DataLedger::Publish];
     let peer_proofs = peer_publish_ledger.proofs.as_ref();
     assert!(
