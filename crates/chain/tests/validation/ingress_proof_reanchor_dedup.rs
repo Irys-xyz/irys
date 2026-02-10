@@ -101,7 +101,7 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
     genesis_node.post_chunk_32b(&data_tx, 1, &chunks).await;
     genesis_node.post_chunk_32b(&data_tx, 2, &chunks).await;
     peer_node
-        .wait_for_ingress_proofs_no_mining_with_proof_count(vec![data_tx.header.id], 10, 2)
+        .wait_for_multiple_ingress_proofs_no_mining(vec![data_tx.header.id], 2, 10)
         .await?;
     let peer_block = peer_node.mine_block().await?;
 
