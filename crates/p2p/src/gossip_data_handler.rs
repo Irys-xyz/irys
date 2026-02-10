@@ -19,7 +19,7 @@ use irys_domain::{
     BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache, PeerList, ScoreDecreaseReason,
 };
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
-use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId};
+use irys_types::{BlockBody, Config, IrysAddress, IrysPeerId, H256};
 use irys_types::{
     BlockHash, CommitmentTransaction, DataTransactionHeader, EvmBlockHash, GossipCacheKey,
     GossipRequestV2, IngressProof, IrysBlockHeader, PeerListItem, UnpackedChunk,
@@ -52,6 +52,8 @@ where
     pub block_tree: BlockTreeReadGuard,
     pub config: Config,
     pub started_at: Instant,
+    /// Precomputed hash of the consensus config to avoid recomputing on every handshake
+    pub consensus_config_hash: H256,
 }
 
 impl<M, B> Clone for GossipDataHandler<M, B>
@@ -73,6 +75,7 @@ where
             block_tree: self.block_tree.clone(),
             config: self.config.clone(),
             started_at: self.started_at,
+            consensus_config_hash: self.consensus_config_hash,
         }
     }
 }
