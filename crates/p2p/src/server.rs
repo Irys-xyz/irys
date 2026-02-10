@@ -1163,7 +1163,7 @@ where
             version_request.mining_address
         );
 
-        let this_node_consensus_config_hash = server.data_handler.config.consensus.keccak256_hash();
+        let this_node_consensus_config_hash = server.data_handler.consensus_config_hash;
         if version_request.consensus_config_hash != this_node_consensus_config_hash {
             error!(
                 "Consensus config mismatch with peer! ours={} theirs={} peer_addr={} mining_address={} peer_id={}",
