@@ -137,9 +137,15 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
 
     // Store both data txs and all proofs in the DB
     genesis_node.node_ctx.db.update(|tx| {
-        use irys_database::tables::{CompactTxHeader, IrysDataTxHeaders};
+        use irys_database::tables::{
+            CompactCachedIngressProof, CompactTxHeader, IngressProofs, IrysDataTxHeaders,
+        };
+        use irys_types::ingress::CachedIngressProof;
 
         // Data root 1: tx + 3 proofs (2 from signer A, 1 from signer B)
+        // Insert directly into the DB table to bypass the dedup logic in
+        // store_external_ingress_proof_checked (which removes prior proofs
+        // from the same signer for the same data root).
         tx.put::<IrysDataTxHeaders>(data_tx_1.id, CompactTxHeader(data_tx_1.clone()))?;
         irys_database::cache_data_root(tx, &data_tx_1, None)?;
         for (proof, address) in [
@@ -147,7 +153,13 @@ async fn heavy_mempool_dedup_ingress_proof_signers() -> eyre::Result<()> {
             (&proof_1a2, signer_a.address()),
             (&proof_1b, signer_b.address()),
         ] {
-            irys_database::store_external_ingress_proof_checked(tx, proof, address)?;
+            tx.put::<IngressProofs>(
+                proof.data_root,
+                CompactCachedIngressProof(CachedIngressProof {
+                    address,
+                    proof: proof.clone(),
+                }),
+            )?;
         }
         let stored_1 = irys_database::ingress_proofs_by_data_root(tx, data_root_1)?;
         assert_eq!(
