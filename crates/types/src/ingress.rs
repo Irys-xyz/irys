@@ -3,7 +3,7 @@ use crate::{
     decode_rlp_version, encode_rlp_version, generate_data_root, generate_ingress_leaves, DataRoot,
     IrysAddress, IrysSignature, Node, Signable, VersionDiscriminant, Versioned, H256,
 };
-use alloy_primitives::ChainId;
+use alloy_primitives::{keccak256, ChainId};
 use alloy_rlp::Encodable as _;
 use arbitrary::Arbitrary;
 use bytes::BufMut;
@@ -104,6 +104,11 @@ impl IngressProof {
         }
         // Recover and return the signer address
         self.recover_signer()
+    }
+
+    pub fn id(&self) -> H256 {
+        let id: [u8; 32] = keccak256(self.signature.as_bytes()).into();
+        H256::from(id)
     }
 }
 

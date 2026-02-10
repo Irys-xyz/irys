@@ -467,17 +467,22 @@ impl Inner {
         // if we have, update it's expiry height
 
         // Determine existing proof state and chunk count
-        let (chunk_count_opt, existing_local_proof) = self
+        let local_address = self.config.irys_signer().address();
+        let (chunk_count, existing_local_proof) = self
             .irys_db
             .view_eyre(|tx| {
-                let existing_local_proof: Option<IngressProof> = None;
+                let existing_local_proof = irys_database::ingress_proof_by_data_root_address(
+                    tx,
+                    root_hash,
+                    local_address,
+                )?;
 
                 // Count chunks (needed for generation & potential regeneration)
                 let mut cursor = tx.cursor_dup_read::<CachedChunksIndex>()?;
                 let count = cursor
                     .dup_count(root_hash)?
                     .ok_or_else(|| eyre::eyre!("No chunks found for data root"))?;
-                Ok((Some(count), existing_local_proof))
+                Ok((count, existing_local_proof))
             })
             .map_err(|e| {
                 error!(
@@ -488,16 +493,13 @@ impl Inner {
             })?;
 
         // Early return if we have a valid existing local proof
-        if chunk_count_opt.is_none() && existing_local_proof.is_some() {
+        if existing_local_proof.is_some() {
             info!(
                 "Local ingress proof already exists and is valid for data root {}",
                 &root_hash
             );
             return Ok(());
         }
-
-        let chunk_count =
-            chunk_count_opt.expect("chunk_count present when proof missing or expired");
 
         // Compute expected number of chunks from data_size using ceil(data_size / chunk_size)
         // This equals the last chunk index + 1 (since tx offsets are 0-indexed)
