@@ -653,16 +653,18 @@ async fn heavy_ensure_block_validation_double_checks_anchors() -> eyre::Result<(
     // fails validation because the logic used to collect the set of valid anchor block hashes is exclusive instead of inclusive.
 
     // Setup:
-    // - Current height after mining: 7 (we mined 6 blocks, so we're at height 7 now with block_migration_depth=1)
-    // - When validating block at height 8:
-    //   - min_tx_anchor_height = 8 - 3 = 5
-    //   - min_ingress_proof_anchor_height = 8 - 5 = 3
-    //   - valid tx anchors from block tree: 7, 6, 5
-    //   - bt_finished_height = 4
-    //   - valid ingress anchors from block index: for height in [3, 4) = only 3
-    //   - MISSING: height 4 <- this is the bug
+    // - current_height: obtained from genesis_node.get_canonical_chain_height()
+    // - When validating a block at height (current_height + 1):
+    //   - min_tx_anchor_height = (current_height + 1) - tx_anchor_expiry
+    //   - min_ingress_proof_anchor_height = (current_height + 1) - ingress_anchor_expiry
+    //   - valid tx anchors from block tree: current_height down to min_tx_anchor_height (inclusive)
+    //   - bt_finished_height = min_tx_anchor_height - 1
+    //   - valid ingress anchors from block index: for height in [min_ingress_proof_anchor_height, bt_finished_height)
+    //   - MISSING: bt_finished_height itself <- this is the bug
+    //   - edge_case_height = current_height - tx_anchor_expiry (which equals min_tx_anchor_height)
     //
-    // An ingress proof at height 4 should fail validation since it's not in the valid set - if the bug was still present
+    // An ingress proof anchored at edge_case_height used to fail validation due to exclusive range logic.
+    // After the fix, the range is inclusive, so edge_case_height must be valid.
 
     let current_height = genesis_node.get_canonical_chain_height().await;
 
