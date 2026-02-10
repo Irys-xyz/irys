@@ -19,7 +19,6 @@ derive_more = { version = "2.0.1", features = [
     "into",
 ], default-features = true }
 eyre = "0.6.8"
-itertools.workspace = true
 ruint.workspace = true
 fixed-hash = "0.8.0"
 rand = "0.8.5"

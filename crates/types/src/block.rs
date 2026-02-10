@@ -26,7 +26,6 @@ use alloy_primitives::{keccak256, TxHash, B256};
 use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
 use irys_macros_integer_tagged::IntegerTagged;
-use itertools::{EitherOrBoth, Itertools as _};
 use openssl::sha;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
@@ -1138,76 +1137,6 @@ impl BlockTransactions {
     pub fn all_data_txs(&self) -> impl Iterator<Item = &DataTransactionHeader> {
         self.data_txs.values().flatten()
     }
-
-    /// Validates that transactions match the block header using `zip_longest`
-    /// for single-pass length + content checks with no silent truncation.
-    pub fn validate_against_header(
-        &self,
-        header: &IrysBlockHeader,
-        block_hash: BlockHash,
-    ) -> eyre::Result<()> {
-        let expected_commitment_ids = header.get_commitment_ledger_tx_ids();
-        let commitment_mismatch = expected_commitment_ids
-            .iter()
-            .zip_longest(self.commitment_txs.iter())
-            .find(|pair| {
-                !matches!(pair, EitherOrBoth::Both(expected, actual) if **expected == actual.id())
-            });
-        eyre::ensure!(
-            commitment_mismatch.is_none(),
-            "Commitment tx mismatch for block {}: {:?}",
-            block_hash,
-            commitment_mismatch
-        );
-
-        let extra_ledger = self.data_txs.keys().find(|k| {
-            !header
-                .data_ledgers
-                .iter()
-                .any(|l| l.ledger_id == **k as u32)
-        });
-        eyre::ensure!(
-            extra_ledger.is_none(),
-            "Extra ledger {:?} in BlockTransactions not in header for block {}",
-            extra_ledger,
-            block_hash
-        );
-
-        for ledger in &header.data_ledgers {
-            let ledger_type = DataLedger::try_from(ledger.ledger_id).map_err(|_| {
-                eyre::eyre!(
-                    "Invalid ledger_id {} in block {}",
-                    ledger.ledger_id,
-                    block_hash
-                )
-            })?;
-
-            let actual_txs = self
-                .data_txs
-                .get(&ledger_type)
-                .map(std::vec::Vec::as_slice)
-                .unwrap_or(&[]);
-
-            let mismatch = ledger
-                .tx_ids
-                .0
-                .iter()
-                .zip_longest(actual_txs.iter())
-                .find(|pair| {
-                    !matches!(pair, EitherOrBoth::Both(expected, actual) if **expected == actual.id)
-                });
-
-            eyre::ensure!(
-                mismatch.is_none(),
-                "Data tx mismatch for ledger {:?} in block {}: {:?}",
-                ledger_type,
-                block_hash,
-                mismatch
-            );
-        }
-
-        Ok(())
-    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -1234,9 +1163,11 @@ impl BlockBody {
 
         true
     }
-    pub fn tx_ids_match_the_header(&self, header: &IrysBlockHeader) -> bool {
-        if !self.verify_tx_signatures() {
-            return false;
+    pub fn tx_ids_match_the_header(&self, header: &IrysBlockHeader) -> eyre::Result<bool> {
+        let res = self.verify_tx_signatures();
+
+        if !res {
+            return Ok(false);
         }
 
         let expected_commitment_tx_ids: HashSet<H256> = header
@@ -1261,8 +1192,8 @@ impl BlockBody {
             .map(super::transaction::IrysTransactionCommon::id)
             .collect();
 
-        expected_commitment_tx_ids == actual_commitment_tx_ids
-            && expected_data_tx_ids == actual_data_tx_ids
+        Ok(expected_commitment_tx_ids == actual_commitment_tx_ids
+            && expected_data_tx_ids == actual_data_tx_ids)
     }
 }
 

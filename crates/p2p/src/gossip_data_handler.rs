@@ -1146,22 +1146,31 @@ where
         block_header: &IrysBlockHeader,
         source_peer_id: &IrysPeerId,
     ) -> GossipResult<()> {
-        if !block_body.tx_ids_match_the_header(block_header) {
-            warn!(
-                "Node {}: Block {} height {} has mismatching transactions between header and body",
-                self.gossip_client.mining_address, block_header.block_hash, block_header.height
-            );
-            self.peer_list.decrease_peer_score_by_peer_id(
-                source_peer_id,
-                ScoreDecreaseReason::BogusData(
-                    "Mismatching transactions between header and body".into(),
+        match block_body.tx_ids_match_the_header(block_header) {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                warn!(
+                    "Node {}: Block {} height {} has mismatching transactions between header and body",
+                    self.gossip_client.mining_address, block_header.block_hash, block_header.height
+                );
+
+                self.peer_list.decrease_peer_score_by_peer_id(
+                    source_peer_id,
+                    ScoreDecreaseReason::BogusData(
+                        "Mismatching transactions between header and body".into(),
+                    ),
+                );
+                Err(GossipError::InvalidData(
+                    InvalidDataError::BlockBodyTransactionsMismatch,
+                ))
+            }
+            Err(err) => Err(GossipError::Internal(InternalGossipError::Unknown(
+                format!(
+                    "Error when comparing block body transactions with header for block {}: {}",
+                    block_header.block_hash, err
                 ),
-            );
-            return Err(GossipError::InvalidData(
-                InvalidDataError::BlockBodyTransactionsMismatch,
-            ));
+            ))),
         }
-        Ok(())
     }
 
     pub async fn pull_block_body(
@@ -1191,31 +1200,47 @@ where
                 .await
             {
                 Ok((source_peer_id, irys_block_body)) => {
-                    if irys_block_body.tx_ids_match_the_header(header) {
-                        debug!(
-                            "Fetched block body for block {} height {} from peer {:?}",
-                            block_hash, header.height, source_peer_id
-                        );
-                        return Ok(irys_block_body);
-                    }
+                    match irys_block_body.tx_ids_match_the_header(header) {
+                        Ok(true) => {
+                            debug!(
+                                "Fetched block body for block {} height {} from peer {:?}",
+                                block_hash, header.height, source_peer_id
+                            );
+                            return Ok(irys_block_body);
+                        }
+                        Ok(false) => {
+                            warn!(
+                                "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
+                                self.gossip_client.mining_address, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES
+                            );
 
-                    warn!(
-                        "Node {}: Block {} height {} has mismatching transactions between header and body (attempt {}/{})",
-                        self.gossip_client.mining_address, block_hash, header.height, attempt, HEADER_AND_BODY_RETRIES
-                    );
-                    let error =
-                        GossipError::InvalidData(InvalidDataError::BlockBodyTransactionsMismatch);
-                    self.peer_list.decrease_peer_score_by_peer_id(
-                        &source_peer_id,
-                        ScoreDecreaseReason::BogusData(
-                            "Mismatching transactions between header and body".into(),
-                        ),
-                    );
-                    debug!(
-                        "Penalized peer {} for serving bad block body",
-                        source_peer_id
-                    );
-                    failed_attempts.push((Some(source_peer_id), error));
+                            let error = GossipError::InvalidData(
+                                InvalidDataError::BlockBodyTransactionsMismatch,
+                            );
+                            self.peer_list.decrease_peer_score_by_peer_id(
+                                &source_peer_id,
+                                ScoreDecreaseReason::BogusData(
+                                    "Mismatching transactions between header and body".into(),
+                                ),
+                            );
+                            debug!(
+                                "Penalized peer {} for serving bad block body",
+                                source_peer_id
+                            );
+
+                            failed_attempts.push((Some(source_peer_id), error));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Node {}: Error checking if block body matches header for block {} height {}: {} (attempt {}/{})",
+                                self.gossip_client.mining_address, block_hash, header.height, e, attempt, HEADER_AND_BODY_RETRIES
+                            );
+                            let error = GossipError::Internal(InternalGossipError::Unknown(
+                                format!("Error checking block body match: {}", e),
+                            ));
+                            failed_attempts.push((Some(source_peer_id), error));
+                        }
+                    }
                 }
                 Err(e) => {
                     let error = GossipError::from(e);
