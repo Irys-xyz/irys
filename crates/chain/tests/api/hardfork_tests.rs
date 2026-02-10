@@ -760,7 +760,7 @@ mod peer_sync_recovery {
 
         // Wait for peer to pack its storage module with partition data
         peer_node.wait_for_packing(SECONDS_TO_WAIT).await;
-        let peer_node = peer_node.stop().await;
+        let mut stopped_peer = peer_node.stop().await;
         info!("Peer has partition assignments and is ready");
 
         // Step 3: Mine epochs with V1 Commitments + Data Txs
@@ -837,8 +837,7 @@ mod peer_sync_recovery {
         );
 
         // Step 4: Stop Both Nodes, Activate Aurora, Restart
-        let stopped_peer = peer_node;
-        let stopped_genesis = genesis_node.stop().await;
+        let mut stopped_genesis = genesis_node.stop().await;
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -846,28 +845,19 @@ mod peer_sync_recovery {
         let activation_timestamp = now_secs();
 
         // Modify genesis config to enable Aurora
-        let mut genesis_cfg_aurora = stopped_genesis.cfg.clone();
-        genesis_cfg_aurora.consensus.get_mut().hardforks.aurora = Some(Aurora {
+        stopped_genesis.cfg.consensus.get_mut().hardforks.aurora = Some(Aurora {
             activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
             minimum_commitment_tx_version: AURORA_MIN_VERSION,
         });
 
         // Modify peer config to enable Aurora
-        let mut peer_cfg_aurora = stopped_peer.cfg.clone();
-        peer_cfg_aurora.consensus.get_mut().hardforks.aurora = Some(Aurora {
+        stopped_peer.cfg.consensus.get_mut().hardforks.aurora = Some(Aurora {
             activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
             minimum_commitment_tx_version: AURORA_MIN_VERSION,
         });
 
         // Restart genesis with Aurora enabled
-        let genesis_node = IrysNodeTest {
-            node_ctx: (),
-            cfg: genesis_cfg_aurora,
-            temp_dir: stopped_genesis.temp_dir,
-            name: stopped_genesis.name,
-        }
-        .start()
-        .await;
+        let genesis_node = stopped_genesis.start().await;
 
         info!("Genesis node restarted with Aurora enabled");
 
@@ -972,14 +962,7 @@ mod peer_sync_recovery {
         );
 
         // Step 6: Wait for Peer to Sync and Verify
-        let peer_node = IrysNodeTest {
-            node_ctx: (),
-            cfg: peer_cfg_aurora,
-            temp_dir: stopped_peer.temp_dir,
-            name: stopped_peer.name,
-        }
-        .start()
-        .await;
+        let peer_node = stopped_peer.start().await;
         peer_node
             .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
             .await?;
