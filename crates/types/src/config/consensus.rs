@@ -967,4 +967,15 @@ mod tests {
             "configs differing by one field should produce different hashes"
         );
     }
+
+    #[test]
+    fn test_consensus_hash_independent_instances() {
+        let config_a = ConsensusConfig::testing();
+        let config_b = ConsensusConfig::testing();
+        assert_eq!(
+            config_a.keccak256_hash(),
+            config_b.keccak256_hash(),
+            "independently constructed configs should produce identical hashes"
+        );
+    }
 }
