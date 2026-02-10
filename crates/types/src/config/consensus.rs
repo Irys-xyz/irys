@@ -424,7 +424,14 @@ pub struct MempoolConsensusConfig {
     pub commitment_fee: u64,
 }
 
-/// A `std::hash::Hasher` that buffers all writes and produces a Keccak256 digest.
+/// A `std::hash::Hasher` that buffers all writes in little-endian byte order
+/// and produces a Keccak256 digest.
+///
+/// The default `std::hash::Hasher::write_u64` etc. use `to_ne_bytes()` which is
+/// platform-dependent (little-endian on x86/ARM, big-endian on some others).
+/// We override every `write_*` method to use explicit little-endian encoding,
+/// and normalize `usize`/`isize` to 8 bytes, so the hash is identical on all
+/// platforms regardless of endianness or pointer width.
 struct Keccak256Hasher {
     buf: Vec<u8>,
 }
@@ -439,9 +446,59 @@ impl Keccak256Hasher {
     }
 }
 
+/// Implement Hasher in a way that doesn't rely on NE byte order and is consistent across platforms.
 impl std::hash::Hasher for Keccak256Hasher {
     fn write(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
+    }
+
+    fn write_u8(&mut self, i: u8) {
+        self.buf.push(i);
+    }
+
+    fn write_u16(&mut self, i: u16) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_u32(&mut self, i: u32) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_u64(&mut self, i: u64) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_u128(&mut self, i: u128) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_usize(&mut self, i: usize) {
+        // Always write as 8 bytes so 32-bit and 64-bit platforms agree.
+        self.buf.extend_from_slice(&(i as u64).to_le_bytes());
+    }
+
+    fn write_i8(&mut self, i: i8) {
+        self.buf.push(i as u8);
+    }
+
+    fn write_i16(&mut self, i: i16) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_i32(&mut self, i: i32) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_i64(&mut self, i: i64) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_i128(&mut self, i: i128) {
+        self.buf.extend_from_slice(&i.to_le_bytes());
+    }
+
+    fn write_isize(&mut self, i: isize) {
+        self.buf.extend_from_slice(&(i as i64).to_le_bytes());
     }
 
     fn finish(&self) -> u64 {
@@ -452,6 +509,9 @@ impl std::hash::Hasher for Keccak256Hasher {
 
 impl ConsensusConfig {
     /// Produce a deterministic Keccak256 hash of this consensus config.
+    ///
+    /// Uses `std::hash::Hash` with a custom hasher that forces little-endian
+    /// byte order for all integer types, making the output platform-independent.
     pub fn keccak256_hash(&self) -> H256 {
         use std::hash::Hash as _;
         let mut hasher = Keccak256Hasher::new();
