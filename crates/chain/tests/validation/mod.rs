@@ -1,5 +1,6 @@
 mod blobs_rejected;
 mod data_tx_pricing;
+mod ingress_proof_reanchor_dedup;
 mod invalid_perm_fee_refund;
 mod mempool_gossip_shape;
 mod poa_cases;
