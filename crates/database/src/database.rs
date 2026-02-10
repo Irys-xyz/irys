@@ -457,13 +457,12 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
         ));
     }
 
-    // Delete any existing proof for this signer before inserting.
-    // In DupSort tables, `put` does not upsert by subkey — entries with different
-    // encoded values (e.g. different anchor/signature) coexist under the same key+subkey.
-    // Without this delete, re-anchoring produces duplicate signer entries.
+    // Delete all existing proofs for this signer before inserting, as DupSort
+    // tables don't upsert — re-anchoring would otherwise produce duplicates.
     let address = signer.address();
-    if let Some(existing) =
-        ingress_proof_by_data_root_address(tx, ingress_proof.data_root, address)?
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+        .into_iter()
+        .filter(|(_, proof)| proof.address == address)
     {
         tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
@@ -493,9 +492,10 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
         ));
     }
 
-    // Delete any existing proof for this address before inserting (see store_ingress_proof_checked).
-    if let Some(existing) =
-        ingress_proof_by_data_root_address(tx, ingress_proof.data_root, address)?
+    // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+        .into_iter()
+        .filter(|(_, proof)| proof.address == address)
     {
         tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
