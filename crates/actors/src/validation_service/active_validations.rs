@@ -465,6 +465,7 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
+    use irys_types::BlockTransactions;
     use irys_types::{serialization::H256List, BlockHash, IrysBlockHeader, H256};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
@@ -623,6 +624,7 @@ mod tests {
                 .add_common(
                     header.block_hash,
                     &header,
+                    BlockTransactions::default(),
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
@@ -672,6 +674,7 @@ mod tests {
                 tree.add_common(
                     header.block_hash,
                     &header,
+                    BlockTransactions::default(),
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
@@ -720,6 +723,7 @@ mod tests {
                 tree.add_common(
                     header.block_hash,
                     &header,
+                    BlockTransactions::default(),
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),

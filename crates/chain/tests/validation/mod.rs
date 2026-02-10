@@ -1103,7 +1103,7 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -1116,14 +1116,9 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
     );
     dbg!(&block);
 
-    let err = send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await
-    .expect_err("block with missing commitments should be rejected");
+    let err = send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), transactions, false)
+        .await
+        .expect_err("block with missing commitments should be rejected");
 
     let err = err.downcast::<PreValidationError>()?;
     assert!(matches!(
