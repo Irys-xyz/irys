@@ -1529,7 +1529,7 @@ mod tests {
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
 
-        #[tokio::test]
+        #[test_log::test(tokio::test)]
         async fn should_sync_and_change_status() -> eyre::Result<()> {
             let temp_dir = setup_tracing_and_temp_dir(None, false);
             let start_from = 10;

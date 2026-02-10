@@ -38,6 +38,7 @@ irys-api-client = { workspace = true, features = ["test-utils"] }
 irys-actors = { workspace = true, features = ["test-utils"] }
 irys-storage.workspace = true
 async-trait = "0.1"
+test-log.workspace = true
 
 [lints]
 workspace = true
