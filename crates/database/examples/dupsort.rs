@@ -158,5 +158,67 @@ fn main() -> eyre::Result<()> {
 
     assert_eq!(walk.len(), 0);
 
+    // Test: Delete all entries matching a specific subkey (simulates the ingress proof dedup fix)
+    let w_tx = db.tx_mut()?;
+
+    // Re-insert test data with duplicates under same subkey
+    let target_subkey = 42u128;
+    let chunk_v1 = CachedChunk2 {
+        key: target_subkey,
+        chunk: CachedChunk {
+            chunk: None,
+            data_path: Base64::from_utf8_str("version1")?,
+        },
+    };
+    let chunk_v2 = CachedChunk2 {
+        key: target_subkey,
+        chunk: CachedChunk {
+            chunk: None,
+            data_path: Base64::from_utf8_str("version2")?,
+        },
+    };
+    let chunk_v3 = CachedChunk2 {
+        key: target_subkey,
+        chunk: CachedChunk {
+            chunk: None,
+            data_path: Base64::from_utf8_str("version3")?,
+        },
+    };
+
+    w_tx.put::<CachedChunks2>(key, chunk_v1.clone())?;
+    w_tx.put::<CachedChunks2>(key, chunk_v2.clone())?;
+    w_tx.put::<CachedChunks2>(key, chunk_v3.clone())?;
+    w_tx.commit()?;
+
+    // Verify we have 3 entries with the same subkey
+    let read_tx = db.tx()?;
+    let mut cursor = read_tx.cursor_dup_read::<CachedChunks2>()?;
+    let matching: Vec<_> = cursor
+        .walk_dup(Some(key), None)?
+        .collect::<Result<Vec<_>, DatabaseError>>()?
+        .into_iter()
+        .filter(|(_, chunk)| chunk.key == target_subkey)
+        .collect();
+    assert_eq!(matching.len(), 3);
+    drop(read_tx);
+
+    // Delete only v1 and v2, leaving v3
+    let w_tx = db.tx_mut()?;
+    w_tx.delete::<CachedChunks2>(key, Some(chunk_v1))?;
+    w_tx.delete::<CachedChunks2>(key, Some(chunk_v2))?;
+    w_tx.commit()?;
+
+    // Verify only v3 remains
+    let read_tx = db.tx()?;
+    let mut cursor = read_tx.cursor_dup_read::<CachedChunks2>()?;
+    let remaining: Vec<_> = cursor
+        .walk_dup(Some(key), None)?
+        .collect::<Result<Vec<_>, DatabaseError>>()?
+        .into_iter()
+        .filter(|(_, chunk)| chunk.key == target_subkey)
+        .collect();
+    assert_eq!(remaining.len(), 1, "Only v3 should remain");
+    assert_eq!(remaining[0].1, chunk_v3);
+
     Ok(())
 }
