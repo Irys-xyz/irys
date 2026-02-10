@@ -641,7 +641,24 @@ async fn test_ingress_proof_anchor_edge_case(
         edge_case_ingress_proof.id()
     );
 
-    // this should pass mempool validation: edge_case_anchor_height >= min_ingress_proof_anchor_height
+    // Post chunks first so the node auto-generates an ingress proof once all chunks are cached.
+    genesis_node.post_chunk_32b(&edge_data_tx, 0, &chunks).await;
+    genesis_node.post_chunk_32b(&edge_data_tx, 1, &chunks).await;
+    genesis_node.post_chunk_32b(&edge_data_tx, 2, &chunks).await;
+
+    // Wait for the auto-generated proof (1 proof from genesis_signer).
+    // We must wait for this async task to complete before injecting the edge-case proof,
+    // otherwise it could race and overwrite the edge-case proof after we insert it below.
+    genesis_node
+        .wait_for_multiple_ingress_proofs_no_mining(
+            vec![edge_data_tx.header.id],
+            1,
+            seconds_to_wait,
+        )
+        .await?;
+
+    // Now inject the edge-case ingress proof to verify mempool validation accepts it.
+    // This replaces the auto-generated proof (same signer address, dupsort dedup).
     let resp = genesis_node
         .ingest_ingress_proof(edge_case_ingress_proof.clone())
         .await;
@@ -651,27 +668,6 @@ async fn test_ingress_proof_anchor_edge_case(
         "Edge case ingress proof should pass mempool validation but got: {:?}",
         resp.err()
     );
-
-    genesis_node
-        .wait_for_multiple_ingress_proofs_no_mining(
-            vec![edge_data_tx.header.id],
-            1,
-            seconds_to_wait,
-        )
-        .await?;
-
-    // Post chunks for the new transaction
-    genesis_node.post_chunk_32b(&edge_data_tx, 0, &chunks).await;
-    genesis_node.post_chunk_32b(&edge_data_tx, 1, &chunks).await;
-    genesis_node.post_chunk_32b(&edge_data_tx, 2, &chunks).await;
-
-    genesis_node
-        .wait_for_multiple_ingress_proofs_no_mining(
-            vec![edge_data_tx.header.id],
-            2,
-            seconds_to_wait,
-        )
-        .await?;
 
     genesis_node.node_ctx.db.update_eyre(|tx| {
         use reth_db::transaction::DbTxMut as _;
