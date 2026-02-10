@@ -16,6 +16,7 @@ use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
 use irys_types::{BlockHash, IrysBlockHeader};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::{
@@ -272,6 +273,9 @@ pub(super) struct ValidationCoordinator {
     /// Concurrent validation tasks
     pub concurrent_tasks: JoinSet<ConcurrentValidationResult>,
 
+    /// Maps task IDs to block hashes for panic diagnostics
+    pub concurrent_task_blocks: HashMap<tokio::task::Id, BlockHash>,
+
     /// Block tree for priority calculation
     pub block_tree_guard: BlockTreeReadGuard,
 }
@@ -281,6 +285,7 @@ impl ValidationCoordinator {
         Self {
             vdf_scheduler: VdfScheduler::new(Arc::clone(&vdf_notify)),
             concurrent_tasks: JoinSet::new(),
+            concurrent_task_blocks: HashMap::new(),
             block_tree_guard,
         }
     }
@@ -342,7 +347,7 @@ impl ValidationCoordinator {
                 VdfValidationResult::Valid => {
                     let block_hash = task.block.block_hash;
 
-                    self.concurrent_tasks.spawn(
+                    let abort_handle = self.concurrent_tasks.spawn(
                         async move {
                             // Execute the validation and return the result
                             let validation_result = task.execute_concurrent().await;
@@ -358,6 +363,8 @@ impl ValidationCoordinator {
                         ))
                         .in_current_span(),
                     );
+                    self.concurrent_task_blocks
+                        .insert(abort_handle.id(), block_hash);
                 }
                 VdfValidationResult::Cancelled => {
                     // Re-queue the cancelled task with recalculated priority
