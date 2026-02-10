@@ -296,10 +296,29 @@ impl ValidationService {
                                 "Concurrent task panicked"
                             );
                             if let Some(hash) = block_hash {
-                                self.inner.chain_sync_state.record_validation_finished(&hash);
-                                self.inner.chain_sync_state.record_block_validation_error(
-                                    format!("block={} error=concurrent task panicked: {}", hash, e),
-                                );
+                                if let Err(send_err) = self.inner.service_senders.block_tree.send(
+                                    crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                        block_hash: hash,
+                                        validation_result: ValidationResult::Invalid(
+                                            ValidationError::TaskPanicked {
+                                                task: "concurrent_validation".to_string(),
+                                                details: e.to_string(),
+                                            },
+                                        ),
+                                    }
+                                ) {
+                                    error!(
+                                        block.hash = %hash,
+                                        custom.error = ?send_err,
+                                        "Failed to send panic result to block tree service"
+                                    );
+                                    // Block tree won't handle diagnostics since send failed,
+                                    // so record directly as a fallback.
+                                    self.inner.chain_sync_state.record_validation_finished(&hash);
+                                    self.inner.chain_sync_state.record_block_validation_error(
+                                        format!("block={} error=concurrent task panicked: {}", hash, e),
+                                    );
+                                }
                             }
                         }
                         None => {
