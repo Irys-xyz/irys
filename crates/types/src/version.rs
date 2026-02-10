@@ -377,12 +377,12 @@ impl Compact for PeerAddress {
     }
 }
 
-/// Example serialized JSON AcceptedResponse:
+/// Example serialized JSON AcceptedResponse V1:
 /// ```json
 /// {
 ///   "status": "accepted",         // comes from PeerResponse Enum
 ///   "version": "1.2.0",           // semver formatted
-///   "protocol_version": "2",      // or however ProtocolVersion is configured to serialize
+///   "protocol_version": "1",      // V1 protocol version
 ///   "peers": [
 ///     "203.0.113.1:8333",         // IPv4 address:port
 ///     "203.0.113.2:8333",
@@ -394,7 +394,49 @@ impl Compact for PeerAddress {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandshakeResponse {
+pub struct HandshakeResponseV1 {
+    pub version: Version,
+    pub protocol_version: ProtocolVersion,
+    // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
+    pub peers: Vec<PeerAddress>,
+    pub timestamp: u64,
+    pub message: Option<String>,
+}
+
+impl Default for HandshakeResponseV1 {
+    fn default() -> Self {
+        Self {
+            version: Version::new(0, 1, 0), // Default to 0.1.0
+            protocol_version: ProtocolVersion::V1,
+            peers: Vec::new(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            message: None,
+        }
+    }
+}
+
+/// Example serialized JSON AcceptedResponse V2:
+/// ```json
+/// {
+///   "status": "accepted",         // comes from PeerResponse Enum
+///   "version": "1.2.0",           // semver formatted
+///   "protocol_version": "2",      // V2 protocol version
+///   "peers": [
+///     "203.0.113.1:8333",         // IPv4 address:port
+///     "203.0.113.2:8333",
+///     "[2001:db8::1]:8333",       // IPv6 addresses use [] notation
+///     "[2001:db8::2]:8333"
+///   ],
+///   "timestamp": 1645567124437,   // Number of milliseconds since UNIX epoch
+///   "message": "Welcome to the network",  // or null if None
+///   "consensus_config_hash": "0x..."  // Hash of consensus config
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakeResponseV2 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
@@ -404,7 +446,7 @@ pub struct HandshakeResponse {
     pub consensus_config_hash: H256,
 }
 
-impl Default for HandshakeResponse {
+impl Default for HandshakeResponseV2 {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
@@ -419,6 +461,9 @@ impl Default for HandshakeResponse {
         }
     }
 }
+
+/// Legacy type alias for backward compatibility - maps to V2
+pub type HandshakeResponse = HandshakeResponseV2;
 
 /// Example serialized JSON RejectedResponse:
 /// ```json
