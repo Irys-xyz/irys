@@ -26,6 +26,13 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// Defines the core parameters that govern the Irys network consensus rules.
 /// These parameters determine how the network operates, including pricing,
 /// storage requirements, and data validation mechanisms.
+///
+/// ## Hash Stability Note
+///
+/// The `Hash` implementation relies on the stability of `Hash` implementations
+/// from dependency types (Decimal, U256, Address, etc.). For deterministic
+/// consensus hash results across the network, nodes should use matching Rust
+/// compiler versions and dependency versions.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsensusConfig {
@@ -976,6 +983,22 @@ mod tests {
             config_a.keccak256_hash(),
             config_b.keccak256_hash(),
             "independently constructed configs should produce identical hashes"
+        );
+    }
+
+    #[test]
+    fn test_consensus_hash_regression() {
+        // This test verifies that the hash of the testing config remains stable.
+        // If this test fails, it indicates a breaking change in either:
+        // - The ConsensusConfig structure or field order
+        // - The Hash implementation of a dependency type
+        // - The Rust compiler's Hash derive implementation
+        let config = ConsensusConfig::testing();
+        let expected_hash = H256::from_base58("EJTZxm4vLUBZJEEF5i6SdfFbqCxNbSYEfMVtuaJ76Lzg");
+        assert_eq!(
+            config.keccak256_hash(),
+            expected_hash,
+            "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
         );
     }
 }
