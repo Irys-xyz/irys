@@ -202,13 +202,13 @@ fn main() -> eyre::Result<()> {
     assert_eq!(matching.len(), 3);
     drop(read_tx);
 
-    // Delete only v1 and v2, leaving v3
+    // Delete v1 and v3, leaving v2
     let w_tx = db.tx_mut()?;
     w_tx.delete::<CachedChunks2>(key, Some(chunk_v1))?;
-    w_tx.delete::<CachedChunks2>(key, Some(chunk_v2))?;
+    w_tx.delete::<CachedChunks2>(key, Some(chunk_v3))?;
     w_tx.commit()?;
 
-    // Verify only v3 remains
+    // Verify only v2 remains
     let read_tx = db.tx()?;
     let mut cursor = read_tx.cursor_dup_read::<CachedChunks2>()?;
     let remaining: Vec<_> = cursor
@@ -217,8 +217,8 @@ fn main() -> eyre::Result<()> {
         .into_iter()
         .filter(|(_, chunk)| chunk.key == target_subkey)
         .collect();
-    assert_eq!(remaining.len(), 1, "Only v3 should remain");
-    assert_eq!(remaining[0].1, chunk_v3);
+    assert_eq!(remaining.len(), 1, "Only v2 should remain");
+    assert_eq!(remaining[0].1, chunk_v2);
 
     Ok(())
 }
