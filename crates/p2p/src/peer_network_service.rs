@@ -1018,13 +1018,15 @@ impl PeerNetworkService {
 
         match peer_response {
             PeerResponse::Accepted(mut accepted_peers) => {
-                // Check for consensus config mismatch
-                let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
-                if accepted_peers.consensus_config_hash != our_hash {
-                    error!(
-                        "Consensus config mismatch with peer at {}! ours={} theirs={}",
-                        gossip_address, our_hash, accepted_peers.consensus_config_hash,
-                    );
+                // Only log mismatch if the version is not V1 - V1 peers have zero hash
+                if protocol_version != ProtocolVersion::V1 {
+                    let our_hash = inner.state.lock().await.config.consensus.keccak256_hash();
+                    if accepted_peers.consensus_config_hash != our_hash {
+                        error!(
+                            "Consensus config mismatch with peer at {}! ours={} theirs={}",
+                            gossip_address, our_hash, accepted_peers.consensus_config_hash,
+                        );
+                    }
                 }
 
                 if is_trusted_peer && peer_filter_mode == PeerFilterMode::TrustedAndHandshake {
