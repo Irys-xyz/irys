@@ -656,6 +656,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     let sync_mode = config.node_config.sync_mode;
     let block_batch_size = config.node_config.sync.block_batch_size;
     let retry_block_request_timeout_secs = config.node_config.sync.retry_block_request_timeout_secs;
+    let wait_queue_slot_timeout_secs = config.node_config.sync.wait_queue_slot_timeout_secs;
+    let wait_queue_slot_max_attempts = config.node_config.sync.wait_queue_slot_max_attempts;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -796,8 +798,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
             // This will only fail if max attempts are exceeded AND no validations are running
             match sync_state
                 .wait_for_an_empty_queue_slot_with_validation_awareness(
-                    Duration::from_secs(30), // timeout per attempt
-                    3,                       // max attempts
+                    Duration::from_secs(wait_queue_slot_timeout_secs),
+                    wait_queue_slot_max_attempts,
                 )
                 .await
             {
@@ -869,7 +871,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
                     }
 
                     // Final check: if still no active validations and queue is still full, fail
-                    if !sync_state.has_active_validations() && sync_state.is_queue_full() {
+                    // Use atomic check to avoid TOCTOU
+                    if sync_state.queue_full_with_no_active_validations() {
                         error!("Sync task: Queue still full with no active validations after retry, exiting sync");
                         return Err(ChainSyncError::Internal(
                             "Failed to get queue slot after timeout and retries with no active validations".to_string(),

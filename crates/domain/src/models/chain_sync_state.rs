@@ -458,10 +458,14 @@ impl ChainSyncState {
         timeout_per_attempt: Duration,
         max_attempts: usize,
     ) -> Result<(), WaitForQueueSlotError> {
-        for attempt in 1..=max_attempts {
+        let mut consecutive_no_active_timeouts = 0;
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
             debug!(
-                "Wait attempt {} of {} for empty queue slot",
-                attempt, max_attempts
+                "Wait attempt {} (consecutive no-active timeouts: {}) for empty queue slot",
+                attempt, consecutive_no_active_timeouts
             );
 
             match self
@@ -493,16 +497,20 @@ impl ChainSyncState {
                             "Active validations in progress ({}), continuing to wait...",
                             active_count
                         );
-                        // Wait a bit before next attempt
+                        // Reset the consecutive counter since there are active validations
+                        consecutive_no_active_timeouts = 0;
+                        // Wait a bit before the next attempt
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         continue;
                     }
 
-                    // No active validations - this is the failure condition
-                    // but only fail on the last attempt
-                    if attempt == max_attempts {
+                    // No active validations - increment consecutive timeout counter
+                    consecutive_no_active_timeouts += 1;
+
+                    // Check if we've exceeded max consecutive timeouts with no active validations
+                    if consecutive_no_active_timeouts >= max_attempts {
                         warn!(
-                            "All {} attempts failed with no active validations. Diagnostic info:\n{}",
+                            "All {} consecutive attempts failed with no active validations. Diagnostic info:\n{}",
                             max_attempts,
                             self.get_diagnostic_summary()
                         );
@@ -514,14 +522,6 @@ impl ChainSyncState {
                 }
             }
         }
-
-        // Should not reach here, but handle it
-        Err(WaitForQueueSlotError::MaxAttemptsExceeded {
-            attempts: max_attempts,
-            queue_depth: self
-                .sync_target_height()
-                .saturating_sub(self.highest_processed_block()),
-        })
     }
 
     /// Waits for the highest pre-validated block to reach target sync height
@@ -655,5 +655,12 @@ impl ChainSyncState {
     pub fn has_active_validations(&self) -> bool {
         let diagnostic = self.diagnostic_info.read().unwrap();
         diagnostic.has_active_validations()
+    }
+
+    /// Atomically check if the queue is full AND there are no active validations.
+    /// This avoids TOCTOU issues when checking both conditions separately.
+    pub fn queue_full_with_no_active_validations(&self) -> bool {
+        let diagnostic = self.diagnostic_info.read().unwrap();
+        self.is_queue_full() && !diagnostic.has_active_validations()
     }
 }
