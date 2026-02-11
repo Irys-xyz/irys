@@ -2,12 +2,12 @@ use super::{CommitmentState, CommitmentStateEntry, PartitionAssignments};
 use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FILE_NAME};
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
-use irys_database::{data_ledger::*, SystemLedger};
+use irys_database::{ExpiringPartitionInfo, Ledgers};
 use irys_types::CommitmentStatus;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, NodeConfig, SimpleRNG, H256,
+    IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
 };
 use irys_types::{
     partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
@@ -48,7 +48,7 @@ pub struct EpochSnapshot {
 impl Default for EpochSnapshot {
     fn default() -> Self {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         Self {
             ledgers: Ledgers::new(&config.consensus),
             partition_assignments: PartitionAssignments::new(),
@@ -1340,7 +1340,7 @@ mod tests {
             num_partitions_per_slot: 2,
             ..node_config.consensus_config()
         });
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let mut snapshot = EpochSnapshot {
             ledgers: Ledgers::new(&config.consensus),
             partition_assignments: PartitionAssignments::new(),
@@ -1393,7 +1393,7 @@ mod tests {
 
     mod validate_commitments {
         use crate::EpochSnapshot;
-        use irys_database::SystemLedger;
+        use irys_types::SystemLedger;
         use irys_types::{ConsensusConfig, H256List, SystemTransactionLedger};
 
         #[test]

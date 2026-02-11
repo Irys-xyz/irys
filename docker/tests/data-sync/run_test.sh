@@ -5,7 +5,8 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$SCRIPT_DIR/../../.."
 cd "$SCRIPT_DIR"
 
-IMAGE_NAME="${IMAGE_NAME:-localhost/irys-test:latest}"
+# Default to debug image (has shell for test scripts)
+IMAGE_NAME="${IMAGE_NAME:-irys:debug}"
 export IMAGE_NAME
 
 # Function to cleanup on exit

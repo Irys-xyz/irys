@@ -9,10 +9,10 @@ use futures::StreamExt as _;
 use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
-    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, GossipRequest,
-    HandshakeRequest, HandshakeResponse, IrysAddress, IrysBlockHeader, IrysTransactionResponse,
-    NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse, ProtocolVersion,
-    DATA_REQUEST_RETRIES, H256,
+    BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
+    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
+    IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
+    PeerResponse, ProtocolVersion, DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -48,6 +48,7 @@ pub enum GossipClientError {
 #[derive(Debug, Clone)]
 pub struct GossipClient {
     pub mining_address: IrysAddress,
+    pub peer_id: IrysPeerId,
     client: Client,
 }
 
@@ -55,9 +56,10 @@ impl GossipClient {
     pub const CURRENT_PROTOCOL_VERSION: u32 = ProtocolVersion::current() as u32;
 
     #[must_use]
-    pub fn new(timeout: Duration, mining_address: IrysAddress) -> Self {
+    pub fn new(timeout: Duration, mining_address: IrysAddress, peer_id: IrysPeerId) -> Self {
         Self {
             mining_address,
+            peer_id,
             client: Client::builder()
                 .timeout(timeout)
                 .build()
@@ -92,7 +94,7 @@ impl GossipClient {
     /// and false if it doesn't.
     pub async fn make_get_data_request_and_update_the_score(
         &self,
-        peer: &(IrysAddress, PeerListItem),
+        peer: &(IrysPeerId, PeerListItem),
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<bool>> {
@@ -105,25 +107,27 @@ impl GossipClient {
                 ));
             }
 
-            let url = format!(
-                "http://{}/gossip{}",
-                peer.1.address.gossip,
-                GossipRoutes::GetData
-            );
             if let Some(req_v1) = requested_data.to_v1() {
-                self.send_data_internal(url, &req_v1).await
+                self.send_data_internal(
+                    &peer.1.address.gossip,
+                    GossipRoutes::GetData,
+                    &req_v1,
+                    ProtocolVersion::V1,
+                )
+                .await
             } else {
                 Ok(GossipResponse::Rejected(
                     RejectionReason::UnsupportedFeature,
                 ))
             }
         } else {
-            let url = format!(
-                "http://{}/gossip/v2{}",
-                peer.1.address.gossip,
-                GossipRoutes::GetData
-            );
-            self.send_data_internal(url, &requested_data).await
+            self.send_data_internal(
+                &peer.1.address.gossip,
+                GossipRoutes::GetData,
+                &requested_data,
+                ProtocolVersion::V2,
+            )
+            .await
         };
 
         let response_time = start_time.elapsed();
@@ -133,7 +137,7 @@ impl GossipClient {
 
     async fn pull_block_body_from_v1_peer(
         &self,
-        peer: &(IrysAddress, PeerListItem),
+        peer: &(IrysPeerId, PeerListItem),
         header: &IrysBlockHeader,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
@@ -195,7 +199,7 @@ impl GossipClient {
     /// and updates the peer's score based on the result.
     async fn pull_primitive_data_and_update_the_score(
         &self,
-        peer: &(IrysAddress, PeerListItem),
+        peer: &(IrysPeerId, PeerListItem),
         requested_data: GossipDataRequestV2,
         peer_list: &PeerList,
     ) -> GossipResult<GossipResponse<Option<GossipDataV2>>> {
@@ -203,14 +207,15 @@ impl GossipClient {
 
         let res: GossipResult<GossipResponse<Option<GossipDataV2>>> =
             if peer.1.protocol_version == irys_types::ProtocolVersion::V1 {
-                let url = format!(
-                    "http://{}/gossip{}",
-                    peer.1.address.gossip,
-                    GossipRoutes::PullData
-                );
                 if let Some(req_v1) = requested_data.to_v1() {
                     let res_v1: GossipResult<GossipResponse<Option<irys_types::v1::GossipDataV1>>> =
-                        self.send_data_internal(url, &req_v1).await;
+                        self.send_data_internal(
+                            &peer.1.address.gossip,
+                            GossipRoutes::PullData,
+                            &req_v1,
+                            ProtocolVersion::V1,
+                        )
+                        .await;
 
                     res_v1.map(|response| match response {
                         GossipResponse::Accepted(maybe_data) => {
@@ -224,12 +229,13 @@ impl GossipClient {
                     ))
                 }
             } else {
-                let url = format!(
-                    "http://{}/gossip/v2{}",
-                    peer.1.address.gossip,
-                    GossipRoutes::PullData
-                );
-                self.send_data_internal(url, &requested_data).await
+                self.send_data_internal(
+                    &peer.1.address.gossip,
+                    GossipRoutes::PullData,
+                    &requested_data,
+                    ProtocolVersion::V2,
+                )
+                .await
             };
 
         let response_time = start_time.elapsed();
@@ -242,7 +248,7 @@ impl GossipClient {
     /// and updates the peer's score based on the result.
     async fn pull_data_and_update_the_score(
         &self,
-        peer: &(IrysAddress, PeerListItem),
+        peer: &(IrysPeerId, PeerListItem),
         requested_data: GossipDataRequestV2,
         fallback_header: Option<&IrysBlockHeader>,
         peer_list: &PeerList,
@@ -328,18 +334,15 @@ impl GossipClient {
         }
     }
 
-    pub async fn post_handshake(
+    pub async fn post_handshake_v1(
         &self,
         peer: SocketAddr,
         version: HandshakeRequest,
     ) -> Result<PeerResponse, GossipClientError> {
-        let path = if version.protocol_version == ProtocolVersion::V1 {
-            format!("gossip{}", GossipRoutes::Version)
-        } else {
-            format!("gossip/v2{}", GossipRoutes::Handshake)
-        };
+        // V1 uses /version endpoint
+        let path = format!("gossip{}", GossipRoutes::Version);
         let url = format!("http://{}/{}", peer, path);
-        debug!("Posting handshake to {}: {:?}", url, version);
+        debug!("Posting V1 handshake to {}: {:?}", url, version);
         let response = self
             .internal_client()
             .post(&url)
@@ -355,7 +358,72 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponse> =
+        let response: GossipResponse<HandshakeResponseV1> =
+            response.json().await.map_err(|error| {
+                GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
+            })?;
+
+        match response {
+            GossipResponse::Accepted(v1_response) => {
+                // Convert V1 response to V2 format for internal compatibility
+                let v2_response = HandshakeResponseV2 {
+                    version: v1_response.version,
+                    protocol_version: v1_response.protocol_version,
+                    peers: v1_response.peers,
+                    timestamp: v1_response.timestamp,
+                    message: v1_response.message,
+                    consensus_config_hash: H256::zero(), // V1 doesn't have consensus hash
+                };
+                Ok(PeerResponse::Accepted(v2_response))
+            }
+            GossipResponse::Rejected(reason) => match reason {
+                RejectionReason::InvalidCredentials => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::InvalidCredentials,
+                        message: Some("Invalid credentials provided".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                RejectionReason::ProtocolMismatch => Ok(PeerResponse::Rejected(
+                    irys_types::version::RejectedResponse {
+                        reason: irys_types::version::RejectionReason::ProtocolMismatch,
+                        message: Some("Protocol mismatch".to_string()),
+                        retry_after: None,
+                    },
+                )),
+                _ => Err(GossipClientError::GetRequest(
+                    peer.to_string(),
+                    format!("Unexpected rejection reason: {:?}", reason),
+                )),
+            },
+        }
+    }
+
+    pub async fn post_handshake_v2(
+        &self,
+        peer: SocketAddr,
+        version: HandshakeRequestV2,
+    ) -> Result<PeerResponse, GossipClientError> {
+        // V2 uses /v2/handshake endpoint
+        let path = format!("gossip/v2{}", GossipRoutes::Handshake);
+        let url = format!("http://{}/{}", peer, path);
+        debug!("Posting V2 handshake to {}: {:?}", url, version);
+        let response = self
+            .internal_client()
+            .post(&url)
+            .json(&version)
+            .send()
+            .await
+            .map_err(|error| GossipClientError::GetRequest(peer.to_string(), error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(GossipClientError::GetRequest(
+                peer.to_string(),
+                response.status().to_string(),
+            ));
+        }
+
+        let response: GossipResponse<HandshakeResponseV2> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
@@ -558,34 +626,28 @@ impl GossipClient {
         match data {
             GossipDataV2::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::Chunk
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Chunk,
                     unpacked_chunk,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::Transaction
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Transaction,
                     irys_transaction_header,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::CommitmentTx
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::CommitmentTx,
                     commitment_tx,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
@@ -598,45 +660,37 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::Block
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Block,
                     &irys_block_header,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::BlockBody(block_body) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::BlockBody
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::BlockBody,
                     &block_body,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::ExecutionPayload
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::ExecutionPayload,
                     &execution_payload,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
             GossipDataV2::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip/v2{}",
-                        peer.address.gossip,
-                        GossipRoutes::IngressProof
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::IngressProof,
                     ingress_proof,
+                    ProtocolVersion::V2,
                 )
                 .await
             }
@@ -652,34 +706,28 @@ impl GossipClient {
         match data {
             GossipDataV1::Chunk(unpacked_chunk) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::Chunk
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Chunk,
                     unpacked_chunk,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::Transaction(irys_transaction_header) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::Transaction
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Transaction,
                     irys_transaction_header,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::CommitmentTransaction(commitment_tx) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::CommitmentTx
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::CommitmentTx,
                     commitment_tx,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
@@ -692,34 +740,28 @@ impl GossipClient {
                     );
                 }
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::Block
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::Block,
                     irys_block_header,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::ExecutionPayload(execution_payload) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::ExecutionPayload
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::ExecutionPayload,
                     execution_payload,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
             GossipDataV1::IngressProof(ingress_proof) => {
                 self.send_data_internal(
-                    format!(
-                        "http://{}/gossip{}",
-                        peer.address.gossip,
-                        GossipRoutes::IngressProof
-                    ),
+                    &peer.address.gossip,
+                    GossipRoutes::IngressProof,
                     ingress_proof,
+                    ProtocolVersion::V1,
                 )
                 .await
             }
@@ -728,28 +770,40 @@ impl GossipClient {
 
     async fn send_data_internal<T, R>(
         &self,
-        url: String,
+        gossip_address: &SocketAddr,
+        route: GossipRoutes,
         data: &T,
+        protocol_version: ProtocolVersion,
     ) -> GossipResult<GossipResponse<R>>
     where
-        T: Serialize + ?Sized,
+        T: Serialize + Clone,
         for<'de> R: Deserialize<'de>,
     {
-        debug!("Sending data to {}", url);
+        // Construct URL based on protocol version
+        let url = match protocol_version {
+            ProtocolVersion::V1 => format!("http://{}/gossip{}", gossip_address, route),
+            ProtocolVersion::V2 => format!("http://{}/gossip/v2{}", gossip_address, route),
+        };
 
-        let req = self.create_request(data);
-        let response =
-            self.client
-                .post(&url)
-                .json(&req)
-                .send()
-                .await
-                .map_err(|response_error| {
-                    GossipError::Network(format!(
-                        "Failed to send data to {}: {}",
-                        url, response_error
-                    ))
-                })?;
+        debug!("Sending data to {} using {:?}", url, protocol_version);
+
+        let response = match protocol_version {
+            ProtocolVersion::V1 => {
+                let req = self.create_request_v1(data.clone());
+                self.client.post(&url).json(&req).send().await
+            }
+            ProtocolVersion::V2 => {
+                let req = self.create_request_v2(data.clone());
+                self.client.post(&url).json(&req).send().await
+            }
+        };
+
+        let response = response.map_err(|response_error| {
+            GossipError::Network(format!(
+                "Failed to send data to {}: {}",
+                url, response_error
+            ))
+        })?;
 
         let status = response.status();
 
@@ -813,7 +867,7 @@ impl GossipClient {
     fn handle_data_retrieval_score<T>(
         peer_list: &PeerList,
         result: &GossipResult<T>,
-        peer_miner_address: &IrysAddress,
+        peer_id: &IrysPeerId,
         response_time: Duration,
     ) {
         match result {
@@ -821,23 +875,23 @@ impl GossipClient {
                 // Successful response - reward based on speed
                 if response_time <= FAST_RESPONSE_THRESHOLD {
                     // Fast response deserves extra reward
-                    peer_list.increase_peer_score(
-                        peer_miner_address,
+                    peer_list.increase_peer_score_by_peer_id(
+                        peer_id,
                         ScoreIncreaseReason::TimelyResponse,
                     );
                 } else if response_time <= NORMAL_RESPONSE_THRESHOLD {
                     // Normal response gets standard reward
-                    peer_list.increase_peer_score(peer_miner_address, ScoreIncreaseReason::Online);
+                    peer_list.increase_peer_score_by_peer_id(peer_id, ScoreIncreaseReason::Online);
                 } else {
                     // Slow but successful response gets minimal penalty
                     peer_list
-                        .decrease_peer_score(peer_miner_address, ScoreDecreaseReason::SlowResponse);
+                        .decrease_peer_score_by_peer_id(peer_id, ScoreDecreaseReason::SlowResponse);
                 }
             }
             Err(err) => {
                 // Failed to respond - severe penalty
-                peer_list.decrease_peer_score(
-                    peer_miner_address,
+                peer_list.decrease_peer_score_by_peer_id(
+                    peer_id,
                     ScoreDecreaseReason::NetworkError(format!(
                         "handle_data_retrieval_score resulted in an error: {:?}",
                         err
@@ -850,7 +904,7 @@ impl GossipClient {
     /// Sends data to a peer and update their score in a detached task
     pub fn send_data_and_update_the_score_detached(
         &self,
-        peer: (&IrysAddress, &PeerListItem),
+        peer: (&IrysPeerId, &PeerListItem),
         data: Arc<GossipDataV2>,
         peer_list: &PeerList,
         cache: Arc<GossipCache>,
@@ -858,10 +912,11 @@ impl GossipClient {
     ) {
         let client = self.clone();
         let peer_list = peer_list.clone();
-        let peer_miner_address = *peer.0;
+        let peer_id = *peer.0;
         let peer = peer.1.clone();
 
         tokio::spawn(async move {
+            let peer_miner_address = peer.mining_address;
             if let Err(e) = client
                 .send_data_and_update_score_internal(
                     (&peer_miner_address, &peer),
@@ -871,7 +926,7 @@ impl GossipClient {
                 .await
             {
                 error!("Error sending data to peer: {:?}", e);
-            } else if let Err(err) = cache.record_seen(peer_miner_address, gossip_cache_key) {
+            } else if let Err(err) = cache.record_seen(peer_id, gossip_cache_key) {
                 error!("Error recording seen data in cache: {:?}", err);
             }
         });
@@ -926,8 +981,16 @@ impl GossipClient {
         });
     }
 
-    fn create_request<T>(&self, data: T) -> GossipRequest<T> {
-        GossipRequest {
+    fn create_request_v1<T>(&self, data: T) -> irys_types::GossipRequestV1<T> {
+        irys_types::GossipRequestV1 {
+            miner_address: self.mining_address,
+            data,
+        }
+    }
+
+    fn create_request_v2<T>(&self, data: T) -> irys_types::GossipRequestV2<T> {
+        irys_types::GossipRequestV2 {
+            peer_id: self.peer_id,
             miner_address: self.mining_address,
             data,
         }
@@ -938,7 +1001,7 @@ impl GossipClient {
         block_hash: BlockHash,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
         self.pull_data_from_network(
             data_request,
@@ -955,7 +1018,7 @@ impl GossipClient {
         header: Arc<IrysBlockHeader>,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, Arc<BlockBody>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, Arc<BlockBody>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockBody(header.block_hash);
         self.pull_data_from_network(
             data_request,
@@ -978,7 +1041,7 @@ impl GossipClient {
         evm_payload_hash: B256,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, Block), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, Block), PeerNetworkError> {
         let data_request = GossipDataRequestV2::ExecutionPayload(evm_payload_hash);
         self.pull_data_from_network(
             data_request,
@@ -995,7 +1058,7 @@ impl GossipClient {
         tx_id: H256,
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, IrysTransactionResponse), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, IrysTransactionResponse), PeerNetworkError> {
         let data_request = GossipDataRequestV2::Transaction(tx_id);
         self.pull_data_from_network(
             data_request,
@@ -1011,9 +1074,9 @@ impl GossipClient {
     pub async fn pull_block_header_from_peer(
         &self,
         block_hash: BlockHash,
-        peer: &(IrysAddress, PeerListItem),
+        peer: &(IrysPeerId, PeerListItem),
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, Arc<IrysBlockHeader>), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, Arc<IrysBlockHeader>), PeerNetworkError> {
         let data_request = GossipDataRequestV2::BlockHeader(block_hash);
         for attempt in 0..2 {
             match self
@@ -1049,7 +1112,7 @@ impl GossipClient {
                                 }
                             }
                             RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online(&peer.0, false);
+                                peer_list.set_is_online_by_peer_id(&peer.0, false);
                             }
                             RejectionReason::InvalidCredentials
                             | RejectionReason::ProtocolMismatch => {
@@ -1077,9 +1140,9 @@ impl GossipClient {
     pub async fn pull_transaction_from_peer(
         &self,
         tx_id: H256,
-        peer: &(IrysAddress, PeerListItem),
+        peer: &(IrysPeerId, PeerListItem),
         peer_list: &PeerList,
-    ) -> Result<(IrysAddress, IrysTransactionResponse), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, IrysTransactionResponse), PeerNetworkError> {
         let data_request = GossipDataRequestV2::Transaction(tx_id);
         for attempt in 0..2 {
             match self
@@ -1115,7 +1178,7 @@ impl GossipClient {
                                 }
                             }
                             RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online(&peer.0, false);
+                                peer_list.set_is_online_by_peer_id(&peer.0, false);
                             }
                             RejectionReason::InvalidCredentials
                             | RejectionReason::ProtocolMismatch => {
@@ -1181,7 +1244,7 @@ impl GossipClient {
         use_trusted_peers_only: bool,
         peer_list: &PeerList,
         map_data: fn(GossipDataV2) -> Result<T, PeerNetworkError>,
-    ) -> Result<(IrysAddress, T), PeerNetworkError> {
+    ) -> Result<(IrysPeerId, T), PeerNetworkError> {
         let mut peers = if use_trusted_peers_only {
             peer_list.online_trusted_peers()
         } else {
@@ -1285,7 +1348,7 @@ impl GossipClient {
                                 ));
                             }
                             RejectionReason::GossipDisabled => {
-                                peer_list.set_is_online(&peer.0, false);
+                                peer_list.set_is_online_by_peer_id(&peer.0, false);
                                 last_error = Some(GossipError::from(
                                     PeerNetworkError::FailedToRequestData(format!(
                                         "Request {:?}: Peer {:?} has gossip disabled",
@@ -1427,14 +1490,14 @@ impl GossipClient {
             match self.check_health(peer.1.address, peer_list).await {
                 Ok(is_healthy) => {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
-                    peer_list.set_is_online(&peer.0, is_healthy);
+                    peer_list.set_is_online_by_peer_id(&peer.0, is_healthy);
                 }
                 Err(err) => {
                     warn!(
                         "Failed to check the health of peer {}: {}, setting offline status",
                         peer.0, err
                     );
-                    peer_list.set_is_online(&peer.0, false);
+                    peer_list.set_is_online_by_peer_id(&peer.0, false);
                 }
             }
         }
@@ -1520,7 +1583,8 @@ impl GossipClient {
                 };
 
                 // Update score for the peer based on the result
-                Self::handle_score(peer_list, &res, &peer.0);
+                let miner_address = peer.1.mining_address;
+                Self::handle_score(peer_list, &res, &miner_address);
 
                 match res {
                     Ok(response) => match response {
@@ -1546,7 +1610,7 @@ impl GossipClient {
                                     Some(GossipError::from(PeerNetworkError::FailedToRequestData(
                                         format!("{}: Peer {:?} has gossip disabled", url, peer.0),
                                     )));
-                                peer_list.set_is_online(&peer.0, false);
+                                peer_list.set_is_online_by_peer_id(&peer.0, false);
                                 round_failures_were_handshake = false;
                             }
                             RejectionReason::InvalidData => {
@@ -1651,13 +1715,21 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             Self {
-                client: GossipClient::new(Duration::from_secs(1), IrysAddress::from([1_u8; 20])),
+                client: GossipClient::new(
+                    Duration::from_secs(1),
+                    IrysAddress::from([1_u8; 20]),
+                    IrysPeerId::from([1_u8; 20]),
+                ),
             }
         }
 
         fn with_timeout(timeout: Duration) -> Self {
             Self {
-                client: GossipClient::new(timeout, IrysAddress::from([1_u8; 20])),
+                client: GossipClient::new(
+                    timeout,
+                    IrysAddress::from([1_u8; 20]),
+                    IrysPeerId::from([1_u8; 20]),
+                ),
             }
         }
     }
@@ -1915,8 +1987,9 @@ mod tests {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        fn create_test_peer(id: u8) -> (IrysAddress, PeerListItem) {
+        fn create_test_peer(id: u8) -> (IrysPeerId, IrysAddress, PeerListItem) {
             let mining_addr = IrysAddress::from([id; 20]);
+            let peer_id = IrysPeerId::from(mining_addr); // For tests: peer_id = mining_addr for simplicity
             let peer_address = PeerAddress {
                 gossip: SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(192, 168, 1, id)),
@@ -1926,6 +1999,8 @@ mod tests {
                 execution: RethPeerInfo::default(),
             };
             let peer = PeerListItem {
+                peer_id,
+                mining_address: mining_addr,
                 address: peer_address,
                 reputation_score: PeerScore::new(PeerScore::INITIAL),
                 response_time: 100,
@@ -1936,7 +2011,7 @@ mod tests {
                     .as_secs(),
                 protocol_version: Default::default(),
             };
-            (mining_addr, peer)
+            (peer_id, mining_addr, peer)
         }
 
         #[test]
@@ -1952,19 +2027,19 @@ mod tests {
 
             for (response_time, should_increase) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
-                let (addr, peer) = create_test_peer(1);
-                peer_list.add_or_update_peer(addr, peer, true);
+                let (peer_id, _mining_addr, peer) = create_test_peer(1);
+                peer_list.add_or_update_peer(peer, true);
 
-                let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
 
                 GossipClient::handle_data_retrieval_score(
                     &peer_list,
                     &Ok(()),
-                    &addr,
+                    &peer_id,
                     response_time,
                 );
 
-                let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
                 if should_increase {
                     assert!(
                         updated_score > initial_score,
@@ -1988,19 +2063,19 @@ mod tests {
 
             for (response_time, expected_decrease) in test_cases {
                 let peer_list = PeerList::test_mock().expect("to create peer list mock");
-                let (addr, peer) = create_test_peer(1);
-                peer_list.add_or_update_peer(addr, peer, true);
+                let (peer_id, _mining_addr, peer) = create_test_peer(1);
+                peer_list.add_or_update_peer(peer, true);
 
-                let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
 
                 GossipClient::handle_data_retrieval_score(
                     &peer_list,
                     &Ok(()),
-                    &addr,
+                    &peer_id,
                     response_time,
                 );
 
-                let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
                 assert_eq!(
                     updated_score,
                     initial_score - expected_decrease,
@@ -2014,20 +2089,20 @@ mod tests {
         #[test]
         fn test_handle_data_retrieval_score_failed_response() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let (addr, peer) = create_test_peer(1);
-            peer_list.add_or_update_peer(addr, peer, true);
+            let (peer_id, _mining_addr, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
 
-            let initial_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            let initial_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
             let response_time = Duration::from_millis(500);
 
             GossipClient::handle_data_retrieval_score::<()>(
                 &peer_list,
                 &Err(GossipError::Network("timeout".to_string())),
-                &addr,
+                &peer_id,
                 response_time,
             );
 
-            let updated_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+            let updated_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
             assert_eq!(
                 updated_score,
                 initial_score - 3,
@@ -2038,8 +2113,8 @@ mod tests {
         #[test]
         fn test_multiple_score_updates_in_sequence() {
             let peer_list = PeerList::test_mock().expect("to create peer list mock");
-            let (addr, peer) = create_test_peer(1);
-            peer_list.add_or_update_peer(addr, peer, true);
+            let (peer_id, _mining_addr, peer) = create_test_peer(1);
+            peer_list.add_or_update_peer(peer, true);
 
             let operations = vec![
                 (Duration::from_millis(100), Ok(()), 51),
@@ -2058,7 +2133,7 @@ mod tests {
                         GossipClient::handle_data_retrieval_score(
                             &peer_list,
                             &Ok(()),
-                            &addr,
+                            &peer_id,
                             response_time,
                         );
                     }
@@ -2066,13 +2141,13 @@ mod tests {
                         GossipClient::handle_data_retrieval_score::<()>(
                             &peer_list,
                             &Err(e),
-                            &addr,
+                            &peer_id,
                             response_time,
                         );
                     }
                 }
 
-                let current_score = peer_list.get_peer(&addr).unwrap().reputation_score.get();
+                let current_score = peer_list.get_peer(&peer_id).unwrap().reputation_score.get();
                 assert_eq!(
                     current_score, expected_score,
                     "After response time {:?}, score should be {}",
@@ -2126,22 +2201,37 @@ mod tests {
     mod concurrent_scoring_tests {
         use super::*;
         use irys_types::IrysAddress;
-        use irys_types::{PeerListItem, PeerScore};
+        use irys_types::{PeerAddress, PeerListItem, PeerScore, ProtocolVersion, RethPeerInfo};
+        use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
         use std::sync::Arc;
         use tokio::task::JoinSet;
 
         #[tokio::test]
         async fn test_concurrent_score_updates() {
             let peer_list = Arc::new(PeerList::test_mock().expect("to create peer list mock"));
-            let addr = IrysAddress::from([1_u8; 20]);
-            let peer = PeerListItem::default();
-            peer_list.add_or_update_peer(addr, peer, true);
+            let mining_addr = IrysAddress::from([1_u8; 20]);
+            let peer_id = IrysPeerId::from(mining_addr);
+            let peer = PeerListItem {
+                peer_id,
+                mining_address: mining_addr,
+                address: PeerAddress {
+                    gossip: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9000)),
+                    api: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 9001)),
+                    execution: RethPeerInfo::default(),
+                },
+                reputation_score: PeerScore::new(PeerScore::INITIAL),
+                response_time: 0,
+                last_seen: 0,
+                is_online: true,
+                protocol_version: ProtocolVersion::default(),
+            };
+            peer_list.add_or_update_peer(peer, true);
 
             let mut join_set = JoinSet::new();
 
             for i in 0..20 {
                 let peer_list_clone = peer_list.clone();
-                let addr_copy = addr;
+                let peer_id_copy = peer_id;
 
                 join_set.spawn(async move {
                     let response_time = if i % 3 == 0 {
@@ -2156,14 +2246,14 @@ mod tests {
                         GossipClient::handle_data_retrieval_score::<()>(
                             &peer_list_clone,
                             &Err(GossipError::Network("test".to_string())),
-                            &addr_copy,
+                            &peer_id_copy,
                             response_time,
                         );
                     } else {
                         GossipClient::handle_data_retrieval_score(
                             &peer_list_clone,
                             &Ok(()),
-                            &addr_copy,
+                            &peer_id_copy,
                             response_time,
                         );
                     }
@@ -2172,7 +2262,7 @@ mod tests {
 
             while (join_set.join_next().await).is_some() {}
 
-            let final_peer = peer_list.get_peer(&addr);
+            let final_peer = peer_list.get_peer(&peer_id);
             assert!(final_peer.is_some());
             let final_score = final_peer.unwrap().reputation_score.get();
             // Score should be within valid bounds

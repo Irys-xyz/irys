@@ -1,5 +1,6 @@
 use crate::state::AtomicVdfState;
 use crate::{apply_reset_seed, step_number_to_salt_number, vdf_sha, MiningBroadcaster, VdfStep};
+use irys_domain::chain_sync_state::ChainSyncState;
 use irys_types::block_provider::BlockProvider;
 use irys_types::{
     block_production::Seed, AtomicVdfStepNumber, H256List, IrysBlockHeader, H256, U256,
@@ -62,6 +63,7 @@ pub fn run_vdf<B: BlockProvider>(
     vdf_state: AtomicVdfState,
     atomic_vdf_global_step: AtomicVdfStepNumber,
     block_provider: B,
+    chain_sync_state: ChainSyncState,
 ) {
     let mut next_reset_seed = initial_reset_seed;
     let mut canonical_global_step_number = vdf_state.read().unwrap().canonical_step();
@@ -105,6 +107,7 @@ pub fn run_vdf<B: BlockProvider>(
                     proposed_ff_step.global_step_number,
                     canonical_global_step_number,
                 );
+                chain_sync_state.record_vdf_step(global_step_number);
                 hash = process_reset(
                     global_step_number,
                     hash,
@@ -170,6 +173,7 @@ pub fn run_vdf<B: BlockProvider>(
             global_step_number + 1,
             canonical_global_step_number,
         );
+        chain_sync_state.record_vdf_step(global_step_number);
         info!(
             "Seed created {} step number {}",
             hash.clone(),
@@ -272,7 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_vdf_step() {
-        let config = Config::new(NodeConfig::testing());
+        let config = Config::new_with_random_peer_id(NodeConfig::testing());
         let mut hasher = Sha256::new();
         let mut checkpoints: Vec<H256> =
             vec![H256::default(); config.vdf.num_checkpoints_in_vdf_step];
@@ -314,7 +318,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let seed = H256::random();
         let reset_seed = H256::random();
@@ -337,6 +341,7 @@ mod tests {
         // Set global step number to 2 to simulate a scenario where canonical chain progresses
         mock_header.vdf_limiter_info.global_step_number = 2;
 
+        let chain_sync_state = ChainSyncState::new(false, false);
         let mining_state = Arc::clone(&is_mining_enabled);
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
@@ -353,6 +358,7 @@ mod tests {
                     vdf_state.clone(),
                     atomic_global_step_number,
                     MockBlockProvider(mock_header),
+                    chain_sync_state,
                 )
             }
         });
@@ -435,7 +441,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         node_config.consensus.get_mut().vdf.reset_frequency = 2;
         node_config.consensus.get_mut().vdf.sha_1s_difficulty = 1;
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let seed = H256::random();
         let reset_seed = H256::random();
@@ -454,6 +460,7 @@ mod tests {
 
         let atomic_global_step_number = Arc::new(AtomicU64::new(0));
 
+        let chain_sync_state = ChainSyncState::new(false, false);
         let mining_state = Arc::clone(&is_mining_enabled);
         let vdf_thread_handler = std::thread::spawn({
             let config = config.clone();
@@ -470,6 +477,7 @@ mod tests {
                     vdf_state.clone(),
                     atomic_global_step_number,
                     MockBlockProvider::new(),
+                    chain_sync_state,
                 )
             }
         });

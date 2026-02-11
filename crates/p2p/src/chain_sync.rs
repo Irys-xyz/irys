@@ -7,7 +7,7 @@ use irys_actors::MempoolFacade;
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::{BlockIndexReadGuard, PeerList};
 use irys_types::{
-    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysAddress, NodeMode,
+    BlockHash, BlockIndexItem, BlockIndexQuery, Config, EvmBlockHash, IrysPeerId, NodeMode,
     PeerListItem, SyncMode, TokioServiceHandle, U256,
 };
 use rand::prelude::SliceRandom as _;
@@ -656,6 +656,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     let sync_mode = config.node_config.sync_mode;
     let block_batch_size = config.node_config.sync.block_batch_size;
     let retry_block_request_timeout_secs = config.node_config.sync.retry_block_request_timeout_secs;
+    let wait_queue_slot_timeout_secs = config.node_config.sync.wait_queue_slot_timeout_secs;
+    let wait_queue_slot_max_attempts = config.node_config.sync.wait_queue_slot_max_attempts;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -792,88 +794,91 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         if sync_state.is_queue_full() {
             debug!("Sync task: Block queue is full, waiting for an empty slot");
 
-            // Retry logic for wait_for_an_empty_queue_slot
-            let retry_attempts = 3;
-            let mut wait_success = false;
+            // Use validation-aware wait that considers active validations
+            // This will only fail if max attempts are exceeded AND no validations are running
+            match sync_state
+                .wait_for_an_empty_queue_slot_with_validation_awareness(
+                    Duration::from_secs(wait_queue_slot_timeout_secs),
+                    wait_queue_slot_max_attempts,
+                )
+                .await
+            {
+                Ok(()) => {
+                    debug!("Sync task: Queue slot became available");
+                }
+                Err(e) => {
+                    // All attempts failed with no active validations - try to trigger processing
+                    warn!(
+                        "Sync task: Wait failed ({}), attempting to trigger block processing",
+                        e
+                    );
 
-            for attempt in 1..=retry_attempts {
-                debug!("Sync task: Wait attempt {} for empty queue slot", attempt);
+                    let retry_height = sync_state.highest_processed_block() + 1;
+                    debug!(
+                        "Sync task: Attempting to request block at height {} to trigger processing",
+                        retry_height
+                    );
 
-                match sync_state.wait_for_an_empty_queue_slot().await {
-                    Ok(()) => {
-                        debug!(
-                            "Sync task: Queue slot became available on attempt {}",
-                            attempt
-                        );
-                        wait_success = true;
-                        break;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "Sync task: Timeout on attempt {} waiting for queue slot",
-                            attempt
-                        );
+                    match get_block_index(
+                        peer_list,
+                        gossip_client,
+                        retry_height,
+                        1, // Just get one block
+                        3, // 3 retries for the network call
+                        is_trusted_mode,
+                    )
+                    .await
+                    {
+                        Ok(retry_index) if !retry_index.is_empty() => {
+                            let retry_block = &retry_index[0];
+                            debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
 
-                        if attempt < retry_attempts {
-                            // Try to request the block at height = last synced + 1 to trigger processing
-                            let retry_height = sync_state.highest_processed_block() + 1;
-                            debug!("Sync task: Attempting to request block at height {} to trigger processing", retry_height);
-
-                            match get_block_index(
-                                peer_list,
-                                gossip_client,
-                                retry_height,
-                                1, // Just get one block
-                                3, // 3 retries for the network call
-                                is_trusted_mode,
+                            // Try to reprocess the last prevalidated block
+                            match timeout(
+                                Duration::from_secs(retry_block_request_timeout_secs),
+                                gossip_data_handler.pull_and_process_block(
+                                    retry_block.block_hash,
+                                    sync_state.is_syncing_from_a_trusted_peer(),
+                                ),
                             )
                             .await
                             {
-                                Ok(retry_index) if !retry_index.is_empty() => {
-                                    let retry_block = &retry_index[0];
-                                    debug!("Sync task: Got to retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
-
-                                    // Try to reprocess the last prevalidated block
-                                    match timeout(
-                                        Duration::from_secs(retry_block_request_timeout_secs),
-                                        gossip_data_handler.pull_and_process_block(
-                                            retry_block.block_hash,
-                                            sync_state.is_syncing_from_a_trusted_peer(),
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(())) => {
-                                            debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
-                                        }
-                                        Ok(Err(e)) => {
-                                            warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
-                                        }
-                                        Err(_) => {
-                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
-                                        }
-                                    }
+                                Ok(Ok(())) => {
+                                    debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
+                                    // Give some time for validation to start, then continue the loop
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
-                                Ok(_) => {
-                                    warn!("Sync task: Retry attempt returned empty index for height {}", retry_height);
+                                Ok(Err(e)) => {
+                                    warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
                                 }
-                                Err(e) => {
-                                    warn!("Sync task: Failed to get retry block index for height {}: {}", retry_height, e);
+                                Err(_) => {
+                                    warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
                                 }
                             }
-
-                            // Wait a bit before next retry
-                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                        }
+                        Ok(_) => {
+                            warn!(
+                                "Sync task: Retry attempt returned empty index for height {}",
+                                retry_height
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Sync task: Failed to get retry block index for height {}: {}",
+                                retry_height, err
+                            );
                         }
                     }
-                }
-            }
 
-            if !wait_success {
-                error!("Sync task: All wait attempts failed, exiting sync");
-                return Err(ChainSyncError::Internal(
-                    "Failed to get queue slot after timeout and retries".to_string(),
-                ));
+                    // Final check: if still no active validations and queue is still full, fail
+                    // Use atomic check to avoid TOCTOU
+                    if sync_state.queue_full_with_no_active_validations() {
+                        error!("Sync task: Queue still full with no active validations after retry, exiting sync");
+                        return Err(ChainSyncError::Internal(
+                            "Failed to get queue slot after timeout and retries with no active validations".to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -1010,9 +1015,9 @@ async fn pull_highest_blocks(
     gossip_client: &GossipClient,
     use_trusted_peers_only: bool,
     top_n: Option<usize>,
-) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)>> {
+) -> ChainSyncResult<HashMap<BlockHash, (u64, Vec<(IrysPeerId, PeerListItem)>)>> {
     // Pick peers: trusted or top N active
-    let peers: Vec<(IrysAddress, irys_types::PeerListItem)> = if use_trusted_peers_only {
+    let peers: Vec<(IrysPeerId, irys_types::PeerListItem)> = if use_trusted_peers_only {
         debug!("Post-sync: Collecting the highest blocks from trusted peers");
         peer_list.online_trusted_peers()
     } else {
@@ -1031,7 +1036,7 @@ async fn pull_highest_blocks(
         ));
     }
 
-    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysAddress, PeerListItem)>)> =
+    let mut peers_by_top_block_hash: HashMap<BlockHash, (u64, Vec<(IrysPeerId, PeerListItem)>)> =
         HashMap::new();
 
     for (miner_address, peer) in peers {
@@ -1428,7 +1433,7 @@ async fn synced_peers_sorted_by_cumulative_diff(
     peer_list: &PeerList,
     gossip_client: &GossipClient,
     trusted_peers_only: bool,
-) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysAddress, PeerListItem)>>> {
+) -> ChainSyncResult<BTreeMap<U256, Vec<(IrysPeerId, PeerListItem)>>> {
     let peers = if trusted_peers_only {
         peer_list.online_trusted_peers()
     } else {
@@ -1510,8 +1515,8 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, PeerAddress,
-            PeerListItem, PeerNetworkSender, PeerScore,
+            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, IrysPeerId, NodeConfig,
+            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1592,7 +1597,7 @@ mod tests {
             node_config.sync_mode = SyncMode::Full;
             node_config.trusted_peers = vec![fake_peer_address];
             node_config.genesis_peer_discovery_timeout_millis = 10;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
 
@@ -1609,9 +1614,11 @@ mod tests {
                 tokio_handle,
             );
 
+            let fake_mining_addr = IrysAddress::repeat_byte(2);
             peer_list_guard.add_or_update_peer(
-                IrysAddress::repeat_byte(2),
                 PeerListItem {
+                    peer_id: IrysPeerId::from(fake_mining_addr),
+                    mining_address: fake_mining_addr,
                     reputation_score: PeerScore::new(100),
                     response_time: 0,
                     address: fake_peer_address,
@@ -1691,7 +1698,7 @@ mod tests {
             node_config.node_mode = NodeMode::Genesis;
             node_config.trusted_peers = vec![];
             node_config.genesis_peer_discovery_timeout_millis = 10;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
             let runtime_handle = tokio::runtime::Handle::current();
@@ -1713,9 +1720,11 @@ mod tests {
                 execution: Default::default(),
             };
 
+            let fake_mining_addr = IrysAddress::repeat_byte(2);
             peer_list.add_or_update_peer(
-                IrysAddress::repeat_byte(2),
                 PeerListItem {
+                    peer_id: IrysPeerId::from(fake_mining_addr),
+                    mining_address: fake_mining_addr,
                     reputation_score: PeerScore::new(100),
                     response_time: 0,
                     address: fake_peer_address,
@@ -1819,7 +1828,7 @@ mod tests {
             // Config and services
             let mut node_config = NodeConfig::testing();
             node_config.sync_mode = SyncMode::Full;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
 
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
@@ -1843,7 +1852,11 @@ mod tests {
             );
 
             // Add two peers reporting the same highest hash
+            let addr_a = IrysAddress::repeat_byte(0xA0);
+            let addr_b = IrysAddress::repeat_byte(0xB0);
             let peer1 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_a),
+                mining_address: addr_a,
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
                 address: PeerAddress {
@@ -1856,6 +1869,8 @@ mod tests {
                 protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_b),
+                mining_address: addr_b,
                 reputation_score: PeerScore::new(99),
                 response_time: 0,
                 address: PeerAddress {
@@ -1868,10 +1883,8 @@ mod tests {
                 protocol_version: Default::default(),
             };
 
-            let addr_a = IrysAddress::repeat_byte(0xA0);
-            let addr_b = IrysAddress::repeat_byte(0xB0);
-            peer_list_guard.add_or_update_peer(addr_a, peer1, true);
-            peer_list_guard.add_or_update_peer(addr_b, peer2, true);
+            peer_list_guard.add_or_update_peer(peer1, true);
+            peer_list_guard.add_or_update_peer(peer2, true);
 
             // Build data handler
             let db = db.clone();
@@ -1947,7 +1960,7 @@ mod tests {
 
             let mut node_config = NodeConfig::testing();
             node_config.sync_mode = SyncMode::Full;
-            let config = Config::new(node_config);
+            let config = Config::new_with_random_peer_id(node_config);
             let retry_timeout = config.node_config.sync.retry_block_request_timeout_secs;
 
             let (sender, receiver) = PeerNetworkSender::new_with_receiver();
@@ -1969,7 +1982,11 @@ mod tests {
                 runtime_handle,
             );
 
+            let addr_a = IrysAddress::repeat_byte(0xA1);
+            let addr_b = IrysAddress::repeat_byte(0xB1);
             let peer1 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_a),
+                mining_address: addr_a,
                 reputation_score: PeerScore::new(100),
                 response_time: 0,
                 address: PeerAddress {
@@ -1982,6 +1999,8 @@ mod tests {
                 protocol_version: Default::default(),
             };
             let peer2 = PeerListItem {
+                peer_id: IrysPeerId::from(addr_b),
+                mining_address: addr_b,
                 reputation_score: PeerScore::new(99),
                 response_time: 0,
                 address: PeerAddress {
@@ -1993,10 +2012,8 @@ mod tests {
                 is_online: true,
                 protocol_version: Default::default(),
             };
-            let addr_a = IrysAddress::repeat_byte(0xA1);
-            let addr_b = IrysAddress::repeat_byte(0xB1);
-            peer_list_guard.add_or_update_peer(addr_a, peer1, true);
-            peer_list_guard.add_or_update_peer(addr_b, peer2, true);
+            peer_list_guard.add_or_update_peer(peer1, true);
+            peer_list_guard.add_or_update_peer(peer2, true);
 
             let db = db.clone();
             let data_handler =

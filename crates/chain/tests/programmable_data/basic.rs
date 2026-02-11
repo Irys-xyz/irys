@@ -177,7 +177,7 @@ async fn heavy_test_programmable_data_basic() -> eyre::Result<()> {
 
             if response.status() == reqwest::StatusCode::OK {
                 let result: DataTransactionHeader = response.json().await.unwrap();
-                assert_eq!(&tx.header, &result);
+                assert!(&tx.header.eq_tx(&result));
                 info!("Transaction was retrieved ok after {} attempts", attempt);
                 break;
             }

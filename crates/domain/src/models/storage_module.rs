@@ -296,27 +296,39 @@ impl StorageModule {
                     params.packing_address
                 );
 
-                // check the partition assignment if it's present
-                if let Some(pa) = storage_module_info.partition_assignment {
-                    // if we have an assignment, check that the partition hash matches
-                    if let Some(ph) = params.partition_hash {
-                        ensure!(
-                            params.partition_hash == Some(pa.partition_hash),
-                            "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
-                            This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
-                            assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
-                            pa.partition_hash,
-                            ph,
-                        );
-                    } else {
-                        // we don't have the partition hash on disk
-                        // so we need to write the new params to disk
-                        params.partition_hash = Some(pa.partition_hash);
-                        params.ledger = pa.ledger_id;
-                        params.slot = pa.slot_index;
-                        params.last_updated_height = Some(0);
-                        params.write_to_disk(&params_path);
-                    }
+                // If disk has a partition hash that conflicts with the epoch
+                // snapshot, the submodule was packed against a different genesis.
+                if let (Some(ph), Some(pa)) = (
+                    params.partition_hash,
+                    storage_module_info.partition_assignment,
+                ) {
+                    ensure!(
+                        ph == pa.partition_hash,
+                        "Partition hash mismatch:\nexpected: {}\nfound   : {}\n\nError: Submodule partition assignments are out of sync with genesis block. \
+                        This occurs when a new genesis block is created with a different last_epoch_hash, but submodules still have partition_hashes \
+                        assigned from the previous genesis. To fix: clear the contents of the submodule directories and let them be repacked with the current genesis",
+                        pa.partition_hash,
+                        ph,
+                    );
+                }
+
+                // Derive the desired state from the epoch snapshot
+                let (want_hash, want_ledger, want_slot) =
+                    match storage_module_info.partition_assignment {
+                        Some(pa) => (Some(pa.partition_hash), pa.ledger_id, pa.slot_index),
+                        None => (None, None, None),
+                    };
+
+                // Sync disk params to the desired state if anything drifted
+                if params.partition_hash != want_hash
+                    || params.ledger != want_ledger
+                    || params.slot != want_slot
+                {
+                    params.partition_hash = want_hash;
+                    params.ledger = want_ledger;
+                    params.slot = want_slot;
+                    params.last_updated_height = Some(0);
+                    params.write_to_disk(&params_path);
                 }
             }
 
@@ -1908,7 +1920,7 @@ mod tests {
             base_directory: base_path.clone(),
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -2122,7 +2134,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let chunk_size = config.consensus.chunk_size as usize;
 
         // Create a StorageModule with the specified submodules and config
@@ -2330,7 +2342,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         // Create a StorageModule with the specified submodules and config
         let storage_module_info = &infos[0];
@@ -2345,10 +2357,13 @@ mod tests {
         storage_module.pack_with_zeros();
 
         // Create a dummy data tx header to provide the data_size and data_root
-        let data_tx = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_root,
-            data_size,
-            ..Default::default()
+        let data_tx = DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_root,
+                data_size,
+                ..Default::default()
+            },
+            metadata: irys_types::DataTransactionMetadata::new(),
         });
 
         let _ = storage_module.index_transaction_data(
@@ -2405,7 +2420,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
@@ -2470,7 +2485,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let storage_module = StorageModule::new(&infos[0], &config)?;
 
@@ -2549,7 +2564,7 @@ mod tests {
             base_directory: base_path,
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config.clone());
+        let config = Config::new_with_random_peer_id(node_config.clone());
 
         {
             let storage_module = StorageModule::new(&infos[0], &config)?;
@@ -2589,7 +2604,8 @@ mod tests {
         }
 
         // Create a new StorageModule instance (simulating restart)
-        let storage_module = StorageModule::new(&infos[0], &Config::new(node_config))?;
+        let storage_module =
+            StorageModule::new(&infos[0], &Config::new_with_random_peer_id(node_config))?;
 
         // Verify that Interrupted chunks are reset to Uninitialized on load
         let interrupted = storage_module.get_intervals(ChunkType::Interrupted);
@@ -2629,7 +2645,7 @@ mod tests {
             },
             ..NodeConfig::testing()
         };
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
 
         let infos = [StorageModuleInfo {
             id: 0,

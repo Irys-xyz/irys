@@ -5326,6 +5326,7 @@ dependencies = [
  "irys-types",
  "modular-bitfield",
  "paste",
+ "rand 0.8.5",
  "reth-codecs",
  "reth-db",
  "reth-db-api",
@@ -5370,6 +5371,7 @@ dependencies = [
  "irys-storage",
  "irys-testing-utils",
  "irys-types",
+ "itertools 0.13.0",
  "lru 0.14.0",
  "nodit",
  "openssl",
@@ -5406,7 +5408,7 @@ name = "irys-macros-integer-tagged"
 version = "0.1.0"
 dependencies = [
  "quote",
- "syn 1.0.109",
+ "syn 2.0.111",
 ]
 
 [[package]]

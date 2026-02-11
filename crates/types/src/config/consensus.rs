@@ -1,5 +1,5 @@
 use crate::hardfork_config::{Aurora, FrontierParams, IrysHardforkConfig};
-use crate::{serde_utils, UnixTimestamp};
+use crate::{serde_utils, unix_timestamp_string_serde, UnixTimestamp};
 use crate::{
     storage_pricing::{
         phantoms::{
@@ -17,6 +17,7 @@ use alloy_primitives::{Address, U256};
 use eyre::Result;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use serde::de::value::StringDeserializer;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -225,7 +226,7 @@ impl ConsensusOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlockRewardConfig {
     #[serde(
@@ -268,7 +269,7 @@ impl IrysRethConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GenesisConfig {
     /// The timestamp in milliseconds used for the genesis block
@@ -308,7 +309,7 @@ pub struct GenesisConfig {
 /// # Epoch Configuration
 ///
 /// Controls the timing and parameters for network epochs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EpochConfig {
     /// Scaling factor for the capacity projection curve
@@ -328,7 +329,7 @@ pub struct EpochConfig {
 /// # EMA (Exponential Moving Average) Configuration
 ///
 /// Controls how token prices are smoothed over time to reduce volatility.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaConfig {
     /// Number of blocks between EMA price recalculations
@@ -339,7 +340,7 @@ pub struct EmaConfig {
 /// # VDF (Verifiable Delay Function) Configuration
 ///
 /// Settings for the time-delay proof mechanism used in consensus.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VdfConsensusConfig {
     /// VDF reset frequency in global steps
@@ -365,7 +366,7 @@ pub struct VdfConsensusConfig {
 /// # Difficulty Adjustment Configuration
 ///
 /// Controls how mining difficulty changes over time to maintain target block times.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DifficultyAdjustmentConfig {
     /// Target time between blocks in seconds
@@ -384,7 +385,7 @@ pub struct DifficultyAdjustmentConfig {
 /// # Mempool Configuration
 ///
 /// Controls how unconfirmed transactions are managed before inclusion in blocks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MempoolConsensusConfig {
     /// Maximum number of data transactions that can be included in a single block
@@ -405,11 +406,55 @@ pub struct MempoolConsensusConfig {
     pub commitment_fee: u64,
 }
 
+/// Recursively sort all object keys in a JSON value for deterministic serialization.
+fn sort_json_keys(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let sorted: BTreeMap<String, serde_json::Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, sort_json_keys(v)))
+                .collect();
+            serde_json::Value::Object(
+                sorted
+                    .into_iter()
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+            )
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sort_json_keys).collect())
+        }
+        other => other,
+    }
+}
+
 impl ConsensusConfig {
+    /// Produce a deterministic Keccak256 hash of this consensus config.
+    ///
+    /// Uses canonical JSON serialization with alphabetically sorted keys.
+    /// This ensures platform-independent and deterministic hashing across the network.
+    pub fn keccak256_hash(&self) -> H256 {
+        // Serialize to canonical JSON value (camelCase keys, u64/i64 as strings)
+        let json_value = crate::canonical::to_canonical(self)
+            .expect("ConsensusConfig should serialize to canonical JSON");
+
+        // Sort all keys recursively for deterministic ordering
+        let sorted_value = sort_json_keys(json_value);
+
+        // Serialize to compact JSON string (no extra whitespace)
+        let json_string = serde_json::to_string(&sorted_value)
+            .expect("Sorted JSON value should serialize to string");
+
+        // Hash the canonical JSON string
+        H256(alloy_primitives::keccak256(json_string.as_bytes()).0)
+    }
+
     // This is hardcoded here to be used just by C packing related stuff as it is also hardcoded right now in C sources
     // TODO: get rid of this hardcoded variable? Otherwise altering the `chunk_size` in the configs may have
     // discrepancies when using GPU mining
     pub const CHUNK_SIZE: u64 = 256 * 1024;
+
+    // 20TB, with ~10% overhead, aligned to the nearest recall range (400 chunks)
+    pub const CHUNKS_PER_PARTITION_20TB: u64 = 75_534_400;
 
     /// Calculate the number of epochs in one year based on network parameters
     pub fn epochs_per_year(&self) -> u64 {
@@ -606,33 +651,6 @@ impl ConsensusConfig {
         const TEST_NUM_CHUNKS_IN_PARTITION: u64 = 10;
         const TEST_NUM_CHUNKS_IN_RECALL_RANGE: u64 = 2;
 
-        let base = Self::testnet();
-
-        let difficulty_adjustment = DifficultyAdjustmentConfig {
-            block_time: DEFAULT_BLOCK_TIME,
-            difficulty_adjustment_interval: (24_u64 * 60 * 60 * 1000).div_ceil(DEFAULT_BLOCK_TIME)
-                * 14,
-            ..base.difficulty_adjustment
-        };
-
-        let vdf = VdfConsensusConfig {
-            sha_1s_difficulty: SHA1_DIFFICULTY,
-            ..base.vdf
-        };
-
-        Self {
-            chunk_size: CHUNK_SIZE,
-            num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
-            num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
-            difficulty_adjustment,
-            vdf,
-            ..base
-        }
-    }
-
-    pub fn testnet() -> Self {
-        const DEFAULT_BLOCK_TIME: u64 = 12;
-
         // block reward params
         const HALF_LIFE_YEARS: u128 = 4;
         const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
@@ -653,9 +671,9 @@ impl ConsensusConfig {
             },
             expected_genesis_hash: None,
             token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
-            chunk_size: Self::CHUNK_SIZE,
-            num_chunks_in_partition: 51_872_000,
-            num_chunks_in_recall_range: 800,
+            chunk_size: CHUNK_SIZE,
+            num_chunks_in_partition: TEST_NUM_CHUNKS_IN_PARTITION,
+            num_chunks_in_recall_range: TEST_NUM_CHUNKS_IN_RECALL_RANGE,
             num_partitions_per_slot: 1,
             block_migration_depth: 6,
             block_tree_depth: 50,
@@ -676,7 +694,7 @@ impl ConsensusConfig {
                 reset_frequency: 50 * 12,
                 num_checkpoints_in_vdf_step: 25,
                 max_allowed_vdf_fork_steps: 60_000,
-                sha_1s_difficulty: 1_800_000,
+                sha_1s_difficulty: SHA1_DIFFICULTY,
             },
 
             epoch: EpochConfig {
@@ -748,5 +766,161 @@ impl ConsensusConfig {
                 next_name_tbd: None,
             },
         }
+    }
+
+    pub fn testnet() -> Self {
+        const BLOCK_TIME: u64 = 10;
+        const INFLATION_CAP: u128 = 100_000_000;
+        const HALF_LIFE_YEARS: u128 = 4;
+        const SECS_PER_YEAR: u128 = 365 * 24 * 60 * 60;
+
+        Self {
+            chain_id: 1270,
+            annual_cost_per_gb: Amount::token(dec!(0.01)).unwrap(), // 0.01$
+            decay_rate: Amount::percentage(dec!(0.01)).unwrap(),    // 1%
+            safe_minimum_number_of_years: 200,
+
+            expected_genesis_hash: Some(H256::from_base58(
+                "CVqXN2QqETJYke83dKCMjBWEnxstrFGk6ySUqNho7QRr",
+            )),
+            token_price_safe_range: Amount::percentage(dec!(1)).expect("valid percentage"),
+            chunk_size: Self::CHUNK_SIZE,
+            num_chunks_in_partition: Self::CHUNKS_PER_PARTITION_20TB,
+            num_chunks_in_recall_range: 400,
+            num_partitions_per_slot: 10,
+            block_migration_depth: 6,
+            block_tree_depth: 50,
+            entropy_packing_iterations: 1000,
+            stake_value: Amount::token(dec!(20000)).expect("valid token amount"),
+            pledge_base_value: Amount::token(dec!(950)).expect("valid token amount"),
+            pledge_decay: Amount::percentage(dec!(0.9)).expect("valid percentage"),
+            immediate_tx_inclusion_reward_percent: Amount::percentage(dec!(0.05))
+                .expect("valid percentage"),
+            minimum_term_fee_usd: Amount::token(dec!(0.01)).expect("valid token amount"), // $0.01 USD minimum
+            enable_full_ingress_proof_validation: false,
+            max_future_timestamp_drift_millis: 15_000,
+
+            genesis: GenesisConfig {
+                timestamp_millis: 1764677430138,
+                miner_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
+                    .unwrap(),
+                reward_address: IrysAddress::from_hex("0x577b412bc03804496a1f787280c66dcd82873375")
+                    .unwrap(),
+                last_epoch_hash: H256::from_base58("6mZBRJGrxbYZsLLQqwZEFEAsdvNvx4Hd7RVVBAD69f7Y"),
+                vdf_seed: H256::zero(),
+                vdf_next_seed: None,
+                genesis_price: Amount::token(dec!(1)).expect("valid token amount"),
+            },
+
+            mempool: MempoolConsensusConfig {
+                max_data_txs_per_block: 100,
+                max_commitment_txs_per_block: 100,
+                tx_anchor_expiry_depth: 50,
+                ingress_proof_anchor_expiry_depth: 200,
+                commitment_fee: 100,
+            },
+            vdf: VdfConsensusConfig {
+                reset_frequency: 1200,
+                num_checkpoints_in_vdf_step: 25,
+                max_allowed_vdf_fork_steps: 190_735,
+                sha_1s_difficulty: 10_000_000,
+            },
+
+            epoch: EpochConfig {
+                capacity_scalar: 100,
+                num_blocks_in_epoch: 360,
+                submit_ledger_epoch_length: 5,
+                num_capacity_partitions: None,
+            },
+
+            difficulty_adjustment: DifficultyAdjustmentConfig {
+                block_time: BLOCK_TIME,
+                difficulty_adjustment_interval: 2000,
+                max_difficulty_adjustment_factor: dec!(4),
+                min_difficulty_adjustment_factor: dec!(0.25),
+            },
+            ema: EmaConfig {
+                price_adjustment_interval: 10,
+            },
+            reth: IrysRethConfig {
+                gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                alloc: BTreeMap::new(),
+            },
+            block_reward_config: BlockRewardConfig {
+                inflation_cap: Amount::token(rust_decimal::Decimal::from(INFLATION_CAP)).unwrap(),
+                half_life_secs: (HALF_LIFE_YEARS * SECS_PER_YEAR).try_into().unwrap(),
+            },
+
+            // Hardfork configuration
+            hardforks: IrysHardforkConfig {
+                frontier: FrontierParams {
+                    number_of_ingress_proofs_total: 3,
+                    number_of_ingress_proofs_from_assignees: 0,
+                },
+                aurora: Some(Aurora {
+                    activation_timestamp: unix_timestamp_string_serde::deserialize(
+                        StringDeserializer::<serde::de::value::Error>::new(
+                            "2026-01-29T16:30:00+00:00".to_owned(),
+                        ),
+                    )
+                    .unwrap(),
+                    minimum_commitment_tx_version: 2,
+                }),
+                next_name_tbd: None,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_consensus_hash_deterministic() {
+        let config = ConsensusConfig::testing();
+        let hash1 = config.keccak256_hash();
+        let hash2 = config.keccak256_hash();
+        assert_eq!(hash1, hash2, "same config should hash to the same value");
+        assert_ne!(hash1, H256::zero(), "hash should not be zero");
+    }
+
+    #[test]
+    fn test_consensus_hash_differs_on_change() {
+        let config_a = ConsensusConfig::testing();
+        let mut config_b = ConsensusConfig::testing();
+        config_b.chunk_size += 1;
+        assert_ne!(
+            config_a.keccak256_hash(),
+            config_b.keccak256_hash(),
+            "configs differing by one field should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_consensus_hash_independent_instances() {
+        let config_a = ConsensusConfig::testing();
+        let config_b = ConsensusConfig::testing();
+        assert_eq!(
+            config_a.keccak256_hash(),
+            config_b.keccak256_hash(),
+            "independently constructed configs should produce identical hashes"
+        );
+    }
+
+    #[test]
+    fn test_consensus_hash_regression() {
+        // This test verifies that the hash of the testing config remains stable.
+        // If this test fails, it indicates a breaking change in either:
+        // - The ConsensusConfig structure or field order
+        // - The canonical JSON serialization implementation
+        // - The serde serialization of dependency types
+        let config = ConsensusConfig::testing();
+        let expected_hash = H256::from_base58("4XhdvXXeABvjmMP88tLmgvTpBYaV3mehui984uVvS7p4");
+        assert_eq!(
+            config.keccak256_hash(),
+            expected_hash,
+            "Hash changed—this may indicate a breaking change in the consensus config or its dependencies"
+        );
     }
 }

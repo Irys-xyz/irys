@@ -1,5 +1,5 @@
 use dashmap::DashMap;
-use irys_types::IrysAddress;
+use irys_types::IrysPeerId;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -107,7 +107,7 @@ impl DataRequestRecord {
 #[derive(Clone, Debug)]
 pub struct DataRequestTracker {
     /// Per-peer request history
-    request_history: Arc<DashMap<IrysAddress, DataRequestRecord>>,
+    request_history: Arc<DashMap<IrysPeerId, DataRequestRecord>>,
     /// Maximum score points a peer can gain per minute from data requests
     max_score_per_minute: u32,
     /// Maximum requests per minute before blocking
@@ -134,7 +134,7 @@ impl DataRequestTracker {
     /// Check if score should be increased for this peer's data request
     pub fn check_request(
         &self,
-        peer_address: &IrysAddress,
+        peer_id: &IrysPeerId,
         duplicate_request_milliseconds: u128,
     ) -> RequestCheckResult {
         // Perform cleanup if needed
@@ -143,7 +143,7 @@ impl DataRequestTracker {
         // Get or create record for this peer
         let mut entry = self
             .request_history
-            .entry(*peer_address)
+            .entry(*peer_id)
             .or_insert_with(|| DataRequestRecord::new(duplicate_request_milliseconds));
 
         // If this is the first request ever for this peer, allow score update immediately
@@ -153,7 +153,7 @@ impl DataRequestTracker {
         if entry.is_window_expired() {
             debug!(
                 "Request tracking window expired for peer {:?}, resetting",
-                peer_address
+                peer_id
             );
             entry.reset_window();
             entry.score_given = 1;
@@ -165,7 +165,7 @@ impl DataRequestTracker {
             entry.score_given = 1;
             debug!(
                 "First request from peer {:?}, allowing score update",
-                peer_address
+                peer_id
             );
             return RequestCheckResult::GrantScoreAndServe;
         }
@@ -174,7 +174,7 @@ impl DataRequestTracker {
         if entry.is_duplicate_request() {
             trace!(
                 "Duplicate request from peer {:?} within deduplication window",
-                peer_address
+                peer_id
             );
             return RequestCheckResult::ServeOnly; // Still serve data but don't update score
         }
@@ -186,7 +186,7 @@ impl DataRequestTracker {
         if entry.request_count > self.max_requests_per_minute {
             debug!(
                 "Peer {:?} exceeded request limit ({}/{})",
-                peer_address, entry.request_count, self.max_requests_per_minute
+                peer_id, entry.request_count, self.max_requests_per_minute
             );
             return RequestCheckResult::BlockRequest; // Don't serve data or update score
         }
@@ -196,13 +196,13 @@ impl DataRequestTracker {
             entry.score_given += 1;
             debug!(
                 "Peer {:?} score update allowed ({}/{})",
-                peer_address, entry.score_given, self.max_score_per_minute
+                peer_id, entry.score_given, self.max_score_per_minute
             );
             true
         } else {
             debug!(
                 "Peer {:?} reached score cap for this minute ({}/{})",
-                peer_address, entry.score_given, self.max_score_per_minute
+                peer_id, entry.score_given, self.max_score_per_minute
             );
             false
         };
@@ -215,10 +215,8 @@ impl DataRequestTracker {
     }
 
     /// Get request statistics for a peer
-    pub fn get_peer_stats(&self, peer_address: &IrysAddress) -> Option<DataRequestRecord> {
-        self.request_history
-            .get(peer_address)
-            .map(|entry| entry.clone())
+    pub fn get_peer_stats(&self, peer_id: &IrysPeerId) -> Option<DataRequestRecord> {
+        self.request_history.get(peer_id).map(|entry| entry.clone())
     }
 
     /// Cleanup expired entries to prevent memory growth
@@ -284,7 +282,7 @@ impl Default for DataRequestTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_types::IrysAddress;
+    use irys_types::{IrysAddress, IrysPeerId};
 
     const TEST_DEDUP_WINDOW_MS: u128 = 10_000; // Test deduplication window
     const TEST_SLEEP_MS: u64 = 11_000; // Test sleep duration
@@ -292,13 +290,13 @@ mod tests {
     #[tokio::test]
     async fn slow_test_data_request_tracker_score_limiting() {
         let tracker = DataRequestTracker::new();
-        let peer_addr = IrysAddress::from([1_u8; 20]);
+        let peer_id = IrysPeerId::from(IrysAddress::from([1_u8; 20]));
 
         // First 5 requests should allow score updates
         for i in 1..=5 {
             // Wait a bit to avoid deduplication window
             tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-            let result = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS);
+            let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
             assert!(result.should_serve(), "Should serve data for request {}", i);
             if i == 1 {
                 // First request always updates score
@@ -317,7 +315,7 @@ mod tests {
 
         // Nth request should not update score but still serve
         tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-        let result = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS);
+        let result = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
         assert!(
             !result.should_update_score(),
             "Should not update score after cap"
@@ -328,7 +326,7 @@ mod tests {
         );
 
         // Check stats
-        let stats = tracker.get_peer_stats(&peer_addr).unwrap();
+        let stats = tracker.get_peer_stats(&peer_id).unwrap();
         assert_eq!(stats.score_given, 5);
         assert!(stats.request_count >= 6);
     }
@@ -336,15 +334,15 @@ mod tests {
     #[tokio::test]
     async fn test_data_request_deduplication() {
         let tracker = DataRequestTracker::new();
-        let peer_addr = IrysAddress::from([2_u8; 20]);
+        let peer_id = IrysPeerId::from(IrysAddress::from([2_u8; 20]));
 
         // First request
-        let result1 = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS);
+        let result1 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
         assert!(result1.should_update_score());
         assert!(result1.should_serve());
 
         // Immediate second request should be deduplicated
-        let result2 = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS);
+        let result2 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
         assert!(
             !result2.should_update_score(),
             "Should not update score for duplicate"
@@ -356,7 +354,7 @@ mod tests {
 
         // After deduplication window, should allow score update
         tokio::time::sleep(Duration::from_millis(TEST_SLEEP_MS)).await;
-        let result3 = tracker.check_request(&peer_addr, TEST_DEDUP_WINDOW_MS);
+        let result3 = tracker.check_request(&peer_id, TEST_DEDUP_WINDOW_MS);
         assert!(
             result3.should_update_score(),
             "Should update score after dedup window"

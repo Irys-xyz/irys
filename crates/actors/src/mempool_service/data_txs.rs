@@ -156,11 +156,11 @@ impl Inner {
         // preserving promoted_height value on ingress is the safest policy
         // mutating on ingress would allow for various incorrect behaviours such as skipping already-promoted txs by consulting this flag
         // this allows proper chain-handling flows to adjust it if needed (e.g., on a reorg event)
-        if tx.promoted_height.is_some() {
+        if tx.promoted_height().is_some() {
             warn!(
                 "Ingressed tx {:?} has promoted_height set to {:?}; preserving existing promotion state",
                 tx.id,
-                tx.promoted_height
+                tx.promoted_height()
             );
         }
 
@@ -207,7 +207,7 @@ impl Inner {
             "Received data tx from API"
         );
 
-        tx.promoted_height = None;
+        tx.set_promoted_height(None);
 
         // Shared pre-checks: duplicate detection, signature, anchor/expiry, ledger parsing
         let (ledger, expiry_height) = self.precheck_data_ingress_common(&tx).await?;

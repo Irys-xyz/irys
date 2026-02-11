@@ -12,7 +12,8 @@ alloy-core.workspace = true
 atomic-write-file = "0.2"
 derive_more.workspace = true
 eyre.workspace = true
-irys-types = { workspace = true, features = ["test-utils"] }
+itertools.workspace = true
+irys-types.workspace = true
 irys-config.workspace = true
 irys-database.workspace = true
 irys-packing.workspace = true
@@ -43,6 +44,7 @@ proptest.workspace = true
 rust_decimal.workspace = true
 rust_decimal_macros.workspace = true
 irys-testing-utils.workspace = true
+irys-types = { workspace = true, features = ["test-utils"] }
 
 [lints]
 workspace = true

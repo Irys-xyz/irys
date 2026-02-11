@@ -30,6 +30,7 @@ strum.workspace = true
 [dev-dependencies]
 irys-config = { workspace = true, features = ["test-utils"] }
 test-log.workspace = true
+rand.workspace = true
 
 [lints]
 workspace = true

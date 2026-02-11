@@ -14,10 +14,10 @@ use irys_domain::chain_sync_state::ChainSyncState;
 #[cfg(test)]
 use irys_domain::execution_payload_cache::RethBlockProvider;
 
-use irys_database::SystemLedger;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
 use irys_domain::ExecutionPayloadCache;
 use irys_types::v2::GossipBroadcastMessageV2;
+use irys_types::SystemLedger;
 use irys_types::{
     BlockBody, BlockHash, BlockTransactions, Config, DataLedger, DatabaseProvider, EvmBlockHash,
     IrysBlockHeader, IrysTransactionResponse, PeerNetworkError, H256,
@@ -689,7 +689,10 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::ParentIsAPartOfAPrunedFork),
                 )
                 .await;
-            return Err(CriticalBlockPoolError::ForkedBlock(block_header.block_hash).into());
+            let err = CriticalBlockPoolError::ForkedBlock(block_header.block_hash);
+            self.sync_state
+                .record_block_processing_error(err.to_string());
+            return Err(err.into());
         }
 
         if !previous_block_status.is_processed() {
@@ -715,6 +718,7 @@ where
                             BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                         )
                         .await;
+                    self.sync_state.record_block_processing_error(e.to_string());
                     return Err(e);
                 }
                 Err(e) => return Err(e),
@@ -845,7 +849,9 @@ where
                         ),
                     )
                     .await;
-                return Err(CriticalBlockPoolError::BlockError(format!("{:?}", err)).into());
+                self.sync_state
+                    .record_block_processing_error(err.to_string());
+                return Err(CriticalBlockPoolError::BlockError(err.to_string()).into());
             }
         }
 
@@ -881,6 +887,7 @@ where
                         BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                     )
                     .await;
+                self.sync_state.record_block_processing_error(e.to_string());
                 return Err(e);
             }
             Err(e) => return Err(e),
@@ -943,8 +950,10 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
                 )
                 .await;
+            self.sync_state
+                .record_block_processing_error(block_discovery_error.to_string());
             return Err(
-                CriticalBlockPoolError::BlockError(format!("{:?}", block_discovery_error)).into(),
+                CriticalBlockPoolError::BlockError(block_discovery_error.to_string()).into(),
             );
         }
 
@@ -966,6 +975,8 @@ where
         );
         self.sync_state
             .mark_processed(current_block_height as usize);
+        self.sync_state
+            .record_successful_block_processing(current_block_hash);
         self.blocks_cache
             .remove_block(
                 &block_header.block_hash,
@@ -1625,7 +1636,10 @@ mod tests {
 
     #[test]
     fn order_transactions_matching_header_body() {
-        use irys_types::{CommitmentTransaction, DataTransactionHeaderV1, SystemTransactionLedger};
+        use irys_types::{
+            CommitmentTransaction, CommitmentV2WithMetadata, DataTransactionHeaderV1,
+            DataTransactionHeaderV1WithMetadata, DataTransactionMetadata, SystemTransactionLedger,
+        };
 
         // Create test transaction IDs
         let submit_tx_id1 = H256::repeat_byte(0x11);
@@ -1668,17 +1682,26 @@ mod tests {
 
         // Create matching transactions (deliberately in different order than header)
         let data_txs = vec![
-            DataTransactionHeader::V1(DataTransactionHeaderV1 {
-                id: submit_tx_id1,
-                ..Default::default()
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: submit_tx_id1,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
             }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1 {
-                id: submit_tx_id2,
-                ..Default::default()
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: submit_tx_id2,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
             }),
-            DataTransactionHeader::V1(DataTransactionHeaderV1 {
-                id: publish_tx_id1,
-                ..Default::default()
+            DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: publish_tx_id1,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
             }),
         ];
 
@@ -1686,7 +1709,10 @@ mod tests {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(commitment_tx)];
+        let commitment_txs = vec![CommitmentTransaction::V2(CommitmentV2WithMetadata {
+            tx: commitment_tx,
+            metadata: Default::default(),
+        })];
 
         // Execute ordering function
         let result = order_transactions_for_block(&header, data_txs, commitment_txs)
@@ -1708,7 +1734,9 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_missing_tx() {
-        use irys_types::DataTransactionHeaderV1;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+        };
 
         // Create test transaction IDs
         let submit_tx_id1 = H256::repeat_byte(0x11);
@@ -1747,10 +1775,15 @@ mod tests {
         let header = IrysBlockHeader::V1(header);
 
         // Create body with only ONE transaction (mismatch)
-        let data_txs = vec![DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: submit_tx_id1,
-            ..Default::default()
-        })];
+        let data_txs = vec![DataTransactionHeader::V1(
+            DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: submit_tx_id1,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            },
+        )];
 
         let commitment_txs = vec![];
 
@@ -1783,7 +1816,9 @@ mod tests {
 
     #[test]
     fn order_transactions_header_body_mismatch_wrong_ledger() {
-        use irys_types::DataTransactionHeaderV1;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+        };
 
         // Create test transaction IDs
         let tx_id1 = H256::repeat_byte(0x13);
@@ -1821,10 +1856,15 @@ mod tests {
 
         // Create body with transaction that has a different ID than expected
         // (simulating the transaction being missing from expected ledger)
-        let data_txs = vec![DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::repeat_byte(0x99), // Different ID, not in any expected ledger
-            ..Default::default()
-        })];
+        let data_txs = vec![DataTransactionHeader::V1(
+            DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: H256::repeat_byte(0x99), // Different ID, not in any expected ledger
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            },
+        )];
 
         let commitment_txs = vec![];
 
@@ -1882,9 +1922,12 @@ mod tests {
             id: commitment_tx_id1,
             ..Default::default()
         };
-        let commitment_txs = vec![CommitmentTransaction::V2(commitment_tx)];
-
-        // Execute ordering function - should return error
+        let commitment_txs = vec![CommitmentTransaction::V2(
+            irys_types::CommitmentV2WithMetadata {
+                tx: commitment_tx,
+                metadata: Default::default(),
+            },
+        )];
         let result = order_transactions_for_block(&header, data_txs, commitment_txs);
 
         // Verify the function returns an error for the mismatch
@@ -1913,7 +1956,9 @@ mod tests {
 
     #[test]
     fn order_transactions_tx_in_both_ledgers() {
-        use irys_types::DataTransactionHeaderV1;
+        use irys_types::{
+            DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+        };
 
         // Create a transaction ID that appears in both Submit and Publish
         let dual_tx_id = H256::repeat_byte(0x77);
@@ -1949,10 +1994,15 @@ mod tests {
         let header = IrysBlockHeader::V1(header);
 
         // Provide the transaction once in the body
-        let data_txs = vec![DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: dual_tx_id,
-            ..Default::default()
-        })];
+        let data_txs = vec![DataTransactionHeader::V1(
+            DataTransactionHeaderV1WithMetadata {
+                tx: DataTransactionHeaderV1 {
+                    id: dual_tx_id,
+                    ..Default::default()
+                },
+                metadata: DataTransactionMetadata::new(),
+            },
+        )];
 
         let commitment_txs = vec![];
 

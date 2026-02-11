@@ -21,13 +21,13 @@ use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ing
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
 use crate::shadow_tx_generator::PublishLedgerWithTxs;
-use crate::MempoolReadGuard;
+use crate::{MempoolReadGuard, TxMetadata};
 use eyre::{eyre, OptionExt as _};
 use futures::FutureExt as _;
 use irys_database::db::IrysDatabaseExt as _;
 use irys_database::tables::IngressProofs;
 use irys_database::{
-    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid, SystemLedger,
+    cached_data_root_by_data_root, ingress_proofs_by_data_root, tx_header_by_txid,
 };
 use irys_domain::{
     get_atomic_file, BlockTreeEntry, BlockTreeReadGuard, CommitmentSnapshotStatus,
@@ -39,7 +39,7 @@ use irys_types::ingress::IngressProof;
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, NodeConfig, UnixTimestamp, H256, U256,
+    IrysTransactionId, NodeConfig, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{
     storage_pricing::{
@@ -526,7 +526,7 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-
+        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -1096,9 +1096,11 @@ impl Inner {
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
+        // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
+        let next_block_height = current_height + 1;
 
         // only max anchor age is constrained for ingress proofs
-        let min_ingress_proof_anchor_height = current_height.saturating_sub(
+        let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
             self.config
                 .consensus
                 .mempool
@@ -1181,13 +1183,13 @@ impl Inner {
                     "Processing publish candidate tx {} {:#?}",
                     &tx_header.id, &tx_header
                 );
-                let is_promoted = tx_header.promoted_height.is_some();
+                let is_promoted = tx_header.promoted_height().is_some();
 
                 if is_promoted {
                     // If it's promoted skip it
                     warn!(
                         tx.id = ?tx_header.id,
-                        tx.promoted_height = ?tx_header.promoted_height,
+                        tx.promoted_height = ?tx_header.promoted_height(),
                         "Publish candidate is already promoted"
                     );
                     continue;
@@ -1219,7 +1221,7 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = self
+                let mut all_proofs = self
                     .irys_db
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
@@ -1230,6 +1232,21 @@ impl Inner {
                         !expired
                     })
                     .collect::<Vec<_>>();
+
+                // Dedup by signer address in-place, keeping first proof per address
+                let pre_dedup_len = all_proofs.len();
+                let mut seen_addresses = HashSet::new();
+                all_proofs
+                    .retain(|(_, cached_proof)| seen_addresses.insert(cached_proof.0.address));
+                if all_proofs.len() < pre_dedup_len {
+                    warn!(
+                        tx.id = ?tx_header.id,
+                        tx.data_root = ?tx_header.data_root,
+                        before = pre_dedup_len,
+                        after = all_proofs.len(),
+                        "Duplicate ingress proof signers detected for data root, deduplicating"
+                    );
+                }
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1948,7 +1965,12 @@ impl AtomicMempoolState {
     }
 
     pub async fn all_valid_submit_ledgers_cloned(&self) -> BTreeMap<H256, DataTransactionHeader> {
-        self.read().await.valid_submit_ledger_tx.clone()
+        self.read()
+            .await
+            .valid_submit_ledger_tx
+            .iter()
+            .map(|(id, tx)| (*id, tx.clone()))
+            .collect()
     }
 
     /// For confirmed blocks, we log warnings but don't fail if mempool is full
@@ -2065,6 +2087,101 @@ impl AtomicMempoolState {
         state.valid_submit_ledger_tx.remove(tx_id);
     }
 
+    /// Set included_height for a data transaction with optional overwrite
+    ///
+    /// # Parameters
+    /// - `tx_id`: Transaction ID to update
+    /// - `height`: Block height to set
+    /// - `overwrite`: If false, only sets height if currently None; if true, sets unconditionally
+    ///
+    /// Returns true if the included_height was actually changed, false otherwise.
+    /// Also updates the recent_valid_tx cache when the transaction is found.
+    async fn set_data_tx_included_height_inner(
+        &self,
+        tx_id: H256,
+        height: u64,
+        overwrite: bool,
+    ) -> bool {
+        let mut state = self.write().await;
+        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
+            let updated = overwrite || wrapped_tx.metadata().included_height.is_none();
+            if updated {
+                wrapped_tx.metadata_mut().included_height = Some(height);
+                tracing::debug!(
+                    tx.id = %tx_id,
+                    included_height = height,
+                    overwrite = overwrite,
+                    "Set included_height in mempool"
+                );
+            }
+            // Always update recent_valid_tx cache when tx is found
+            state.recent_valid_tx.put(tx_id, ());
+            updated
+        } else {
+            false
+        }
+    }
+
+    /// Clear included_height for a data transaction (re-org handling)
+    /// Returns true if the transaction was found and the height was cleared
+    async fn clear_data_tx_included_height_inner(&self, tx_id: H256) -> bool {
+        let mut state = self.write().await;
+        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get_mut(&tx_id) {
+            wrapped_tx.metadata_mut().included_height = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set included_height for a commitment transaction
+    /// Returns true if the transaction was found and updated
+    pub async fn set_commitment_tx_included_height(&self, tx_id: H256, height: u64) -> bool {
+        let mut state = self.write().await;
+
+        // Check valid commitment transactions
+        for txs in state.valid_commitment_tx.values_mut() {
+            if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
+                tx.metadata_mut().included_height = Some(height);
+                return true;
+            }
+        }
+
+        // Check pending pledges
+        for (_, pledges_cache) in state.pending_pledges.iter_mut() {
+            if let Some(tx) = pledges_cache.get_mut(&tx_id) {
+                tx.metadata_mut().included_height = Some(height);
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Clears the included_height for a commitment transaction.
+    /// Returns true if the transaction was found.
+    pub async fn clear_commitment_tx_included_height(&self, tx_id: H256) -> bool {
+        let mut state = self.write().await;
+
+        // Check valid commitment transactions
+        for txs in state.valid_commitment_tx.values_mut() {
+            if let Some(tx) = txs.iter_mut().find(|t| t.id() == tx_id) {
+                tx.metadata_mut().included_height = None;
+                return true;
+            }
+        }
+
+        // Check pending pledges
+        for (_, pledges_cache) in state.pending_pledges.iter_mut() {
+            if let Some(tx) = pledges_cache.get_mut(&tx_id) {
+                tx.metadata_mut().included_height = None;
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub async fn pop_pending_chunks_cache(
         &self,
         data_root: &DataRoot,
@@ -2125,10 +2242,53 @@ impl AtomicMempoolState {
     ) {
         let mut state = self.write().await;
         state.recent_valid_tx.clear();
-        (
-            std::mem::take(&mut state.valid_submit_ledger_tx),
-            std::mem::take(&mut state.valid_commitment_tx),
-        )
+
+        // Return the transactions directly (they already contain metadata)
+        let data_txs = std::mem::take(&mut state.valid_submit_ledger_tx);
+        let commitment_txs = std::mem::take(&mut state.valid_commitment_tx);
+
+        (data_txs, commitment_txs)
+    }
+
+    /// Check if a transaction ID is in the recent valid transactions cache
+    pub async fn is_recent_valid_tx(&self, tx_id: &H256) -> bool {
+        self.read().await.recent_valid_tx.contains(tx_id)
+    }
+
+    /// Get transaction metadata from the mempool.
+    ///
+    /// Returns `Some(TxMetadata)` when a transaction with metadata is found in
+    /// [`valid_submit_ledger_tx`], [`valid_commitment_tx`], or [`pending_pledges`].
+    /// Returns `None` only when the transaction ID is not present in the mempool.
+    ///
+    /// [`get_tx_metadata`]: Self::get_tx_metadata
+    /// [`TxMetadata`]: TxMetadata
+    /// [`valid_submit_ledger_tx`]: MempoolState::valid_submit_ledger_tx
+    /// [`valid_commitment_tx`]: MempoolState::valid_commitment_tx
+    /// [`pending_pledges`]: MempoolState::pending_pledges
+    pub async fn get_tx_metadata(&self, tx_id: &H256) -> Option<TxMetadata> {
+        let state = self.read().await;
+
+        // Check data transactions - metadata is embedded
+        if let Some(wrapped_tx) = state.valid_submit_ledger_tx.get(tx_id) {
+            return Some(TxMetadata::Data(*wrapped_tx.metadata()));
+        }
+
+        // Check commitment transactions - metadata is embedded
+        for txs in state.valid_commitment_tx.values() {
+            if let Some(tx) = txs.iter().find(|t| t.id() == *tx_id) {
+                return Some(TxMetadata::Commitment(*tx.metadata()));
+            }
+        }
+
+        // Check pending pledges - they also have metadata
+        for (_, pledges_cache) in state.pending_pledges.iter() {
+            if let Some(tx) = pledges_cache.peek(tx_id) {
+                return Some(TxMetadata::Commitment(*tx.metadata()));
+            }
+        }
+
+        None
     }
 
     pub async fn remove_transactions_from_pending_valid_pool(&self, submit_tx_ids: &[H256]) {
@@ -2145,14 +2305,21 @@ impl AtomicMempoolState {
             .await
             .valid_submit_ledger_tx
             .entry(tx.id)
-            .and_modify(|t| *t = tx);
+            .and_modify(|existing| {
+                // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
+                let merged_metadata = existing.metadata().merge(tx.metadata());
+
+                *existing = tx;
+                existing.set_metadata(merged_metadata);
+            });
     }
 
     pub async fn clear_promoted_height(&self, txid: H256) -> bool {
         let mut cleared = false;
         let mut state = self.write().await;
-        if let Some(header) = state.valid_submit_ledger_tx.get_mut(&txid) {
-            header.promoted_height = None;
+        if let Some(wrapped_header) = state.valid_submit_ledger_tx.get_mut(&txid) {
+            // Clear promoted_height in metadata
+            wrapped_header.metadata_mut().promoted_height = None;
             state.recent_valid_tx.put(txid, ());
             tracing::debug!(tx.id = %txid, "Cleared promoted_height in mempool");
             cleared = true;
@@ -2169,14 +2336,38 @@ impl AtomicMempoolState {
         height: u64,
     ) -> Option<DataTransactionHeader> {
         let mut state = self.write().await;
-        let header = state.valid_submit_ledger_tx.get_mut(&txid)?;
-        if header.promoted_height.is_none() {
-            header.promoted_height = Some(height);
+        let wrapped_header = state.valid_submit_ledger_tx.get_mut(&txid)?;
+        if wrapped_header.promoted_height().is_none() {
+            // Set promoted_height in metadata
+            wrapped_header.metadata_mut().promoted_height = Some(height);
         }
-        let result = header.clone();
+        let result = wrapped_header.clone();
         tracing::debug!(tx.id = %txid, promoted_height = height, "Set promoted_height in mempool");
         state.recent_valid_tx.put(txid, ());
         Some(result)
+    }
+
+    /// Atomically sets the included_height on a data transaction in the mempool.
+    /// This is a convenience wrapper around set_tx_included_height with overwrite=false.
+    /// Returns true if the tx was found and updated, false otherwise.
+    pub async fn set_data_tx_included_height(&self, txid: H256, height: u64) -> bool {
+        // Use the consolidated method with overwrite=false to maintain backward compatibility
+        self.set_data_tx_included_height_inner(txid, height, false)
+            .await
+    }
+
+    /// Set included_height for a data transaction with overwrite enabled
+    /// This is used when processing canonical confirmations to ensure the height
+    /// is updated even if previously set (e.g., after a reorg)
+    pub async fn set_data_tx_included_height_overwrite(&self, txid: H256, height: u64) -> bool {
+        self.set_data_tx_included_height_inner(txid, height, true)
+            .await
+    }
+
+    /// Atomically clears the included_height on a data transaction in the mempool.
+    /// Returns true if the tx was found and updated, false otherwise.
+    pub async fn clear_data_tx_included_height(&self, txid: H256) -> bool {
+        self.clear_data_tx_included_height_inner(txid).await
     }
 
     pub async fn put_recent_invalid(&self, tx_id: H256) {
@@ -2464,10 +2655,16 @@ impl MempoolState {
         tx: DataTransactionHeader,
     ) -> Result<(), TxIngressError> {
         use std::collections::btree_map::Entry;
+
         // If tx already exists we still update it.
         // the new entry might have the `is_promoted` flag set on it, which is needed for correct promotion logic
-        if let Entry::Occupied(mut value) = self.valid_submit_ledger_tx.entry(tx.id) {
-            value.insert(tx);
+        // Preserve metadata when updating
+        if let Entry::Occupied(mut entry) = self.valid_submit_ledger_tx.entry(tx.id) {
+            // Merge metadata: prefer incoming metadata fields when set, preserve existing otherwise
+            let merged_metadata = entry.get().metadata().merge(tx.metadata());
+            let mut new_tx = tx;
+            new_tx.set_metadata(merged_metadata);
+            entry.insert(new_tx);
             return Ok(());
         }
 
@@ -2512,8 +2709,8 @@ impl MempoolState {
     fn find_lowest_fee_data_tx(&self) -> Option<(H256, BoundedFee)> {
         self.valid_submit_ledger_tx
             .iter()
-            .min_by_key(|(_, tx)| tx.user_fee())
-            .map(|(id, tx)| (*id, tx.user_fee()))
+            .min_by_key(|(_, wrapped_tx)| wrapped_tx.user_fee())
+            .map(|(id, wrapped_tx)| (*id, wrapped_tx.user_fee()))
     }
 
     /// Insert commitment tx with bounds enforcement.
@@ -2525,10 +2722,11 @@ impl MempoolState {
         tx: &CommitmentTransaction,
     ) -> Result<(), TxIngressError> {
         let address = tx.signer();
+        let tx_id = tx.id();
 
         // Check for duplicate tx.id - if already exists, just return Ok()
         if let Some(existing_txs) = self.valid_commitment_tx.get(&address) {
-            if existing_txs.iter().any(|t| t.id() == tx.id()) {
+            if existing_txs.iter().any(|t| t.id() == tx_id) {
                 return Ok(()); // Duplicate, already have this commitment
             }
         }
@@ -2583,7 +2781,7 @@ impl MempoolState {
                 address = ?address,
                 current_count = txs.len(),
                 max_allowed = self.max_commitments_per_address,
-                new.tx_id = ?tx.id(),
+                new.tx_id = ?tx_id,
                 "Address commitment pool full: rejecting new commitment"
             );
             return Err(TxIngressError::MempoolFull(format!(
@@ -3076,7 +3274,7 @@ mod bounded_mempool_tests {
     use super::*;
     use irys_types::{
         CommitmentTransactionV2, CommitmentTypeV2, DataLedger, DataTransactionHeaderV1,
-        IrysSignature,
+        DataTransactionMetadata, IrysSignature,
     };
 
     // ========================================================================
@@ -3085,34 +3283,39 @@ mod bounded_mempool_tests {
 
     /// Creates a test data transaction with specified fee
     fn create_test_data_tx(fee: u64) -> DataTransactionHeader {
-        DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            id: H256::random(),
-            anchor: H256::zero(),
-            signer: IrysAddress::random(),
-            data_root: H256::random(),
-            data_size: 1024,
-            header_size: 0,
-            term_fee: U256::from(fee).into(),
-            perm_fee: Some(U256::from(100).into()),
-            ledger_id: DataLedger::Publish as u32,
-            bundle_format: Some(0),
-            promoted_height: None,
-            signature: IrysSignature::default(),
-            chain_id: 1,
+        DataTransactionHeader::V1(irys_types::DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                id: H256::random(),
+                anchor: H256::zero(),
+                signer: IrysAddress::random(),
+                data_root: H256::random(),
+                data_size: 1024,
+                header_size: 0,
+                term_fee: U256::from(fee).into(),
+                perm_fee: Some(U256::from(100).into()),
+                ledger_id: DataLedger::Publish as u32,
+                bundle_format: Some(0),
+                signature: IrysSignature::default(),
+                chain_id: 1,
+            },
+            metadata: DataTransactionMetadata::new(),
         })
     }
 
     /// Creates a test commitment transaction with specified signer and value
     fn create_test_commitment_tx(signer: IrysAddress, value: u64) -> CommitmentTransaction {
-        CommitmentTransaction::V2(CommitmentTransactionV2 {
-            id: H256::random(), // Random ID for testing
-            anchor: H256::zero(),
-            signer,
-            signature: IrysSignature::default(),
-            fee: 100,
-            value: U256::from(value),
-            commitment_type: CommitmentTypeV2::Stake,
-            chain_id: 1,
+        CommitmentTransaction::V2(irys_types::CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                id: H256::random(), // Random ID for testing
+                anchor: H256::zero(),
+                signer,
+                signature: IrysSignature::default(),
+                fee: 100,
+                value: U256::from(value),
+                commitment_type: CommitmentTypeV2::Stake,
+                chain_id: 1,
+            },
+            metadata: Default::default(),
         })
     }
 

@@ -3,10 +3,10 @@ use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
 use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
-use irys_database::{insert_commitment_tx, tx_header_by_txid, SystemLedger};
+use irys_database::{insert_commitment_tx, tx_header_by_txid};
 use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
-    IrysTransactionId, H256,
+    IrysTransactionId, SystemLedger, H256,
 };
 use reth_db::Database as _;
 use std::collections::{HashMap, HashSet};
@@ -20,7 +20,74 @@ impl Inner {
         &self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
+        // Persist included_height for all txs in this confirmed block.
+        // This drives the /v1/tx/{txId}/status endpoint's INCLUDED status.
+        let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
+        let publish_txids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
+        let commitment_txids = block.get_commitment_ledger_tx_ids();
+
+        let all_tx_ids: Vec<H256> = submit_txids
+            .iter()
+            .chain(publish_txids.iter())
+            .chain(commitment_txids.iter())
+            .copied()
+            .collect();
+
+        if !all_tx_ids.is_empty() {
+            // Persist included_height to database - this is critical for transaction status
+            self.irys_db.update_eyre(|tx| {
+                // Set included_height for data transactions
+                let data_tx_ids: Vec<_> = submit_txids
+                    .iter()
+                    .chain(publish_txids.iter())
+                    .copied()
+                    .collect();
+                if !data_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(
+                        tx,
+                        &data_tx_ids,
+                        block.height,
+                    )
+                    .map_err(|e| eyre::eyre!("Failed to batch set data tx included_height for {} txs at block {}: {:?}", data_tx_ids.len(), block.height, e))?;
+                }
+                // Set included_height for commitment transactions
+                if !commitment_txids.is_empty() {
+                    irys_database::batch_set_commitment_tx_included_height(
+                        tx,
+                        &commitment_txids,
+                        block.height,
+                    )
+                    .map_err(|e| eyre::eyre!("Failed to batch set commitment tx included_height for {} txs at block {}: {:?}", commitment_txids.len(), block.height, e))?;
+                }
+                Ok(())
+            }).map_err(|e| TxIngressError::DatabaseError(format!("Failed to persist included_height to database: {}", e)))?;
+
+            // Also update mempool metadata for data transactions (with overwrite for canonical blocks)
+            for txid in submit_txids.iter().chain(publish_txids.iter()) {
+                self.mempool_state
+                    .set_data_tx_included_height_overwrite(*txid, block.height)
+                    .await;
+            }
+
+            // Update commitment transactions in mempool
+            for txid in commitment_txids.iter() {
+                self.mempool_state
+                    .set_commitment_tx_included_height(*txid, block.height)
+                    .await;
+            }
+        }
+
         let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
+
+        // Persist promoted_height for publish ledger txs.
+        if !published_txids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_set_data_tx_promoted_height(tx, published_txids, block.height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                tracing::error!("Failed to batch set promoted_height in database: {}", e);
+            }
+        }
 
         if !published_txids.is_empty() {
             for txid in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter() {
@@ -57,8 +124,9 @@ impl Inner {
                     // Only update DB if the tx was already in DB (to match original behavior)
                     // This prevents writing mempool-only txs to DB which would cause reorg issues
                     if let Some(ref mut db_tx) = db_header.clone() {
-                        if db_tx.promoted_height.is_none() {
-                            db_tx.promoted_height = Some(block.height);
+                        if db_tx.promoted_height().is_none() {
+                            // Set promoted_height in metadata
+                            db_tx.metadata_mut().promoted_height = Some(block.height);
                             if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
                                 error!("Failed to update tx header in DB for tx {}: {}", txid, e);
                             }
@@ -76,8 +144,9 @@ impl Inner {
                     continue;
                 };
 
-                if header.promoted_height.is_none() {
-                    header.promoted_height = Some(block.height);
+                if header.promoted_height().is_none() {
+                    // Set promoted_height in metadata
+                    header.metadata_mut().promoted_height = Some(block.height);
                 }
 
                 // Update DB with promoted header
@@ -430,6 +499,28 @@ impl Inner {
             "Should always be able to get all orphaned commitment transactions"
         );
 
+        // Clear included_height for orphaned commitment transactions before resubmitting
+        for id in orphaned_commitment_tx_ids.iter() {
+            // Clear in-memory mempool state
+            if self
+                .mempool_state
+                .clear_commitment_tx_included_height(*id)
+                .await
+            {
+                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in mempool");
+            }
+
+            // Also clear the persisted included_height in the database
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::clear_commitment_tx_metadata(tx, id)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                tracing::warn!(tx.id = %id, error = %e, "Failed to clear included_height in DB for orphaned commitment tx");
+            } else {
+                tracing::debug!(tx.id = %id, "Cleared included_height for orphaned commitment tx in DB");
+            }
+        }
+
         // resubmit each commitment tx
         for (id, orphaned_full_commitment_tx) in orphaned_full_commitment_txs {
             if let Err(e) = self
@@ -552,6 +643,17 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
+        // Clear included_height for orphaned submit transactions
+        for tx_id in submit_txs.iter().copied() {
+            if self
+                .mempool_state
+                .clear_data_tx_included_height(tx_id)
+                .await
+            {
+                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned submit tx");
+            }
+        }
+
         // these txs should be present in the database, as they're part of the (technically sort of still current) chain
         let full_orphaned_submit_txs = self.handle_get_data_tx_message(submit_txs.clone()).await;
 
@@ -582,8 +684,19 @@ impl Inner {
             .cloned()
             .unwrap_or_default();
 
+        // Clear included_height for orphaned publish transactions
+        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
+            if self
+                .mempool_state
+                .clear_data_tx_included_height(tx_id)
+                .await
+            {
+                tracing::debug!(tx.id = %tx_id, "Cleared included_height for orphaned publish tx");
+            }
+        }
+
         // these txs have been confirmed, but NOT migrated
-        for tx_id in orphaned_confirmed_publish_txs {
+        for tx_id in orphaned_confirmed_publish_txs.iter().copied() {
             debug!("reorging orphaned publish tx: {}", &tx_id);
             // Clear promotion state for txs that were promoted on an orphaned fork
             if let Err(e) = self.mark_unpromoted_in_mempool(tx_id).await {
@@ -591,6 +704,22 @@ impl Inner {
                     tx.id = %tx_id,
                     tx.err = %e,
                     "Failed to unpromote tx during reorg"
+                );
+            }
+        }
+
+        // Clear promoted_height in database for publish-ledger txs orphaned by the reorg.
+        if !orphaned_confirmed_publish_txs.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_clear_data_tx_promoted_height(
+                    tx,
+                    &orphaned_confirmed_publish_txs,
+                )
+                .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!(
+                    "Failed to batch clear promoted_height in database during reorg: {}",
+                    e
                 );
             }
         }
@@ -615,6 +744,7 @@ impl Inner {
             .await;
 
         let publish_tx_block_map = new_fork_tx_block_map.get(&DataLedger::Publish).unwrap();
+        let mut promoted_height_updates: Vec<(H256, u64)> = Vec::new();
         for (idx, tx) in full_published_txs.into_iter().enumerate() {
             if let Some(mut tx) = tx {
                 let txid = tx.id;
@@ -627,7 +757,9 @@ impl Inner {
                 // Get the ingress proofs for this txid (also performs some validation)
                 let tx_proofs = get_ingress_proofs(publish_ledger, &txid)?;
 
-                tx.promoted_height = Some(promoted_in_block.height);
+                // Set promoted_height in metadata
+                tx.metadata_mut().promoted_height = Some(promoted_in_block.height);
+                promoted_height_updates.push((txid, promoted_in_block.height));
                 // update entry
                 self.mempool_state.update_submit_transaction(tx).await;
                 debug!(
@@ -639,6 +771,42 @@ impl Inner {
                 eyre::bail!(
                     "Unable to get dual-published tx {:?}",
                     &published_in_both.get(idx)
+                );
+            }
+        }
+
+        // Ensure the metadata table reflects the canonical promoted heights for txs published in both forks.
+        if !promoted_height_updates.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|db_tx| {
+                for (tx_id, height) in &promoted_height_updates {
+                    irys_database::set_data_tx_promoted_height(db_tx, tx_id, *height)
+                        .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                Ok(())
+            }) {
+                error!(
+                    "Failed to update promoted_height in database during reorg reconciliation: {}",
+                    e
+                );
+            }
+        }
+
+        // Batch clear included_height in database for all orphaned data transactions
+        let all_orphaned_tx_ids: Vec<H256> = orphaned_confirmed_ledger_txs
+            .values()
+            .flat_map(|txs| txs.iter().copied())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if !all_orphaned_tx_ids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_clear_data_tx_metadata(tx, &all_orphaned_tx_ids)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!(
+                    "Failed to batch clear included_height in database during reorg: {}",
+                    e
                 );
             }
         }
@@ -663,82 +831,66 @@ impl Inner {
             migrated_block.poa.chunk.is_some(),
             "poa chunk must be present"
         );
-        let data_ledger_txs = migrated_block.get_data_ledger_tx_ids();
+
+        // Use transactions directly from the event instead of fetching from mempool
+        let transactions = &event.transactions;
 
         // stage 1: move commitment transactions from tree to index
-        let commitment_tx_ids = migrated_block.get_commitment_ledger_tx_ids();
-        let commitments = self
-            .handle_get_commitment_tx_message(commitment_tx_ids)
-            .await;
-
-        // Remove all commitments from mempool in one batch operation
-        self.mempool_state
-            .remove_commitment_txs(commitments.values().map(CommitmentTransaction::id))
-            .await;
+        // Use commitment transactions directly from the event
+        let commitment_txs = &transactions.commitment_txs;
+        let commitment_tx_ids: Vec<H256> = commitment_txs
+            .iter()
+            .map(irys_types::CommitmentTransaction::id)
+            .collect();
 
         // stage 1: insert commitment transactions into database
+        // Persist to DB before removing from mempool so txs aren't lost if the DB write fails
         self.irys_db.update_eyre(|tx| {
-            for commitment_tx in commitments.values() {
-                // Insert the commitment transaction in to the db, perform migration
+            for commitment_tx in commitment_txs {
                 insert_commitment_tx(tx, commitment_tx)?;
             }
             Ok(())
         })?;
 
-        // stage 2: move submit transactions from tree to index
-        let submit_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Submit).unwrap().clone();
-        {
-            // FIXME: this next line is less efficient than it needs to be?
-            //        why would we read mdbx txs when we are migrating?
-            let data_tx_headers = self.handle_get_data_tx_message(submit_tx_ids.clone()).await;
+        // Remove all commitments from mempool only after successful DB persist
+        self.mempool_state
+            .remove_commitment_txs(commitment_txs.iter().map(CommitmentTransaction::id))
+            .await;
 
+        // stage 2: move submit transactions from tree to index
+        // Use submit transactions directly from the event
+        let submit_txs = transactions
+            .data_txs
+            .get(&DataLedger::Submit)
+            .cloned()
+            .unwrap_or_default();
+        let submit_tx_ids: Vec<H256> = submit_txs.iter().map(|tx| tx.id).collect();
+        {
             self.irys_db.update_eyre(|tx| {
-                for (idx, maybe_header) in data_tx_headers.into_iter().enumerate() {
-                    match maybe_header {
-                        Some(header) => {
-                            if let Err(err) = insert_tx_header(tx, &header) {
-                                error!(
-                                    "Could not insert transaction header - txid: {} err: {}",
-                                    header.id, err
-                                );
-                            }
-                        }
-                        None => {
-                            error!(
-                                "Could not find transaction {} header in mempool",
-                                &submit_tx_ids[idx]
-                            );
-                        }
-                    }
+                for header in &submit_txs {
+                    insert_tx_header(tx, header)?;
                 }
                 Ok(())
             })?;
         }
 
         // stage 3: publish txs: update submit transactions in the index now they have ingress proofs
-        let publish_tx_ids: Vec<H256> = data_ledger_txs.get(&DataLedger::Publish).unwrap().clone();
+        // Use publish transactions directly from the event
+        let publish_txs = transactions
+            .data_txs
+            .get(&DataLedger::Publish)
+            .cloned()
+            .unwrap_or_default();
+        let publish_tx_ids: Vec<H256> = publish_txs.iter().map(|tx| tx.id).collect();
         {
-            let publish_tx_headers = self
-                .handle_get_data_tx_message(publish_tx_ids.clone())
-                .await;
-
             self.irys_db.update_eyre(|mut_tx| {
-                for mut header in publish_tx_headers.into_iter().flatten() {
-                    if header.promoted_height.is_none() {
-                        header.promoted_height = Some(event.block.height);
-                        eyre::bail!(
-                            "Migrating publish tx with no promoted_height {} at height {}",
-                            header.id,
-                            event.block.height
-                        );
+                for mut header in publish_txs {
+                    if header.promoted_height().is_none() {
+                        // Set promoted_height in metadata
+                        header.metadata_mut().promoted_height = Some(event.block.height);
                     }
 
-                    if let Err(err) = insert_tx_header(mut_tx, &header) {
-                        error!(
-                            "Could not insert transaction header - txid: {} err: {}",
-                            header.id, err
-                        );
-                    }
+                    insert_tx_header(mut_tx, &header)?;
                 }
                 Ok(())
             })?;
@@ -750,6 +902,59 @@ impl Inner {
         mempool_state
             .remove_transactions_from_pending_valid_pool(&submit_tx_ids)
             .await;
+
+        // Fallback: ensure included_height metadata exists for all migrated txs.
+        // (INCLUDED should already have been set at block confirmation time.)
+        let block_height = event.block.height;
+
+        // Persist metadata to database in batch for all migrated transactions
+        let all_tx_ids: Vec<H256> = submit_tx_ids
+            .iter()
+            .chain(publish_tx_ids.iter())
+            .chain(commitment_tx_ids.iter())
+            .copied()
+            .collect();
+
+        if !all_tx_ids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                // Set included_height for data transactions
+                let data_tx_ids: Vec<_> = submit_tx_ids
+                    .iter()
+                    .chain(publish_tx_ids.iter())
+                    .copied()
+                    .collect();
+                if !data_tx_ids.is_empty() {
+                    irys_database::batch_set_data_tx_included_height(
+                        tx,
+                        &data_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                // Set included_height for commitment transactions
+                if !commitment_tx_ids.is_empty() {
+                    irys_database::batch_set_commitment_tx_included_height(
+                        tx,
+                        &commitment_tx_ids,
+                        block_height,
+                    )
+                    .map_err(|e| eyre::eyre!("{:?}", e))?;
+                }
+                Ok(())
+            }) {
+                error!("Failed to batch set included_height in database: {}", e);
+            }
+        }
+
+        // Fallback: ensure promoted_height metadata exists for publish-ledger txs in this migrated block.
+        if !publish_tx_ids.is_empty() {
+            if let Err(e) = self.irys_db.update_eyre(|tx| {
+                irys_database::batch_set_data_tx_promoted_height(tx, &publish_tx_ids, block_height)
+                    .map_err(|e| eyre::eyre!("{:?}", e))
+            }) {
+                error!("Failed to batch set promoted_height in database: {}", e);
+            }
+        }
 
         // add block with optional poa chunk to index
         self.irys_db

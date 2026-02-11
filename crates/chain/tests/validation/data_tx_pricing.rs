@@ -103,7 +103,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
-                config: Config::new(evil_config),
+                config: Config::new_with_random_peer_id(evil_config),
                 db: genesis_block_prod.db.clone(),
                 block_discovery: genesis_block_prod.block_discovery.clone(),
                 mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
@@ -121,20 +121,14 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Send block directly to block tree service for validation
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), transactions, false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(
@@ -230,7 +224,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         malicious_tx: malicious_tx.header.clone(),
         prod: ProductionStrategy {
             inner: Arc::new(BlockProducerInner {
-                config: Config::new(evil_config),
+                config: Config::new_with_random_peer_id(evil_config),
                 db: genesis_block_prod.db.clone(),
                 block_discovery: genesis_block_prod.block_discovery.clone(),
                 mining_broadcaster: genesis_block_prod.mining_broadcaster.clone(),
@@ -248,20 +242,14 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
 
     // Validate the block directly via block tree service
     gossip_data_tx_to_node(&genesis_node, &malicious_tx.header).await?;
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        block.clone(),
-        BlockTransactions::default(),
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, block.clone(), transactions, false).await?;
 
     let outcome = read_block_from_state(&genesis_node.node_ctx, &block.block_hash).await;
     assert_validation_error(

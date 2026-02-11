@@ -512,7 +512,7 @@ impl InnerCacheTask {
             let mut any_unpromoted = false;
             for txid in cached_data_root.txid_set.iter() {
                 if let Some(tx_header) = tx_header_by_txid(&tx, txid)? {
-                    if tx_header.promoted_height.is_none() {
+                    if tx_header.promoted_height().is_none() {
                         any_unpromoted = true;
                         debug!(ingress_proof.data_root = ?data_root, tx.id = ?tx_header.id, "Found unpromoted tx for data root");
                         break;
@@ -880,7 +880,8 @@ mod tests {
     use irys_testing_utils::initialize_tracing;
     use irys_types::{
         app_state::DatabaseProvider, Base64, Config, DataTransactionHeader,
-        DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
+        DataTransactionHeaderV1, DataTransactionHeaderV1WithMetadata, DataTransactionMetadata,
+        IrysBlockHeader, NodeConfig, TxChunkOffset, UnpackedChunk,
     };
     use reth_db::cursor::DbDupCursorRO as _;
     use std::sync::{Arc, RwLock};
@@ -890,7 +891,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_unconfirmed_data_roots() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -899,9 +900,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -972,7 +976,7 @@ mod tests {
     #[tokio::test]
     async fn prunes_expired_never_confirmed_data_root() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -981,9 +985,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path (no block header -> empty block_set)
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1073,7 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_chunks_with_active_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1082,9 +1089,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create tx header + data root + chunk
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1167,16 +1177,19 @@ mod tests {
     #[tokio::test]
     async fn prunes_chunks_without_any_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
             None,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1251,15 +1264,21 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create two data roots: one "old" and one "new"
-        let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            data_root: DataRoot::random(),
-            ..Default::default()
+        let tx_header_old = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                data_root: DataRoot::random(),
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
-        let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            data_root: DataRoot::random(),
-            ..Default::default()
+        let tx_header_new = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                data_root: DataRoot::random(),
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header_old, None)?;
@@ -1375,7 +1394,7 @@ mod tests {
         let mut node_config = NodeConfig::testing();
         // First run: below 80% (set to 96B; 64B cache < 76.8B threshold)
         node_config.cache.max_cache_size_bytes = 96;
-        let config_below = Config::new(node_config.clone());
+        let config_below = Config::new_with_random_peer_id(node_config.clone());
 
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
@@ -1385,10 +1404,13 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create one data root with two chunks and mark them old to be eligible
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            data_root: DataRoot::random(),
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                data_root: DataRoot::random(),
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1466,7 +1488,7 @@ mod tests {
         // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
         let mut node_config2 = node_config.clone();
         node_config2.cache.max_cache_size_bytes = 64;
-        let config_above = Config::new(node_config2);
+        let config_above = Config::new_with_random_peer_id(node_config2);
         let task_above = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
@@ -1496,16 +1518,19 @@ mod tests {
     #[tokio::test]
     async fn skips_pruning_during_active_generation_state() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
             None,
         )?;
         let db = DatabaseProvider(Arc::new(db_env));
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
@@ -1562,7 +1587,7 @@ mod tests {
     #[tokio::test]
     async fn does_not_prune_data_root_with_local_ingress_proof() -> eyre::Result<()> {
         let node_config = NodeConfig::testing();
-        let config = Config::new(node_config);
+        let config = Config::new_with_random_peer_id(node_config);
         let db_env = open_or_create_db(
             irys_testing_utils::utils::temporary_directory(None, false),
             IrysTables::ALL,
@@ -1571,9 +1596,12 @@ mod tests {
         let db = DatabaseProvider(Arc::new(db_env));
 
         // Create a data root cached via mempool path
-        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1 {
-            data_size: 64,
-            ..Default::default()
+        let tx_header = DataTransactionHeader::V1(DataTransactionHeaderV1WithMetadata {
+            tx: DataTransactionHeaderV1 {
+                data_size: 64,
+                ..Default::default()
+            },
+            metadata: DataTransactionMetadata::new(),
         });
         db.update(|wtx| {
             database::cache_data_root(wtx, &tx_header, None)?;
