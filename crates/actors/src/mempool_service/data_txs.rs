@@ -180,14 +180,8 @@ impl Inner {
             DataLedger::Publish => {
                 // Gossip path: skip API-only checks here
             }
-            DataLedger::OneYear => {
-                // Possibly some validation here?
-            }
-            DataLedger::ThirtyDay => {
-                // Possibly some validation here?
-            }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
+            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
+                // Term ledgers and direct Submit targeting are not yet supported
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
@@ -234,14 +228,8 @@ impl Inner {
                 // Publish ledger - permanent storage
                 self.validate_fee_structure_api_only(&tx)?;
             }
-            DataLedger::OneYear => {
-                // Possibly some validation here?
-            }
-            DataLedger::ThirtyDay => {
-                // Possibly some validation here?
-            }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
+            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
+                // Term ledgers and direct Submit targeting are not yet supported
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
