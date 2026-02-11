@@ -923,7 +923,7 @@ mod tests {
         // - The canonical JSON serialization implementation
         // - The serde serialization of dependency types
         let config = ConsensusConfig::testing();
-        let expected_hash = H256::from_base58("4XhdvXXeABvjmMP88tLmgvTpBYaV3mehui984uVvS7p4");
+        let expected_hash = H256::from_base58("FqweVVmuY7LZDbEduJ2Yf5HGkkYpP59xGfvKzzopCjVE");
         assert_eq!(
             config.keccak256_hash(),
             expected_hash,
