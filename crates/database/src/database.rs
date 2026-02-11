@@ -527,6 +527,9 @@ pub fn insert_block_index_items_for_block<T: DbTxMut>(
     // Build a CompactIrysBlockIndexItem wrapper for each LedgerIndexItem
     // Post all of them to the DB with a single write TX
 
+    // Delete any existing dups for this height to make the insert idempotent
+    let _ = tx.delete::<IrysBlockIndexItems>(block.height, None);
+
     for data_ledger in block.data_ledgers.iter() {
         // Create a LedgerIndexItem for each data ledger in the block
         let ledger_enum = DataLedger::try_from(data_ledger.ledger_id)?;
@@ -622,6 +625,9 @@ pub fn insert_block_index_item<T: DbTxMut>(
     height: BlockHeight,
     item: &BlockIndexItem,
 ) -> eyre::Result<()> {
+    // Delete any existing dups for this height to make the insert idempotent
+    let _ = tx.delete::<IrysBlockIndexItems>(height, None);
+
     tx.put::<MigratedBlockHashes>(height, item.block_hash)?;
     for ledger_item in &item.ledgers {
         tx.put::<IrysBlockIndexItems>(height, CompactLedgerIndexItem(ledger_item.clone()))?;
