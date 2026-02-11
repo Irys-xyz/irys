@@ -1282,7 +1282,7 @@ pub async fn shadow_transactions_are_valid(
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
-    block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     transactions: &BlockTransactions,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
@@ -1532,7 +1532,7 @@ async fn generate_expected_shadow_transactions(
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
-    block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
@@ -2978,12 +2978,12 @@ mod tests {
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
         IrysBlockHeaderV1, NodeConfig, Signature, H256, U256,
     };
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tracing::{debug, info};
 
     pub(super) struct TestContext {
-        pub block_index: Arc<RwLock<BlockIndex>>,
+        pub block_index: BlockIndex,
         pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
         #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
@@ -3034,11 +3034,12 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let block_index = Arc::new(RwLock::new(
-            BlockIndex::new(&node_config)
-                .await
-                .expect("Expected to create block index"),
-        ));
+        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+            &data_dir.path().to_path_buf(),
+        )
+        .expect("to create DB");
+        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db);
 
         // Spawn Tokio BlockIndex service
         let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3252,14 +3253,7 @@ mod tests {
         chunk_size: usize,
     ) {
         // Initialize genesis block at height 0
-        let height: u64;
-        {
-            height = context
-                .block_index
-                .read()
-                .expect("Expected to be able to read block index")
-                .num_blocks();
-        }
+        let height = context.block_index.num_blocks();
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
@@ -3456,14 +3450,7 @@ mod tests {
         chunk_size: usize,
     ) {
         // Initialize genesis block at height 0
-        let height: u64;
-        {
-            height = context
-                .block_index
-                .read()
-                .expect("To read block index")
-                .num_blocks();
-        }
+        let height = context.block_index.num_blocks();
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(

@@ -4,7 +4,7 @@ use irys_types::{
     BlockHash, BlockIndexItem, ConsensusConfig, DataTransactionHeader, IrysBlockHeader,
     TokioServiceHandle, UnixTimestampMs, H256, U256,
 };
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, info, instrument, warn, Instrument as _};
 
@@ -54,7 +54,7 @@ struct BlockLogEntry {
 /// Core logic of the BlockIndex service
 #[derive(Debug)]
 pub struct BlockIndexServiceInner {
-    block_index: Arc<RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     supply_state: Option<Arc<SupplyState>>,
     block_log: Vec<BlockLogEntry>,
     num_blocks: u64,
@@ -64,7 +64,7 @@ pub struct BlockIndexServiceInner {
 
 impl BlockIndexServiceInner {
     pub fn new(
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         supply_state: Option<Arc<SupplyState>>,
         consensus_config: &ConsensusConfig,
     ) -> Self {
@@ -149,12 +149,8 @@ impl BlockIndexServiceInner {
                 }
             }
             BlockIndexServiceMessage::GetLatestBlockIndex { response } => {
-                let bi = self
-                    .block_index
-                    .read()
-                    .map_err(|_| eyre!("block_index read lock poisoned"))?;
-                let block_height = bi.num_blocks().max(1) - 1;
-                let resp = bi.get_item(block_height).cloned();
+                let block_height = self.block_index.num_blocks().max(1) - 1;
+                let resp = self.block_index.get_item(block_height);
                 if let Err(send_err) = response.send(resp) {
                     tracing::warn!(
                         block.height = block_height,
@@ -186,8 +182,6 @@ impl BlockIndexServiceInner {
         // backfill could miss a block's reward (not yet in index) while live
         // migration already counted it, causing incorrect totals.
         self.block_index
-            .write()
-            .map_err(|_| eyre!("block_index write lock poisoned"))?
             .push_block(block, all_txs, chunk_size)?;
 
         if let Some(supply_state) = &self.supply_state {
@@ -224,7 +218,7 @@ impl BlockIndexService {
     #[tracing::instrument(level = "trace", skip_all, name = "spawn_service_block_index")]
     pub fn spawn_service(
         rx: UnboundedReceiver<BlockIndexServiceMessage>,
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         supply_state: Option<Arc<SupplyState>>,
         consensus_config: &ConsensusConfig,
         runtime_handle: tokio::runtime::Handle,

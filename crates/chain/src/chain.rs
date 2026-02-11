@@ -663,7 +663,7 @@ impl IrysNode {
         genesis_block: &IrysBlockHeader,
         genesis_commitments: &[CommitmentTransaction],
         irys_db: &DatabaseProvider,
-        block_index: &mut BlockIndex,
+        block_index: &BlockIndex,
     ) -> eyre::Result<()> {
         info!("Initializing database with genesis block and commitments");
 
@@ -710,8 +710,7 @@ impl IrysNode {
 
         // In all startup modes, irys_db and block_index are prerequisites
         let irys_db = init_irys_db(config).expect("could not open irys db");
-        let mut block_index = BlockIndex::new(&config.node_config)
-            .await
+        let block_index = BlockIndex::new(&config.node_config, irys_db.clone())
             .expect("initializing a new block index should be doable");
 
         // Gets or creates the genesis block and commitments regardless of node mode
@@ -729,7 +728,7 @@ impl IrysNode {
                 &genesis_block,
                 &genesis_commitments,
                 &irys_db,
-                &mut block_index,
+                &block_index,
             )?;
         }
 
@@ -971,8 +970,6 @@ impl IrysNode {
                 move || {
                     rt_handle.block_on(
                         async move {
-                            let block_index = Arc::new(RwLock::new(block_index));
-
                             // start the rest of the services
                             let (
                                 irys_node,
@@ -1155,7 +1152,7 @@ impl IrysNode {
         reth_shutdown_sender: tokio::sync::mpsc::Sender<ShutdownReason>,
         vdf_shutdown_receiver: tokio::sync::mpsc::Receiver<ShutdownReason>,
         reth_handle_receiver: oneshot::Receiver<RethNode>,
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         latest_block: Arc<IrysBlockHeader>,
         irys_provider: IrysRethProvider,
         task_exec: &TaskExecutor,
@@ -1912,7 +1909,7 @@ impl IrysNode {
         reth_node_adapter: IrysRethNodeAdapter,
         block_producer_rx: UnboundedReceiver<BlockProducerCommand>,
         reth_provider: NodeProvider,
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         runtime_handle: tokio::runtime::Handle,
     ) -> (Arc<irys_actors::BlockProducerInner>, TokioServiceHandle) {
         let block_producer_inner = Arc::new(irys_actors::BlockProducerInner {
@@ -2077,7 +2074,6 @@ fn read_latest_block_data(
     // Read latest from the block index; if no entries, panic
     let latest_block_index = block_index
         .get_latest_item()
-        .cloned()
         .expect("block index must have at least one entry");
     let latest_block_height = block_index.latest_height();
     let latest_block = Arc::new(

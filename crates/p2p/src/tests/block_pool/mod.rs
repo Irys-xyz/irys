@@ -61,7 +61,7 @@ impl MockedServices {
                 .expect("can't open temp dir"),
         ));
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(vec![])),
@@ -477,6 +477,7 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         sync_state.clone(),
         block_pool.clone(),
         &config,
+        db.clone(),
     )
     .await;
 

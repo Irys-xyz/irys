@@ -872,7 +872,6 @@ impl ChunkCacheService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eyre::WrapErr as _;
     use irys_database::{
         database, open_or_create_db,
         tables::{CachedChunks, CachedChunksIndex, CachedDataRoots, IrysTables},
@@ -931,12 +930,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config)
-            .await
-            .wrap_err("failed to build BlockIndex for test")?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -1014,12 +1011,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config)
-            .await
-            .wrap_err("failed to build BlockIndex for test")?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -1124,10 +1119,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
@@ -1213,10 +1208,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
@@ -1431,10 +1426,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config_below.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config_below.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Below-capacity prune: should NOT remove chunks
@@ -1532,10 +1527,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let generation_state = IngressProofGenerationState::new();
         generation_state.mark_generating(tx_header.data_root);
@@ -1614,10 +1609,10 @@ mod tests {
         let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
-        let block_index = BlockIndex::new(&config.node_config).await?;
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(Arc::new(
-            RwLock::new(block_index),
-        ));
+        let block_index = BlockIndex::new_for_testing(db.clone());
+        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
+            block_index,
+        );
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {

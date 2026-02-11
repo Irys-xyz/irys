@@ -574,6 +574,66 @@ pub fn prune_ledger_range<T: DbTxMut, U: RangeBounds<BlockHeight>>(
     Ok(())
 }
 
+/// Inserts a single [`BlockIndexItem`] into the block index tables.
+///
+/// Writes the `block_hash` to [`MigratedBlockHashes`] and each [`LedgerIndexItem`]
+/// to [`IrysBlockIndexItems`]. Used by the migration path and `push_item`.
+pub fn insert_block_index_item<T: DbTxMut>(
+    tx: &T,
+    height: BlockHeight,
+    item: &BlockIndexItem,
+) -> eyre::Result<()> {
+    tx.put::<MigratedBlockHashes>(height, item.block_hash)?;
+    for ledger_item in &item.ledgers {
+        tx.put::<IrysBlockIndexItems>(
+            height,
+            CompactLedgerIndexItem(ledger_item.clone()),
+        )?;
+    }
+    Ok(())
+}
+
+/// Returns the latest (highest) block height in the block index, or `None` if empty.
+pub fn block_index_latest_height<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
+    let mut cursor = tx.cursor_read::<MigratedBlockHashes>()?;
+    Ok(cursor.last()?.map(|(height, _)| height))
+}
+
+/// Returns the number of blocks stored in the block index.
+pub fn block_index_num_blocks<T: DbTx>(tx: &T) -> eyre::Result<u64> {
+    let count = tx.entries::<MigratedBlockHashes>()?;
+    Ok(count as u64)
+}
+
+/// Deletes block index entries for all heights in the given range from both tables.
+///
+/// Used for rollback operations. Removes entries from both [`IrysBlockIndexItems`]
+/// and [`MigratedBlockHashes`].
+pub fn delete_block_index_range<T: DbTxMut, U: RangeBounds<BlockHeight> + Clone>(
+    tx: &T,
+    range: U,
+) -> eyre::Result<()> {
+    // Delete from IrysBlockIndexItems
+    let mut cursor = tx.cursor_write::<IrysBlockIndexItems>()?;
+    let mut range_walker = cursor.walk_range(range.clone())?;
+    while let Some(result) = range_walker.next() {
+        let (_height, _item) = result?;
+        range_walker.delete_current()?;
+    }
+    drop(range_walker);
+    drop(cursor);
+
+    // Delete from MigratedBlockHashes
+    let mut cursor = tx.cursor_write::<MigratedBlockHashes>()?;
+    let mut range_walker = cursor.walk_range(range)?;
+    while let Some(result) = range_walker.next() {
+        let (_height, _hash) = result?;
+        range_walker.delete_current()?;
+    }
+
+    Ok(())
+}
+
 pub fn walk_all<T: Table, TX: DbTx>(
     read_tx: &TX,
 ) -> eyre::Result<Vec<(<T as Table>::Key, <T as Table>::Value)>> {

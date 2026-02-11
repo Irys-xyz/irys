@@ -1,101 +1,144 @@
 //! Manages a list of `{block_hash, weave_size, tx_root}`entries, indexed by
 //! block height.
+//!
+//! Block index items are stored in MDBX via the `IrysBlockIndexItems` and
+//! `MigratedBlockHashes` tables.
 
 use eyre::Result;
+use irys_database::{
+    block_index_item_by_height, block_index_latest_height, block_index_num_blocks,
+    db::IrysDatabaseExt as _, insert_block_index_item,
+};
 use irys_types::{
-    BlockIndexItem, DataLedger, DataTransactionHeader, IrysBlockHeader, LedgerChunkOffset,
-    LedgerIndexItem, NodeConfig, H256,
+    BlockIndexItem, DataLedger, DataTransactionHeader, DatabaseProvider, IrysBlockHeader,
+    LedgerChunkOffset, LedgerIndexItem, NodeConfig, H256,
 };
 use std::fs::OpenOptions;
-use std::io::{BufReader, Read as _, Write as _};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::instrument;
+use std::io::{BufReader, Read as _};
+use std::path::Path;
+use tracing::{info, instrument};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BlockIndex {
-    /// Stored as a fixed size array with an Arc to allow multithreaded access
-    pub items: Arc<[BlockIndexItem]>,
-    pub block_index_file: PathBuf,
-}
-
-const FILE_NAME: &str = "index.dat";
-
-impl Default for BlockIndex {
-    fn default() -> Self {
-        unreachable!("do not rely on the default implementation")
-    }
+    db: DatabaseProvider,
 }
 
 impl BlockIndex {
-    /// Initializes a block index from disk, if this was a multi node network
-    /// it could also read the latest block information from the network.
-    pub async fn new(config: &NodeConfig) -> Result<Self> {
-        let block_index_dir = config.block_index_dir();
-        tokio::fs::create_dir_all(&block_index_dir).await?;
-        let block_index_file = block_index_dir.join(FILE_NAME);
+    /// Initializes a block index backed by MDBX.
+    ///
+    /// On first run, if the DB is empty and a legacy `index.dat` file exists,
+    /// performs a one-time migration of the file contents into the DB.
+    pub fn new(config: &NodeConfig, db: DatabaseProvider) -> Result<Self> {
+        let block_index = Self { db: db.clone() };
 
-        // Try to load the block index from disk
-        let index = load_index_from_file(&block_index_file)?;
+        // Check if migration from file is needed
+        let num_blocks = db.view_eyre(|tx| block_index_num_blocks(tx))?;
 
-        // Return the "Initialized" state of the BlockIndex type
-        Ok(Self {
-            items: index.into(),
-            block_index_file,
-        })
+        if num_blocks == 0 {
+            let block_index_dir = config.block_index_dir();
+            let index_file = block_index_dir.join(FILE_NAME);
+
+            if index_file.exists() {
+                info!("Migrating block index from index.dat to MDBX...");
+                let items = load_index_from_file(&index_file)?;
+                let item_count = items.len();
+
+                if !items.is_empty() {
+                    db.update_eyre(|tx| {
+                        for (height, item) in items.iter().enumerate() {
+                            insert_block_index_item(tx, height as u64, item)?;
+                        }
+                        Ok(())
+                    })?;
+                    info!(
+                        "Migration complete: {} blocks migrated from index.dat to MDBX",
+                        item_count
+                    );
+                }
+
+                // Rename the legacy file so it won't be re-read on next startup
+                let migrated_path = block_index_dir.join("index.dat.migrated");
+                if let Err(e) = std::fs::rename(&index_file, &migrated_path) {
+                    tracing::warn!("Failed to rename index.dat to index.dat.migrated: {e}");
+                } else {
+                    info!("Renamed index.dat to index.dat.migrated");
+                }
+            }
+        }
+
+        Ok(block_index)
+    }
+
+    /// Creates a `BlockIndex` backed by the given DB without migration logic.
+    /// For use in tests only.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn new_for_testing(db: DatabaseProvider) -> Self {
+        Self { db }
+    }
+
+    /// Returns a reference to the underlying database provider.
+    pub fn db(&self) -> &DatabaseProvider {
+        &self.db
     }
 
     /// Retrieves the number of blocks in the index
     pub fn num_blocks(&self) -> u64 {
-        self.items.len() as u64
+        self.db
+            .view_eyre(|tx| block_index_num_blocks(tx))
+            .unwrap_or(0)
     }
 
     /// Returns the latest block height stored by the block index
     pub fn latest_height(&self) -> u64 {
-        (self.items.len().saturating_sub(1)) as u64
+        self.db
+            .view_eyre(|tx| block_index_latest_height(tx))
+            .ok()
+            .flatten()
+            .unwrap_or(0)
     }
 
     /// Retrieves a [`BlockIndexItem`] from the block index by block height
-    pub fn get_item(&self, block_height: u64) -> Option<&BlockIndexItem> {
-        // Check if block_height can fit into a usize
-        let index = if block_height <= usize::MAX as u64 {
-            block_height as usize
-        } else {
-            return None; // Block height too large for this platform
-        };
-
-        self.items.get(index)
+    pub fn get_item(&self, block_height: u64) -> Option<BlockIndexItem> {
+        self.db
+            .view_eyre(|tx| block_index_item_by_height(tx, &block_height))
+            .ok()
     }
 
-    /// Retrieves the most recent [`BlockIndexItem`] from the block index by block height
-    pub fn get_latest_item(&self) -> Option<&BlockIndexItem> {
-        if self.items.is_empty() {
-            return None;
-        };
-        self.items.last()
+    /// Retrieves the most recent [`BlockIndexItem`] from the block index
+    pub fn get_latest_item(&self) -> Option<BlockIndexItem> {
+        let latest_height = self
+            .db
+            .view_eyre(|tx| block_index_latest_height(tx))
+            .ok()
+            .flatten()?;
+        self.get_item(latest_height)
     }
 
     /// Retrieves a range of [`BlockIndexItem`]s from the block index
     pub fn get_range(&self, start_height: u64, limit: usize) -> Vec<BlockIndexItem> {
-        let total = self.items.len();
-        let start = (start_height as usize).min(total);
-        let end = start.saturating_add(limit).min(total);
-        self.items[start..end].to_vec()
+        self.db
+            .view_eyre(|tx| {
+                let total = block_index_num_blocks(tx)?;
+                let start = (start_height).min(total);
+                let end = start.saturating_add(limit as u64).min(total);
+                let mut items = Vec::with_capacity((end - start) as usize);
+                for h in start..end {
+                    items.push(block_index_item_by_height(tx, &h)?);
+                }
+                Ok(items)
+            })
+            .unwrap_or_default()
     }
 
-    /// Pushes a new [`BlockIndexItem`] onto the items array
-    pub fn push_item(&mut self, block_index_item: &BlockIndexItem) -> eyre::Result<()> {
-        let mut items_vec = self.items.to_vec();
-        // TODO: improve this, storing in file each item
-        append_item(block_index_item, &self.block_index_file)?;
-        items_vec.push(block_index_item.clone());
-        self.items = items_vec.into();
-        Ok(())
+    /// Pushes a new [`BlockIndexItem`] at the given height
+    pub fn push_item(&self, block_index_item: &BlockIndexItem, height: u64) -> eyre::Result<()> {
+        self.db
+            .update_eyre(|tx| insert_block_index_item(tx, height, block_index_item))
     }
 
     #[instrument(skip_all, err, fields(block.hash = %block.block_hash, block.height = %block.height))]
     pub fn push_block(
-        &mut self,
+        &self,
         block: &IrysBlockHeader,
         all_txs: &[DataTransactionHeader],
         chunk_size: u64,
@@ -134,7 +177,6 @@ impl BlockIndex {
                         block.height.saturating_sub(1),
                         block.previous_block_hash,
                         prev_block.block_hash
-
                     );
                 }
                 (
@@ -167,72 +209,164 @@ impl BlockIndex {
             ],
         };
 
-        self.push_item(&block_index_item)
+        self.push_item(&block_index_item, block.height)
     }
 
-    /// For a given byte offset in a ledger, what block was responsible for adding
-    /// that byte to the data ledger?
+    /// For a given chunk offset in a ledger, what block was responsible for adding
+    /// that chunk to the data ledger?
     pub fn get_block_bounds(
         &self,
         ledger: DataLedger,
         chunk_offset: LedgerChunkOffset,
     ) -> eyre::Result<BlockBounds> {
-        let mut block_bounds = BlockBounds {
-            ledger,
-            ..Default::default()
-        };
+        self.db.view_eyre(|tx| {
+            let latest_height = block_index_latest_height(tx)?
+                .ok_or_else(|| eyre::eyre!("Block index is empty"))?;
 
-        let (block_height, found_item) = self.get_block_index_item(ledger, chunk_offset.into())?;
-        let previous_item = self
-            .get_item(block_height.saturating_sub(1))
-            .ok_or_else(|| {
-                eyre::eyre!(format!("No previous block at height {}", block_height - 1))
-            })?;
+            let last_item = block_index_item_by_height(tx, &latest_height)?;
+            let last_max = last_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .map(|l| l.total_chunks)
+                .ok_or_else(|| {
+                    eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, latest_height)
+                })?;
 
-        let ledger_index = usize::try_from(ledger)?;
-        block_bounds.start_chunk_offset = previous_item.ledgers[ledger_index].total_chunks;
-        block_bounds.end_chunk_offset = found_item.ledgers[ledger_index].total_chunks;
-        block_bounds.tx_root = found_item.ledgers[ledger_index].tx_root;
-        block_bounds.height = block_height;
+            let chunk_offset_val: u64 = chunk_offset.into();
+            eyre::ensure!(
+                chunk_offset_val < last_max,
+                "chunk_offset {} beyond last block's max_chunk_offset {}, last block height {}",
+                chunk_offset_val,
+                last_max,
+                latest_height + 1
+            );
 
-        Ok(block_bounds)
+            // Binary search for the block containing this chunk offset
+            let (block_height, found_item) = {
+                let mut lo: u64 = 0;
+                let mut hi: u64 = latest_height;
+
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let item = block_index_item_by_height(tx, &mid)?;
+                    let total = item
+                        .ledgers
+                        .iter()
+                        .find(|l| l.ledger == ledger)
+                        .map(|l| l.total_chunks)
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Ledger {:?} not found in block at height {}",
+                                ledger,
+                                mid
+                            )
+                        })?;
+                    if chunk_offset_val < total {
+                        hi = mid;
+                    } else {
+                        lo = mid + 1;
+                    }
+                }
+
+                let item = block_index_item_by_height(tx, &lo)?;
+                (lo, item)
+            };
+
+            let previous_item = block_index_item_by_height(tx, &block_height.saturating_sub(1))?;
+
+            let prev_total = previous_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .map(|l| l.total_chunks)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        block_height.saturating_sub(1)
+                    )
+                })?;
+
+            let found_ledger = found_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        block_height
+                    )
+                })?;
+
+            Ok(BlockBounds {
+                height: block_height,
+                ledger,
+                start_chunk_offset: prev_total,
+                end_chunk_offset: found_ledger.total_chunks,
+                tx_root: found_ledger.tx_root,
+            })
+        })
     }
 
-    /// Returns the block height + block index item
+    /// Returns the block height + block index item containing the given chunk offset
     pub fn get_block_index_item(
         &self,
         ledger: DataLedger,
         chunk_offset: u64,
-    ) -> Result<(u64, &BlockIndexItem)> {
-        if let Some(last_item) = self.items.last() {
-            let last_max = last_item.ledgers[ledger as usize].total_chunks;
+    ) -> Result<(u64, BlockIndexItem)> {
+        self.db.view_eyre(|tx| {
+            let latest_height = block_index_latest_height(tx)?
+                .ok_or_else(|| eyre::eyre!("Block index is empty"))?;
+
+            let last_item = block_index_item_by_height(tx, &latest_height)?;
+            let last_max = last_item
+                .ledgers
+                .iter()
+                .find(|l| l.ledger == ledger)
+                .map(|l| l.total_chunks)
+                .ok_or_else(|| {
+                    eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, latest_height)
+                })?;
+
             eyre::ensure!(
                 chunk_offset < last_max,
                 "chunk_offset {} beyond last block's max_chunk_offset {}, last block height {}",
                 chunk_offset,
                 last_max,
-                self.items.len()
+                latest_height + 1
             );
-        }
 
-        let ledger_index = usize::try_from(ledger)?;
-        let result = self.items.binary_search_by(|item| {
-            if chunk_offset < item.ledgers[ledger_index].total_chunks {
-                std::cmp::Ordering::Greater
-            } else {
-                std::cmp::Ordering::Less
+            // Binary search
+            let mut lo: u64 = 0;
+            let mut hi: u64 = latest_height;
+
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let item = block_index_item_by_height(tx, &mid)?;
+                let total = item
+                    .ledgers
+                    .iter()
+                    .find(|l| l.ledger == ledger)
+                    .map(|l| l.total_chunks)
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Ledger {:?} not found in block at height {}",
+                            ledger,
+                            mid
+                        )
+                    })?;
+                if chunk_offset < total {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
             }
-        });
 
-        // It's the nature of binary_search_by to return Err if it doesn't find
-        // an exact match. We are looking for the position of the closest element
-        // so we ignore the Result enum values and extract the pos return val.
-        let index = match result {
-            Ok(pos) => pos,
-            Err(pos) => pos,
-        };
-
-        Ok((index as u64, &self.items[index]))
+            let item = block_index_item_by_height(tx, &lo)?;
+            Ok((lo, item))
+        })
     }
 
     pub fn print_items(&self) {
@@ -262,31 +396,17 @@ pub struct BlockBounds {
     pub tx_root: H256,
 }
 
-fn append_item(item: &BlockIndexItem, file_path: &Path) -> eyre::Result<()> {
-    match OpenOptions::new().append(true).create(true).open(file_path) {
-        Ok(mut file) => {
-            file.write_all(&item.to_bytes())?;
-            file.sync_all()?;
-            Ok(())
-        }
-        Err(err) => Err(eyre::eyre!(
-            "While trying to open file :{:?} got error: {}",
-            file_path,
-            err
-        )),
-    }
-}
+// === Migration-only code (temporary, will be removed once all nodes have migrated) ===
 
+const FILE_NAME: &str = "index.dat";
 const HEADER_SIZE: usize = 33; // 32 bytes block_hash + 1 byte num_ledgers
 const LEDGER_ITEM_SIZE: usize = 40; // 8 bytes total_chunks + 32 bytes tx_root
-
-// NOTE: Must match BlockIndexItem::to_bytes() encoding. Changing this is a format change.
 const EXPECTED_NUM_LEDGERS: u8 = 2; // Publish and Submit ledgers
 
 /// Loads the block index from file using streaming deserialization.
 ///
-/// Uses a buffered reader to avoid loading the entire file into memory,
-/// which would otherwise double the memory footprint during startup.
+/// **Migration-only** — this function will be removed in a future PR once
+/// all nodes have migrated from `index.dat` to MDBX.
 #[tracing::instrument(level = "trace", skip_all, err)]
 fn load_index_from_file(file_path: &Path) -> eyre::Result<Vec<BlockIndexItem>> {
     let file = match OpenOptions::new().read(true).open(file_path) {
@@ -385,9 +505,18 @@ mod tests {
     use super::BlockIndex;
     use super::*;
     use crate::BlockBounds;
+    use irys_database::open_or_create_db;
+    use irys_database::tables::IrysTables;
     use irys_testing_utils::utils::setup_tracing_and_temp_dir;
     use irys_types::H256;
     use std::fs::{self, File};
+    use std::io::Write as _;
+    use std::sync::Arc;
+
+    fn create_test_db(path: &std::path::Path) -> DatabaseProvider {
+        let db = open_or_create_db(path, IrysTables::ALL, None).unwrap();
+        DatabaseProvider(Arc::new(db))
+    }
 
     fn save_block_index(
         block_index_items: &[BlockIndexItem],
@@ -403,14 +532,8 @@ mod tests {
         Ok(())
     }
 
-    #[test_log::test(tokio::test)]
-    async fn read_and_write_block_index() -> eyre::Result<()> {
-        let tmp_dir = setup_tracing_and_temp_dir(Some("read_and_write_block_index"), false);
-        let base_path = tmp_dir.path().to_path_buf();
-        let mut node_config = NodeConfig::testing();
-        node_config.base_directory = base_path;
-
-        let block_items = vec![
+    fn make_test_items() -> Vec<BlockIndexItem> {
+        vec![
             BlockIndexItem {
                 block_hash: H256::random(),
                 num_ledgers: 2,
@@ -459,19 +582,27 @@ mod tests {
                     },
                 ],
             },
-        ];
+        ]
+    }
 
-        save_block_index(&block_items, &node_config)?;
+    #[test]
+    fn read_and_write_block_index() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("read_and_write_block_index_db"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+        let db = create_test_db(&base_path.join("db"));
+        let block_index = BlockIndex::new_for_testing(db);
 
-        // Load the items from disk
-        let block_index = BlockIndex::new(&node_config).await?;
+        let block_items = make_test_items();
 
-        println!("{:?}", block_index.items);
+        // Write items
+        for (i, item) in block_items.iter().enumerate() {
+            block_index.push_item(item, i as u64)?;
+        }
 
-        assert_eq!(block_index.items.len(), 3);
-        assert_eq!(*block_index.get_item(0).unwrap(), block_items[0]);
-        assert_eq!(*block_index.get_item(1).unwrap(), block_items[1]);
-        assert_eq!(*block_index.get_item(2).unwrap(), block_items[2]);
+        assert_eq!(block_index.num_blocks(), 3);
+        assert_eq!(block_index.get_item(0).unwrap(), block_items[0]);
+        assert_eq!(block_index.get_item(1).unwrap(), block_items[1]);
+        assert_eq!(block_index.get_item(2).unwrap(), block_items[2]);
 
         // check an invalid byte offset causes get_block_bounds to return an error
         let invalid_block_bounds =
@@ -511,7 +642,7 @@ mod tests {
         );
 
         let item = block_index.get_item(2).unwrap();
-        assert_eq!(*item, block_items[2]);
+        assert_eq!(item, block_items[2]);
 
         Ok(())
     }
@@ -547,5 +678,36 @@ mod tests {
             bytes[32], EXPECTED_NUM_LEDGERS,
             "num_ledgers byte does not match EXPECTED_NUM_LEDGERS constant"
         );
+    }
+
+    #[test]
+    fn migration_from_file_to_db() -> eyre::Result<()> {
+        let tmp_dir = setup_tracing_and_temp_dir(Some("migration_from_file_to_db"), false);
+        let base_path = tmp_dir.path().to_path_buf();
+
+        let mut node_config = NodeConfig::testing();
+        node_config.base_directory = base_path.clone();
+
+        let block_items = make_test_items();
+
+        // Write items to legacy file
+        save_block_index(&block_items, &node_config)?;
+
+        // Create DB and trigger migration
+        let db = create_test_db(&base_path.join("db"));
+        let block_index = BlockIndex::new(&node_config, db)?;
+
+        // Verify items migrated correctly
+        assert_eq!(block_index.num_blocks(), 3);
+        assert_eq!(block_index.get_item(0).unwrap(), block_items[0]);
+        assert_eq!(block_index.get_item(1).unwrap(), block_items[1]);
+        assert_eq!(block_index.get_item(2).unwrap(), block_items[2]);
+
+        // Verify legacy file was renamed
+        let index_dir = node_config.block_index_dir();
+        assert!(!index_dir.join("index.dat").exists(), "index.dat should have been renamed");
+        assert!(index_dir.join("index.dat.migrated").exists(), "index.dat.migrated should exist");
+
+        Ok(())
     }
 }

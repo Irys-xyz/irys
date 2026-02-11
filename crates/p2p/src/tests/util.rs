@@ -366,7 +366,7 @@ impl GossipServiceTestFixture {
         let mempool_txs = Arc::clone(&mempool_stub.txs);
         let mempool_chunks = Arc::clone(&mempool_stub.chunks);
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
             internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
@@ -374,7 +374,7 @@ impl GossipServiceTestFixture {
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
 
         let task_manager = TaskManager::new(tokio_runtime);
         let task_executor = task_manager.executor();
@@ -465,7 +465,7 @@ impl GossipServiceTestFixture {
 
         let mempool_stub = self.mempool_stub.clone();
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node_config).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&self.config.node_config, self.db.clone());
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::clone(&self.discovery_blocks),
             internal_message_bus: Some(self.service_senders.gossip_broadcast.clone()),
@@ -493,11 +493,9 @@ impl GossipServiceTestFixture {
                     self.service_senders.clone(),
                     self.sync_tx.clone(),
                     MempoolReadGuard::new(self.mempool_state.clone()),
-                    BlockIndexReadGuard::new(Arc::new(RwLock::new(
-                        BlockIndex::new(&self.config.node_config)
-                            .await
-                            .expect("block index"),
-                    ))),
+                    BlockIndexReadGuard::new(
+                        BlockIndex::new_for_testing(self.db.clone()),
+                    ),
                     BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
                         &IrysBlockHeader::new_mock_header(),
                         self.config.consensus.clone(),
@@ -978,10 +976,8 @@ pub(crate) async fn data_handler_stub(
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
     let genesis_block = IrysBlockHeader::new_mock_header();
-    let block_index = BlockIndex::new(&config.node_config)
-        .await
-        .expect("expected to create a block index");
-    let block_index_read_guard_stub = BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+    let block_index = BlockIndex::new_for_testing(db.clone());
+    let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 
@@ -994,7 +990,7 @@ pub(crate) async fn data_handler_stub(
     let mempool_state = AtomicMempoolState::new(state);
     let mempool_stub = MempoolStub::new(gossip_tx, mempool_state);
     let reth_block_mock_provider = RethBlockProvider::Mock(Arc::new(RwLock::new(HashMap::new())));
-    let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+    let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
     let block_discovery_stub = BlockDiscoveryStub {
         blocks: Arc::new(RwLock::new(Vec::new())),
         internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
@@ -1045,6 +1041,7 @@ pub(crate) async fn data_handler_with_stubbed_pool(
     sync_state: ChainSyncState,
     block_pool: Arc<BlockPool<BlockDiscoveryStub, MempoolStub>>,
     config: &Config,
+    db: DatabaseProvider,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
     let (service_senders, _service_receivers) =
         irys_actors::test_helpers::build_test_service_senders();
@@ -1058,10 +1055,8 @@ pub(crate) async fn data_handler_with_stubbed_pool(
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
 
     let genesis_block = IrysBlockHeader::new_mock_header();
-    let block_index = BlockIndex::new(&config.node_config)
-        .await
-        .expect("expected to create a block index");
-    let block_index_read_guard_stub = BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+    let block_index = BlockIndex::new_for_testing(db);
+    let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
     let block_tree_read_guard_stub = BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
 

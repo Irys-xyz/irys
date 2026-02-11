@@ -89,7 +89,7 @@ pub async fn calculate_expired_ledger_fees(
     block_height: u64,
     ledger_type: DataLedger,
     config: &Config,
-    block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
@@ -330,18 +330,14 @@ fn collect_expired_partitions(
 fn find_block_range(
     expired_slots: BTreeMap<SlotIndex, Vec<IrysAddress>>,
     config: &Config,
-    block_index: &std::sync::RwLock<BlockIndex>,
+    block_index: &BlockIndex,
     ledger_type: DataLedger,
 ) -> eyre::Result<Option<BlockRange>> {
     let mut blocks_with_expired_ledgers = BTreeMap::new();
-    let block_index_read = block_index
-        .read()
-        .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
 
     // Ensure that we don't start reading a partition that's only partially populated
-    let last_item = block_index_read
-        .items
-        .last()
+    let last_item = block_index
+        .get_latest_item()
         .expect("expected block index to contain at least one item");
     let max_chunk_offset_across_all_partitions =
         LedgerChunkOffset::from(last_item.ledgers[ledger_type].total_chunks);
@@ -359,7 +355,7 @@ fn find_block_range(
         let mut chunk_offset = *chunk_range.start();
         while chunk_offset < *chunk_range.end() {
             let (height, block_index_item) =
-                block_index_read.get_block_index_item(ledger_type, chunk_offset)?;
+                block_index.get_block_index_item(ledger_type, chunk_offset)?;
 
             // Update min_height if this is the first block or a lower height
             if min_height.as_ref().is_none_or(|(h, _, _)| height < *h) {
@@ -465,7 +461,7 @@ async fn process_boundary_block(
     is_earliest: bool,
     ledger_type: DataLedger,
     config: &Config,
-    block_index: &std::sync::RwLock<BlockIndex>,
+    block_index: &BlockIndex,
     block_tree_guard: &BlockTreeReadGuard,
     mempool_guard: &MempoolReadGuard,
     db: &DatabaseProvider,
@@ -485,11 +481,7 @@ async fn process_boundary_block(
         get_data_tx_in_parallel(ledger_tx_ids.to_vec(), mempool_guard, db).await?;
 
     // Get the previous block's max offset
-    let block_index_read = block_index
-        .read()
-        .map_err(|_| eyre::eyre!("block index read guard poisoned"))?;
-    let prev_max_offset = get_previous_max_offset(&block_index_read, boundary.height, ledger_type)?;
-    drop(block_index_read);
+    let prev_max_offset = get_previous_max_offset(block_index, boundary.height, ledger_type)?;
 
     // Filter transactions based on chunk positions
     let filtered_txs = filter_transactions_by_chunk_range(

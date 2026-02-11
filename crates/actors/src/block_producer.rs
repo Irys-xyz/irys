@@ -179,7 +179,7 @@ pub struct BlockProducerInner {
     /// Reth beacon engine handle
     pub consensus_engine_handle: ConsensusEngineHandle<<IrysEthereumNode as NodeTypes>::Payload>,
     /// Block index
-    pub block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    pub block_index: BlockIndex,
     /// Read guard for mempool state
     pub mempool_guard: MempoolReadGuard,
 }
@@ -1557,7 +1557,7 @@ pub trait BlockProdStrategy {
             block_height,
             DataLedger::Submit, // Currently only Submit ledgers expire
             &self.inner().config,
-            Arc::clone(&self.inner().block_index),
+            self.inner().block_index.clone(),
             &self.inner().block_tree_guard,
             &self.inner().mempool_guard,
             &self.inner().db,
