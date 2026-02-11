@@ -8,10 +8,6 @@
 //! Test scenarios covered:
 //! 1. VDF too old - solution's VDF step is not greater than parent's VDF step
 //! 2. Valid solution reuse - parent changes but solution remains valid
-//!
-//! NOTE: All tests use the `serial_` prefix to ensure they run sequentially.
-//! This is required because the VDF thread needs consistent CPU time without
-//! OS scheduling congestion from concurrent test execution.
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
 use irys_types::{
@@ -83,7 +79,7 @@ impl BlockProdStrategy for TrackingStrategy {
 /// VDF step is no longer greater than the parent's VDF step, the solution
 /// is correctly discarded.
 #[test_log::test(tokio::test)]
-async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
+async fn solution_discarded_vdf_too_old() -> eyre::Result<()> {
     // Setup
     let mut config = NodeConfig::testing();
     config.consensus.get_mut().chunk_size = 32;
@@ -196,7 +192,7 @@ async fn serial_solution_discarded_vdf_too_old() -> eyre::Result<()> {
 /// but the solution still meets all requirements (VDF step and difficulty),
 /// the block producer rebuilds on the new parent using the same solution.
 #[test_log::test(tokio::test)]
-async fn serial_solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
+async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("Starting test: solution reused when parent changes but remains valid");
 
     // Setup
