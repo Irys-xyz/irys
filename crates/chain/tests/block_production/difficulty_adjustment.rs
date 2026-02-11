@@ -113,7 +113,7 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
         (&fork_creator_1.mine_block_without_gossip().await?, false),
         (&fork_creator_1.mine_block_without_gossip().await?, true),
     ];
-    for ((block, _eth_block, txs), _new_tip) in order.iter() {
+    for ((block, _eth_block, transactions), _new_tip) in order.iter() {
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
         let body = BlockBody {
             block_hash: block.block_hash,

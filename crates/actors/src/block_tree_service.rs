@@ -18,10 +18,7 @@ use irys_domain::{
     forkchoice_markers::ForkChoiceMarkers, make_block_tree_entry, BlockState, BlockTree,
     BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
-use irys_types::{
-    BlockHash, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysAddress,
-    IrysBlockHeader, SealedBlock, TokioServiceHandle, H256,
-};
+use irys_types::{BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader, SealedBlock, TokioServiceHandle, H256};
 use reth::tasks::shutdown::Shutdown;
 use std::{
     collections::HashMap,
@@ -91,6 +88,7 @@ pub struct ReorgEvent {
 #[derive(Debug, Clone)]
 pub struct BlockMigratedEvent {
     pub block: Arc<IrysBlockHeader>,
+    pub transactions: Arc<BlockTransactions>,
 }
 
 /// Event broadcast when a block's state changes in the block tree.
@@ -254,8 +252,7 @@ impl BlockTreeServiceInner {
     /// Sends block-migration notifications to services after a block reaches migration depth.
     ///
     /// This method:
-    /// - Resolves the full `IrysBlockHeader` for the provided `block_hash` from the mempool or the database
-    /// - Fetches the Submit and Publish data-transaction headers from the mempool
+    /// - Uses the transactions passed in from the block tree (no mempool lookup needed)
     /// - Emits a block migration message to the `BlockIndexService` and `ChunkMigrationService`
     ///
     /// Errors
@@ -264,13 +261,18 @@ impl BlockTreeServiceInner {
     async fn send_block_migration_message(
         &self,
         block_header: Arc<IrysBlockHeader>,
+        transactions: &BlockTransactions,
     ) -> eyre::Result<()> {
-        let submit_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Submit)
-            .await?;
-        let publish_txs = self
-            .get_data_ledger_tx_headers_from_mempool(&block_header, DataLedger::Publish)
-            .await?;
+        let submit_txs = transactions
+            .data_txs
+            .get(&DataLedger::Submit)
+            .cloned()
+            .unwrap_or_default();
+        let publish_txs = transactions
+            .data_txs
+            .get(&DataLedger::Publish)
+            .cloned()
+            .unwrap_or_default();
 
         // TODO: Migrate block_index to use the HashMap so we don't have to close these headers
         let mut all_txs = vec![];
@@ -448,10 +450,26 @@ impl BlockTreeServiceInner {
 
         // Send all blocks in order (oldest to newest)
         for block_to_migrate in blocks_to_migrate {
+            // Extract transactions from block tree
+            let transactions = {
+                let cache = self.cache.read().expect("poisoned lock");
+                cache
+                    .blocks
+                    .get(&block_to_migrate.block_hash)
+                    .map(|meta| meta.transactions.clone())
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "missing cache entry for block {} during block migration",
+                            block_to_migrate.block_hash
+                        )
+                    })?
+            };
+
             // NOTE: order of events is very important! block migration event
             // writes chunks to db, which is expected by `send_block_migration_message`.
             let block_migrated_event = BlockMigratedEvent {
                 block: Arc::clone(&block_to_migrate),
+                transactions: Arc::new(transactions.clone()),
             };
             if let Err(e) = self
                 .service_senders
@@ -462,7 +480,7 @@ impl BlockTreeServiceInner {
             }
             let block_hash = block_to_migrate.block_hash;
             let block_height = block_to_migrate.height;
-            self.send_block_migration_message(block_to_migrate)
+            self.send_block_migration_message(block_to_migrate, &transactions)
                 .await
                 .inspect_err(|e| {
                     error!(
@@ -538,7 +556,8 @@ impl BlockTreeServiceInner {
             .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
 
         let add_result = cache.add_block(
-            block_header,
+            &block,
+            transactions.clone(),
             commitment_snapshot,
             arc_epoch_snapshot,
             ema_snapshot,
@@ -555,6 +574,10 @@ impl BlockTreeServiceInner {
                     *block_hash,
                 ));
             }
+
+            // Record validation started for diagnostics
+            self.chain_sync_state.record_validation_started(*block_hash);
+
             self.service_senders
                 .validation_service
                 .send(ValidationServiceMessage::ValidateBlock {
@@ -600,6 +623,10 @@ impl BlockTreeServiceInner {
         block_hash: H256,
         validation_result: ValidationResult,
     ) -> eyre::Result<()> {
+        // Record validation finished for diagnostics (regardless of result)
+        self.chain_sync_state
+            .record_validation_finished(&block_hash);
+
         // Handle a failed validation first
         if let ValidationResult::Invalid(validation_error) = &validation_result {
             error!(
@@ -1026,49 +1053,6 @@ impl BlockTreeServiceInner {
             },
         )?;
         Ok(())
-    }
-
-    /// Fetches full transaction headers from mempool using the txids from a ledger in a block
-    async fn get_data_ledger_tx_headers_from_mempool(
-        &self,
-        block_header: &IrysBlockHeader,
-        ledger: DataLedger,
-    ) -> eyre::Result<Vec<DataTransactionHeader>> {
-        // FIXME: when we add multiple term ledgers this will not work as there may be gaps in the index range
-        // Explicitly cast enum to index
-        let ledger_index = ledger as usize;
-
-        let data_tx_ids = block_header
-            .data_ledgers
-            .get(ledger_index)
-            .ok_or_else(|| eyre::eyre!("Ledger index {} out of bounds", ledger_index))?
-            .tx_ids
-            .0
-            .clone();
-        let mempool = self.service_senders.mempool.clone();
-
-        let (tx, rx) = oneshot::channel();
-        mempool
-            .send(MempoolServiceMessage::GetDataTxs(data_tx_ids.clone(), tx))
-            .map_err(|_| eyre::eyre!("Failed to send request to mempool"))?;
-
-        let received = rx
-            .await
-            .map_err(|e| eyre::eyre!("Mempool response error: {}", e))?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<DataTransactionHeader>>();
-
-        if received.len() != data_tx_ids.len() {
-            return Err(eyre::eyre!(
-                "Mismatch in {:?} tx count: expected {}, got {}",
-                ledger,
-                data_tx_ids.len(),
-                received.len()
-            ));
-        }
-
-        Ok(received)
     }
 }
 

@@ -12,7 +12,7 @@ use irys_actors::block_validation::ValidationError;
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
-use irys_types::{BlockBody, IrysBlockHeader, NodeConfig, SealedBlock as IrysSealedBlock};
+use irys_types::{BlockBody, BlockTransactions, IrysBlockHeader, NodeConfig, SealedBlock as IrysSealedBlock};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
@@ -20,17 +20,21 @@ use reth::primitives::Block;
 // Produces a valid block, then returns its header and evm payload (sealed block).
 async fn produce_block(
     genesis_node: &IrysNodeTest<IrysNodeCtx>,
-) -> eyre::Result<(Arc<IrysBlockHeader>, reth::payload::EthBuiltPayload)> {
+) -> eyre::Result<(
+    Arc<IrysBlockHeader>,
+    BlockTransactions,
+    reth::payload::EthBuiltPayload,
+)> {
     let block_prod_strategy = ProductionStrategy {
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (block, _adjustment_stats, eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("no block produced"))?;
 
-    Ok((block.header().clone(), eth_payload))
+    Ok((block, transactions, eth_payload))
 }
 
 // Mutates the sealed block's header in-place via unseal/modify/seal, returns the new sealed block.
@@ -65,7 +69,7 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (irys_block, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set blob_gas_used in the EVM header to non-zero
     let mutated = mutate_header(eth_payload.block(), |blk| {

@@ -526,7 +526,7 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-
+        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -1088,9 +1088,11 @@ impl Inner {
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
+        // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
+        let next_block_height = current_height + 1;
 
         // only max anchor age is constrained for ingress proofs
-        let min_ingress_proof_anchor_height = current_height.saturating_sub(
+        let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
             self.config
                 .consensus
                 .mempool
@@ -1211,7 +1213,7 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = self
+                let mut all_proofs = self
                     .irys_db
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
@@ -1222,6 +1224,21 @@ impl Inner {
                         !expired
                     })
                     .collect::<Vec<_>>();
+
+                // Dedup by signer address in-place, keeping first proof per address
+                let pre_dedup_len = all_proofs.len();
+                let mut seen_addresses = HashSet::new();
+                all_proofs
+                    .retain(|(_, cached_proof)| seen_addresses.insert(cached_proof.0.address));
+                if all_proofs.len() < pre_dedup_len {
+                    warn!(
+                        tx.id = ?tx_header.id,
+                        tx.data_root = ?tx_header.data_root,
+                        before = pre_dedup_len,
+                        after = all_proofs.len(),
+                        "Duplicate ingress proof signers detected for data root, deduplicating"
+                    );
+                }
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self

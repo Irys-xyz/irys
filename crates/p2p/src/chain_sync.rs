@@ -654,6 +654,8 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
     let sync_mode = config.node_config.sync_mode;
     let block_batch_size = config.node_config.sync.block_batch_size;
     let retry_block_request_timeout_secs = config.node_config.sync.retry_block_request_timeout_secs;
+    let wait_queue_slot_timeout_secs = config.node_config.sync.wait_queue_slot_timeout_secs;
+    let wait_queue_slot_max_attempts = config.node_config.sync.wait_queue_slot_max_attempts;
     let genesis_peer_discovery_timeout_millis =
         config.node_config.genesis_peer_discovery_timeout_millis;
     // Check if gossip reception is enabled before starting sync
@@ -790,101 +792,91 @@ async fn sync_chain<B: BlockDiscoveryFacade, M: MempoolFacade>(
         if sync_state.is_queue_full() {
             debug!("Sync task: Block queue is full, waiting for an empty slot");
 
-            // Retry logic for wait_for_an_empty_queue_slot
-            let retry_attempts = 3;
-            let mut wait_success = false;
+            // Use validation-aware wait that considers active validations
+            // This will only fail if max attempts are exceeded AND no validations are running
+            match sync_state
+                .wait_for_an_empty_queue_slot_with_validation_awareness(
+                    Duration::from_secs(wait_queue_slot_timeout_secs),
+                    wait_queue_slot_max_attempts,
+                )
+                .await
+            {
+                Ok(()) => {
+                    debug!("Sync task: Queue slot became available");
+                }
+                Err(e) => {
+                    // All attempts failed with no active validations - try to trigger processing
+                    warn!(
+                        "Sync task: Wait failed ({}), attempting to trigger block processing",
+                        e
+                    );
 
-            for attempt in 1..=retry_attempts {
-                debug!("Sync task: Wait attempt {} for empty queue slot", attempt);
+                    let retry_height = sync_state.highest_processed_block() + 1;
+                    debug!(
+                        "Sync task: Attempting to request block at height {} to trigger processing",
+                        retry_height
+                    );
 
-                match sync_state.wait_for_an_empty_queue_slot().await {
-                    Ok(()) => {
-                        debug!(
-                            "Sync task: Queue slot became available on attempt {}",
-                            attempt
-                        );
-                        wait_success = true;
-                        break;
-                    }
-                    Err(_) => {
-                        warn!(
-                            "Sync task: Timeout on attempt {} waiting for queue slot. Queue depth: {} (target: {}, processed: {}), trusted_sync: {}",
-                            attempt,
-                            sync_state.sync_target_height().saturating_sub(sync_state.highest_processed_block()),
-                            sync_state.sync_target_height(),
-                            sync_state.highest_processed_block(),
-                            sync_state.is_trusted_sync()
-                        );
+                    match get_block_index(
+                        peer_list,
+                        gossip_client,
+                        retry_height,
+                        1, // Just get one block
+                        3, // 3 retries for the network call
+                        is_trusted_mode,
+                    )
+                    .await
+                    {
+                        Ok(retry_index) if !retry_index.is_empty() => {
+                            let retry_block = &retry_index[0];
+                            debug!("Sync task: Got retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
 
-                        if attempt == retry_attempts {
-                            // Last attempt failed, print full diagnostics
-                            warn!(
-                                "Sync task: All {} attempts failed. Diagnostic info:\n{}",
-                                retry_attempts,
-                                sync_state.get_diagnostic_summary()
-                            );
-                        }
-
-                        if attempt < retry_attempts {
-                            // Try to request the block at height = last synced + 1 to trigger processing
-                            let retry_height = sync_state.highest_processed_block() + 1;
-                            debug!("Sync task: Attempting to request block at height {} to trigger processing", retry_height);
-
-                            match get_block_index(
-                                peer_list,
-                                gossip_client,
-                                retry_height,
-                                1, // Just get one block
-                                3, // 3 retries for the network call
-                                is_trusted_mode,
+                            // Try to reprocess the last prevalidated block
+                            match timeout(
+                                Duration::from_secs(retry_block_request_timeout_secs),
+                                gossip_data_handler.pull_and_process_block(
+                                    retry_block.block_hash,
+                                    sync_state.is_syncing_from_a_trusted_peer(),
+                                ),
                             )
                             .await
                             {
-                                Ok(retry_index) if !retry_index.is_empty() => {
-                                    let retry_block = &retry_index[0];
-                                    debug!("Sync task: Got to retry block {:?} for height {}, requesting from network", retry_block.block_hash, retry_height);
-
-                                    // Try to reprocess the last prevalidated block
-                                    match timeout(
-                                        Duration::from_secs(retry_block_request_timeout_secs),
-                                        gossip_data_handler.pull_and_process_block(
-                                            retry_block.block_hash,
-                                            sync_state.is_syncing_from_a_trusted_peer(),
-                                        ),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(())) => {
-                                            debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
-                                        }
-                                        Ok(Err(e)) => {
-                                            warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
-                                        }
-                                        Err(_) => {
-                                            warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
-                                        }
-                                    }
+                                Ok(Ok(())) => {
+                                    debug!("Sync task: Successfully requested retry block {:?} from network", retry_block.block_hash);
+                                    // Give some time for validation to start, then continue the loop
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
-                                Ok(_) => {
-                                    warn!("Sync task: Retry attempt returned empty index for height {}", retry_height);
+                                Ok(Err(e)) => {
+                                    warn!("Sync task: Failed to request retry block {:?} from network: {}", retry_block.block_hash, e);
                                 }
-                                Err(e) => {
-                                    warn!("Sync task: Failed to get retry block index for height {}: {}", retry_height, e);
+                                Err(_) => {
+                                    warn!("Sync task: Timeout ({:?}s) while requesting retry block {:?} from network", retry_block_request_timeout_secs, retry_block.block_hash);
                                 }
                             }
-
-                            // Wait a bit before next retry
-                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                        }
+                        Ok(_) => {
+                            warn!(
+                                "Sync task: Retry attempt returned empty index for height {}",
+                                retry_height
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "Sync task: Failed to get retry block index for height {}: {}",
+                                retry_height, err
+                            );
                         }
                     }
-                }
-            }
 
-            if !wait_success {
-                error!("Sync task: All wait attempts failed, exiting sync");
-                return Err(ChainSyncError::Internal(
-                    "Failed to get queue slot after timeout and retries".to_string(),
-                ));
+                    // Final check: if still no active validations and queue is still full, fail
+                    // Use atomic check to avoid TOCTOU
+                    if sync_state.queue_full_with_no_active_validations() {
+                        error!("Sync task: Queue still full with no active validations after retry, exiting sync");
+                        return Err(ChainSyncError::Internal(
+                            "Failed to get queue slot after timeout and retries with no active validations".to_string(),
+                        ));
+                    }
+                }
             }
         }
 

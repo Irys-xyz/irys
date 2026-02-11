@@ -17,7 +17,10 @@ use crate::{
     services::ServiceSenders,
 };
 use eyre::{bail, ensure};
-use irys_domain::{BlockIndexReadGuard, BlockTreeReadGuard, ExecutionPayloadCache};
+use irys_domain::{
+    chain_sync_state::ChainSyncState, BlockIndexReadGuard, BlockTreeReadGuard,
+    ExecutionPayloadCache,
+};
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
     app_state::DatabaseProvider, Config, IrysBlockHeader, SealedBlock, TokioServiceHandle,
@@ -94,6 +97,8 @@ pub(crate) struct ValidationServiceInner {
     pub(crate) execution_payload_provider: ExecutionPayloadCache,
     /// Toggle to enable/disable validation message processing
     pub validation_enabled: Arc<AtomicBool>,
+    /// Chain sync state for recording diagnostic info
+    pub(crate) chain_sync_state: ChainSyncState,
 }
 
 impl ValidationService {
@@ -111,6 +116,7 @@ impl ValidationService {
         execution_payload_provider: ExecutionPayloadCache,
         rx: UnboundedReceiver<ValidationServiceMessage>,
         runtime_handle: tokio::runtime::Handle,
+        chain_sync_state: ChainSyncState,
     ) -> (TokioServiceHandle, Arc<AtomicBool>) {
         info!("Spawning validation service");
 
@@ -145,6 +151,7 @@ impl ValidationService {
                         db,
                         execution_payload_provider,
                         validation_enabled: validation_enabled_clone,
+                        chain_sync_state,
                     }),
                 };
 
@@ -263,9 +270,10 @@ impl ValidationService {
                 }
 
                 // Process concurrent task completions (only if there are tasks)
-                result = coordinator.concurrent_tasks.join_next(), if !coordinator.concurrent_tasks.is_empty() => {
+                result = coordinator.concurrent_tasks.join_next_with_id(), if !coordinator.concurrent_tasks.is_empty() => {
                     match result {
-                        Some(Ok(validation)) => {
+                        Some(Ok((id, validation))) => {
+                            coordinator.concurrent_task_blocks.remove(&id);
 
                             // Send the validation result to the block tree service
                             if let Err(e) = self.inner.service_senders.block_tree.send(
@@ -282,7 +290,42 @@ impl ValidationService {
                             }
                         }
                         Some(Err(e)) => {
-                            error!(custom.error = %e, "Concurrent task panicked");
+                            let block_hash = coordinator.concurrent_task_blocks.remove(&e.id());
+                            let message = if e.is_cancelled() {
+                                "Concurrent validation task was cancelled"
+                            } else {
+                                "Concurrent validation task panicked"
+                            };
+                            error!(
+                                block.hash = ?block_hash,
+                                custom.error = %e,
+                                message
+                            );
+                            if let Some(hash) = block_hash {
+                                if let Err(send_err) = self.inner.service_senders.block_tree.send(
+                                    crate::block_tree_service::BlockTreeServiceMessage::BlockValidationFinished {
+                                        block_hash: hash,
+                                        validation_result: ValidationResult::Invalid(
+                                            ValidationError::TaskPanicked {
+                                                task: "concurrent_validation".to_string(),
+                                                details: e.to_string(),
+                                            },
+                                        ),
+                                    }
+                                ) {
+                                    error!(
+                                        block.hash = %hash,
+                                        custom.error = ?send_err,
+                                        "Failed to send panic result to block tree service"
+                                    );
+                                    // Block tree won't handle diagnostics since send failed,
+                                    // so record directly as a fallback.
+                                    self.inner.chain_sync_state.record_validation_finished(&hash);
+                                    self.inner.chain_sync_state.record_block_validation_error(
+                                        format!("block={} error=concurrent task panicked: {}", hash, e),
+                                    );
+                                }
+                            }
                         }
                         None => {
                             // This shouldn't happen when we check is_empty()
