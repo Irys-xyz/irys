@@ -398,6 +398,8 @@ reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af
 
 [profile.release]
 overflow-checks = true
+lto = "fat"
+codegen-units = 1
 
 [profile.debug-release]
 inherits = "release"
