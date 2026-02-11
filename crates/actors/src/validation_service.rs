@@ -290,10 +290,15 @@ impl ValidationService {
                         }
                         Some(Err(e)) => {
                             let block_hash = coordinator.concurrent_task_blocks.remove(&e.id());
+                            let message = if e.is_cancelled() {
+                                "Concurrent validation task was cancelled"
+                            } else {
+                                "Concurrent validation task panicked"
+                            };
                             error!(
                                 block.hash = ?block_hash,
                                 custom.error = %e,
-                                "Concurrent task panicked"
+                                message
                             );
                             if let Some(hash) = block_hash {
                                 if let Err(send_err) = self.inner.service_senders.block_tree.send(
