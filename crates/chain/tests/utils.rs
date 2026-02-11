@@ -2133,16 +2133,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .add_execution_payload_to_cache(eth_payload.block().clone())
             .await;
 
-        let block_body = BlockBody {
-            block_hash: irys_block_header.block_hash,
-            data_transactions: block_transactions.all_data_txs().cloned().collect(),
-            commitment_transactions: block_transactions.commitment_txs.clone(),
-        };
-        let sealed_block = SealedBlock::new(irys_block_header.clone(), block_body)?;
+        let sealed_block = build_sealed_block(irys_block_header.clone(), &block_transactions)?;
 
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(Arc::new(sealed_block), false)
+            .handle_block(sealed_block, false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 

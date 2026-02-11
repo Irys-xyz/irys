@@ -557,14 +557,14 @@ pub(crate) async fn get_node_assignment_info(
 
     for assignment in &assignments_resp.assignments {
         match assignment.ledger_id {
-            Some(0) => {
+            Some(id) if id == u32::from(DataLedger::Publish) => {
                 if let Some(slot_idx) = assignment.slot_index {
-                    publish_slots.push(slot_idx); // DataLedger::Publish = 0
+                    publish_slots.push(slot_idx);
                 }
             }
-            Some(1) => {
+            Some(id) if id == u32::from(DataLedger::Submit) => {
                 if let Some(slot_idx) = assignment.slot_index {
-                    submit_slots.push(slot_idx); // DataLedger::Submit = 1
+                    submit_slots.push(slot_idx);
                 }
             }
             None => {} // capacity assignment
