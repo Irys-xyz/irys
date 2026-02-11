@@ -95,10 +95,8 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
             .block_pool
             .add_execution_payload_to_cache(eth_block.block().clone())
             .await;
-        let sealed_block =
-            build_sealed_block(header.as_ref().clone(), block_txs)?;
-        send_block_to_block_tree(&peer_node.node_ctx, sealed_block, false)
-            .await?;
+        let sealed_block = build_sealed_block(header.as_ref().clone(), block_txs)?;
+        send_block_to_block_tree(&peer_node.node_ctx, sealed_block, false).await?;
     }
 
     // Peer mines a block with the genesis ingress proof present in its db

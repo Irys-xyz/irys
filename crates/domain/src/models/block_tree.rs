@@ -1,6 +1,10 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid};
-use irys_types::{BlockBody, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SealedBlock, SystemLedger, H256, U256};
+use irys_types::{
+    BlockBody, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SealedBlock, SystemLedger,
+    H256, U256,
+};
 use itertools::{EitherOrBoth, Itertools as _};
 use reth_db::Database as _;
 use std::{
@@ -282,8 +286,7 @@ impl BlockTree {
             data_transactions: start_block_data_txs.into_values().flatten().collect(),
             commitment_transactions: start_block_commitment_txs,
         };
-        let sealed_start_block =
-            Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
+        let sealed_start_block = Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
 
         // Create a Block Entry for the start block
         let block_entry = BlockMetadata {
@@ -423,9 +426,13 @@ impl BlockTree {
         // Validate that transactions match the header
         {
             // Check commitment transactions
-            let expected_commitment_ids: HashSet<H256> =
-                block.header().get_commitment_ledger_tx_ids().into_iter().collect();
-            let actual_commitment_ids: HashSet<H256> = block.transactions()
+            let expected_commitment_ids: HashSet<H256> = block
+                .header()
+                .get_commitment_ledger_tx_ids()
+                .into_iter()
+                .collect();
+            let actual_commitment_ids: HashSet<H256> = block
+                .transactions()
                 .commitment_txs
                 .iter()
                 .map(irys_types::CommitmentTransaction::id)
@@ -440,10 +447,13 @@ impl BlockTree {
 
             // Check data transactions per-ledger
             // Verify no extra ledgers in transactions that aren't in header
-            let extra_ledger = block.transactions()
-                .data_txs
-                .keys()
-                .find(|k| !block.header().data_ledgers.iter().any(|l| l.ledger_id == **k as u32));
+            let extra_ledger = block.transactions().data_txs.keys().find(|k| {
+                !block
+                    .header()
+                    .data_ledgers
+                    .iter()
+                    .any(|l| l.ledger_id == **k as u32)
+            });
             eyre::ensure!(
                 extra_ledger.is_none(),
                 "Extra ledger {:?} in BlockTransactions not in header for block {}",
@@ -457,7 +467,8 @@ impl BlockTree {
                     eyre::eyre!("Invalid ledger_id {} in block {}", ledger.ledger_id, hash)
                 })?;
 
-                let actual_txs = block.transactions()
+                let actual_txs = block
+                    .transactions()
                     .data_txs
                     .get(&ledger_type)
                     .map(std::vec::Vec::as_slice)
@@ -508,7 +519,9 @@ impl BlockTree {
         if block.header().cumulative_diff > self.max_cumulative_difficulty.0 {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
-                block.header().cumulative_diff, hash, block.header().height
+                block.header().cumulative_diff,
+                hash,
+                block.header().height
             );
             self.max_cumulative_difficulty = (block.header().cumulative_diff, hash);
         }
@@ -547,7 +560,8 @@ impl BlockTree {
 
         debug!(
             "add_block() - {} height: {}",
-            block.header().block_hash, block.header().height
+            block.header().block_hash,
+            block.header().height
         );
 
         if matches!(
@@ -1053,7 +1067,9 @@ impl BlockTree {
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
                 "get_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}",
-                prev_entry.chain_state, prev_hash, prev_entry.block.header().height
+                prev_entry.chain_state,
+                prev_hash,
+                prev_entry.block.header().height
             );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
@@ -1589,7 +1605,7 @@ mod tests {
     /// Creates a properly signed data transaction for testing.
     fn create_signed_data_tx() -> DataTransactionHeader {
         use irys_types::irys::IrysSigner;
-        use irys_types::transaction::IrysTransactionCommon;
+        use irys_types::transaction::IrysTransactionCommon as _;
 
         let config = ConsensusConfig::testing();
         let signer = IrysSigner::random_signer(&config);
@@ -1929,7 +1945,7 @@ mod tests {
         // b2 still has tx IDs from earlier modification
         assert_matches!(
             cache.add_block(
-                &seal_block_with_data_txs(&b2, vec![b2_tx.clone()]),
+                &seal_block_with_data_txs(&b2, vec![b2_tx]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()

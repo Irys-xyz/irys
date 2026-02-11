@@ -626,7 +626,16 @@ mod tests {
             header.block_hash = H256::random();
             header.cumulative_diff = height.into();
 
-            let sealed = Arc::new(SealedBlock::new(header.clone(), BlockBody { block_hash: header.block_hash, ..Default::default() }).expect("sealing block"));
+            let sealed = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block"),
+            );
             block_tree
                 .add_common(
                     header.block_hash,
@@ -677,7 +686,16 @@ mod tests {
                 header.cumulative_diff = height.into();
                 last_hash = header.block_hash;
 
-                let sealed = Arc::new(SealedBlock::new(header.clone(), BlockBody { block_hash: header.block_hash, ..Default::default() }).expect("sealing block"));
+                let sealed = Arc::new(
+                    SealedBlock::new(
+                        header.clone(),
+                        BlockBody {
+                            block_hash: header.block_hash,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("sealing block"),
+                );
                 tree.add_common(
                     header.block_hash,
                     &sealed,
@@ -726,7 +744,16 @@ mod tests {
                 header.cumulative_diff = height.into();
                 last_hash = header.block_hash;
 
-                let sealed = Arc::new(SealedBlock::new(header.clone(), BlockBody { block_hash: header.block_hash, ..Default::default() }).expect("sealing block"));
+                let sealed = Arc::new(
+                    SealedBlock::new(
+                        header.clone(),
+                        BlockBody {
+                            block_hash: header.block_hash,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("sealing block"),
+                );
                 tree.add_common(
                     header.block_hash,
                     &sealed,

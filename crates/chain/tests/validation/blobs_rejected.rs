@@ -12,7 +12,9 @@ use irys_actors::block_validation::ValidationError;
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
-use irys_types::{BlockBody, BlockTransactions, IrysBlockHeader, NodeConfig, SealedBlock as IrysSealedBlock};
+use irys_types::{
+    BlockBody, BlockTransactions, IrysBlockHeader, NodeConfig, SealedBlock as IrysSealedBlock,
+};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
@@ -84,9 +86,13 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
-    // Clear transaction ledgers to match the empty body
-    header.data_ledgers.clear();
-    header.system_ledgers.clear();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
 
     // Create new SealedBlock with mutated header and matching body.block_hash
@@ -137,9 +143,13 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
-    // Clear transaction ledgers to match the empty body
-    header.data_ledgers.clear();
-    header.system_ledgers.clear();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
 
     // Create new SealedBlock with mutated header and matching body.block_hash
@@ -201,9 +211,13 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
-    // Clear transaction ledgers to match the empty body
-    header.data_ledgers.clear();
-    header.system_ledgers.clear();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
 
     // Create new SealedBlock with mutated header and matching body.block_hash
@@ -275,9 +289,13 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
-    // Clear transaction ledgers to match the empty body
-    header.data_ledgers.clear();
-    header.system_ledgers.clear();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
 
     // Create new SealedBlock with mutated header and matching body.block_hash
