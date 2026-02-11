@@ -81,8 +81,9 @@ impl BlockStatusProvider {
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
         let height_is_in_the_index = index_item.is_some();
-        let hash_is_in_the_index =
-            index_item.as_ref().is_some_and(|idx| idx.block_hash == *block_hash);
+        let hash_is_in_the_index = index_item
+            .as_ref()
+            .is_some_and(|idx| idx.block_hash == *block_hash);
 
         if height_is_in_the_index {
             if hash_is_in_the_index {
@@ -212,9 +213,7 @@ impl BlockStatusProvider {
                 &IrysBlockHeader::new_mock_header(),
                 node_config.consensus_config(),
             )))),
-            block_index_read_guard: BlockIndexReadGuard::new(
-                BlockIndex::new_for_testing(db),
-            ),
+            block_index_read_guard: BlockIndexReadGuard::new(BlockIndex::new_for_testing(db)),
         }
     }
 

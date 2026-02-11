@@ -32,7 +32,7 @@ impl BlockIndex {
         let block_index = Self { db: db.clone() };
 
         // Check if migration from file is needed
-        let num_blocks = db.view_eyre(|tx| block_index_num_blocks(tx))?;
+        let num_blocks = db.view_eyre(block_index_num_blocks)?;
 
         if num_blocks == 0 {
             let block_index_dir = config.block_index_dir();
@@ -83,15 +83,13 @@ impl BlockIndex {
 
     /// Retrieves the number of blocks in the index
     pub fn num_blocks(&self) -> u64 {
-        self.db
-            .view_eyre(|tx| block_index_num_blocks(tx))
-            .unwrap_or(0)
+        self.db.view_eyre(block_index_num_blocks).unwrap_or(0)
     }
 
     /// Returns the latest block height stored by the block index
     pub fn latest_height(&self) -> u64 {
         self.db
-            .view_eyre(|tx| block_index_latest_height(tx))
+            .view_eyre(block_index_latest_height)
             .ok()
             .flatten()
             .unwrap_or(0)
@@ -108,7 +106,7 @@ impl BlockIndex {
     pub fn get_latest_item(&self) -> Option<BlockIndexItem> {
         let latest_height = self
             .db
-            .view_eyre(|tx| block_index_latest_height(tx))
+            .view_eyre(block_index_latest_height)
             .ok()
             .flatten()?;
         self.get_item(latest_height)
@@ -230,7 +228,11 @@ impl BlockIndex {
                 .find(|l| l.ledger == ledger)
                 .map(|l| l.total_chunks)
                 .ok_or_else(|| {
-                    eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, latest_height)
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        latest_height
+                    )
                 })?;
 
             let chunk_offset_val: u64 = chunk_offset.into();
@@ -256,11 +258,7 @@ impl BlockIndex {
                         .find(|l| l.ledger == ledger)
                         .map(|l| l.total_chunks)
                         .ok_or_else(|| {
-                            eyre::eyre!(
-                                "Ledger {:?} not found in block at height {}",
-                                ledger,
-                                mid
-                            )
+                            eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, mid)
                         })?;
                     if chunk_offset_val < total {
                         hi = mid;
@@ -327,7 +325,11 @@ impl BlockIndex {
                 .find(|l| l.ledger == ledger)
                 .map(|l| l.total_chunks)
                 .ok_or_else(|| {
-                    eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, latest_height)
+                    eyre::eyre!(
+                        "Ledger {:?} not found in block at height {}",
+                        ledger,
+                        latest_height
+                    )
                 })?;
 
             eyre::ensure!(
@@ -351,11 +353,7 @@ impl BlockIndex {
                     .find(|l| l.ledger == ledger)
                     .map(|l| l.total_chunks)
                     .ok_or_else(|| {
-                        eyre::eyre!(
-                            "Ledger {:?} not found in block at height {}",
-                            ledger,
-                            mid
-                        )
+                        eyre::eyre!("Ledger {:?} not found in block at height {}", ledger, mid)
                     })?;
                 if chunk_offset < total {
                     hi = mid;
@@ -705,8 +703,14 @@ mod tests {
 
         // Verify legacy file was renamed
         let index_dir = node_config.block_index_dir();
-        assert!(!index_dir.join("index.dat").exists(), "index.dat should have been renamed");
-        assert!(index_dir.join("index.dat.migrated").exists(), "index.dat.migrated should exist");
+        assert!(
+            !index_dir.join("index.dat").exists(),
+            "index.dat should have been renamed"
+        );
+        assert!(
+            index_dir.join("index.dat.migrated").exists(),
+            "index.dat.migrated should exist"
+        );
 
         Ok(())
     }

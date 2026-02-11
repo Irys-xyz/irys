@@ -770,7 +770,7 @@ impl BlockTreeServiceInner {
                 let block_index_read = self.block_index_guard.read();
                 let markers = ForkChoiceMarkers::from_block_tree(
                     &cache,
-                    &block_index_read,
+                    block_index_read,
                     &self.db,
                     self.config.consensus.block_migration_depth as usize,
                     self.config.consensus.block_tree_depth as usize,

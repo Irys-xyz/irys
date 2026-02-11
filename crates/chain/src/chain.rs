@@ -1584,7 +1584,7 @@ impl IrysNode {
         let fcu_markers = {
             let block_index = block_index_guard.read();
             ForkChoiceMarkers::from_index(
-                &block_index,
+                block_index,
                 &irys_db,
                 config.consensus.block_migration_depth as usize,
                 config.consensus.block_tree_depth as usize,

@@ -935,9 +935,8 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -948,7 +947,7 @@ mod tests {
                 db: db.clone(),
                 block_tree_guard,
                 block_index_guard,
-                config: config.clone(),
+                config,
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
@@ -1019,9 +1018,8 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (_shutdown_tx, shutdown_rx) = reth::tasks::shutdown::signal();
@@ -1032,7 +1030,7 @@ mod tests {
                 db: db.clone(),
                 block_tree_guard,
                 block_index_guard,
-                config: config.clone(),
+                config,
                 gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
                 ingress_proof_generation_state: IngressProofGenerationState::new(),
                 cache_sender: tx,
@@ -1130,15 +1128,14 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
@@ -1222,15 +1219,14 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,
@@ -1449,9 +1445,8 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Below-capacity prune: should NOT remove chunks
@@ -1459,7 +1454,7 @@ mod tests {
             db: db.clone(),
             block_tree_guard: block_tree_guard.clone(),
             block_index_guard: block_index_guard.clone(),
-            config: config_below.clone(),
+            config: config_below,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx.clone(),
@@ -1486,7 +1481,7 @@ mod tests {
         })??;
 
         // Above-capacity prune: set max to 64B so 64B cache > 51.2B threshold
-        let mut node_config2 = node_config.clone();
+        let mut node_config2 = node_config;
         node_config2.cache.max_cache_size_bytes = 64;
         let config_above = Config::new_with_random_peer_id(node_config2);
         let task_above = InnerCacheTask {
@@ -1553,9 +1548,8 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let generation_state = IngressProofGenerationState::new();
         generation_state.mark_generating(tx_header.data_root);
@@ -1563,7 +1557,7 @@ mod tests {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: generation_state,
             cache_sender: tx,
@@ -1638,16 +1632,15 @@ mod tests {
         let block_tree_guard =
             irys_domain::BlockTreeReadGuard::new(Arc::new(RwLock::new(block_tree)));
         let block_index = BlockIndex::new_for_testing(db.clone());
-        let block_index_guard = irys_domain::block_index_guard::BlockIndexReadGuard::new(
-            block_index,
-        );
+        let block_index_guard =
+            irys_domain::block_index_guard::BlockIndexReadGuard::new(block_index);
 
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let service_task = InnerCacheTask {
             db: db.clone(),
             block_tree_guard,
             block_index_guard,
-            config: config.clone(),
+            config,
             gossip_broadcast: tokio::sync::mpsc::unbounded_channel().0,
             ingress_proof_generation_state: IngressProofGenerationState::new(),
             cache_sender: tx,

@@ -624,10 +624,7 @@ pub fn insert_block_index_item<T: DbTxMut>(
 ) -> eyre::Result<()> {
     tx.put::<MigratedBlockHashes>(height, item.block_hash)?;
     for ledger_item in &item.ledgers {
-        tx.put::<IrysBlockIndexItems>(
-            height,
-            CompactLedgerIndexItem(ledger_item.clone()),
-        )?;
+        tx.put::<IrysBlockIndexItems>(height, CompactLedgerIndexItem(ledger_item.clone()))?;
     }
     Ok(())
 }

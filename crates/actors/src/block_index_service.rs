@@ -181,8 +181,7 @@ impl BlockIndexServiceInner {
         // historical reward summing. Reversing this order creates a race where
         // backfill could miss a block's reward (not yet in index) while live
         // migration already counted it, causing incorrect totals.
-        self.block_index
-            .push_block(block, all_txs, chunk_size)?;
+        self.block_index.push_block(block, all_txs, chunk_size)?;
 
         if let Some(supply_state) = &self.supply_state {
             supply_state

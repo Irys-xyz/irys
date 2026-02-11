@@ -384,7 +384,7 @@ where
         let prune_depth = self.config.consensus.block_tree_depth as usize;
         let tree = self.block_status_provider.block_tree_read_guard().read();
         let index = self.block_status_provider.block_index_read_guard().read();
-        ForkChoiceMarkers::from_block_tree(&tree, &index, &self.db, migration_depth, prune_depth)
+        ForkChoiceMarkers::from_block_tree(&tree, index, &self.db, migration_depth, prune_depth)
     }
 
     pub(crate) fn new(

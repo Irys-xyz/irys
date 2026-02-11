@@ -131,7 +131,10 @@ async fn main() -> eyre::Result<()> {
                 RollbackMode::ToBlock { target } => {
                     if let Ok(height) = target.parse::<u64>() {
                         if latest < height {
-                            warn!("Block index is at {}, which is smaller than rollback height {}", latest, &height);
+                            warn!(
+                                "Block index is at {}, which is smaller than rollback height {}",
+                                latest, &height
+                            );
                             return Ok(());
                         }
                         height
@@ -174,7 +177,8 @@ async fn main() -> eyre::Result<()> {
             for h in (target_height + 1)..=latest {
                 if let Some(item) = block_index.get_item(h) {
                     info!("Removing block {}@{}", &item.block_hash, h);
-                    rw_tx.delete::<irys_database::tables::IrysBlockHeaders>(item.block_hash, None)?;
+                    rw_tx
+                        .delete::<irys_database::tables::IrysBlockHeaders>(item.block_hash, None)?;
                 }
             }
 

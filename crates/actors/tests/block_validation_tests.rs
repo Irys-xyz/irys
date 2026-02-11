@@ -30,7 +30,7 @@ fn invalid_previous_solution_hash_rejected() {
 fn poa_chunk_offset_out_of_bounds_returns_error() {
     let config = ConsensusConfig::testing();
 
-    let block_index_items = vec![
+    let block_index_items = [
         BlockIndexItem {
             block_hash: H256::zero(),
             num_ledgers: 2,
