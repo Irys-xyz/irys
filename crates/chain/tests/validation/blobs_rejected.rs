@@ -29,12 +29,14 @@ async fn produce_block(
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (block, _adjustment_stats, transactions, eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("no block produced"))?;
 
-    Ok((block, transactions, eth_payload))
+    let header = block.header().clone();
+    let transactions = block.transactions().as_ref().clone();
+    Ok((header, transactions, eth_payload))
 }
 
 // Mutates the sealed block's header in-place via unseal/modify/seal, returns the new sealed block.
@@ -69,7 +71,7 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (irys_block, transactions, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set blob_gas_used in the EVM header to non-zero
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -122,7 +124,7 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (irys_block, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set excess_blob_gas in the EVM header to non-zero
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -175,7 +177,7 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (irys_block, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set a non-empty withdrawals list in the EVM body
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -240,7 +242,7 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (irys_block, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: append an EIP-4844 transaction that carries blob_versioned_hashes (non-empty)
     let mutated = mutate_header(eth_payload.block(), |blk| {

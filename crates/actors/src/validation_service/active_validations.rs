@@ -472,8 +472,7 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
-    use irys_types::BlockTransactions;
-    use irys_types::{serialization::H256List, BlockHash, IrysBlockHeader, H256};
+    use irys_types::{serialization::H256List, BlockBody, BlockHash, IrysBlockHeader, H256};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
@@ -627,11 +626,11 @@ mod tests {
             header.block_hash = H256::random();
             header.cumulative_diff = height.into();
 
+            let sealed = Arc::new(SealedBlock::new(header.clone(), BlockBody { block_hash: header.block_hash, ..Default::default() }).expect("sealing block"));
             block_tree
                 .add_common(
                     header.block_hash,
-                    &header,
-                    BlockTransactions::default(),
+                    &sealed,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
@@ -678,10 +677,10 @@ mod tests {
                 header.cumulative_diff = height.into();
                 last_hash = header.block_hash;
 
+                let sealed = Arc::new(SealedBlock::new(header.clone(), BlockBody { block_hash: header.block_hash, ..Default::default() }).expect("sealing block"));
                 tree.add_common(
                     header.block_hash,
-                    &header,
-                    BlockTransactions::default(),
+                    &sealed,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
@@ -727,10 +726,10 @@ mod tests {
                 header.cumulative_diff = height.into();
                 last_hash = header.block_hash;
 
+                let sealed = Arc::new(SealedBlock::new(header.clone(), BlockBody { block_hash: header.block_hash, ..Default::default() }).expect("sealing block"));
                 tree.add_common(
                     header.block_hash,
-                    &header,
-                    BlockTransactions::default(),
+                    &sealed,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),

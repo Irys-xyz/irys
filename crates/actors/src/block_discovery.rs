@@ -635,6 +635,7 @@ impl BlockDiscoveryServiceInner {
                                 .get(&read.tip)
                                 .expect("Tip block not found")
                                 .block
+                                .header()
                                 .height,
                                 &new_block_header.block_hash,
                                 &new_block_header.height,

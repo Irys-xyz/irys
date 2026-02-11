@@ -456,7 +456,7 @@ impl BlockTreeServiceInner {
                 cache
                     .blocks
                     .get(&block_to_migrate.block_hash)
-                    .map(|meta| meta.transactions.clone())
+                    .map(|meta| meta.block.transactions().clone())
                     .ok_or_else(|| {
                         eyre::eyre!(
                             "missing cache entry for block {} during block migration",
@@ -469,7 +469,7 @@ impl BlockTreeServiceInner {
             // writes chunks to db, which is expected by `send_block_migration_message`.
             let block_migrated_event = BlockMigratedEvent {
                 block: Arc::clone(&block_to_migrate),
-                transactions: Arc::new(transactions.clone()),
+                transactions: Arc::clone(&transactions),
             };
             if let Err(e) = self
                 .service_senders
@@ -550,7 +550,7 @@ impl BlockTreeServiceInner {
             .ema_snapshot
             .next_snapshot(
                 block_header,
-                &parent_block_entry.block,
+                parent_block_entry.block.header(),
                 &self.config.consensus,
             )
             .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
@@ -746,7 +746,7 @@ impl BlockTreeServiceInner {
                 .blocks
                 .get(&block_hash)
                 .unwrap_or_else(|| panic!("block entry {block_hash} not found in cache"));
-            let arc_block = Arc::new(block_entry.block.clone());
+            let arc_block = block_entry.block.header().clone();
 
             let tip_changed = {
                 let old_tip_block = cache

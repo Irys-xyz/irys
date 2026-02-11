@@ -8,7 +8,8 @@ use irys_domain::{
     EpochSnapshot,
 };
 use irys_types::{
-    storage_pricing::TOKEN_SCALE, BlockTransactions, Config, IrysBlockHeader, IrysTokenPrice, H256,
+    storage_pricing::TOKEN_SCALE, BlockBody, Config, IrysBlockHeader, IrysTokenPrice, SealedBlock,
+    H256,
 };
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
@@ -80,11 +81,20 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
         } else {
             block_hash = block.block_hash;
         }
+        let sealed = Arc::new(
+            SealedBlock::new(
+                block.clone(),
+                BlockBody {
+                    block_hash: block.block_hash,
+                    ..Default::default()
+                },
+            )
+            .expect("sealing block with empty body"),
+        );
         block_tree_cache
             .add_common(
                 block.block_hash,
-                block,
-                BlockTransactions::default(),
+                &sealed,
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -244,10 +254,19 @@ pub fn create_and_apply_fork(
             });
 
             // Add to block tree as validated but not yet canonical
+            let sealed = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block with empty body"),
+            );
             tree.add_common(
                 header.block_hash,
-                &header,
-                BlockTransactions::default(),
+                &sealed,
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),
