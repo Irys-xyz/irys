@@ -1135,6 +1135,10 @@ pub struct SealedBlock {
 impl SealedBlock {
     pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
         eyre::ensure!(
+            header.is_signature_valid(),
+            "Invalid block signature for block hash {:?}",
+        );
+        eyre::ensure!(
             header.block_hash == body.block_hash,
             "Header block hash does not match body block hash. Header: {:?}, Body: {:?}",
             header.block_hash,
