@@ -1134,6 +1134,12 @@ pub struct SealedBlock {
 
 impl SealedBlock {
     pub fn new(header: IrysBlockHeader, body: BlockBody) -> eyre::Result<Self> {
+        eyre::ensure!(
+            header.block_hash == body.block_hash,
+            "Header block hash does not match body block hash. Header: {:?}, Body: {:?}",
+            header.block_hash,
+            body.block_hash
+        );
         // Verifies all tx signatures and that the tx ids in the body match those in the header
         eyre::ensure!(
             body.tx_ids_match_the_header(&header)?,
