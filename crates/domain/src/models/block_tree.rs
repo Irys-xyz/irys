@@ -1,9 +1,6 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid};
-use irys_types::{
-    BlockHash, BlockTransactions, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SystemLedger, H256, U256,
-};
+use irys_types::{BlockHash, BlockTransactions, CommitmentTransaction, Config, ConsensusConfig, DataLedger, DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SealedBlock, SystemLedger, H256, U256};
 use itertools::{EitherOrBoth, Itertools as _};
 use reth_db::Database as _;
 use std::{
@@ -53,8 +50,8 @@ pub struct BlockTree {
 #[derive(Debug)]
 pub struct BlockMetadata {
     // todo: wrap into Arc to avoid expensive clones
-    pub block: IrysBlockHeader,
-    pub transactions: BlockTransactions,
+    pub block: Arc<IrysBlockHeader>,
+    pub transactions: Arc<BlockTransactions>,
     pub chain_state: ChainState,
     pub timestamp: SystemTime,
     pub children: HashSet<H256>,
@@ -102,13 +99,13 @@ impl BlockTree {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
     #[cfg(any(feature = "test-utils", test))]
-    pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
+    pub fn new(genesis_block_header: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         use crate::dummy_epoch_snapshot;
 
-        let block_hash = genesis_block.block_hash;
-        let solution_hash = genesis_block.solution_hash;
-        let height = genesis_block.height;
-        let cumulative_diff = genesis_block.cumulative_diff;
+        let block_hash = genesis_block_header.block_hash;
+        let solution_hash = genesis_block_header.solution_hash;
+        let height = genesis_block_header.height;
+        let cumulative_diff = genesis_block_header.cumulative_diff;
 
         let mut blocks = HashMap::new();
         let mut solutions = HashMap::new();
@@ -118,13 +115,14 @@ impl BlockTree {
         let commitment_snapshot = Arc::new(CommitmentSnapshot::default());
 
         // Create EMA cache for genesis block
-        let ema_snapshot = EmaSnapshot::genesis(genesis_block);
+        let ema_snapshot = EmaSnapshot::genesis(genesis_block_header);
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
+
         let block_entry = BlockMetadata {
-            block: genesis_block.clone(),
-            transactions: BlockTransactions::default(),
+            block: Arc::new(genesis_block_header.clone()),
+            transactions: Arc::new(BlockTransactions::default()),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -139,7 +137,7 @@ impl BlockTree {
         height_index.insert(height, HashSet::from([block_hash]));
 
         // Initialize longest chain cache to contain the genesis block
-        let entry = make_block_tree_entry(genesis_block);
+        let entry = make_block_tree_entry(genesis_block_header);
         let longest_chain_cache = (vec![(entry)], 0);
 
         Self {
@@ -281,8 +279,8 @@ impl BlockTree {
 
         // Create a Block Entry for the start block
         let block_entry = BlockMetadata {
-            block: start_block.clone(),
-            transactions: start_block_transactions,
+            block: Arc::new(start_block.clone()),
+            transactions: Arc::new(start_block_transactions),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -370,7 +368,6 @@ impl BlockTree {
                 .add_common(
                     block.block_hash,
                     &block,
-                    block_transactions,
                     arc_commitment_snapshot,
                     epoch_snapshot,
                     arc_ema_snapshot,
@@ -408,8 +405,7 @@ impl BlockTree {
     pub fn add_common(
         &mut self,
         hash: BlockHash,
-        block: &IrysBlockHeader,
-        transactions: BlockTransactions,
+        block: &Arc<SealedBlock>,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         epoch_snapshot: Arc<EpochSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
@@ -419,8 +415,8 @@ impl BlockTree {
         {
             // Check commitment transactions
             let expected_commitment_ids: HashSet<H256> =
-                block.get_commitment_ledger_tx_ids().into_iter().collect();
-            let actual_commitment_ids: HashSet<H256> = transactions
+                block.header().get_commitment_ledger_tx_ids().into_iter().collect();
+            let actual_commitment_ids: HashSet<H256> = block.transactions()
                 .commitment_txs
                 .iter()
                 .map(irys_types::CommitmentTransaction::id)
@@ -435,10 +431,10 @@ impl BlockTree {
 
             // Check data transactions per-ledger
             // Verify no extra ledgers in transactions that aren't in header
-            let extra_ledger = transactions
+            let extra_ledger = block.transactions()
                 .data_txs
                 .keys()
-                .find(|k| !block.data_ledgers.iter().any(|l| l.ledger_id == **k as u32));
+                .find(|k| !block.header().data_ledgers.iter().any(|l| l.ledger_id == **k as u32));
             eyre::ensure!(
                 extra_ledger.is_none(),
                 "Extra ledger {:?} in BlockTransactions not in header for block {}",
@@ -447,12 +443,12 @@ impl BlockTree {
             );
 
             // Check each ledger's tx IDs match
-            for ledger in &block.data_ledgers {
+            for ledger in &block.header().data_ledgers {
                 let ledger_type = DataLedger::try_from(ledger.ledger_id).map_err(|_| {
                     eyre::eyre!("Invalid ledger_id {} in block {}", ledger.ledger_id, hash)
                 })?;
 
-                let actual_txs = transactions
+                let actual_txs = block.transactions()
                     .data_txs
                     .get(&ledger_type)
                     .map(std::vec::Vec::as_slice)
@@ -476,7 +472,7 @@ impl BlockTree {
             }
         }
 
-        let prev_hash = block.previous_block_hash;
+        let prev_hash = block.header().previous_block_hash;
 
         // Get parent
         let prev_entry = self
@@ -487,32 +483,32 @@ impl BlockTree {
         // Update indices
         prev_entry.children.insert(hash);
         self.solutions
-            .entry(block.solution_hash)
+            .entry(block.header().solution_hash)
             .or_default()
             .insert(hash);
         self.height_index
-            .entry(block.height)
+            .entry(block.header().height)
             .or_default()
             .insert(hash);
 
         debug!(
             "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}, ema_snapshot_hash: {}",
-            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &ema_snapshot.get_hash()
+            self.max_cumulative_difficulty.0, block.header().cumulative_diff, block.header().block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &ema_snapshot.get_hash()
         );
 
-        if block.cumulative_diff > self.max_cumulative_difficulty.0 {
+        if block.header().cumulative_diff > self.max_cumulative_difficulty.0 {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
-                block.cumulative_diff, hash, block.height
+                block.header().cumulative_diff, hash, block.header().height
             );
-            self.max_cumulative_difficulty = (block.cumulative_diff, hash);
+            self.max_cumulative_difficulty = (block.header().cumulative_diff, hash);
         }
 
         self.blocks.insert(
             hash,
             BlockMetadata {
-                block: block.clone(),
-                transactions,
+                block: Arc::clone(block),
+                transactions: Arc::clone(block.transactions()),
                 chain_state,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
@@ -534,17 +530,16 @@ impl BlockTree {
     /// 3. **Block Index Migration** - Only then is the block added to the block_index
     pub fn add_block(
         &mut self,
-        block: &IrysBlockHeader,
-        transactions: BlockTransactions,
+        block: &SealedBlock,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         epoch_snapshot: Arc<EpochSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
     ) -> eyre::Result<()> {
-        let hash = block.block_hash;
+        let hash = block.header().block_hash;
 
         debug!(
             "add_block() - {} height: {}",
-            block.block_hash, block.height
+            block.header().block_hash, block.header().height
         );
 
         if matches!(
@@ -558,7 +553,6 @@ impl BlockTree {
         self.add_common(
             hash,
             block,
-            transactions,
             commitment_snapshot,
             epoch_snapshot,
             ema_snapshot,
@@ -1624,7 +1618,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b1_test,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1658,7 +1651,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b2,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1685,7 +1677,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b2,
-                b2_txs,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1728,7 +1719,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b2,
-                b2_txs,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1740,7 +1730,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b1_2,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1881,7 +1870,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b1_2,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1893,7 +1881,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b2,
-                b2_txs,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1909,7 +1896,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b2_2,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1935,7 +1921,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b2_3,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1959,7 +1944,6 @@ mod tests {
             cache.add_common(
                 b2_2.block_hash,
                 &b2_2,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -1991,7 +1975,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b3,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2002,7 +1985,6 @@ mod tests {
             cache.add_common(
                 b3.block_hash,
                 &b3,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2036,7 +2018,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b4,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2179,7 +2160,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b12,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2207,7 +2187,6 @@ mod tests {
             cache.add_common(
                 b13.block_hash,
                 &b13,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2246,7 +2225,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b14,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2341,7 +2319,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b15,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2363,7 +2340,6 @@ mod tests {
             cache.add_common(
                 b14.block_hash,
                 &b14,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2391,7 +2367,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b16,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2452,7 +2427,6 @@ mod tests {
         assert_matches!(
             cache.add_block(
                 &b12,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2471,7 +2445,6 @@ mod tests {
             cache.add_common(
                 b13.block_hash,
                 &b13,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2502,7 +2475,6 @@ mod tests {
             cache.add_common(
                 b12.block_hash,
                 &b12,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2522,7 +2494,6 @@ mod tests {
             cache.add_common(
                 b13a.block_hash,
                 &b13a,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2534,7 +2505,6 @@ mod tests {
             cache.add_common(
                 b13b.block_hash,
                 &b13b,
-                BlockTransactions::default(),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2554,7 +2524,6 @@ mod tests {
             cache.add_common(
                 b14b.block_hash,
                 &b14b,
-                BlockTransactions::default(),
                 comm_cache,
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),

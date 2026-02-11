@@ -557,7 +557,6 @@ impl BlockTreeServiceInner {
 
         let add_result = cache.add_block(
             &block,
-            transactions.clone(),
             commitment_snapshot,
             arc_epoch_snapshot,
             ema_snapshot,
