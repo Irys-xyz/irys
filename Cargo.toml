@@ -57,7 +57,6 @@ irys-efficient-sampling = { path = "./crates/efficient-sampling" }
 irys-price-oracle = { path = "./crates/price-oracle" }
 irys-p2p = { path = "./crates/p2p" }
 irys-reth = { path = "./crates/irys-reth" }
-irys-cli = { path = "./crates/cli" }
 irys-utils = { path = "./crates/utils/utils" }
 irys-packing-worker = { path = "./crates/packing-worker" }
 irys-tui = { path = "./crates/tui" }
@@ -67,7 +66,6 @@ actix-web = "4.9.0"
 actix-http = "3.9.0"
 awc = "3.5.1"
 base58 = "0.2.0"
-tokio-stream = "0.1"
 tokio-util = "0.7"
 rand = "0.8"
 hex = "0.4"
@@ -75,7 +73,6 @@ base64-url = "2"
 clap = { version = "4", features = ["derive"] }
 arbitrary = { version = "1.3", features = ["derive"] }
 rstest = "0.25"
-once_cell = "1"
 assert_matches = "1"
 bytes = "1.5"
 derive_more = { version = "2", features = ["full"] }
@@ -88,14 +85,12 @@ dashmap = "6.0"
 itertools = "0.13"
 futures = "0.3"
 bytemuck = "1"
-futures-concurrency = "7"
 test-log = { version = "0.2", features = ["trace"] }
 pretty_assertions = "1"
 nodit = { version = "0.9", features = ["serde"] }
 modular-bitfield = "0.11"
 openssl = { version = "0.10", features = ["vendored"] }
 proptest = "1.6"
-proptest-derive = "0.5"
 rust_decimal = "1"
 rust_decimal_macros = "1"
 serde = { version = "1", default-features = false }
@@ -104,9 +99,6 @@ test-fuzz = "6"
 thiserror = "1"
 tokio = { version = "1", features = ["rt", "macros"] }
 toml = "0.8"
-derive-syn-parse = "0"
-proc-macro2 = "1"
-quote = "1"
 semver = { version = "1.0", features = ["serde"] }
 syn = { version = "2", features = ["full"] }
 tracing = "0.1.0"
@@ -135,10 +127,6 @@ tracing-opentelemetry = "0.32.0"
 opentelemetry-semantic-conventions = "0.31.0"
 tempfile = "3"
 csv = "1"
-jsonrpsee = "0.24"
-jsonrpsee-core = "0.24"
-jsonrpsee-http-client = "0.24"
-jsonrpsee-types = "0.24"
 futures-util = "0.3"
 lru = "0.14"
 paste = "1.0.15"
@@ -147,7 +135,6 @@ strum = { version = "0.27", features = ["derive"] }
 priority-queue = "2.5"
 moka = "0.12.10"
 socket2 = "0.5"
-async-stream = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 
 
@@ -174,7 +161,6 @@ alloy-core = { version = "1", default-features = false }
 alloy-eips = { version = "1", default-features = false }
 alloy-genesis = { version = "1", default-features = false }
 revm-primitives = "21"
-revm-interpreter = "21"
 alloy-network = { version = "1", default-features = false }
 alloy-provider = { version = "1", default-features = false }
 alloy-rpc-types = { version = "1", features = [
@@ -193,12 +179,10 @@ reth-chainspec = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08a
 reth-e2e-test-utils = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-engine-local = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-ethereum-engine-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
-reth-ethereum-forks = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-evm-ethereum = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-node-ethereum = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-ethereum-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-evm = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
-reth-network = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-node-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-node-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-node-core = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
@@ -215,15 +199,12 @@ reth-provider = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af
 reth-tasks = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-tracing = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-transaction-pool = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
-reth-trie-db = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-cli-commands = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-storage-api = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-basic-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-payload-builder-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-payload-primitives = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
-reth-revm = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-chain-state = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
-reth-errors = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-ethereum-payload-builder = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 reth-cli-util = { git = "https://github.com/irys-xyz/reth-irys", rev = "b8cb08af7bcb" }
 
