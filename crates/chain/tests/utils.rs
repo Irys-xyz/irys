@@ -1080,7 +1080,11 @@ impl IrysNodeTest<IrysNodeCtx> {
                         if tx_proofs.len() >= num_proofs {
                             for ingress_proof in tx_proofs.iter() {
                                 assert_eq!(ingress_proof.proof.data_root, tx_header.data_root);
-                                tracing::info!("proof signer: {}", ingress_proof.address);
+                                tracing::info!(
+                                    "proof {} signer: {}",
+                                    ingress_proof.proof.id(),
+                                    ingress_proof.address
+                                );
                             }
                             to_remove.insert(to_check[idx]);
                         }
@@ -2400,6 +2404,7 @@ impl IrysNodeTest<IrysNodeCtx> {
             address: self.node_ctx.config.node_config.peer_address(),
             mining_address: self.node_ctx.config.node_config.reward_address,
             peer_id: self.node_ctx.config.peer_id(),
+            consensus_config_hash: self.node_ctx.config.consensus.keccak256_hash(),
             ..HandshakeRequestV2::default()
         };
         self.node_ctx

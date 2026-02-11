@@ -1330,6 +1330,7 @@ impl IrysNode {
             &storage_submodules_config,
             &config,
             &service_senders,
+            sync_state.clone(),
             runtime_handle.clone(),
         );
 
@@ -1446,6 +1447,7 @@ impl IrysNode {
             execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),
+            sync_state.clone(),
         );
 
         // create the block reward curve
@@ -1561,6 +1563,7 @@ impl IrysNode {
             vdf_state,
             atomic_global_step_number,
             block_status_provider,
+            sync_state.clone(),
         );
 
         // set up chunk provider
@@ -1789,6 +1792,7 @@ impl IrysNode {
         vdf_state: AtomicVdfState,
         atomic_global_step_number: Arc<AtomicU64>,
         block_status_provider: BlockStatusProvider,
+        chain_sync_state: ChainSyncState,
     ) -> JoinHandle<()> {
         let next_canonical_vdf_seed = latest_block.vdf_limiter_info.next_seed;
         // FIXME: this should be controlled via a config parameter rather than relying on test-only artifact generation
@@ -1836,6 +1840,7 @@ impl IrysNode {
                     vdf_state.clone(),
                     atomic_global_step_number.clone(),
                     block_status_provider,
+                    chain_sync_state,
                 )
             }
         });

@@ -689,7 +689,10 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::ParentIsAPartOfAPrunedFork),
                 )
                 .await;
-            return Err(CriticalBlockPoolError::ForkedBlock(block_header.block_hash).into());
+            let err = CriticalBlockPoolError::ForkedBlock(block_header.block_hash);
+            self.sync_state
+                .record_block_processing_error(err.to_string());
+            return Err(err.into());
         }
 
         if !previous_block_status.is_processed() {
@@ -715,6 +718,7 @@ where
                             BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                         )
                         .await;
+                    self.sync_state.record_block_processing_error(e.to_string());
                     return Err(e);
                 }
                 Err(e) => return Err(e),
@@ -845,7 +849,9 @@ where
                         ),
                     )
                     .await;
-                return Err(CriticalBlockPoolError::BlockError(format!("{:?}", err)).into());
+                self.sync_state
+                    .record_block_processing_error(err.to_string());
+                return Err(CriticalBlockPoolError::BlockError(err.to_string()).into());
             }
         }
 
@@ -881,6 +887,7 @@ where
                         BlockRemovalReason::FailedToProcess(FailureReason::HeaderBodyMismatch),
                     )
                     .await;
+                self.sync_state.record_block_processing_error(e.to_string());
                 return Err(e);
             }
             Err(e) => return Err(e),
@@ -943,8 +950,10 @@ where
                     BlockRemovalReason::FailedToProcess(FailureReason::BlockPrevalidationFailed),
                 )
                 .await;
+            self.sync_state
+                .record_block_processing_error(block_discovery_error.to_string());
             return Err(
-                CriticalBlockPoolError::BlockError(format!("{:?}", block_discovery_error)).into(),
+                CriticalBlockPoolError::BlockError(block_discovery_error.to_string()).into(),
             );
         }
 
@@ -966,6 +975,8 @@ where
         );
         self.sync_state
             .mark_processed(current_block_height as usize);
+        self.sync_state
+            .record_successful_block_processing(current_block_hash);
         self.blocks_cache
             .remove_block(
                 &block_header.block_hash,

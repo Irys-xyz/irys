@@ -70,7 +70,7 @@ pub enum BlockDiscoveryError {
 #[derive(Debug, PartialEq, Eq)]
 pub enum AnchorItemType {
     DataTransaction { tx_id: H256 },
-    IngressProof { promotion_target_id: H256 },
+    IngressProof { promotion_target_id: H256, id: H256 },
     SystemTransaction { tx_id: H256 },
 }
 
@@ -515,7 +515,8 @@ impl BlockDiscoveryServiceInner {
             // this is the last block header we got from the above loop
             // we use this to ensure that
             let last_bt_safe_parent_height = parent_block.height.checked_sub(1);
-            for height in min_ingress_proof_anchor_height..bt_finished_height {
+            // IMPORTANT: this MUST be inclusive! matching mempool `validate_ingress_proof_anchor_for_inclusion` behaviour
+            for height in min_ingress_proof_anchor_height..=bt_finished_height {
                 // these block index assertions should always be true, which is why we panic (we enforce that the block tree must at least go to the boundary for migration in Config::validate)
                 let block_index_item =
                     block_index
@@ -573,9 +574,18 @@ impl BlockDiscoveryServiceInner {
             // Validate the anchors
             for proof in tx_proofs.iter() {
                 if !valid_ingress_anchor_blocks.contains(&proof.anchor) {
+                    info!(
+                        "valid ingress anchor blocks: {:?},  bt_finished_height {} min_ingress_proof_anchor_height {} anchor {}, ID {}",
+                        &valid_ingress_anchor_blocks,
+                        &bt_finished_height,
+                        &min_ingress_proof_anchor_height,
+                        &proof.anchor,
+                        &proof.id()
+                    );
                     return Err(BlockDiscoveryError::InvalidAnchor {
                         item_type: AnchorItemType::IngressProof {
                             promotion_target_id: tx_header.id,
+                            id: proof.id(),
                         },
                         anchor: proof.anchor,
                     });

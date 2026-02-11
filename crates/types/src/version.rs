@@ -192,6 +192,7 @@ pub struct HandshakeRequestV2 {
     pub address: PeerAddress,
     pub timestamp: u64,
     pub user_agent: Option<String>,
+    pub consensus_config_hash: H256,
     pub signature: IrysSignature,
 }
 
@@ -230,6 +231,7 @@ impl Default for HandshakeRequestV2 {
             chain_id: 0,
             address: PeerAddress::default(),
             user_agent: None,
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         }
     }
@@ -277,7 +279,8 @@ impl HandshakeRequestV2 {
             + self
                 .user_agent
                 .as_ref()
-                .map_or(1, alloy_rlp::Encodable::length); // empty string for None
+                .map_or(1, alloy_rlp::Encodable::length) // empty string for None
+            + self.consensus_config_hash.length();
 
         alloy_rlp::Header {
             list: true,
@@ -296,6 +299,7 @@ impl HandshakeRequestV2 {
         } else {
             "".encode(out);
         }
+        self.consensus_config_hash.encode(out);
     }
 
     pub fn signature_hash(&self) -> [u8; 32] {
@@ -373,12 +377,12 @@ impl Compact for PeerAddress {
     }
 }
 
-/// Example serialized JSON AcceptedResponse:
+/// Example serialized JSON AcceptedResponse V1:
 /// ```json
 /// {
 ///   "status": "accepted",         // comes from PeerResponse Enum
 ///   "version": "1.2.0",           // semver formatted
-///   "protocol_version": "2",      // or however ProtocolVersion is configured to serialize
+///   "protocol_version": "1",      // V1 protocol version
 ///   "peers": [
 ///     "203.0.113.1:8333",         // IPv4 address:port
 ///     "203.0.113.2:8333",
@@ -390,7 +394,7 @@ impl Compact for PeerAddress {
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandshakeResponse {
+pub struct HandshakeResponseV1 {
     pub version: Version,
     pub protocol_version: ProtocolVersion,
     // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
@@ -399,7 +403,50 @@ pub struct HandshakeResponse {
     pub message: Option<String>,
 }
 
-impl Default for HandshakeResponse {
+impl Default for HandshakeResponseV1 {
+    fn default() -> Self {
+        Self {
+            version: Version::new(0, 1, 0), // Default to 0.1.0
+            protocol_version: ProtocolVersion::V1,
+            peers: Vec::new(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            message: None,
+        }
+    }
+}
+
+/// Example serialized JSON AcceptedResponse V2:
+/// ```json
+/// {
+///   "status": "accepted",         // comes from PeerResponse Enum
+///   "version": "1.2.0",           // semver formatted
+///   "protocol_version": "2",      // V2 protocol version
+///   "peers": [
+///     "203.0.113.1:8333",         // IPv4 address:port
+///     "203.0.113.2:8333",
+///     "[2001:db8::1]:8333",       // IPv6 addresses use [] notation
+///     "[2001:db8::2]:8333"
+///   ],
+///   "timestamp": 1645567124437,   // Number of milliseconds since UNIX epoch
+///   "message": "Welcome to the network",  // or null if None
+///   "consensus_config_hash": "0x..."  // Hash of consensus config
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandshakeResponseV2 {
+    pub version: Version,
+    pub protocol_version: ProtocolVersion,
+    // pub features: Vec<Feature>,  // perhaps something like "features": ["DHT", "NAT"], in the future
+    pub peers: Vec<PeerAddress>,
+    pub timestamp: u64,
+    pub message: Option<String>,
+    pub consensus_config_hash: H256,
+}
+
+impl Default for HandshakeResponseV2 {
     fn default() -> Self {
         Self {
             version: Version::new(0, 1, 0), // Default to 0.1.0
@@ -410,9 +457,13 @@ impl Default for HandshakeResponse {
                 .unwrap_or_default()
                 .as_millis() as u64,
             message: None,
+            consensus_config_hash: H256::zero(),
         }
     }
 }
+
+/// Legacy type alias for backward compatibility - maps to V2
+pub type HandshakeResponse = HandshakeResponseV2;
 
 /// Example serialized JSON RejectedResponse:
 /// ```json
@@ -739,6 +790,7 @@ mod tests {
             address: crate::PeerAddress::default(),
             timestamp: 1234567890,
             user_agent: Some("test-agent".to_string()),
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         };
 
@@ -765,7 +817,8 @@ mod tests {
             + handshake
                 .user_agent
                 .as_ref()
-                .map_or(1, alloy_rlp::Encodable::length);
+                .map_or(1, alloy_rlp::Encodable::length)
+            + handshake.consensus_config_hash.length();
 
         assert_eq!(
             calculated_length, header.payload_length,
@@ -863,6 +916,7 @@ mod tests {
             address: crate::PeerAddress::default(),
             timestamp: 1000000000,
             user_agent: Some("stable-test".to_string()),
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         };
 
@@ -896,6 +950,7 @@ mod tests {
             address: crate::PeerAddress::default(),
             timestamp: 1000,
             user_agent: Some("test".to_string()),
+            consensus_config_hash: H256::zero(),
             signature: IrysSignature::default(),
         };
 
@@ -930,5 +985,129 @@ mod tests {
             encoded.contains(&0x64),
             "Encoded data should contain chain_id byte"
         );
+    }
+
+    #[test]
+    fn test_v2_signature_includes_consensus_hash() {
+        let req_a = HandshakeRequestV2 {
+            consensus_config_hash: H256::from([0xAA; 32]),
+            ..HandshakeRequestV2::default()
+        };
+        let mut req_b = HandshakeRequestV2 {
+            consensus_config_hash: H256::from([0xBB; 32]),
+            ..HandshakeRequestV2::default()
+        };
+        // Force identical timestamps so only the hash field differs
+        req_b.timestamp = req_a.timestamp;
+
+        assert_ne!(
+            req_a.signature_hash(),
+            req_b.signature_hash(),
+            "different consensus_config_hash values should produce different signature hashes"
+        );
+    }
+
+    /// A helper to generate a new raw JSON for the version endpoint test.
+    /// Run `cargo test -p irys-types -- generate_raw_handshake_json --nocapture --ignored`
+    /// to produce the raw JSON needed by the peer_discovery integration test.
+    #[test]
+    #[ignore]
+    fn generate_raw_handshake_json() {
+        use crate::irys::IrysSigner;
+        use crate::ConsensusConfig;
+
+        let mut config = ConsensusConfig::testing();
+
+        // NodeConfig::testing() sets these genesis addresses
+        let testing_key = k256::ecdsa::SigningKey::from_slice(
+            &hex::decode(b"db793353b633df950842415065f769699541160845d73db902eadee6bc5042d0")
+                .expect("valid hex"),
+        )
+        .expect("valid key");
+        let testing_signer = IrysSigner {
+            signer: testing_key,
+            chain_id: 0,
+            chunk_size: 0,
+        };
+        config.genesis.miner_address = testing_signer.address();
+        config.genesis.reward_address = testing_signer.address();
+
+        // Match the consensus config from the test
+        config.chunk_size = 32;
+        config.num_chunks_in_partition = 10;
+        config.num_chunks_in_recall_range = 2;
+        config.num_partitions_per_slot = 1;
+        config.entropy_packing_iterations = 1_000;
+        config.block_migration_depth = 1;
+
+        // Hardcoded key matching the test node's genesis signer
+        let genesis_key_bytes: [u8; 32] = [
+            0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+            0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55,
+            0x66, 0x77, 0x88, 0x99,
+        ];
+        let genesis_signing_key =
+            k256::ecdsa::SigningKey::from_bytes((&genesis_key_bytes).into()).unwrap();
+        let genesis_signer = IrysSigner {
+            signer: genesis_signing_key,
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+        };
+
+        // Add genesis account to match test
+        use alloy_core::primitives::U256;
+        use alloy_genesis::GenesisAccount;
+        let genesis_account = GenesisAccount {
+            balance: U256::from(690000000000000000_u128),
+            ..Default::default()
+        };
+        config
+            .reth
+            .alloc
+            .insert(genesis_signer.address().into(), genesis_account);
+
+        // Fixed private key for the peer handshake (different from genesis)
+        let key_bytes: [u8; 32] = [
+            0x1f, 0x2e, 0x3d, 0x4c, 0x5b, 0x6a, 0x79, 0x88, 0x97, 0xa6, 0xb5, 0xc4, 0xd3, 0xe2,
+            0xf1, 0x00, 0x0f, 0x1e, 0x2d, 0x3c, 0x4b, 0x5a, 0x69, 0x78, 0x87, 0x96, 0xa5, 0xb4,
+            0xc3, 0xd2, 0xe1, 0xf0,
+        ];
+        let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_bytes).into()).unwrap();
+        let signer = IrysSigner {
+            signer: signing_key,
+            chain_id: config.chain_id,
+            chunk_size: config.chunk_size,
+        };
+
+        let mining_addr = signer.address();
+
+        eprintln!("mining_address = {}", mining_addr);
+        eprintln!("consensus_config_hash = {}", config.keccak256_hash());
+
+        let peer_id_addr: IrysAddress = "4JaNfJ1tQ2TCLREq6opq6pWGmCJW".parse().unwrap();
+        let mut req = HandshakeRequestV2 {
+            version: semver::Version::new(0, 1, 0),
+            protocol_version: ProtocolVersion::V2,
+            mining_address: mining_addr,
+            peer_id: peer_id_addr.into(),
+            chain_id: 1270,
+            address: crate::PeerAddress {
+                gossip: "127.0.0.2:8080".parse().unwrap(),
+                api: "127.0.0.2:8081".parse().unwrap(),
+                execution: crate::RethPeerInfo {
+                    peering_tcp_addr: "127.0.0.2:8082".parse().unwrap(),
+                    peer_id: "0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".parse().unwrap(),
+                },
+            },
+            timestamp: 0,
+            user_agent: Some("miner2/0.1.0 (macos/aarch64)".to_string()),
+            consensus_config_hash: config.keccak256_hash(),
+            signature: IrysSignature::default(),
+        };
+
+        signer.sign_p2p_handshake_v2(&mut req).unwrap();
+
+        eprintln!("=== Signed HandshakeRequestV2 JSON ===");
+        eprintln!("{}", serde_json::to_string_pretty(&req).unwrap());
     }
 }

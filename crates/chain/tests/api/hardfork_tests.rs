@@ -882,3 +882,393 @@ mod borealis_hardfork {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod peer_sync_recovery {
+    use std::time::Duration;
+
+    use super::*;
+    use irys_database::db::IrysDatabaseExt as _;
+
+    const NUM_BLOCKS_IN_EPOCH: usize = 3;
+    const NUM_EPOCHS_BEFORE_ACTIVATION: usize = 3;
+    const NUM_EPOCHS_AFTER_ACTIVATION: usize = 3; // 3 epochs after Aurora
+    const BLOCK_MIGRATION_DEPTH: usize = 2;
+    const SECONDS_TO_WAIT: usize = 30;
+
+    /// Tests that a peer node can sync through an Aurora hardfork activation boundary.
+    /// Both genesis and peer start together, peer stakes to get partition assignments,
+    /// then blocks are mined with V1 commitments before activation and V2 after.
+    /// After restart with Aurora enabled, verifies peer syncs correctly through the boundary.
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_aurora_hardfork_recovery_peer_sync() -> eyre::Result<()> {
+        initialize_tracing();
+
+        // Step 1: Setup Configuration (Aurora disabled initially)
+        let block_migration_depth = BLOCK_MIGRATION_DEPTH;
+        let mut genesis_config = NodeConfig::testing_with_epochs(NUM_BLOCKS_IN_EPOCH);
+        genesis_config.consensus.get_mut().chunk_size = 32;
+        genesis_config.consensus.get_mut().block_migration_depth =
+            block_migration_depth.try_into()?;
+        genesis_config.consensus.get_mut().hardforks = IrysHardforkConfig {
+            frontier: default_test_frontier(),
+            aurora: None, // Disabled initially
+            next_name_tbd: None,
+            borealis: None,
+        };
+
+        // Fund signers: 9 for V1 (3 epochs * 3 blocks), 9 for V2 (3 epochs * 3 blocks), 1 for peer
+        let signers: [IrysSigner; 19] = create_funded_signers(&mut genesis_config);
+        let peer_signer = &signers[18];
+
+        // Step 2: Start Genesis and Peer
+        let genesis_node = IrysNodeTest::new_genesis(genesis_config.clone())
+            .start_and_wait_for_packing("GENESIS", SECONDS_TO_WAIT)
+            .await;
+
+        let peer_config = genesis_node.testing_peer_with_signer(peer_signer);
+        let peer_node = IrysNodeTest::new(peer_config).start_with_name("PEER").await;
+
+        // Peer stakes and pledges to participate in the network
+        let peer_stake = peer_node.post_stake_commitment(None).await?;
+        let peer_pledge = peer_node.post_pledge_commitment(None).await?;
+
+        // Wait for commitments to reach genesis mempool
+        genesis_node
+            .wait_for_mempool(peer_stake.id(), SECONDS_TO_WAIT)
+            .await?;
+        genesis_node
+            .wait_for_mempool(peer_pledge.id(), SECONDS_TO_WAIT)
+            .await?;
+
+        // Mine first epoch to get peer's partition assignments
+        genesis_node.mine_blocks(NUM_BLOCKS_IN_EPOCH).await?;
+        peer_node
+            .wait_until_height(NUM_BLOCKS_IN_EPOCH as u64, SECONDS_TO_WAIT)
+            .await?;
+
+        // Wait for peer to pack its storage module with partition data
+        peer_node.wait_for_packing(SECONDS_TO_WAIT).await;
+        let mut stopped_peer = peer_node.stop().await;
+        info!("Peer has partition assignments and is ready");
+
+        // Step 3: Mine epochs with V1 Commitments + Data Txs
+        let mut signer_idx = 0;
+        for epoch in 0..NUM_EPOCHS_BEFORE_ACTIVATION {
+            for block_in_epoch in 0..NUM_BLOCKS_IN_EPOCH {
+                let anchor = genesis_node.get_anchor().await?;
+                let signer = &signers[signer_idx];
+
+                // Post V1 commitment
+                let v1_tx = create_stake_tx(&genesis_node, signer, TxVersion::V1).await;
+                genesis_node.post_commitment_tx(&v1_tx).await?;
+
+                // Post data tx
+                let data = format!("pre-aurora-epoch{}-block{}", epoch, block_in_epoch);
+                genesis_node
+                    .post_data_tx(anchor, data.into_bytes(), signer)
+                    .await;
+
+                // Mine block
+                genesis_node.mine_block().await?;
+                signer_idx += 1;
+            }
+        }
+
+        let pre_activation_height = genesis_node.get_canonical_chain_height().await;
+        info!(
+            "Mined {} pre-activation blocks (height: {}), block_migration_depth={}",
+            NUM_EPOCHS_BEFORE_ACTIVATION * NUM_BLOCKS_IN_EPOCH,
+            pre_activation_height,
+            block_migration_depth
+        );
+
+        // Step 3.5: Wait for Pre-Aurora Block Migration
+        // Calculate expected migrated height (current - migration_depth)
+        let pre_aurora_migrated_height = pre_activation_height - block_migration_depth as u64;
+        info!(
+            "Waiting for block index to reach height {} (chain={} - depth={})",
+            pre_aurora_migrated_height, pre_activation_height, block_migration_depth
+        );
+        genesis_node
+            .wait_until_block_index_height(pre_aurora_migrated_height, SECONDS_TO_WAIT)
+            .await?;
+        info!(
+            "Pre-Aurora blocks migrated to height {}",
+            pre_aurora_migrated_height
+        );
+
+        // Validate pre-aurora blocks are in the index with PoA chunks and their txs are in DB
+        let mut pre_aurora_tx_count = 0;
+        for height in 1..=pre_aurora_migrated_height {
+            let block = genesis_node.get_block_by_height_from_index(height, true)?;
+            assert!(
+                block.poa.chunk.is_some(),
+                "Pre-aurora migrated block at height {} should have PoA chunk",
+                height
+            );
+            // Verify all data txs in this block are in the database
+            for tx_ids in block.get_data_ledger_tx_ids().values() {
+                for tx_id in tx_ids {
+                    let tx_header = genesis_node.get_tx_header(tx_id)?;
+                    assert_eq!(
+                        &tx_header.id, tx_id,
+                        "Data tx {} from block {} should be in DB",
+                        tx_id, height
+                    );
+                    pre_aurora_tx_count += 1;
+                }
+            }
+        }
+        info!(
+            "Validated {} pre-Aurora blocks with {} data txs in index",
+            pre_aurora_migrated_height, pre_aurora_tx_count
+        );
+
+        // Step 4: Stop Both Nodes, Activate Aurora, Restart
+        let mut stopped_genesis = genesis_node.stop().await;
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Set activation in the past so all new blocks are post-activation
+        let activation_timestamp = now_secs();
+
+        // Modify genesis config to enable Aurora
+        stopped_genesis.cfg.consensus.get_mut().hardforks.aurora = Some(Aurora {
+            activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
+            minimum_commitment_tx_version: AURORA_MIN_VERSION,
+        });
+
+        // Modify peer config to enable Aurora
+        stopped_peer.cfg.consensus.get_mut().hardforks.aurora = Some(Aurora {
+            activation_timestamp: UnixTimestamp::from_secs(activation_timestamp),
+            minimum_commitment_tx_version: AURORA_MIN_VERSION,
+        });
+
+        // Restart genesis with Aurora enabled
+        let genesis_node = stopped_genesis.start().await;
+
+        info!("Genesis node restarted with Aurora enabled");
+
+        // Step 5: Mine V2 Commitments + Data Txs after Aurora
+        // Continue signer index from pre-Aurora
+        let mut v2_signer_idx = NUM_EPOCHS_BEFORE_ACTIVATION * NUM_BLOCKS_IN_EPOCH;
+        for epoch in 0..NUM_EPOCHS_AFTER_ACTIVATION {
+            for block_in_epoch in 0..NUM_BLOCKS_IN_EPOCH {
+                let anchor = genesis_node.get_anchor().await?;
+                let signer = &signers[v2_signer_idx];
+
+                // Post V2 commitment (V1 would be rejected now)
+                let v2_tx = create_stake_tx(&genesis_node, signer, TxVersion::V2).await;
+                genesis_node.post_commitment_tx(&v2_tx).await?;
+
+                // Verify V1 is rejected after activation (only check once per epoch)
+                if block_in_epoch == 0 {
+                    let v1_tx = create_stake_tx(&genesis_node, signer, TxVersion::V1).await;
+                    assert!(
+                        genesis_node.post_commitment_tx(&v1_tx).await.is_err(),
+                        "V1 should be rejected after Aurora activation"
+                    );
+                }
+
+                // Post data tx
+                let data = format!("post-aurora-epoch{}-block{}", epoch, block_in_epoch);
+                genesis_node
+                    .post_data_tx(anchor, data.into_bytes(), signer)
+                    .await;
+
+                genesis_node.mine_block().await?;
+                v2_signer_idx += 1;
+            }
+        }
+
+        // Mine one additional block to ensure post-Aurora blocks are pushed past migration depth
+        genesis_node.mine_block().await?;
+
+        let final_height = genesis_node.get_canonical_chain_height().await;
+        info!(
+            "Mined {} post-activation blocks + 1 extra (final height: {}), pre_activation_height was {}",
+            NUM_EPOCHS_AFTER_ACTIVATION * NUM_BLOCKS_IN_EPOCH,
+            final_height,
+            pre_activation_height
+        );
+
+        // Step 5.5: Wait for Post-Aurora Block Migration
+        let post_aurora_migrated_height = final_height - block_migration_depth as u64;
+        info!(
+            "Waiting for post-Aurora block index to reach height {} (final={} - depth={})",
+            post_aurora_migrated_height, final_height, block_migration_depth
+        );
+        genesis_node
+            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT)
+            .await?;
+        info!(
+            "Post-Aurora blocks migrated to height {}",
+            post_aurora_migrated_height
+        );
+
+        // Validate all blocks (including post-aurora) are in the index with PoA chunks and their txs are in DB
+        let mut total_tx_count = 0;
+        for height in 1..=post_aurora_migrated_height {
+            let block = genesis_node.get_block_by_height_from_index(height, true)?;
+            assert!(
+                block.poa.chunk.is_some(),
+                "Migrated block at height {} should have PoA chunk",
+                height
+            );
+            // Verify all data txs in this block are in the database
+            let mut block_tx_count = 0;
+            for tx_ids in block.get_data_ledger_tx_ids().values() {
+                for tx_id in tx_ids {
+                    let tx_header = genesis_node.get_tx_header(tx_id)?;
+                    assert_eq!(
+                        &tx_header.id, tx_id,
+                        "Data tx {} from block {} should be in DB",
+                        tx_id, height
+                    );
+                    block_tx_count += 1;
+                }
+            }
+            total_tx_count += block_tx_count;
+        }
+        info!(
+            "Validated {} blocks with {} total data txs in genesis block index",
+            post_aurora_migrated_height, total_tx_count
+        );
+
+        // Verify that we have at least one post-Aurora block migrated
+        // Pre-activation height was recorded before restart, post-Aurora blocks start after that
+        assert!(
+            post_aurora_migrated_height > pre_aurora_migrated_height,
+            "Should have at least one post-Aurora block migrated: pre={}, post={}",
+            pre_aurora_migrated_height,
+            post_aurora_migrated_height
+        );
+        info!(
+            "Post-Aurora blocks validated: {} blocks migrated after pre-Aurora height {}",
+            post_aurora_migrated_height - pre_aurora_migrated_height,
+            pre_aurora_migrated_height
+        );
+
+        // Step 6: Wait for Peer to Sync and Verify
+        let peer_node = stopped_peer.start().await;
+        peer_node
+            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .await?;
+        info!("Peer synced to height {}", final_height);
+
+        // Verify chain matches at all heights
+        for height in 1..=final_height {
+            let genesis_block = genesis_node.get_block_by_height(height).await?;
+            let peer_block = peer_node.get_block_by_height(height).await?;
+            assert_eq!(
+                genesis_block.block_hash, peer_block.block_hash,
+                "Block hash mismatch at height {}",
+                height
+            );
+        }
+        info!(
+            "Verified all {} blocks match between genesis and peer",
+            final_height
+        );
+
+        // Step 7: Wait for Peer Block Migration and Validate
+        peer_node
+            .wait_until_block_index_height(post_aurora_migrated_height, SECONDS_TO_WAIT * 2)
+            .await?;
+        info!(
+            "Peer block index migrated to height {}",
+            post_aurora_migrated_height
+        );
+
+        // Verify peer's block index matches genesis AND transactions are in DB (not mempool)
+        let mut peer_data_tx_count = 0;
+        let mut peer_commitment_tx_count = 0;
+        for height in 1..=post_aurora_migrated_height {
+            let genesis_block = genesis_node.get_block_by_height_from_index(height, true)?;
+            let peer_block = peer_node.get_block_by_height_from_index(height, true)?;
+            assert_eq!(
+                genesis_block.block_hash, peer_block.block_hash,
+                "Block index hash mismatch at height {}",
+                height
+            );
+            assert!(
+                peer_block.poa.chunk.is_some(),
+                "Peer migrated block at height {} should have PoA chunk",
+                height
+            );
+            // Verify all data txs in this block are in the peer's database (direct DB read, not mempool)
+            for tx_ids in peer_block.get_data_ledger_tx_ids().values() {
+                for tx_id in tx_ids {
+                    let tx_header = peer_node
+                        .node_ctx
+                        .db
+                        .view_eyre(|tx| irys_database::tx_header_by_txid(tx, tx_id))?
+                        .ok_or_else(|| {
+                            eyre::eyre!(
+                                "Data tx {} from block {} not found in peer's DB",
+                                tx_id,
+                                height
+                            )
+                        })?;
+                    assert_eq!(
+                        &tx_header.id, tx_id,
+                        "Data tx {} from block {} should be in peer's DB",
+                        tx_id, height
+                    );
+                    peer_data_tx_count += 1;
+                }
+            }
+            // Verify all commitment txs in this block are in the peer's database
+            for tx_id in peer_block.get_commitment_ledger_tx_ids() {
+                let commitment_tx = peer_node
+                    .node_ctx
+                    .db
+                    .view_eyre(|tx| irys_database::commitment_tx_by_txid(tx, &tx_id))?
+                    .ok_or_else(|| {
+                        eyre::eyre!(
+                            "Commitment tx {} from block {} not found in peer's DB",
+                            tx_id,
+                            height
+                        )
+                    })?;
+                assert_eq!(
+                    commitment_tx.id(),
+                    tx_id,
+                    "Commitment tx {} from block {} should be in peer's DB",
+                    tx_id,
+                    height
+                );
+                peer_commitment_tx_count += 1;
+            }
+        }
+        info!(
+            "Peer block index validated for {} migrated blocks with {} data txs and {} commitment txs",
+            post_aurora_migrated_height, peer_data_tx_count, peer_commitment_tx_count
+        );
+
+        // Step 8: Additional Peer Restart After Sync
+        let stopped_peer = peer_node.stop().await;
+        info!("Peer stopped for additional restart test");
+
+        let peer_node = IrysNodeTest {
+            node_ctx: (),
+            cfg: stopped_peer.cfg.clone(),
+            temp_dir: stopped_peer.temp_dir,
+            name: stopped_peer.name,
+        }
+        .start()
+        .await;
+        info!("Peer restarted after sync");
+
+        // Wait for peer to reach the same height after restart
+        peer_node
+            .wait_until_height(final_height, SECONDS_TO_WAIT * 2)
+            .await?;
+        info!("Peer synced to height {} after restart", final_height);
+
+        peer_node.stop().await;
+        genesis_node.stop().await;
+        Ok(())
+    }
+}

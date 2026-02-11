@@ -4,7 +4,7 @@ use crate::{serialization::unix_timestamp_string_serde, UnixTimestamp, VersionDi
 use serde::{Deserialize, Serialize};
 
 /// Configurable hardfork schedule - part of ConsensusConfig.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct IrysHardforkConfig {
     /// Frontier parameters (always active from genesis)
     pub frontier: FrontierParams,
@@ -27,7 +27,7 @@ pub struct IrysHardforkConfig {
 /// Parameters for Frontier hardfork (genesis defaults).
 ///
 /// These are the parameters active from block 0.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FrontierParams {
     /// Number of ingress proofs required for promotion
     pub number_of_ingress_proofs_total: u64,
@@ -39,7 +39,7 @@ pub struct FrontierParams {
 /// A hardfork activation with its parameters.
 ///
 /// When this fork activates, the contained parameters take effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NextNameTBD {
     /// Times (seconds since epoch) at which this hardfork activates
     #[serde(with = "unix_timestamp_string_serde")]
@@ -52,7 +52,7 @@ pub struct NextNameTBD {
     pub number_of_ingress_proofs_from_assignees: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Aurora {
     #[serde(with = "unix_timestamp_string_serde")]
     pub activation_timestamp: UnixTimestamp,
@@ -63,7 +63,7 @@ pub struct Aurora {
 ///
 /// Activation is epoch-aligned: the feature is enabled for all blocks in an epoch
 /// if that epoch's epoch block has a timestamp >= activation_timestamp.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Borealis {
     /// Timestamp (seconds since epoch) at which this hardfork activates.
     /// The actual activation happens at the first epoch boundary where the

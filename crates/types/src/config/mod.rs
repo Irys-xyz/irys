@@ -37,6 +37,7 @@ impl Config {
     }
 
     pub fn irys_signer(&self) -> IrysSigner {
+        // TODO: store the IrysSigner somewhere so we don't have to clone it all the time (& also memoize the address)
         IrysSigner {
             signer: self.node_config.mining_key.clone(),
             chain_id: self.consensus.chain_id,
