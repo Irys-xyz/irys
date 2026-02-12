@@ -12,7 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{BlockTransactions, CommitmentTypeV1};
+use irys_types::{BlockTransactions, CommitmentTypeV2};
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 use std::collections::HashMap;
 
@@ -46,6 +46,7 @@ async fn heavy_block_unpledge_partition_not_owned_gets_rejected() -> eyre::Resul
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -209,6 +210,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -247,7 +249,7 @@ async fn heavy_block_unpledge_invalid_count_gets_rejected() -> eyre::Result<()> 
         .await;
 
         let count = target_counts[idx];
-        tx.set_commitment_type(CommitmentTypeV1::Unpledge {
+        tx.set_commitment_type(CommitmentTypeV2::Unpledge {
             pledge_count_before_executing: count,
             partition_hash: assignment.partition_hash,
         });
@@ -339,6 +341,7 @@ async fn heavy_block_unpledge_invalid_value_gets_rejected() -> eyre::Result<()> 
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -445,6 +448,7 @@ async fn slow_heavy_epoch_block_with_extra_unpledge_gets_rejected() -> eyre::Res
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

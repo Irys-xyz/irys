@@ -1443,6 +1443,7 @@ impl IrysNode {
             execution_payload_cache.clone(),
             receivers.validation_service,
             runtime_handle.clone(),
+            sync_state.clone(),
         );
 
         // create the block reward curve

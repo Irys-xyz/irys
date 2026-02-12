@@ -19,7 +19,7 @@ use eyre::{eyre, OptionExt as _};
 use irys_database::{block_header_by_hash, db::IrysDatabaseExt as _};
 use irys_domain::{
     BlockIndex, BlockTreeReadGuard, CommitmentSnapshot, EmaSnapshot, EpochSnapshot,
-    ExponentialMarketAvgCalculation,
+    ExponentialMarketAvgCalculation, HardforkConfigExt as _,
 };
 use irys_price_oracle::IrysPriceOracle;
 use irys_reth::{
@@ -246,6 +246,9 @@ pub struct MempoolTxsBundle {
     pub commitment_refund_events: Vec<UnpledgeRefundEvent>,
     /// Unstake refund events to emit on epoch blocks; empty on non-epoch blocks
     pub unstake_refund_events: Vec<UnstakeRefundEvent>,
+
+    /// Epoch snapshot for the parent block - used to resolve reward addresses
+    pub epoch_snapshot: Arc<EpochSnapshot>,
 }
 
 impl BlockProducerService {
@@ -820,6 +823,7 @@ pub trait BlockProdStrategy {
             &mempool.aggregated_miner_fees,
             &mempool.commitment_refund_events,
             &mempool.unstake_refund_events,
+            &mempool.epoch_snapshot,
         )?;
 
         let mut shadow_txs = Vec::new();
@@ -1348,6 +1352,10 @@ pub trait BlockProdStrategy {
         let block_height = prev_block_header.height + 1;
         let is_epoch = self.is_epoch_block(block_height);
 
+        // Fetch epoch snapshot (needed for reward address resolution)
+        let (parent_epoch_snapshot, parent_commitment_snapshot) =
+            self.fetch_parent_snapshots(prev_block_header)?;
+
         if !is_epoch {
             // Filter commitments by version using block timestamp
             self.inner()
@@ -1359,6 +1367,22 @@ pub trait BlockProdStrategy {
                     block_timestamp.to_secs(),
                 );
 
+            // Filter UpdateRewardAddress by Borealis activation
+            if !self
+                .inner()
+                .config
+                .consensus
+                .hardforks
+                .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
+            {
+                mempool_txs.commitment_tx.retain(|tx| {
+                    !matches!(
+                        tx.commitment_type(),
+                        irys_types::CommitmentTypeV2::UpdateRewardAddress { .. }
+                    )
+                });
+            }
+
             debug!(
                 block.height = block_height,
                 custom.commitment_ids = ?mempool_txs
@@ -1368,16 +1392,12 @@ pub trait BlockProdStrategy {
                     .collect::<Vec<_>>(),
                 "Selected best mempool txs"
             );
-            return Ok(self.build_non_epoch_bundle(mempool_txs));
+            return Ok(self.build_non_epoch_bundle(mempool_txs, parent_epoch_snapshot));
         }
 
         // =====
         // ONLY EPOCH BLOCK PROCESSING
         // =====
-
-        // Epoch blocks: compute expired fees, roll up commitments, and derive refunds
-        let (parent_epoch_snapshot, parent_commitment_snapshot) =
-            self.fetch_parent_snapshots(prev_block_header)?;
 
         let aggregated_miner_fees = self
             .calculate_expired_ledger_fees(&parent_epoch_snapshot, block_height)
@@ -1402,6 +1422,7 @@ pub trait BlockProdStrategy {
             aggregated_miner_fees,
             commitment_refund_events,
             unstake_refund_events,
+            epoch_snapshot: parent_epoch_snapshot,
         })
     }
 
@@ -1477,7 +1498,11 @@ pub trait BlockProdStrategy {
         )
     }
 
-    fn build_non_epoch_bundle(&self, mempool_txs: MempoolTxs) -> MempoolTxsBundle {
+    fn build_non_epoch_bundle(
+        &self,
+        mempool_txs: MempoolTxs,
+        epoch_snapshot: Arc<EpochSnapshot>,
+    ) -> MempoolTxsBundle {
         MempoolTxsBundle {
             commitment_txs_to_bill: mempool_txs.commitment_tx.clone(),
             commitment_txs: mempool_txs.commitment_tx,
@@ -1486,6 +1511,7 @@ pub trait BlockProdStrategy {
             aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
             commitment_refund_events: Vec::new(),
             unstake_refund_events: Vec::new(),
+            epoch_snapshot,
         }
     }
 
