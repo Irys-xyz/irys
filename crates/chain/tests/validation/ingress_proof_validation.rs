@@ -50,6 +50,7 @@ async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre:
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
