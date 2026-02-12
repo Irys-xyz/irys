@@ -73,6 +73,8 @@ pub enum TransactionPacket {
     PermFeeRefund(BalanceIncrement),
     /// Unstake funds to an account (balance increment). Executed at epoch for refunds.
     UnstakeRefund(BalanceIncrement),
+    /// Update reward address at inclusion: fee-only via priority fee. No amount in packet; log-only.
+    UpdateRewardAddress(UpdateRewardAddressDebit),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, arbitrary::Arbitrary)]
@@ -102,6 +104,29 @@ pub struct UnstakeDebit {
     pub irys_ref: FixedBytes<32>,
 }
 
+/// Inclusion-time UpdateRewardAddress record: fee-only via priority fee, no balance change.
+#[derive(
+    serde::Deserialize,
+    serde::Serialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    // manual Borsh impls below
+    arbitrary::Arbitrary,
+)]
+pub struct UpdateRewardAddressDebit {
+    /// Target account address (fee payer for priority fee).
+    pub target: Address,
+    /// Reference to the consensus layer transaction that resulted in this shadow tx.
+    pub irys_ref: FixedBytes<32>,
+    /// New reward address being set.
+    pub new_reward_address: Address,
+}
+
 impl TransactionPacket {
     /// Returns the target address for this transaction packet, if any.
     /// Returns None for BlockReward since it has no explicit target (uses beneficiary).
@@ -118,6 +143,7 @@ impl TransactionPacket {
             Self::TermFeeReward(inc) => Some(inc.target),
             Self::IngressProofReward(inc) => Some(inc.target),
             Self::PermFeeRefund(inc) => Some(inc.target),
+            Self::UpdateRewardAddress(dec) => Some(dec.target),
         }
     }
 }
@@ -149,6 +175,8 @@ pub mod shadow_tx_topics {
         LazyLock::new(|| keccak256("SHADOW_TX_INGRESS_PROOF_REWARD"));
     pub static PERM_FEE_REFUND: LazyLock<FixedBytes<32>> =
         LazyLock::new(|| keccak256("SHADOW_TX_PERM_FEE_REFUND"));
+    pub static UPDATE_REWARD_ADDRESS: LazyLock<FixedBytes<32>> =
+        LazyLock::new(|| keccak256("SHADOW_TX_UPDATE_REWARD_ADDRESS"));
 }
 
 impl ShadowTransaction {
@@ -221,6 +249,7 @@ impl TransactionPacket {
             Self::TermFeeReward(_) => *TERM_FEE_REWARD,
             Self::IngressProofReward(_) => *INGRESS_PROOF_REWARD,
             Self::PermFeeRefund(_) => *PERM_FEE_REFUND,
+            Self::UpdateRewardAddress(_) => *UPDATE_REWARD_ADDRESS,
         }
     }
 }
@@ -237,6 +266,7 @@ pub const INGRESS_PROOF_REWARD_ID: u8 = 0x08;
 pub const PERM_FEE_REFUND_ID: u8 = 0x09;
 pub const UNPLEDGE_REFUND_ID: u8 = 0x0A;
 pub const UNSTAKE_DEBIT_ID: u8 = 0x0B;
+pub const UPDATE_REWARD_ADDRESS_ID: u8 = 0x0C;
 
 /// Discriminants for EitherIncrementOrDecrement
 pub const EITHER_INCREMENT_ID: u8 = 0x01;
@@ -328,6 +358,10 @@ impl BorshSerialize for TransactionPacket {
                 writer.write_all(&[UNPLEDGE_REFUND_ID])?;
                 inner.serialize(writer)
             }
+            Self::UpdateRewardAddress(inner) => {
+                writer.write_all(&[UPDATE_REWARD_ADDRESS_ID])?;
+                inner.serialize(writer)
+            }
         }
     }
 }
@@ -355,6 +389,9 @@ impl BorshDeserialize for TransactionPacket {
             }
             UNPLEDGE_REFUND_ID => {
                 Self::UnpledgeRefund(BalanceIncrement::deserialize_reader(reader)?)
+            }
+            UPDATE_REWARD_ADDRESS_ID => {
+                Self::UpdateRewardAddress(UpdateRewardAddressDebit::deserialize_reader(reader)?)
             }
             _ => {
                 return Err(borsh::io::Error::new(
@@ -554,6 +591,37 @@ impl BorshDeserialize for UnstakeDebit {
         reader.read_exact(&mut ref_buf)?;
         let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
         Ok(Self { target, irys_ref })
+    }
+}
+
+impl BorshSerialize for UpdateRewardAddressDebit {
+    fn serialize<W: Write>(&self, writer: &mut W) -> borsh::io::Result<()> {
+        writer.write_all(self.target.as_slice())?;
+        writer.write_all(self.irys_ref.as_slice())?;
+        writer.write_all(self.new_reward_address.as_slice())?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for UpdateRewardAddressDebit {
+    fn deserialize_reader<R: Read>(reader: &mut R) -> borsh::io::Result<Self> {
+        let mut addr = [0_u8; 20];
+        reader.read_exact(&mut addr)?;
+        let target = Address::from_slice(&addr);
+
+        let mut ref_buf = [0_u8; 32];
+        reader.read_exact(&mut ref_buf)?;
+        let irys_ref = FixedBytes::<32>::from_slice(&ref_buf);
+
+        let mut new_addr = [0_u8; 20];
+        reader.read_exact(&mut new_addr)?;
+        let new_reward_address = Address::from_slice(&new_addr);
+
+        Ok(Self {
+            target,
+            irys_ref,
+            new_reward_address,
+        })
     }
 }
 

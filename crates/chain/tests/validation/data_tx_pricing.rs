@@ -12,7 +12,7 @@ use irys_actors::{
 };
 use irys_database::tables::IngressProofs as IngressProofsTable;
 use irys_database::walk_all;
-use irys_domain::ChainState;
+use irys_domain::{BlockTreeReadGuard, ChainState};
 use irys_types::storage_pricing::{
     calculate_perm_fee_from_config, calculate_term_fee_from_config, Amount,
 };
@@ -55,6 +55,7 @@ async fn slow_heavy_block_insufficient_perm_fee_gets_rejected() -> eyre::Result<
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -172,6 +173,7 @@ async fn slow_heavy_block_insufficient_term_fee_gets_rejected() -> eyre::Result<
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -562,6 +564,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         pub prod: ProductionStrategy,
         pub data_tx: DataTransactionHeader,
         pub proofs: IngressProofsList,
+        pub block_tree_guard: BlockTreeReadGuard,
     }
 
     #[async_trait::async_trait]
@@ -586,6 +589,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
                 aggregated_miner_fees: LedgerExpiryBalanceDelta::default(),
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: self.block_tree_guard.read().canonical_epoch_snapshot(),
             })
         }
     }
@@ -596,6 +600,7 @@ async fn slow_heavy_same_block_promoted_tx_with_ema_price_change_gets_accepted()
         prod: ProductionStrategy {
             inner: genesis_node.node_ctx.block_producer_inner.clone(),
         },
+        block_tree_guard: genesis_node.node_ctx.block_tree_guard.clone(),
     };
 
     let (promote_block, _adjustment_stats, _eth_payload) = block_prod_strategy

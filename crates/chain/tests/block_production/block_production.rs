@@ -1236,11 +1236,12 @@ async fn heavy_block_prod_fails_with_insufficient_storage_fees() -> eyre::Result
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

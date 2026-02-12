@@ -101,6 +101,7 @@ fn create_test_config(aurora: Option<Aurora>) -> NodeConfig {
         frontier: default_test_frontier(),
         next_name_tbd: None,
         aurora,
+        borealis: None,
     };
     config
 }
@@ -534,6 +535,7 @@ mod epoch_block_filtering {
             frontier: default_test_frontier(),
             next_name_tbd: None,
             aurora,
+            borealis: None,
         };
         config
     }
@@ -637,6 +639,7 @@ mod epoch_block_filtering {
                 activation_timestamp: UnixTimestamp::from_secs(aurora_activation),
                 minimum_commitment_tx_version: AURORA_MIN_VERSION,
             }),
+            borealis: None,
         };
         let [signer1, signer2] = create_funded_signers(&mut config);
         let node = IrysNodeTest::new_genesis(config).start().await;
@@ -696,6 +699,191 @@ mod epoch_block_filtering {
 }
 
 #[cfg(test)]
+mod borealis_hardfork {
+    use super::*;
+    use irys_types::{hardfork_config::Borealis, IrysAddress};
+
+    fn create_borealis_config(borealis: Option<Borealis>, aurora: Option<Aurora>) -> NodeConfig {
+        let mut config = NodeConfig::testing();
+        config.consensus.get_mut().hardforks = IrysHardforkConfig {
+            frontier: default_test_frontier(),
+            next_name_tbd: None,
+            aurora,
+            borealis,
+        };
+        config
+    }
+
+    fn borealis_config_with_timestamp(activation_secs: u64) -> NodeConfig {
+        // Aurora required for V2 transactions
+        let aurora = Some(Aurora {
+            activation_timestamp: UnixTimestamp::from_secs(0),
+            minimum_commitment_tx_version: AURORA_MIN_VERSION,
+        });
+        create_borealis_config(
+            Some(Borealis {
+                activation_timestamp: UnixTimestamp::from_secs(activation_secs),
+            }),
+            aurora,
+        )
+    }
+
+    fn borealis_config_future() -> NodeConfig {
+        borealis_config_with_timestamp(now_secs().saturating_add(ONE_HOUR_SECS))
+    }
+
+    fn borealis_config_past() -> NodeConfig {
+        borealis_config_with_timestamp(now_secs().saturating_sub(ONE_HOUR_SECS))
+    }
+
+    /// Test that UpdateRewardAddress is rejected before Borealis activation.
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_borealis_rejects_update_reward_address_pre_activation() -> eyre::Result<()>
+    {
+        let mut config = borealis_config_future();
+        let signer = create_funded_signer(&mut config);
+        let node = IrysNodeTest::new_genesis(config).start().await;
+
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
+
+        let new_address = IrysAddress::random();
+        let result = node.post_update_reward_address(&signer, new_address).await;
+
+        assert!(result.is_err());
+        assert_http_bad_request(&result.unwrap_err());
+
+        node.stop().await;
+        Ok(())
+    }
+
+    /// Test that UpdateRewardAddress is accepted and mined after Borealis activation.
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_borealis_accepts_update_reward_address_post_activation() -> eyre::Result<()>
+    {
+        let mut config = borealis_config_past();
+        let signer = create_funded_signer(&mut config);
+        let node = IrysNodeTest::new_genesis(config).start().await;
+
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
+
+        let new_address = IrysAddress::random();
+        let tx = node
+            .post_update_reward_address(&signer, new_address)
+            .await?;
+
+        node.mine_blocks(2).await?;
+        let found = find_tx_in_blocks(&node, &tx.id(), MAX_BLOCKS_TO_SEARCH).await;
+        assert!(found.is_some(), "UpdateRewardAddress should be mined");
+
+        node.stop().await;
+        Ok(())
+    }
+
+    /// Test that Borealis activation is epoch-aligned: even after wall clock passes
+    /// the activation timestamp, the hardfork only enables once an epoch block is
+    /// created with timestamp >= activation.
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_borealis_epoch_boundary_activation() -> eyre::Result<()> {
+        let borealis_activation = now_secs().saturating_add(ACTIVATION_DELAY_SECS);
+        let mut config = NodeConfig::testing_with_epochs(2);
+        // Set up Aurora (already active) and Borealis (activating soon)
+        config.consensus.get_mut().hardforks = IrysHardforkConfig {
+            frontier: default_test_frontier(),
+            next_name_tbd: None,
+            aurora: Some(Aurora {
+                activation_timestamp: UnixTimestamp::from_secs(0),
+                minimum_commitment_tx_version: AURORA_MIN_VERSION,
+            }),
+            borealis: Some(Borealis {
+                activation_timestamp: UnixTimestamp::from_secs(borealis_activation),
+            }),
+        };
+
+        let signer = create_funded_signer(&mut config);
+        let node = IrysNodeTest::new_genesis(config).start().await;
+
+        // Stake first (block 1, still in epoch 0 with genesis as epoch block)
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
+
+        // Before activation timestamp: UpdateRewardAddress should be rejected
+        let new_reward_address = IrysAddress::random();
+        let result_pre = node
+            .post_update_reward_address(&signer, new_reward_address)
+            .await;
+        assert!(
+            result_pre.is_err(),
+            "UpdateRewardAddress should be rejected before activation timestamp"
+        );
+
+        // Wait for wall clock to pass activation timestamp
+        wait_for_wallclock(borealis_activation).await;
+
+        // KEY TEST: Wall clock has passed activation, but we haven't mined a new epoch block yet.
+        // The current epoch block (genesis) has timestamp < activation, so hardfork should
+        // still be disabled even though wall clock has passed activation.
+        let result_after_wallclock = node
+            .post_update_reward_address(&signer, new_reward_address)
+            .await;
+        assert!(
+            result_after_wallclock.is_err(),
+            "UpdateRewardAddress should still be rejected after wall clock passes activation \
+             but before epoch block with timestamp >= activation is mined"
+        );
+
+        // Mine to next epoch boundary - this creates a new epoch block with timestamp >= activation
+        node.mine_until_next_epoch().await?;
+
+        // Now hardfork should be active because the new epoch block has timestamp >= activation
+        let result_post = node
+            .post_update_reward_address(&signer, new_reward_address)
+            .await;
+        assert!(
+            result_post.is_ok(),
+            "UpdateRewardAddress should be accepted after epoch block with timestamp >= activation: {:?}",
+            result_post.err()
+        );
+
+        node.stop().await;
+        Ok(())
+    }
+
+    /// Test that Borealis disabled (None) rejects UpdateRewardAddress.
+    #[test_log::test(tokio::test)]
+    async fn heavy_test_borealis_disabled_rejects_update_reward_address() -> eyre::Result<()> {
+        // Aurora active (V2 required), but Borealis disabled
+        let mut config = create_borealis_config(
+            None,
+            Some(Aurora {
+                activation_timestamp: UnixTimestamp::from_secs(0),
+                minimum_commitment_tx_version: AURORA_MIN_VERSION,
+            }),
+        );
+
+        let signer = create_funded_signer(&mut config);
+        let node = IrysNodeTest::new_genesis(config).start().await;
+
+        node.post_stake_commitment_with_signer(&signer).await?;
+        node.mine_block().await?;
+
+        let new_reward_address = IrysAddress::random();
+        let result = node
+            .post_update_reward_address(&signer, new_reward_address)
+            .await;
+        assert!(
+            result.is_err(),
+            "UpdateRewardAddress should be rejected when Borealis is disabled"
+        );
+        assert_http_bad_request(&result.unwrap_err());
+
+        node.stop().await;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod peer_sync_recovery {
     use std::time::Duration;
 
@@ -726,6 +914,7 @@ mod peer_sync_recovery {
             frontier: default_test_frontier(),
             aurora: None, // Disabled initially
             next_name_tbd: None,
+            borealis: None,
         };
 
         // Fund signers: 9 for V1 (3 epochs * 3 blocks), 9 for V2 (3 epochs * 3 blocks), 1 for peer

@@ -2,6 +2,7 @@ mod blobs_rejected;
 mod data_tx_pricing;
 mod ingress_proof_reanchor_dedup;
 mod invalid_perm_fee_refund;
+mod ledger_expiry_with_unstake;
 mod mempool_gossip_shape;
 mod mempool_ingress_proof_dedup;
 mod poa_cases;
@@ -74,7 +75,7 @@ fn send_block_to_block_validation(
 // from the consensus config.
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
-    use irys_types::CommitmentTypeV1;
+    use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -102,11 +103,12 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -127,7 +129,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
     // Create a pledge commitment with invalid value
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentTypeV1::Stake);
+    invalid_pledge.set_commitment_type(CommitmentTypeV2::Stake);
     invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
     invalid_pledge.set_signer(genesis_config.signer().address());
     invalid_pledge.set_fee(consensus_config.mempool.commitment_fee);
@@ -173,7 +175,7 @@ async fn heavy_block_invalid_stake_value_gets_rejected() -> eyre::Result<()> {
 // calculated using calculate_pledge_value_at_count().
 #[test_log::test(tokio::test)]
 async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
-    use irys_types::CommitmentTypeV1;
+    use irys_types::CommitmentTypeV2;
     use irys_types::U256;
 
     struct EvilBlockProdStrategy {
@@ -201,11 +203,12 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -225,7 +228,7 @@ async fn heavy_block_invalid_pledge_value_gets_rejected() -> eyre::Result<()> {
     let consensus_config = &genesis_node.node_ctx.config.consensus;
     let pledge_count = 0;
     let mut invalid_pledge = CommitmentTransaction::new(consensus_config);
-    invalid_pledge.set_commitment_type(CommitmentTypeV1::Pledge {
+    invalid_pledge.set_commitment_type(CommitmentTypeV2::Pledge {
         pledge_count_before_executing: pledge_count,
     });
     invalid_pledge.set_anchor(genesis_node.get_anchor().await?);
@@ -298,11 +301,12 @@ async fn heavy_block_wrong_commitment_order_gets_rejected() -> eyre::Result<()> 
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -416,11 +420,12 @@ async fn heavy_block_unstake_wrong_order_gets_rejected() -> eyre::Result<()> {
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -574,11 +579,12 @@ async fn heavy_block_epoch_commitment_mismatch_gets_rejected() -> eyre::Result<(
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -822,11 +828,12 @@ async fn heavy_block_duplicate_ingress_proof_signers_gets_rejected() -> eyre::Re
                     proofs: Some(proofs),
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -1012,11 +1019,12 @@ async fn heavy_block_epoch_missing_commitments_gets_rejected() -> eyre::Result<(
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: std::collections::BTreeMap::new(),
+                    reward_balance_increment: std::collections::BTreeMap::new(),
                     user_perm_fee_refunds: Vec::new(),
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

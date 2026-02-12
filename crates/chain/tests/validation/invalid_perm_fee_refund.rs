@@ -48,11 +48,12 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: BTreeMap::new(),
+                    reward_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds,
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -180,11 +181,12 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: BTreeMap::new(),
+                    reward_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds, // But we have a refund!
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }

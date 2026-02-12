@@ -1,9 +1,10 @@
 use crate::mempool_service::{validate_commitment_transaction, Inner, TxIngressError, TxReadError};
 use irys_database::{commitment_tx_by_txid, db::IrysDatabaseExt as _};
-use irys_domain::CommitmentSnapshotStatus;
+use irys_domain::{CommitmentSnapshotStatus, HardforkConfigExt as _};
 use irys_types::{
-    CommitmentTransaction, CommitmentValidationError, IrysAddress, IrysTransactionCommon as _,
-    IrysTransactionId, TxKnownStatus, UnixTimestamp, VersionDiscriminant as _, H256,
+    CommitmentTransaction, CommitmentTypeV2, CommitmentValidationError, IrysAddress,
+    IrysTransactionCommon as _, IrysTransactionId, TxKnownStatus, UnixTimestamp,
+    VersionDiscriminant as _, H256,
 };
 // Bring RPC extension trait into scope for test contexts; `as _` avoids unused import warnings
 use irys_types::gossip::v2::GossipBroadcastMessageV2;
@@ -65,6 +66,25 @@ impl Inner {
                 version: commitment_tx.version(),
                 minimum,
             });
+        }
+
+        // Validate commitment type against Borealis hardfork rules (epoch-aligned activation)
+        if matches!(
+            commitment_tx.commitment_type(),
+            CommitmentTypeV2::UpdateRewardAddress { .. }
+        ) {
+            let epoch_snapshot = {
+                let tree = self.block_tree_read_guard.read();
+                tree.canonical_epoch_snapshot()
+            };
+            if !self
+                .config
+                .consensus
+                .hardforks
+                .is_update_reward_address_allowed_for_epoch(&epoch_snapshot)
+            {
+                return Err(TxIngressError::UpdateRewardAddressNotAllowed);
+            }
         }
 
         // Check stake/pledge whitelist early - reject if address is not whitelisted
