@@ -6,9 +6,9 @@ pub use crate::{
         compact_with_discriminant, split_discriminant, Signable, VersionDiscriminant, Versioned,
         VersioningError,
     },
-    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, Compact, ConsensusConfig,
-    DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature, TxChunkOffset,
-    UnpackedChunk, H256, U256,
+    Arbitrary, Base64, CommitmentTransaction, CommitmentTypeV1, CommitmentTypeV2, Compact,
+    ConsensusConfig, DataTransactionMetadata, IrysAddress, IrysSignature, Node, Proof, Signature,
+    TxChunkOffset, UnpackedChunk, H256, U256,
 };
 
 use alloy_primitives::keccak256;
@@ -58,6 +58,9 @@ pub enum CommitmentValidationError {
     InvalidUnpledgeCountZero,
     #[error("Signer address is not allowed to stake/pledge")]
     ForbiddenSigner,
+    /// Invalid update reward address value (must be zero)
+    #[error("Invalid update reward address value: {provided} (must be 0)")]
+    InvalidUpdateRewardAddressValue { provided: U256 },
 }
 
 // Wrapper struct to hold transaction + metadata
@@ -546,10 +549,11 @@ impl CommitmentTransaction {
 
     pub fn total_cost(&self) -> U256 {
         let additional_fee = match &self.commitment_type() {
-            CommitmentTypeV1::Stake => self.value(),
-            CommitmentTypeV1::Pledge { .. } => self.value(),
-            CommitmentTypeV1::Unpledge { .. } => U256::zero(),
-            CommitmentTypeV1::Unstake => U256::zero(),
+            CommitmentTypeV2::Stake => self.value(),
+            CommitmentTypeV2::Pledge { .. } => self.value(),
+            CommitmentTypeV2::Unpledge { .. } => U256::zero(),
+            CommitmentTypeV2::Unstake => U256::zero(),
+            CommitmentTypeV2::UpdateRewardAddress { .. } => U256::zero(),
         };
         U256::from(self.fee()).saturating_add(additional_fee)
     }
@@ -1354,7 +1358,7 @@ mod pledge_decay_parametrized_tests {
             CommitmentTransaction::new_unpledge(&config, H256::zero(), &provider, signer, ph).await;
 
         match tx.commitment_type() {
-            CommitmentTypeV1::Unpledge {
+            CommitmentTypeV2::Unpledge {
                 partition_hash,
                 pledge_count_before_executing,
             } => {

@@ -1198,6 +1198,20 @@ where
                         target,
                     ))
                 }
+                shadow_tx::TransactionPacket::UpdateRewardAddress(update_reward_address_debit) => {
+                    // Fee-only via priority fee (already processed). Emit a log only.
+                    let log = Self::create_shadow_log(
+                        update_reward_address_debit.target,
+                        vec![topic],
+                        vec![
+                            DynSolValue::Address(update_reward_address_debit.target),
+                            DynSolValue::Address(update_reward_address_debit.new_reward_address),
+                        ],
+                    );
+                    let target = update_reward_address_debit.target;
+                    let execution_result = Self::create_success_result(log);
+                    Ok((Err(execution_result), target))
+                }
             },
         }
     }
