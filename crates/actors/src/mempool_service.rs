@@ -802,20 +802,56 @@ impl Inner {
 
         // Log commitment selection summary
         if !commitment_tx.is_empty() {
-            let commitment_summary =
-                commitment_tx
-                    .iter()
-                    .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
-                        match tx.commitment_type() {
-                            CommitmentTypeV2::Stake => (stakes + 1, pledges),
-                            CommitmentTypeV2::Pledge { .. } => (stakes, pledges + 1),
-                            _ => (stakes, pledges),
-                        }
-                    });
+            let (stakes, pledges, unpledges, unstakes, update_reward_addresses) =
+                commitment_tx.iter().fold(
+                    (0_usize, 0_usize, 0_usize, 0_usize, 0_usize),
+                    |(stakes, pledges, unpledges, unstakes, update_reward_addresses), tx| match tx
+                        .commitment_type()
+                    {
+                        CommitmentTypeV2::Stake => (
+                            stakes + 1,
+                            pledges,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Pledge { .. } => (
+                            stakes,
+                            pledges + 1,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Unpledge { .. } => (
+                            stakes,
+                            pledges,
+                            unpledges + 1,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Unstake => (
+                            stakes,
+                            pledges,
+                            unpledges,
+                            unstakes + 1,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::UpdateRewardAddress { .. } => (
+                            stakes,
+                            pledges,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses + 1,
+                        ),
+                    },
+                );
             info!(
                 commitment_selection.selected_commitments = commitment_tx.len(),
-                commitment_selection.stake_txs = commitment_summary.0,
-                commitment_selection.pledge_txs = commitment_summary.1,
+                commitment_selection.stake_txs = stakes,
+                commitment_selection.pledge_txs = pledges,
+                commitment_selection.unpledge_txs = unpledges,
+                commitment_selection.unstake_txs = unstakes,
+                commitment_selection.update_reward_address_txs = update_reward_addresses,
                 commitment_selection.max_allowed = max_commitments,
                 "Completed commitment transaction selection"
             );
