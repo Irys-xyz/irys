@@ -12,8 +12,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::CommitmentTypeV1;
-use irys_types::{BlockTransactions, CommitmentTypeV2};
+use irys_types::CommitmentTypeV2;
 use irys_types::{CommitmentTransaction, NodeConfig, U256};
 
 #[test_log::test(tokio::test)]
