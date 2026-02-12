@@ -457,10 +457,20 @@ pub fn store_ingress_proof_checked<T: DbTx + DbTxMut>(
         ));
     }
 
+    // Delete all existing proofs for this signer before inserting, as DupSort
+    // tables don't upsert — re-anchoring would otherwise produce duplicates.
+    let address = signer.address();
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+        .into_iter()
+        .filter(|(_, proof)| proof.address == address)
+    {
+        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
+    }
+
     tx.put::<IngressProofs>(
         ingress_proof.data_root,
         CompactCachedIngressProof(CachedIngressProof {
-            address: signer.address(),
+            address,
             proof: ingress_proof.clone(),
         }),
     )?;
@@ -480,6 +490,14 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
             "Data root {} not found in CachedDataRoots",
             ingress_proof.data_root
         ));
+    }
+
+    // Delete all existing proofs for this address before inserting (see store_ingress_proof_checked).
+    for (_, existing) in ingress_proofs_by_data_root(tx, ingress_proof.data_root)?
+        .into_iter()
+        .filter(|(_, proof)| proof.address == address)
+    {
+        tx.delete::<IngressProofs>(ingress_proof.data_root, Some(existing))?;
     }
 
     tx.put::<IngressProofs>(

@@ -50,7 +50,7 @@ use irys_types::{
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{BlockHash, CommitmentTypeV1};
+use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -526,7 +526,7 @@ impl Inner {
 
         // these have to be inclusive so we handle txs near height 0 correctly
         let new_enough = anchor_height >= min_anchor_height;
-
+        debug!("ingress proof ID: {} anchor_height: {anchor_height} min_anchor_height: {min_anchor_height}", &ingress_proof.id());
         // note: we don't need old_enough as we're part of the block header
         // so there's no need to go through the mempool
         // let old_enough: bool = anchor_height <= max_anchor_height;
@@ -715,7 +715,7 @@ impl Inner {
             }
 
             // signer stake status check
-            if matches!(tx.commitment_type(), CommitmentTypeV1::Stake) {
+            if matches!(tx.commitment_type(), CommitmentTypeV2::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer());
                 debug!(
                     tx.id = ?tx.id(),
@@ -802,20 +802,56 @@ impl Inner {
 
         // Log commitment selection summary
         if !commitment_tx.is_empty() {
-            let commitment_summary =
-                commitment_tx
-                    .iter()
-                    .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
-                        match tx.commitment_type() {
-                            CommitmentTypeV1::Stake => (stakes + 1, pledges),
-                            CommitmentTypeV1::Pledge { .. } => (stakes, pledges + 1),
-                            _ => (stakes, pledges),
-                        }
-                    });
+            let (stakes, pledges, unpledges, unstakes, update_reward_addresses) =
+                commitment_tx.iter().fold(
+                    (0_usize, 0_usize, 0_usize, 0_usize, 0_usize),
+                    |(stakes, pledges, unpledges, unstakes, update_reward_addresses), tx| match tx
+                        .commitment_type()
+                    {
+                        CommitmentTypeV2::Stake => (
+                            stakes + 1,
+                            pledges,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Pledge { .. } => (
+                            stakes,
+                            pledges + 1,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Unpledge { .. } => (
+                            stakes,
+                            pledges,
+                            unpledges + 1,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Unstake => (
+                            stakes,
+                            pledges,
+                            unpledges,
+                            unstakes + 1,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::UpdateRewardAddress { .. } => (
+                            stakes,
+                            pledges,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses + 1,
+                        ),
+                    },
+                );
             info!(
                 commitment_selection.selected_commitments = commitment_tx.len(),
-                commitment_selection.stake_txs = commitment_summary.0,
-                commitment_selection.pledge_txs = commitment_summary.1,
+                commitment_selection.stake_txs = stakes,
+                commitment_selection.pledge_txs = pledges,
+                commitment_selection.unpledge_txs = unpledges,
+                commitment_selection.unstake_txs = unstakes,
+                commitment_selection.update_reward_address_txs = update_reward_addresses,
                 commitment_selection.max_allowed = max_commitments,
                 "Completed commitment transaction selection"
             );
@@ -1088,9 +1124,11 @@ impl Inner {
     ) -> Result<PublishLedgerWithTxs, eyre::Error> {
         let mut publish_txs: Vec<DataTransactionHeader> = Vec::new();
         let mut publish_proofs: Vec<IngressProof> = Vec::new();
+        // IMPORTANT: must be valid for THE HEIGHT WE ARE ABOUT TO PRODUCE
+        let next_block_height = current_height + 1;
 
         // only max anchor age is constrained for ingress proofs
-        let min_ingress_proof_anchor_height = current_height.saturating_sub(
+        let min_ingress_proof_anchor_height = next_block_height.saturating_sub(
             self.config
                 .consensus
                 .mempool
@@ -1211,7 +1249,7 @@ impl Inner {
                 // If it's not promoted, validate the proofs
 
                 // Get all the proofs for this tx
-                let all_proofs = self
+                let mut all_proofs = self
                     .irys_db
                     .view_eyre(|read_tx| ingress_proofs_by_data_root(read_tx, tx_header.data_root))?
                     .into_iter()
@@ -1222,6 +1260,21 @@ impl Inner {
                         !expired
                     })
                     .collect::<Vec<_>>();
+
+                // Dedup by signer address in-place, keeping first proof per address
+                let pre_dedup_len = all_proofs.len();
+                let mut seen_addresses = HashSet::new();
+                all_proofs
+                    .retain(|(_, cached_proof)| seen_addresses.insert(cached_proof.0.address));
+                if all_proofs.len() < pre_dedup_len {
+                    warn!(
+                        tx.id = ?tx_header.id,
+                        tx.data_root = ?tx_header.data_root,
+                        before = pre_dedup_len,
+                        after = all_proofs.len(),
+                        "Duplicate ingress proof signers detected for data root, deduplicating"
+                    );
+                }
 
                 // Check for minimum number of ingress proofs
                 let total_miners = self
@@ -1980,7 +2033,7 @@ impl AtomicMempoolState {
     pub async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
-        commitment_type_filter: impl Fn(CommitmentTypeV1) -> bool,
+        commitment_type_filter: impl Fn(CommitmentTypeV2) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
         let mempool = self.read().await;
@@ -2519,7 +2572,7 @@ impl AtomicMempoolState {
             // Check if there's at least one pending stake transaction
             if pending
                 .iter()
-                .any(|c| c.commitment_type() == CommitmentTypeV1::Stake)
+                .any(|c| c.commitment_type() == CommitmentTypeV2::Stake)
             {
                 return true;
             }
@@ -2833,6 +2886,9 @@ pub enum TxIngressError {
         "Commitment transaction version {version} is below minimum required version {minimum}"
     )]
     InvalidVersion { version: u8, minimum: u8 },
+    /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
+    #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]
+    UpdateRewardAddressNotAllowed,
     /// The account does not have enough tokens to fund this transaction
     #[error("Account has insufficient funds for transaction {0}")]
     Unfunded(H256),

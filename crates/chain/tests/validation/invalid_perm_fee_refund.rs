@@ -10,7 +10,7 @@ use irys_actors::{
     shadow_tx_generator::PublishLedgerWithTxs, BlockProdStrategy, BlockProducerInner,
     ProductionStrategy,
 };
-use irys_types::{BlockTransactions, IrysAddress};
+use irys_types::IrysAddress;
 use irys_types::{
     DataLedger, DataTransactionHeader, DataTransactionHeaderV1, IrysBlockHeader, NodeConfig, H256,
     U256,
@@ -51,11 +51,12 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: BTreeMap::new(),
+                    reward_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds,
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -112,7 +113,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -121,7 +122,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        BlockTransactions::default(),
+        transactions.clone(),
         false,
     )
     .await?;
@@ -136,7 +137,7 @@ pub async fn heavy_block_perm_fee_refund_for_promoted_tx_gets_rejected() -> eyre
     send_block_to_block_tree(
         &peer_node.node_ctx,
         block.clone(),
-        BlockTransactions::default(),
+        transactions.clone(),
         false,
     )
     .await?;
@@ -195,11 +196,12 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
                     proofs: None,
                 },
                 aggregated_miner_fees: LedgerExpiryBalanceDelta {
-                    miner_balance_increment: BTreeMap::new(),
+                    reward_balance_increment: BTreeMap::new(),
                     user_perm_fee_refunds, // But we have a refund!
                 },
                 commitment_refund_events: vec![],
                 unstake_refund_events: vec![],
+                epoch_snapshot: irys_domain::dummy_epoch_snapshot(),
             })
         }
     }
@@ -236,7 +238,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
         },
     };
 
-    let (block, _adjustment_stats, _transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -245,7 +247,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
     send_block_to_block_tree(
         &genesis_node.node_ctx,
         block.clone(),
-        BlockTransactions::default(),
+        transactions.clone(),
         false,
     )
     .await?;
@@ -260,7 +262,7 @@ pub async fn heavy_block_perm_fee_refund_for_nonexistent_tx_gets_rejected() -> e
     send_block_to_block_tree(
         &peer_node.node_ctx,
         block.clone(),
-        BlockTransactions::default(),
+        transactions.clone(),
         false,
     )
     .await?;

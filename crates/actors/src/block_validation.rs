@@ -14,6 +14,7 @@ use irys_database::{block_header_by_hash, cached_data_root_by_data_root, tx_head
 use irys_domain::{
     BlockIndex, BlockIndexReadGuard, BlockTreeReadGuard, CommitmentSnapshot,
     CommitmentSnapshotStatus, EmaSnapshot, EpochSnapshot, ExecutionPayloadCache,
+    HardforkConfigExt as _,
 };
 use irys_packing::{capacity_single::compute_entropy_chunk, xor_vec_u8_arrays_in_place};
 use irys_reth::shadow_tx::{detect_and_decode, ShadowTransaction, ShadowTxError};
@@ -34,7 +35,7 @@ use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
 use irys_types::{BlockHash, LedgerChunkRange};
 use irys_types::{BlockTransactions, UnixTimestampMs};
-use irys_types::{CommitmentTypeV1, IrysTransactionCommon, VersionDiscriminant as _};
+use irys_types::{CommitmentTypeV2, IrysTransactionCommon, VersionDiscriminant as _};
 use irys_vdf::last_step_checkpoints_is_valid;
 use irys_vdf::state::VdfStateReadonly;
 use itertools::*;
@@ -321,6 +322,14 @@ pub enum ValidationError {
         position: usize,
         version: u8,
         minimum: u8,
+    },
+
+    /// Commitment type not allowed before hardfork activation (e.g., UpdateRewardAddress before Borealis)
+    #[error("Commitment {tx_id} at position {position} uses type {commitment_type} not allowed before hardfork activation")]
+    CommitmentTypeNotAllowed {
+        tx_id: H256,
+        position: usize,
+        commitment_type: String,
     },
 
     /// Commitment ordering validation failed
@@ -1600,6 +1609,7 @@ async fn generate_expected_shadow_transactions(
         &expired_ledger_fees,
         &commitment_refund_events,
         &unstake_refund_events,
+        &parent_epoch_snapshot,
     )
     .map_err(|e| eyre!("Failed to create shadow tx generator: {}", e))?;
 
@@ -1734,6 +1744,47 @@ pub async fn commitment_txs_are_valid(
         }
     }
 
+    // Get parent snapshots for Borealis activation check
+    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
+        let read = block_tree_guard.read();
+        let commitment_snapshot = read
+            .get_commitment_snapshot(&block.previous_block_hash)
+            .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
+        let epoch_snapshot = read
+            .get_epoch_snapshot(&block.previous_block_hash)
+            .ok_or_else(|| ValidationError::ParentEpochSnapshotMissing {
+                block_hash: block.previous_block_hash,
+            })?;
+        (commitment_snapshot, epoch_snapshot)
+    };
+
+    // Validate Borealis: reject UpdateRewardAddress if not activated
+    if !config
+        .consensus
+        .hardforks
+        .is_update_reward_address_allowed_for_epoch(&parent_epoch_snapshot)
+    {
+        for (idx, tx) in commitment_txs.iter().enumerate() {
+            if matches!(
+                tx.commitment_type(),
+                CommitmentTypeV2::UpdateRewardAddress { .. }
+            ) {
+                error!(
+                        "Commitment transaction {} at position {} uses UpdateRewardAddress before Borealis activation",
+                        tx.id(),
+                        idx
+                    );
+                return Err(ValidationError::CommitmentTypeNotAllowed {
+                    tx_id: tx.id(),
+                    position: idx,
+                    commitment_type: "UpdateRewardAddress".to_string(),
+                });
+            }
+        }
+    }
+
     // Validate that all commitment transactions have correct values
     for (idx, tx) in commitment_txs.iter().enumerate() {
         tx.validate_value(&config.consensus).map_err(|e| {
@@ -1750,21 +1801,6 @@ pub async fn commitment_txs_are_valid(
             }
         })?;
     }
-
-    let (parent_commitment_snapshot, parent_epoch_snapshot) = {
-        let read = block_tree_guard.read();
-        let commitment_snapshot = read
-            .get_commitment_snapshot(&block.previous_block_hash)
-            .map_err(|_| ValidationError::ParentCommitmentSnapshotMissing {
-                block_hash: block.previous_block_hash,
-            })?;
-        let epoch_snapshot = read
-            .get_epoch_snapshot(&block.previous_block_hash)
-            .ok_or_else(|| ValidationError::ParentEpochSnapshotMissing {
-                block_hash: block.previous_block_hash,
-            })?;
-        (commitment_snapshot, epoch_snapshot)
-    };
 
     if is_epoch_block {
         debug!(
@@ -1817,7 +1853,7 @@ pub async fn commitment_txs_are_valid(
     };
 
     for tx in commitment_txs {
-        if let CommitmentTypeV1::Unpledge { partition_hash, .. } = tx.commitment_type() {
+        if let CommitmentTypeV2::Unpledge { partition_hash, .. } = tx.commitment_type() {
             let owner = parent_epoch_snapshot
                 .partition_assignments
                 .get_assignment(partition_hash)
@@ -3837,6 +3873,7 @@ mod commitment_version_tests {
                     activation_timestamp: UnixTimestamp::from_secs(activation_secs),
                     minimum_commitment_tx_version: min_version,
                 }),
+                borealis: None,
             },
             ..ConsensusConfig::testing()
         }
@@ -3851,6 +3888,7 @@ mod commitment_version_tests {
                 },
                 next_name_tbd: None,
                 aurora: None,
+                borealis: None,
             },
             ..ConsensusConfig::testing()
         }

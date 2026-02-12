@@ -10,9 +10,9 @@ use irys_domain::{PeerList, ScoreDecreaseReason, ScoreIncreaseReason};
 use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
 use irys_types::{
     BlockBody, BlockHash, BlockIndexItem, BlockIndexQuery, GossipCacheKey, HandshakeRequest,
-    HandshakeRequestV2, HandshakeResponse, IrysAddress, IrysBlockHeader, IrysPeerId,
-    IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError, PeerResponse,
-    ProtocolVersion, DATA_REQUEST_RETRIES, H256,
+    HandshakeRequestV2, HandshakeResponseV1, HandshakeResponseV2, IrysAddress, IrysBlockHeader,
+    IrysPeerId, IrysTransactionResponse, NodeInfo, PeerAddress, PeerListItem, PeerNetworkError,
+    PeerResponse, ProtocolVersion, DATA_REQUEST_RETRIES, H256,
 };
 use rand::prelude::SliceRandom as _;
 use reqwest::{Client, StatusCode};
@@ -358,14 +358,23 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponse> =
+        let response: GossipResponse<HandshakeResponseV1> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
 
         match response {
-            GossipResponse::Accepted(version_response) => {
-                Ok(PeerResponse::Accepted(version_response))
+            GossipResponse::Accepted(v1_response) => {
+                // Convert V1 response to V2 format for internal compatibility
+                let v2_response = HandshakeResponseV2 {
+                    version: v1_response.version,
+                    protocol_version: v1_response.protocol_version,
+                    peers: v1_response.peers,
+                    timestamp: v1_response.timestamp,
+                    message: v1_response.message,
+                    consensus_config_hash: H256::zero(), // V1 doesn't have consensus hash
+                };
+                Ok(PeerResponse::Accepted(v2_response))
             }
             GossipResponse::Rejected(reason) => match reason {
                 RejectionReason::InvalidCredentials => Ok(PeerResponse::Rejected(
@@ -414,7 +423,7 @@ impl GossipClient {
             ));
         }
 
-        let response: GossipResponse<HandshakeResponse> =
+        let response: GossipResponse<HandshakeResponseV2> =
             response.json().await.map_err(|error| {
                 GossipClientError::GetJsonResponsePayload(peer.to_string(), error.to_string())
             })?;
