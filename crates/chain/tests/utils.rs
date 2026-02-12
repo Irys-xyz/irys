@@ -51,10 +51,10 @@ use irys_types::{
     H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
 };
 use irys_types::{
-    Base64, ChunkBytes, CommitmentTransaction, Config, ConsensusConfig, DataTransaction,
-    DataTransactionHeader, DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId,
-    LedgerChunkOffset, NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset,
-    UnpackedChunk,
+    Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
+    CommitmentV2WithMetadata, Config, ConsensusConfig, DataTransaction, DataTransactionHeader,
+    DatabaseProvider, IngressProof, IrysBlockHeader, IrysTransactionId, LedgerChunkOffset,
+    NodeConfig, NodeMode, PackedChunk, PeerAddress, TxChunkOffset, UnpackedChunk,
 };
 use irys_types::{
     HandshakeRequest, HandshakeRequestV2, Interval, PartitionChunkOffset, ProtocolVersion,
@@ -2491,6 +2491,49 @@ impl IrysNodeTest<IrysNodeCtx> {
         let api_uri = self.node_ctx.config.node_config.local_api_url();
         self.post_commitment_tx_request(&api_uri, commitment_tx)
             .await
+    }
+
+    /// Helper to post an UpdateRewardAddress commitment transaction.
+    pub async fn post_update_reward_address(
+        &self,
+        signer: &IrysSigner,
+        new_reward_address: IrysAddress,
+    ) -> eyre::Result<CommitmentTransaction> {
+        self.post_update_reward_address_with_fee(
+            signer,
+            new_reward_address,
+            self.node_ctx.config.consensus.mempool.commitment_fee,
+        )
+        .await
+    }
+
+    /// Helper to post an UpdateRewardAddress commitment transaction with a custom fee.
+    pub async fn post_update_reward_address_with_fee(
+        &self,
+        signer: &IrysSigner,
+        new_reward_address: IrysAddress,
+        fee: u64,
+    ) -> eyre::Result<CommitmentTransaction> {
+        let consensus = &self.node_ctx.config.consensus;
+        let anchor = self.get_anchor().await.expect("anchor should be available");
+
+        let mut update_tx = CommitmentTransaction::V2(CommitmentV2WithMetadata {
+            tx: CommitmentTransactionV2 {
+                commitment_type: CommitmentTypeV2::UpdateRewardAddress { new_reward_address },
+                anchor,
+                fee,
+                value: U256::zero(),
+                ..CommitmentTransactionV2::new(consensus)
+            },
+            metadata: Default::default(),
+        });
+
+        signer.sign_commitment(&mut update_tx)?;
+        tracing::info!("Generated update_reward_address_tx.id: {}", update_tx.id());
+
+        self.post_commitment_tx(&update_tx).await?;
+
+        Ok(update_tx)
     }
 
     pub async fn get_stake_price(&self) -> eyre::Result<CommitmentPriceInfo> {

@@ -2,21 +2,34 @@ use irys_types::CommitmentStatus;
 use irys_types::{IrysAddress, IrysTransactionId, H256, U256};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Default, Clone, Hash)]
-pub struct CommitmentStateEntry {
+/// Entry representing a stake commitment.
+#[derive(Debug, Clone, Hash)]
+pub struct StakeEntry {
     pub id: IrysTransactionId,
     pub commitment_status: CommitmentStatus,
-    // Only valid for pledge commitments
-    pub partition_hash: Option<H256>,
     pub signer: IrysAddress,
     /// Irys token amount in atomic units
     pub amount: U256,
+    /// Address to receive rewards
+    pub reward_address: IrysAddress,
+}
+
+/// Entry representing a pledge commitment.
+#[derive(Debug, Clone, Hash)]
+pub struct PledgeEntry {
+    pub id: IrysTransactionId,
+    pub commitment_status: CommitmentStatus,
+    pub signer: IrysAddress,
+    /// Irys token amount in atomic units
+    pub amount: U256,
+    /// Partition hash assigned to this pledge (None until assigned)
+    pub partition_hash: Option<H256>,
 }
 
 #[derive(Debug, Default, Clone, Hash)]
 pub struct CommitmentState {
-    pub stake_commitments: BTreeMap<IrysAddress, CommitmentStateEntry>,
-    pub pledge_commitments: BTreeMap<IrysAddress, Vec<CommitmentStateEntry>>,
+    pub stake_commitments: BTreeMap<IrysAddress, StakeEntry>,
+    pub pledge_commitments: BTreeMap<IrysAddress, Vec<PledgeEntry>>,
 }
 
 impl CommitmentState {

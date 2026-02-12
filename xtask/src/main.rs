@@ -10,7 +10,7 @@ use xtask::failures::{
 };
 
 const CARGO_FLAKE_VERSION: &str = "0.0.5";
-const NEXTEST_VERSION: &str = "0.9.102";
+const NEXTEST_VERSION: &str = "0.9.124";
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]

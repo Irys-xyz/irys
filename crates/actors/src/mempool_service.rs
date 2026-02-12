@@ -50,7 +50,7 @@ use irys_types::{
     ChunkPathHash, CommitmentTransaction, CommitmentValidationError, DataRoot,
     DataTransactionHeader, IrysAddress, MempoolConfig, TxChunkOffset, UnpackedChunk,
 };
-use irys_types::{BlockHash, CommitmentTypeV1};
+use irys_types::{BlockHash, CommitmentTypeV2};
 use irys_types::{DataLedger, IngressProofsList, TokioServiceHandle, TxKnownStatus};
 use lru::LruCache;
 use reth::rpc::types::BlockId;
@@ -715,7 +715,7 @@ impl Inner {
             }
 
             // signer stake status check
-            if matches!(tx.commitment_type(), CommitmentTypeV1::Stake) {
+            if matches!(tx.commitment_type(), CommitmentTypeV2::Stake) {
                 let is_staked = epoch_snapshot.is_staked(tx.signer());
                 debug!(
                     tx.id = ?tx.id(),
@@ -802,20 +802,56 @@ impl Inner {
 
         // Log commitment selection summary
         if !commitment_tx.is_empty() {
-            let commitment_summary =
-                commitment_tx
-                    .iter()
-                    .fold((0_usize, 0_usize), |(stakes, pledges), tx| {
-                        match tx.commitment_type() {
-                            CommitmentTypeV1::Stake => (stakes + 1, pledges),
-                            CommitmentTypeV1::Pledge { .. } => (stakes, pledges + 1),
-                            _ => (stakes, pledges),
-                        }
-                    });
+            let (stakes, pledges, unpledges, unstakes, update_reward_addresses) =
+                commitment_tx.iter().fold(
+                    (0_usize, 0_usize, 0_usize, 0_usize, 0_usize),
+                    |(stakes, pledges, unpledges, unstakes, update_reward_addresses), tx| match tx
+                        .commitment_type()
+                    {
+                        CommitmentTypeV2::Stake => (
+                            stakes + 1,
+                            pledges,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Pledge { .. } => (
+                            stakes,
+                            pledges + 1,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Unpledge { .. } => (
+                            stakes,
+                            pledges,
+                            unpledges + 1,
+                            unstakes,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::Unstake => (
+                            stakes,
+                            pledges,
+                            unpledges,
+                            unstakes + 1,
+                            update_reward_addresses,
+                        ),
+                        CommitmentTypeV2::UpdateRewardAddress { .. } => (
+                            stakes,
+                            pledges,
+                            unpledges,
+                            unstakes,
+                            update_reward_addresses + 1,
+                        ),
+                    },
+                );
             info!(
                 commitment_selection.selected_commitments = commitment_tx.len(),
-                commitment_selection.stake_txs = commitment_summary.0,
-                commitment_selection.pledge_txs = commitment_summary.1,
+                commitment_selection.stake_txs = stakes,
+                commitment_selection.pledge_txs = pledges,
+                commitment_selection.unpledge_txs = unpledges,
+                commitment_selection.unstake_txs = unstakes,
+                commitment_selection.update_reward_address_txs = update_reward_addresses,
                 commitment_selection.max_allowed = max_commitments,
                 "Completed commitment transaction selection"
             );
@@ -1996,7 +2032,7 @@ impl AtomicMempoolState {
     pub async fn count_mempool_commitments(
         &self,
         user_address: &IrysAddress,
-        commitment_type_filter: impl Fn(CommitmentTypeV1) -> bool,
+        commitment_type_filter: impl Fn(CommitmentTypeV2) -> bool,
         seen_ids: &mut HashSet<H256>,
     ) -> u64 {
         let mempool = self.read().await;
@@ -2535,7 +2571,7 @@ impl AtomicMempoolState {
             // Check if there's at least one pending stake transaction
             if pending
                 .iter()
-                .any(|c| c.commitment_type() == CommitmentTypeV1::Stake)
+                .any(|c| c.commitment_type() == CommitmentTypeV2::Stake)
             {
                 return true;
             }
@@ -2849,6 +2885,9 @@ pub enum TxIngressError {
         "Commitment transaction version {version} is below minimum required version {minimum}"
     )]
     InvalidVersion { version: u8, minimum: u8 },
+    /// UpdateRewardAddress commitment type is not allowed before Borealis hardfork activation
+    #[error("UpdateRewardAddress commitment type not allowed before Borealis hardfork")]
+    UpdateRewardAddressNotAllowed,
     /// The account does not have enough tokens to fund this transaction
     #[error("Account has insufficient funds for transaction {0}")]
     Unfunded(H256),
