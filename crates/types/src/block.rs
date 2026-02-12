@@ -1137,6 +1137,7 @@ impl SealedBlock {
         eyre::ensure!(
             header.is_signature_valid(),
             "Invalid block signature for block hash {:?}",
+            header.block_hash
         );
         eyre::ensure!(
             header.block_hash == body.block_hash,
