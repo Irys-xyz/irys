@@ -51,7 +51,7 @@ impl RecoveryAttempts {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CircuitBreakerConfig {
     pub capacity: BreakerCapacity,
     pub failure_threshold: FailureThreshold,
