@@ -13,7 +13,7 @@
 //! then by height (lower first) and VDF steps (fewer first).
 
 use irys_domain::{BlockTree, BlockTreeReadGuard, ChainState};
-use irys_types::{BlockHash, IrysBlockHeader};
+use irys_types::{BlockHash, IrysBlockHeader, SealedBlock};
 use irys_vdf::state::CancelEnum;
 use priority_queue::PriorityQueue;
 use std::collections::HashMap;
@@ -93,15 +93,15 @@ pub(super) struct PreemptibleVdfTask {
 }
 
 impl PreemptibleVdfTask {
-    #[instrument(skip_all, fields(block.hash = %self.task.block.block_hash))]
+    #[instrument(skip_all, fields(block.hash = %self.task.sealed_block.header().block_hash))]
     pub(super) async fn execute(self) -> (VdfValidationResult, BlockValidationTask) {
         let inner = Arc::clone(&self.task.service_inner);
-        let block = Arc::clone(&self.task.block);
+        let header = self.task.sealed_block.header();
         let skip_vdf = self.task.skip_vdf_validation;
 
         // No bridge task needed - just use the AtomicU8 directly!
         let result = match inner
-            .ensure_vdf_is_valid(&block, self.cancel_u8.clone(), skip_vdf)
+            .ensure_vdf_is_valid(header, self.cancel_u8.clone(), skip_vdf)
             .await
         {
             Ok(()) => VdfValidationResult::Valid,
@@ -128,7 +128,7 @@ pub(super) struct CurrentVdfTask {
     pub priority: BlockPriorityMeta,
     pub cancel_signal: Arc<std::sync::atomic::AtomicU8>,
     pub handle: JoinHandle<(VdfValidationResult, BlockValidationTask)>,
-    pub block: Arc<IrysBlockHeader>,
+    pub sealed_block: Arc<SealedBlock>,
 }
 
 /// Simplified VDF scheduler with preemption
@@ -153,9 +153,9 @@ impl VdfScheduler {
     }
 
     /// Submit a VDF task
-    #[instrument(skip_all, fields(block.hash = %task.block.block_hash, ?priority))]
+    #[instrument(skip_all, fields(block.hash = %task.sealed_block.header().block_hash, ?priority))]
     pub(super) fn submit(&mut self, task: BlockValidationTask, priority: BlockPriorityMeta) {
-        let hash = task.block.block_hash;
+        let hash = task.sealed_block.header().block_hash;
 
         // Check for duplicates
         if self.pending.get(&task).is_some() {
@@ -204,11 +204,11 @@ impl VdfScheduler {
         }
 
         let (task, priority) = self.pending.pop()?;
-        let hash = task.block.block_hash;
+        let hash = task.sealed_block.header().block_hash;
 
         // Create AtomicU8 for cancellation
         let cancel_u8 = Arc::new(std::sync::atomic::AtomicU8::new(CancelEnum::Continue as u8));
-        let block = Arc::clone(&task.block);
+        let sealed_block = Arc::clone(&task.sealed_block);
         let preemptible = PreemptibleVdfTask {
             task,
             cancel_u8: Arc::clone(&cancel_u8),
@@ -227,7 +227,7 @@ impl VdfScheduler {
         self.current = Some(CurrentVdfTask {
             hash,
             priority,
-            block,
+            sealed_block,
             cancel_signal: cancel_u8,
             handle,
         });
@@ -332,9 +332,9 @@ impl ValidationCoordinator {
     }
 
     /// Submit a validation task
-    #[instrument(skip_all, fields(block.hash = %task.block.block_hash, block.height = %task.block.height))]
+    #[instrument(skip_all, fields(block.hash = %task.sealed_block.header().block_hash, block.height = %task.sealed_block.header().height))]
     pub(super) fn submit_task(&mut self, task: BlockValidationTask) {
-        let priority = self.calculate_priority(&task.block);
+        let priority = self.calculate_priority(task.sealed_block.header());
         self.vdf_scheduler.submit(task, priority);
     }
 
@@ -345,7 +345,7 @@ impl ValidationCoordinator {
         if let Some((hash, result, task)) = self.vdf_scheduler.poll_current().await {
             match &result {
                 VdfValidationResult::Valid => {
-                    let block_hash = task.block.block_hash;
+                    let block_hash = task.sealed_block.header().block_hash;
 
                     let abort_handle = self.concurrent_tasks.spawn(
                         async move {
@@ -368,7 +368,7 @@ impl ValidationCoordinator {
                 }
                 VdfValidationResult::Cancelled => {
                     // Re-queue the cancelled task with recalculated priority
-                    let priority = self.calculate_priority(&task.block);
+                    let priority = self.calculate_priority(task.sealed_block.header());
                     self.vdf_scheduler.pending.push(task, priority);
                 }
                 VdfValidationResult::Invalid(error) => {
@@ -406,7 +406,7 @@ impl ValidationCoordinator {
         };
 
         // Calculate new priority (block is already a reference)
-        let new_priority = self.calculate_priority(&current.block);
+        let new_priority = self.calculate_priority(current.sealed_block.header());
 
         if new_priority == current.priority {
             return; // No change
@@ -444,7 +444,7 @@ impl ValidationCoordinator {
 
         let mut updated_count = 0;
         for task in tasks_to_update {
-            let new_priority = self.calculate_priority(&task.block);
+            let new_priority = self.calculate_priority(task.sealed_block.header());
             // update_priority returns true if the item existed and was updated
             if self
                 .vdf_scheduler
@@ -472,8 +472,8 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
-    use irys_types::BlockTransactions;
-    use irys_types::{serialization::H256List, BlockHash, IrysBlockHeader, H256};
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+    use irys_types::{serialization::H256List, BlockBody, BlockHash, IrysBlockHeader};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
@@ -609,8 +609,8 @@ mod tests {
         // Create genesis block
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
-        genesis.block_hash = H256::random();
         genesis.cumulative_diff = 0.into();
+        genesis.test_sign();
 
         // Create block tree with genesis
         let mut block_tree = BlockTree::new(&genesis, irys_types::ConsensusConfig::testing());
@@ -624,14 +624,23 @@ mod tests {
             let mut header = IrysBlockHeader::new_mock_header();
             header.height = height;
             header.previous_block_hash = last_hash;
-            header.block_hash = H256::random();
             header.cumulative_diff = height.into();
+            header.test_sign();
 
+            let sealed = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block"),
+            );
             block_tree
                 .add_common(
                     header.block_hash,
-                    &header,
-                    BlockTransactions::default(),
+                    &sealed,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
@@ -674,14 +683,23 @@ mod tests {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
                 header.previous_block_hash = last_hash;
-                header.block_hash = H256::random();
                 header.cumulative_diff = height.into();
+                header.test_sign();
                 last_hash = header.block_hash;
 
+                let sealed = Arc::new(
+                    SealedBlock::new(
+                        header.clone(),
+                        BlockBody {
+                            block_hash: header.block_hash,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("sealing block"),
+                );
                 tree.add_common(
                     header.block_hash,
-                    &header,
-                    BlockTransactions::default(),
+                    &sealed,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),
@@ -723,14 +741,23 @@ mod tests {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
                 header.previous_block_hash = last_hash;
-                header.block_hash = H256::random();
                 header.cumulative_diff = height.into();
+                header.test_sign();
                 last_hash = header.block_hash;
 
+                let sealed = Arc::new(
+                    SealedBlock::new(
+                        header.clone(),
+                        BlockBody {
+                            block_hash: header.block_hash,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("sealing block"),
+                );
                 tree.add_common(
                     header.block_hash,
-                    &header,
-                    BlockTransactions::default(),
+                    &sealed,
                     Arc::new(CommitmentSnapshot::default()),
                     dummy_epoch_snapshot(),
                     dummy_ema_snapshot(),

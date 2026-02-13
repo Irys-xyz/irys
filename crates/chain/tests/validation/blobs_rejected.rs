@@ -12,7 +12,9 @@ use irys_actors::block_validation::ValidationError;
 use irys_actors::BlockProdStrategy as _;
 use irys_actors::ProductionStrategy;
 use irys_chain::IrysNodeCtx;
-use irys_types::{BlockTransactions, IrysBlockHeader, NodeConfig};
+use irys_types::{
+    BlockBody, BlockTransactions, IrysBlockHeader, NodeConfig, SealedBlock as IrysSealedBlock,
+};
 use reth::api::Block as _;
 use reth::core::primitives::SealedBlock;
 use reth::primitives::Block;
@@ -29,12 +31,14 @@ async fn produce_block(
         inner: genesis_node.node_ctx.block_producer_inner.clone(),
     };
 
-    let (block, _adjustment_stats, transactions, eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .ok_or_else(|| eyre::eyre!("no block produced"))?;
 
-    Ok((block, transactions, eth_payload))
+    let header = block.header().clone();
+    let transactions = block.transactions().as_ref().clone();
+    Ok((header, transactions, eth_payload))
 }
 
 // Mutates the sealed block's header in-place via unseal/modify/seal, returns the new sealed block.
@@ -69,7 +73,7 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (mut irys_block, transactions, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set blob_gas_used in the EVM header to non-zero
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -82,18 +86,27 @@ async fn evm_payload_with_blob_gas_used_is_rejected() -> eyre::Result<()> {
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
-    irys_block = Arc::new(header);
 
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        irys_block.clone(),
-        transactions,
-        false,
-    )
-    .await?;
+    // Create new SealedBlock with mutated header and matching body.block_hash
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![],
+        commitment_transactions: vec![],
+    };
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
+
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -117,7 +130,7 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (mut irys_block, transactions, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set excess_blob_gas in the EVM header to non-zero
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -130,18 +143,27 @@ async fn evm_payload_with_excess_blob_gas_is_rejected() -> eyre::Result<()> {
 
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
-    irys_block = Arc::new(header);
 
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        irys_block.clone(),
-        transactions,
-        false,
-    )
-    .await?;
+    // Create new SealedBlock with mutated header and matching body.block_hash
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![],
+        commitment_transactions: vec![],
+    };
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
+
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -165,7 +187,7 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (mut irys_block, transactions, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: set a non-empty withdrawals list in the EVM body
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -189,19 +211,28 @@ async fn evm_payload_with_withdrawals_is_rejected() -> eyre::Result<()> {
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
-    irys_block = Arc::new(header);
+
+    // Create new SealedBlock with mutated header and matching body.block_hash
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![],
+        commitment_transactions: vec![],
+    };
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        irys_block.clone(),
-        transactions,
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),
@@ -225,7 +256,7 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
         .await;
     genesis_node.mine_block().await?;
 
-    let (mut irys_block, transactions, eth_payload) = produce_block(&genesis_node).await?;
+    let (irys_block, _transactions, eth_payload) = produce_block(&genesis_node).await?;
 
     // Mutate: append an EIP-4844 transaction that carries blob_versioned_hashes (non-empty)
     let mutated = mutate_header(eth_payload.block(), |blk| {
@@ -258,19 +289,28 @@ async fn evm_payload_with_versioned_hashes_is_rejected() -> eyre::Result<()> {
     // Update irys block header with new evm block hash and resign
     let mut header = (*irys_block).clone();
     header.evm_block_hash = mutated.hash();
+    // Clear tx_ids in ledgers to match the empty body (keep ledger structure intact)
+    for ledger in header.data_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
+    for ledger in header.system_ledgers.iter_mut() {
+        ledger.tx_ids.0.clear();
+    }
     signer.sign_block_header(&mut header)?;
-    irys_block = Arc::new(header);
+
+    // Create new SealedBlock with mutated header and matching body.block_hash
+    let body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: vec![],
+        commitment_transactions: vec![],
+    };
+    let sealed_block = Arc::new(IrysSealedBlock::new(header, body)?);
 
     // Send block for validation
-    send_block_to_block_tree(
-        &genesis_node.node_ctx,
-        irys_block.clone(),
-        transactions,
-        false,
-    )
-    .await?;
+    send_block_to_block_tree(&genesis_node.node_ctx, sealed_block.clone(), false).await?;
 
-    let outcome = read_block_from_state(&genesis_node.node_ctx, &irys_block.block_hash).await;
+    let outcome =
+        read_block_from_state(&genesis_node.node_ctx, &sealed_block.header().block_hash).await;
     assert_validation_error(
         outcome,
         |e| matches!(e, ValidationError::ShadowTransactionInvalid(_)),

@@ -155,7 +155,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                 tx_path: None,
                 data_path: None,
                 chunk: Some(Base64(entropy_chunk)),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset,
                 partition_hash,
             };
@@ -176,7 +176,7 @@ async fn multi_slot_poa_test() -> eyre::Result<()> {
                     sorted_txs[tx_index].proofs[chunk_index].proof.clone(),
                 )),
                 chunk: Some(Base64(poa_chunk.clone())),
-                ledger_id: Some(1),
+                ledger_id: Some(DataLedger::Submit.into()),
                 partition_chunk_offset,
                 partition_hash,
             };

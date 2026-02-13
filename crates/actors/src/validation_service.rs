@@ -23,7 +23,7 @@ use irys_domain::{
 };
 use irys_reth_node_bridge::IrysRethNodeAdapter;
 use irys_types::{
-    app_state::DatabaseProvider, BlockTransactions, Config, IrysBlockHeader, TokioServiceHandle,
+    app_state::DatabaseProvider, Config, IrysBlockHeader, SealedBlock, TokioServiceHandle,
 };
 use irys_vdf::rayon;
 use irys_vdf::state::{vdf_steps_are_valid, CancelEnum, VdfStateReadonly};
@@ -54,8 +54,7 @@ pub enum VdfValidationResult {
 pub enum ValidationServiceMessage {
     /// Validate a block
     ValidateBlock {
-        block: Arc<IrysBlockHeader>,
-        transactions: BlockTransactions,
+        block: Arc<SealedBlock>,
         skip_vdf_validation: bool,
     },
 }
@@ -206,10 +205,12 @@ impl ValidationService {
                 // Receive new validation messages
                 msg = self.msg_rx.recv() => {
                     match msg {
-                        Some(ValidationServiceMessage::ValidateBlock { block, transactions, skip_vdf_validation }) => {
+                        Some(ValidationServiceMessage::ValidateBlock {
+                            block,
+                            skip_vdf_validation,
+                        }) => {
                             let task = block_validation_task::BlockValidationTask::new(
                                 block.clone(),
-                                Arc::new(transactions),
                                 Arc::clone(&self.inner),
                                 self.inner.block_tree_guard.clone(),
                                 skip_vdf_validation,
@@ -344,7 +345,7 @@ impl ValidationService {
                     // Extract VDF task details if running
                     let (vdf_running, vdf_block_hash, vdf_block_height) =
                         if let Some(current_vdf) = &coordinator.vdf_scheduler.current {
-                            (1, Some(current_vdf.hash), Some(current_vdf.block.height))
+                            (1, Some(current_vdf.hash), Some(current_vdf.sealed_block.header().height))
                         } else {
                             (0, None, None)
                         };

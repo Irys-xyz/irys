@@ -29,7 +29,7 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, SystemLedger, UnixTimestamp, H256, U256,
+    IrysBlockHeader, PoaData, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
@@ -228,6 +228,8 @@ pub enum PreValidationError {
     IngressProofMismatch { tx_id: H256 },
     #[error("Duplicate ingress proof signer {signer} for transaction {tx_id}")]
     DuplicateIngressProofSigner { tx_id: H256, signer: IrysAddress },
+    #[error("Ingress proof signer {signer} is not staked for transaction {tx_id}")]
+    UnstakedIngressProofSigner { tx_id: H256, signer: IrysAddress },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
@@ -391,16 +393,18 @@ pub enum ValidationError {
 }
 
 /// Full pre-validation steps for a block
-#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
-    block: IrysBlockHeader,
-    previous_block: IrysBlockHeader,
+    sealed_block: &SealedBlock,
+    previous_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
-    transactions: &BlockTransactions,
 ) -> Result<(), PreValidationError> {
+    let block = sealed_block.header();
+    let transactions = sealed_block.transactions();
+
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -423,7 +427,7 @@ pub async fn prevalidate_block(
     }
 
     // Check prev_output (vdf)
-    prev_output_is_valid(&block, &previous_block)?;
+    prev_output_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -431,7 +435,7 @@ pub async fn prevalidate_block(
     );
 
     // Check block height continuity
-    height_is_valid(&block, &previous_block)?;
+    height_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -447,15 +451,15 @@ pub async fn prevalidate_block(
 
     // Check the difficulty
     difficulty_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         &config.consensus.difficulty_adjustment,
     )?;
 
     // Validate the last_diff_timestamp field
     last_diff_timestamp_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         &config.consensus.difficulty_adjustment,
     )?;
 
@@ -466,7 +470,7 @@ pub async fn prevalidate_block(
     );
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
-    previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
+    previous_cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -474,7 +478,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(&block, &previous_block)?;
+    cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -485,7 +489,7 @@ pub async fn prevalidate_block(
     debug!("poa data not expired");
 
     // Check the solution_hash
-    solution_hash_is_valid(&block, &previous_block)?;
+    solution_hash_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -493,7 +497,7 @@ pub async fn prevalidate_block(
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
-    solution_hash_link_is_valid(&block, &poa_chunk)?;
+    solution_hash_link_is_valid(block, &poa_chunk)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -501,7 +505,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the previous solution hash references the parent correctly
-    previous_solution_hash_is_valid(&block, &previous_block)?;
+    previous_solution_hash_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -511,7 +515,7 @@ pub async fn prevalidate_block(
     // Validate VDF seeds/next_seed against parent before any VDF-related processing
     let vdf_reset_frequency: u64 = config.vdf.reset_frequency as u64;
     if !matches!(
-        is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
+        is_seed_data_valid(block, previous_block, vdf_reset_frequency),
         ValidationResult::Valid
     ) {
         return Err(PreValidationError::VDFCheckpointsInvalid(
@@ -521,8 +525,8 @@ pub async fn prevalidate_block(
 
     // Ensure the last_epoch_hash field correctly references the most recent epoch block
     last_epoch_hash_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
@@ -550,7 +554,7 @@ pub async fn prevalidate_block(
     let ema_valid = {
         let res = parent_ema_snapshot
             .calculate_ema_for_new_block(
-                &previous_block,
+                previous_block,
                 block.oracle_irys_price,
                 config.consensus.token_price_safe_range,
                 config.consensus.ema.price_adjustment_interval,
@@ -580,19 +584,15 @@ pub async fn prevalidate_block(
         });
     }
 
-    // Validate ingress proof signer uniqueness
-    validate_unique_ingress_proof_signers(&block)?;
+    // Validate ingress proof signers are unique and staked
+    validate_ingress_proof_signers(block, &parent_epoch_snapshot)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
-        "ingress_proof_signers_unique",
+        "ingress_proof_signers_valid",
     );
 
     // After pre-validating a bunch of quick checks we validate the signature
-    // TODO: We may want to further check if the signer is a staked address
-    // this is a little more advanced though as it requires knowing what the
-    // commitment states looked like when this block was produced. For now
-    // we just accept any valid signature.
     if !block.is_signature_valid() {
         return Err(PreValidationError::BlockSignatureInvalid);
     }
@@ -2603,9 +2603,10 @@ fn extract_data_ledgers(
     Ok((publish_ledger, submit_ledger))
 }
 
-/// Validates that all ingress proof signers are unique for each transaction in the Publish ledger
-fn validate_unique_ingress_proof_signers(
+/// Validates that all ingress proof signers are unique and staked for each transaction in the Publish ledger
+fn validate_ingress_proof_signers(
     block: &IrysBlockHeader,
+    parent_epoch_snapshot: &EpochSnapshot,
 ) -> Result<(), PreValidationError> {
     // Extract publish ledger
     let publish_ledger = block
@@ -2629,7 +2630,7 @@ fn validate_unique_ingress_proof_signers(
         });
     }
 
-    // For each transaction in the publish ledger, validate unique signers
+    // For each transaction in the publish ledger, validate signers are unique and staked
     for tx_id in &publish_ledger.tx_ids.0 {
         let tx_proofs = get_ingress_proofs(publish_ledger, tx_id).map_err(|e| {
             PreValidationError::InvalidIngressProof {
@@ -2649,6 +2650,14 @@ fn validate_unique_ingress_proof_signers(
                     reason: e.to_string(),
                 }
             })?;
+
+            // Validate that the signer is staked in the parent epoch snapshot
+            if !parent_epoch_snapshot.is_staked(signer) {
+                return Err(PreValidationError::UnstakedIngressProofSigner {
+                    tx_id: *tx_id,
+                    signer,
+                });
+            }
 
             // Increment the count for this signer
             *signer_counts.entry(signer).or_insert(0) += 1;
@@ -3314,7 +3323,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Some(Base64(poa_chunk.clone())),
-            ledger_id: Some(1),
+            ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
@@ -3566,7 +3575,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(hacked_data_path.clone())),
             chunk: Some(Base64(hacked_data.clone())), // Use RAW data, PoA validation will entropy-pack it
-            ledger_id: Some(1),
+            ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),

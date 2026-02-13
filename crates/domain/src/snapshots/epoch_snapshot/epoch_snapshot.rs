@@ -3,14 +3,13 @@ use crate::{EpochBlockData, PackingParams, StorageModuleInfo, PACKING_PARAMS_FIL
 use eyre::{Error, Result};
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::{ExpiringPartitionInfo, Ledgers};
-use irys_types::CommitmentStatus;
 use irys_types::Config;
 use irys_types::{
     partition::{PartitionAssignment, PartitionHash},
-    IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
+    CommitmentStatus, DataLedger, IrysBlockHeader, NodeConfig, SimpleRNG, SystemLedger, H256,
 };
 use irys_types::{
-    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, DataLedger, IrysAddress,
+    partition_chunk_offset_ie, CommitmentTransaction, ConsensusConfig, IrysAddress,
     PartitionChunkOffset,
 };
 use openssl::sha;
@@ -635,25 +634,24 @@ impl EpochSnapshot {
     /// Computes active capacity partitions available for pledges based on
     /// data partitions and scaling factor
     pub fn get_num_capacity_partitions(num_data_partitions: u64, config: &ConsensusConfig) -> u64 {
+        use num_bigfloat::BigFloat;
+
         // Every ledger needs at least one slot filled with data partitions
         let min_count = DataLedger::ALL.len() as u64 * config.num_partitions_per_slot;
         let base_count = std::cmp::max(num_data_partitions, min_count);
 
-        // Deterministic computation using rug with fixed precision and explicit rounding
-        let p: u32 = 128;
-        let base_f = rug::Float::with_val(p, base_count);
-        let log10 = rug::Float::with_val(p, base_f.log10());
-        let trunc = rug_truncate_to_3_decimals(&log10);
+        // Deterministic computation using num-bigfloat (pure Rust, ~40 decimal digits)
+        let base_f = BigFloat::from_u64(base_count);
+        let log10 = base_f.log10();
+        let trunc = bigfloat_truncate_to_3_decimals(&log10);
 
-        let scalar = rug::Float::with_val(p, config.epoch.capacity_scalar);
-        let scaled = rug::Float::with_val(p, trunc * scalar);
-        let scaled_trunc = rug_truncate_to_3_decimals(&scaled);
+        let scalar = BigFloat::from_u64(config.epoch.capacity_scalar);
+        let scaled = trunc * scalar;
+        let scaled_trunc = bigfloat_truncate_to_3_decimals(&scaled);
 
         // Deterministic ceil to integer, then convert to u64
-        let (ceil_int, _) = scaled_trunc
-            .to_integer_round(rug::float::Round::Up)
-            .expect("value must be finite (not NaN/Inf)");
-        ceil_int
+        scaled_trunc
+            .ceil()
             .to_u64()
             .expect("ceiled value must be in 0..=u64::MAX")
     }
@@ -1353,33 +1351,14 @@ fn hash_sha256(message: &[u8]) -> Result<[u8; 32], Error> {
     Ok(result)
 }
 
-/// Truncate a `rug::Float` value to exactly 3 decimal places deterministically.
+/// Truncate a `BigFloat` value to exactly 3 decimal places deterministically.
 ///
-/// Implementation details:
-/// - Uses the input's precision (`value.prec()`) to construct all intermediates,
-///   ensuring we don't accidentally lower precision during scaling.
-/// - Multiplies by 1000 to shift the third decimal place to the integer part.
-/// - Applies `Round::Down` (i.e., truncation toward negative infinity) to get the integer,
-///   which matches our previous "truncate" semantics and is deterministic across platforms.
-/// - Divides by 1000 to shift back to the original scale.
-///
-/// Why not round? We deliberately do not use rounding here because the capacity
-/// computation must be stable at 3-decimal granularity and avoid cross-platform
-/// f64 rounding/ULP differences. Truncation via MPFR (`rug`) with explicit
-/// `Round::Down` guarantees the same result on all platforms for the same input
-/// and precision.
-fn rug_truncate_to_3_decimals(value: &rug::Float) -> rug::Float {
-    // Preserve the input's precision for all intermediate calculations
-    let p = value.prec();
-
-    // Multiply by 1000 to bring 3 decimal places into the integer domain without allocating a Float
-
-    // Multiply and then truncate toward -inf to implement "truncate" semantics
-    let tmp = rug::Float::with_val(p, value * 1000);
-    let (int, _) = tmp.to_integer_round(rug::float::Round::Down).unwrap();
-
-    // Scale back down to 3-decimal fixed point
-    rug::Float::with_val(p, int) / 1000
+/// Multiplies by 1000, floors to integer, divides by 1000. Pure-Rust
+/// `num-bigfloat` (~40 decimal digits) is deterministic across all platforms.
+fn bigfloat_truncate_to_3_decimals(value: &num_bigfloat::BigFloat) -> num_bigfloat::BigFloat {
+    let thousand = num_bigfloat::BigFloat::from_u32(1000);
+    let tmp = *value * thousand;
+    tmp.floor() / thousand
 }
 
 #[cfg(test)]
