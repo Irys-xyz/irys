@@ -492,7 +492,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "increase(irys_node_shutdown_total{job=~\"$node_re\"}[5m])",
+          "expr": "increase(irys_node_shutdown_total{job=~\"$node_re\"}[$__rate_interval])",
           "legendFormat": "{{reason}}",
           "refId": "A"
         }
@@ -856,7 +856,7 @@
       "description": "Methods consuming the most total CPU time (avg duration \u00d7 call rate). Unit is ms/s \u2014 milliseconds of work per second.",
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 36,
         "w": 12,
         "h": 10
       },
@@ -866,7 +866,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(20, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[5m])))",
+          "expr": "topk(20, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -880,7 +880,7 @@
         "valueMode": "color",
         "reduceOptions": {
           "calcs": [
-            "lastNotNull"
+            "mean"
           ],
           "fields": "",
           "values": false
@@ -910,7 +910,7 @@
       "description": "Stacked view of total time spent per method over time (top 15). Shows how CPU time is distributed across instrumented methods.",
       "gridPos": {
         "x": 12,
-        "y": 30,
+        "y": 36,
         "w": 12,
         "h": 10
       },
@@ -920,7 +920,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "topk(15, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[5m])))",
+          "expr": "topk(15, sum by (span_name) (rate(span_metrics_duration_milliseconds_sum{service_name=~\"$node_re\"}[$__rate_interval])))",
           "legendFormat": "{{span_name}}",
           "refId": "A"
         }
@@ -947,7 +947,7 @@
       "title": "All Logs",
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 46,
         "w": 24,
         "h": 1
       },
@@ -959,7 +959,7 @@
       "title": "All Logs (Live)",
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 47,
         "w": 24,
         "h": 10
       },

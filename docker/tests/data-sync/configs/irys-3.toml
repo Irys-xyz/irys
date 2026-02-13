@@ -3,7 +3,6 @@ sync_mode = "Trusted"
 base_directory = "/app/data"
 mining_key = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
 reward_address = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
-peer_id = "0xAA00000000000000000000000000000000000003"
 stake_pledge_drives = true
 genesis_peer_discovery_timeout_millis = 10000
 
