@@ -1,3 +1,4 @@
+pub mod chunk_data_writer;
 pub mod chunks;
 pub mod commitment_txs;
 pub mod data_txs;
@@ -196,6 +197,8 @@ pub struct Inner {
     /// Pledge provider for commitment transaction validation
     pub pledge_provider: MempoolPledgeProvider,
     message_handler_semaphore: Arc<Semaphore>,
+    /// Async write-behind buffer for chunk MDBX writes
+    pub chunk_data_writer: chunk_data_writer::ChunkDataWriter,
 }
 
 /// Messages that the Mempool Service handler supports
@@ -3097,6 +3100,9 @@ impl MempoolService {
                 let mut stake_and_pledge_whitelist = HashSet::new();
                 stake_and_pledge_whitelist.extend(initial_stake_and_pledge_whitelist);
 
+                let chunk_data_writer =
+                    chunk_data_writer::ChunkDataWriter::spawn(irys_db.clone(), 4096);
+
                 let mempool_service = Self {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
@@ -3114,6 +3120,7 @@ impl MempoolService {
                         message_handler_semaphore: Arc::new(Semaphore::new(
                             max_concurrent_mempool_tasks,
                         )),
+                        chunk_data_writer,
                     }),
                 };
                 mempool_service
