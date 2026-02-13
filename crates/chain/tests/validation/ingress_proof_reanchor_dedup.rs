@@ -1,4 +1,7 @@
-use crate::{utils::IrysNodeTest, validation::send_block_to_block_tree};
+use crate::{
+    utils::{build_sealed_block, IrysNodeTest},
+    validation::send_block_to_block_tree,
+};
 use irys_types::{DataLedger, NodeConfig};
 
 /// Tests that re-anchored ingress proofs do not produce duplicate signer entries.
@@ -85,15 +88,15 @@ async fn heavy_reanchor_duplicate_ingress_proof_signers() -> eyre::Result<()> {
         &genesis_node.mine_block_without_gossip().await?,
     ];
 
-    for (block, eth_block, block_txs) in order.iter() {
+    for (header, eth_block, block_txs) in order.iter() {
         // sync peer node up to date with genesis, this causes ingress proof reanchoring
         peer_node
             .node_ctx
             .block_pool
             .add_execution_payload_to_cache(eth_block.block().clone())
             .await;
-        send_block_to_block_tree(&peer_node.node_ctx, block.clone(), block_txs.clone(), false)
-            .await?;
+        let sealed_block = build_sealed_block(header.as_ref().clone(), block_txs)?;
+        send_block_to_block_tree(&peer_node.node_ctx, sealed_block, false).await?;
     }
 
     // Peer mines a block with the genesis ingress proof present in its db

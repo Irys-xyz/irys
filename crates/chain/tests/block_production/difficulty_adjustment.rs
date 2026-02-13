@@ -1,5 +1,5 @@
 use irys_actors::block_tree_service::ValidationResult;
-use irys_types::NodeConfig;
+use irys_types::{BlockBody, NodeConfig, SealedBlock};
 use rust_decimal_macros::dec;
 
 use crate::{utils::IrysNodeTest, validation::send_block_to_block_tree};
@@ -115,13 +115,14 @@ async fn heavy3_slow_tip_updated_correctly_in_forks_with_variying_cumulative_dif
     ];
     for ((block, _eth_block, transactions), _new_tip) in order.iter() {
         tracing::error!(block_heght = block.height,  ?block.cumulative_diff, "block");
-        send_block_to_block_tree(
-            &genesis_node.node_ctx,
-            block.clone(),
-            transactions.clone(),
-            false,
-        )
-        .await?;
+        let body = BlockBody {
+            block_hash: block.block_hash,
+            commitment_transactions: transactions.commitment_txs.clone(),
+            data_transactions: transactions.all_data_txs().cloned().collect(),
+        };
+        let sealed_block = std::sync::Arc::new(SealedBlock::new(block.as_ref().clone(), body)?);
+
+        send_block_to_block_tree(&genesis_node.node_ctx, sealed_block, false).await?;
     }
 
     tracing::error!("...");

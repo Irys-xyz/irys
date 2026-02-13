@@ -1137,7 +1137,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .await?;
 
     // Produce block with valid PoA/difficulty but invalid EVM payload (subit txs tampered to not match shadow tx order)
-    let (evil_block, _eth_payload, _) = evil_strategy
+    let (evil_block, _eth_payload) = evil_strategy
         .fully_produce_new_block(solution_context(&node.node_ctx).await?)
         .await?
         .unwrap();
@@ -1151,7 +1151,7 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // turn back on the validation for this test
     node.node_ctx.set_validation_enabled(true);
-    let (new_block, _reth_block, _) = ProductionStrategy {
+    let (new_block, _reth_block) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)
@@ -1160,17 +1160,19 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
 
     // Get the new block and verify its parent is not the evil block
     assert_ne!(
-        new_block.previous_block_hash, evil_block.block_hash,
+        new_block.header().previous_block_hash,
+        evil_block.header().block_hash,
         "expect the new block parent to NOT be the evil parent block"
     );
     assert_eq!(
-        new_block.height, evil_block.height,
+        new_block.header().height,
+        evil_block.header().height,
         "we have created a fork because we don't want to build on the evil block"
     );
     loop {
         // wait for the block to be validated
         let res = sub.recv().await.unwrap();
-        if res.block_hash == new_block.block_hash
+        if res.block_hash == new_block.header().block_hash
             // if we get anything other than Unknown, proceed processing
             && res.state != ChainState::NotOnchain(BlockState::Unknown)
         {
@@ -1188,10 +1190,10 @@ async fn heavy_block_prod_will_not_build_on_invalid_blocks() -> eyre::Result<()>
         .node_ctx
         .block_tree_guard
         .read()
-        .get_block_and_status(&new_block.block_hash)
+        .get_block_and_status(&new_block.header().block_hash)
         .unwrap()
         .1;
-    assert_eq!(latest_block_hash, new_block.block_hash);
+    assert_eq!(latest_block_hash, new_block.header().block_hash);
     assert_eq!(new_block_state, ChainState::Onchain);
 
     // Cleanup
@@ -1530,7 +1532,7 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
     let solution = solution_context(&node.node_ctx).await?;
 
     // Produce a block with the evil strategy (invalid solution hash)
-    let (evil_block, _eth_payload, _) = evil_strategy
+    let (evil_block, _eth_payload) = evil_strategy
         .fully_produce_new_block(solution.clone())
         .await?
         .unwrap();
@@ -1540,12 +1542,13 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
 
     // The evil block should not become the tip
     assert_ne!(
-        evil_block.block_hash, initial_canonical_tip,
+        evil_block.header().block_hash,
+        initial_canonical_tip,
         "Block with invalid solution hash should not become the tip"
     );
 
     // Now produce a valid block with the correct strategy to ensure the system still works
-    let (valid_block, _, _) = ProductionStrategy {
+    let (valid_block, _) = ProductionStrategy {
         inner: node.node_ctx.block_producer_inner.clone(),
     }
     .fully_produce_new_block(solution_context(&node.node_ctx).await?)
@@ -1554,13 +1557,15 @@ async fn heavy_test_invalid_solution_hash_rejected() -> eyre::Result<()> {
 
     // The valid block should NOT build on the evil block
     assert_ne!(
-        valid_block.previous_block_hash, evil_block.block_hash,
+        valid_block.header().previous_block_hash,
+        evil_block.header().block_hash,
         "Valid block should not build on block with invalid solution hash"
     );
 
     // The valid block should build on the genesis block (or previous valid block)
     assert_eq!(
-        valid_block.previous_block_hash, initial_canonical_tip,
+        valid_block.header().previous_block_hash,
+        initial_canonical_tip,
         "Valid block should build on the previous valid tip, not the evil block"
     );
 
