@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CircuitBreakerMetrics<K>
 where
     K: Debug + Clone,
@@ -10,21 +10,6 @@ where
     pub open_count: usize,
     pub half_open_count: usize,
     pub open_keys: Vec<K>,
-}
-
-impl<K> Default for CircuitBreakerMetrics<K>
-where
-    K: Debug + Clone,
-{
-    fn default() -> Self {
-        Self {
-            total_count: 0,
-            closed_count: 0,
-            open_count: 0,
-            half_open_count: 0,
-            open_keys: Vec::new(),
-        }
-    }
 }
 
 impl<K> CircuitBreakerMetrics<K>
