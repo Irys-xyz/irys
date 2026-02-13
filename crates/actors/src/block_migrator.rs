@@ -1,7 +1,6 @@
 use crate::{
     block_index_service::BlockIndexServiceMessage,
-    chunk_migration_service::ChunkMigrationServiceMessage, mempool_service::MempoolServiceMessage,
-    services::ServiceSenders,
+    chunk_migration_service::ChunkMigrationServiceMessage, services::ServiceSenders,
 };
 use eyre::{ensure, OptionExt as _};
 use irys_database::{db::IrysDatabaseExt as _, insert_commitment_tx, insert_tx_header};
@@ -105,9 +104,6 @@ impl BlockMigrator {
 
             // Notify ChunkMigrationService (fire-and-forget)
             self.send_chunk_migration(&block_to_migrate, &transactions, service_senders)?;
-
-            // Notify MempoolService for in-memory cleanup (fire-and-forget)
-            self.send_mempool_cleanup(&transactions, service_senders)?;
         }
 
         Ok(())
@@ -363,35 +359,6 @@ impl BlockMigrator {
                 Arc::new(all_txs_map),
             ))
             .map_err(|e| eyre::eyre!("Failed to send BlockMigrated message: {}", e))?;
-
-        Ok(())
-    }
-
-    /// Notify MempoolService to clean up in-memory pools (fire-and-forget).
-    fn send_mempool_cleanup(
-        &self,
-        transactions: &BlockTransactions,
-        senders: &ServiceSenders,
-    ) -> eyre::Result<()> {
-        let commitment_tx_ids: Vec<H256> = transactions
-            .commitment_txs
-            .iter()
-            .map(CommitmentTransaction::id)
-            .collect();
-
-        let submit_tx_ids: Vec<H256> = transactions
-            .data_txs
-            .get(&DataLedger::Submit)
-            .map(|txs| txs.iter().map(|tx| tx.id).collect())
-            .unwrap_or_default();
-
-        senders
-            .mempool
-            .send(MempoolServiceMessage::MigrationCleanup {
-                commitment_tx_ids,
-                submit_tx_ids,
-            })
-            .map_err(|e| eyre::eyre!("Failed to send MigrationCleanup message: {}", e))?;
 
         Ok(())
     }

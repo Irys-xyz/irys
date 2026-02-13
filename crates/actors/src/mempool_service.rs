@@ -269,12 +269,6 @@ pub enum MempoolServiceMessage {
     /// `GetDataTxs`) when possible, and avoid holding the guard across long‑running
     /// operations to prevent reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
-    /// Clean up in-memory mempool pools after block migration.
-    /// Sent by BlockMigrator after DB persistence is complete.
-    MigrationCleanup {
-        commitment_tx_ids: Vec<H256>,
-        submit_tx_ids: Vec<H256>,
-    },
 }
 
 impl MempoolServiceMessage {
@@ -301,7 +295,6 @@ impl MempoolServiceMessage {
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
             Self::GetMempoolStatus(_) => "GetMempoolStatus",
             Self::GetReadGuard(_) => "GetReadGuard",
-            Self::MigrationCleanup { .. } => "MigrationCleanup",
         }
     }
 }
@@ -456,33 +449,8 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
-            MempoolServiceMessage::MigrationCleanup {
-                commitment_tx_ids,
-                submit_tx_ids,
-            } => {
-                self.handle_migration_cleanup(commitment_tx_ids, submit_tx_ids)
-                    .await;
-            }
         }
         Ok(())
-    }
-
-    /// Handles in-memory cleanup after block migration.
-    /// DB persistence has already been handled by BlockMigrator.
-    async fn handle_migration_cleanup(
-        &self,
-        commitment_tx_ids: Vec<H256>,
-        submit_tx_ids: Vec<H256>,
-    ) {
-        // Remove commitment txs from mempool
-        self.mempool_state
-            .remove_commitment_txs(commitment_tx_ids.into_iter())
-            .await;
-
-        // Remove submit txs from the pending valid pool
-        self.mempool_state
-            .remove_transactions_from_pending_valid_pool(&submit_tx_ids)
-            .await;
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
