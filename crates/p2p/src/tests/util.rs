@@ -373,7 +373,7 @@ impl GossipServiceTestFixture {
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(Vec::new())),
             internal_message_bus: Some(service_senders.gossip_broadcast.clone()),
-            block_status_provider: block_status_provider_mock,
+            block_status_provider: block_status_provider_mock.clone(),
         };
         let discovery_blocks = Arc::clone(&block_discovery_stub.blocks);
 
@@ -994,7 +994,7 @@ pub(crate) fn data_handler_stub(
     db: DatabaseProvider,
     sync_state: ChainSyncState,
 ) -> Arc<GossipDataHandler<MempoolStub, BlockDiscoveryStub>> {
-    let genesis_block = IrysBlockHeader::new_mock_header();
+    let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db.clone());
     let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());
@@ -1076,7 +1076,7 @@ pub(crate) fn data_handler_with_stubbed_pool(
     let execution_payload_cache =
         ExecutionPayloadCache::new(peer_list_guard.clone(), reth_block_mock_provider);
 
-    let genesis_block = IrysBlockHeader::new_mock_header();
+    let genesis_block = irys_testing_utils::new_mock_signed_header();
     let block_index = BlockIndex::new_for_testing(db);
     let block_index_read_guard_stub = BlockIndexReadGuard::new(block_index);
     let block_tree = BlockTree::new(&genesis_block, config.consensus.clone());

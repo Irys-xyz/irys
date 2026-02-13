@@ -231,7 +231,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled,
-    } = MockedServices::new(&config).await;
+    } = MockedServices::new(&config);
 
     // Create three blocks in a chain: block1 -> block2 -> block3
     // block1: in database
@@ -406,7 +406,7 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled,
-    } = MockedServices::new(&config).await;
+    } = MockedServices::new(&config);
 
     // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
     // block1: in database
