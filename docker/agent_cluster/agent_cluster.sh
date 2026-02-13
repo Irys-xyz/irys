@@ -14,6 +14,7 @@
 #     -f, --force           Force rebuild even if source unchanged
 #     -r, --ref REF         Build from a git branch/tag/SHA instead of working tree
 #     --native              Skip Docker, build natively (cross-compile on macOS)
+#     --diagnose            Enable cargo fingerprint logging to debug rebuilds
 #   deploy [OPTIONS]      Build + deploy cluster (wipes volumes by default)
 #     -n, --nodes N         Number of nodes (1-3, default 3)
 #     -k, --keep-data       Keep existing volumes (don't wipe)
@@ -113,6 +114,7 @@ cmd_build() {
     local force=false
     local build_ref=""
     local native=false
+    local diagnose=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -f|--force) force=true; shift ;;
@@ -120,6 +122,7 @@ cmd_build() {
                 build_ref="${2:?--ref requires a branch/tag/SHA}"
                 shift 2 ;;
             --native) native=true; shift ;;
+            --diagnose) diagnose=true; shift ;;
             *) die "build: unknown option: $1" ;;
         esac
     done
@@ -293,9 +296,25 @@ cmd_build() {
         fi
     fi
 
+    # Pin OpenSSL env vars to prevent cargo:rerun-if-env-changed triggers
+    # across ephemeral container runs (the build script watches these).
+    local ENV_ARGS=(
+        -e HASH_CHANGED="$hash_changed"
+        -e OPENSSL_CONFIG_DIR=""
+        -e AARCH64_UNKNOWN_LINUX_GNU_OPENSSL_CONFIG_DIR=""
+        -e X86_64_UNKNOWN_LINUX_GNU_OPENSSL_CONFIG_DIR=""
+    )
+
+    # Build the cargo command with optional fingerprint diagnostics
+    local cargo_env=""
+    if [[ "$diagnose" == true ]]; then
+        warn "Diagnose mode: fingerprint logging enabled (verbose output)"
+        cargo_env="CARGO_LOG=cargo::core::compiler::fingerprint=info "
+    fi
+
     docker run --rm \
         --memory="$BUILD_MEMORY" --memory-swap=-1 \
-        -e HASH_CHANGED="$hash_changed" \
+        "${ENV_ARGS[@]}" \
         -v "$src_vol:/workspace:ro" \
         "${VOLUME_ARGS[@]}" \
         -v "$BUILD_OUTPUT:/build-output" \
@@ -313,7 +332,7 @@ cmd_build() {
                 echo "==> No files changed since last sync"
             fi
             echo "==> Starting cargo build (-j'"$CARGO_JOBS"', mem='"$BUILD_MEMORY"')..."
-            CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-chain --locked -j'"$CARGO_JOBS"' \
+            '"$cargo_env"'CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-chain --locked -j'"$CARGO_JOBS"' \
             && cp /workspace-target/release/irys /build-output/irys
         '
 
