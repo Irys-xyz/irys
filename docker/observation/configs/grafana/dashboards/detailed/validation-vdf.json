@@ -473,7 +473,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"ensure_vdf_is_valid\"}[5m])))",
+          "expr": "histogram_quantile(0.50, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"ensure_vdf_is_valid\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p50",
           "refId": "A"
         },
@@ -482,7 +482,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"ensure_vdf_is_valid\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"ensure_vdf_is_valid\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p95",
           "refId": "B"
         },
@@ -491,7 +491,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"ensure_vdf_is_valid\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, service_name) (rate(span_metrics_duration_milliseconds_bucket{service_name=~\"$node\", span_name=\"ensure_vdf_is_valid\"}[$__rate_interval])))",
           "legendFormat": "{{service_name}} p99",
           "refId": "C"
         }
