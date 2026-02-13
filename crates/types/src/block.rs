@@ -27,6 +27,8 @@ use alloy_rlp::{Encodable, RlpDecodable, RlpEncodable};
 use derive_more::Display;
 use irys_macros_integer_tagged::IntegerTagged;
 use openssl::sha;
+use reth_db::table::{Decode, Encode};
+use reth_db::DatabaseError;
 use reth_primitives::Header;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,8 @@ use std::sync::Arc;
 use tracing::debug;
 
 pub type BlockHash = H256;
+
+pub type BlockHeight = u64;
 
 pub type EvmBlockHash = B256;
 
@@ -809,7 +813,7 @@ impl IrysBlockHeaderV1 {
                     tx_root: H256::zero(),
                     tx_ids: H256List::new(),
                     total_chunks: 0,
-                    expires: Some(1622543200),
+                    expires: Some(5),
                     proofs: None,
                     required_proof_count: None,
                 },
@@ -844,7 +848,18 @@ pub struct CombinedBlockHeader {
 
 /// Names for each of the data ledgers as well as their `ledger_id` discriminant
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Compact, PartialOrd, Ord, Hash,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    Compact,
+    PartialOrd,
+    Ord,
+    Hash,
+    Arbitrary,
 )]
 #[repr(u32)]
 #[derive(Default)]
@@ -855,6 +870,8 @@ pub enum DataLedger {
     /// An expiring term ledger used for submitting to the publish ledger
     Submit = 1,
     // Add more term ledgers as they exist
+    OneYear = 10,
+    ThirtyDay = 20,
 }
 
 impl PartialEq<u32> for DataLedger {
@@ -869,9 +886,37 @@ impl PartialEq<DataLedger> for u32 {
     }
 }
 
+impl Decode for DataLedger {
+    fn decode(value: &[u8]) -> Result<Self, DatabaseError> {
+        if value.len() != 4 {
+            return Err(DatabaseError::Decode);
+        }
+
+        // Decode bytes to u32 (big-endian for consistent database key ordering)
+        let id = u32::from_be_bytes(value.try_into().map_err(|_| DatabaseError::Decode)?);
+
+        // Convert u32 to DataLedger
+        Self::from_u32(id).ok_or(DatabaseError::Decode)
+    }
+}
+
+impl Encode for DataLedger {
+    type Encoded = [u8; 4]; // u32 is 4 bytes
+
+    fn encode(self) -> Self::Encoded {
+        self.get_id().to_be_bytes()
+    }
+}
+
 impl DataLedger {
     /// An array of all the Ledger numbers in order
-    pub const ALL: [Self; 2] = [Self::Publish, Self::Submit];
+    pub const ALL: [Self; 2] = [
+        Self::Publish,
+        Self::Submit,
+        // Only add these when ready to populate them with partitions
+        //Self::OneYear,
+        //Self::ThirtyDay
+    ];
 
     /// Make it possible to iterate over all the data ledgers in order
     pub fn iter() -> impl Iterator<Item = Self> {
@@ -886,6 +931,8 @@ impl DataLedger {
         match value {
             0 => Some(Self::Publish),
             1 => Some(Self::Submit),
+            10 => Some(Self::OneYear),
+            20 => Some(Self::ThirtyDay),
             _ => None,
         }
     }
@@ -904,6 +951,8 @@ impl TryFrom<DataLedger> for usize {
         match value {
             DataLedger::Publish => Ok(0),
             DataLedger::Submit => Ok(1),
+            DataLedger::OneYear => Ok(10),
+            DataLedger::ThirtyDay => Ok(20),
         }
     }
 }
@@ -930,6 +979,8 @@ impl std::fmt::Display for DataLedger {
         match self {
             Self::Publish => write!(f, "publish"),
             Self::Submit => write!(f, "submit"),
+            Self::OneYear => write!(f, "one_year"),
+            Self::ThirtyDay => write!(f, "one_month"),
         }
     }
 }
@@ -956,15 +1007,18 @@ pub struct BlockIndexItem {
 
 /// A [`BlockIndexItem`] contains a vec of [`LedgerIndexItem`]s which store the size
 /// and and the `tx_root` of the ledger in that block.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, Arbitrary, Compact)]
 pub struct LedgerIndexItem {
     /// The total number of chunks in this ledger since genesis
     #[serde(with = "string_u64")]
     pub total_chunks: u64, // 8 bytes
     /// The merkle root of the TX that apply to this ledger in the current block
     pub tx_root: H256, // 32 bytes
+    pub ledger: DataLedger, // SubKey
 }
 
+// Used exclusively for reading to and from the block_index file, can be removed
+// after all nodes have mdbx based block_index's
 impl LedgerIndexItem {
     fn to_bytes(&self) -> [u8; 40] {
         // Fixed size of 40 bytes

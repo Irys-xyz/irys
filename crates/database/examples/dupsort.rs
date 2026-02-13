@@ -162,7 +162,7 @@ fn main() -> eyre::Result<()> {
     let w_tx = db.tx_mut()?;
 
     // Re-insert test data with duplicates under same subkey
-    let target_subkey = 42u128;
+    let target_subkey = 42_u128;
     let chunk_v1 = CachedChunk2 {
         key: target_subkey,
         chunk: CachedChunk {

@@ -151,6 +151,16 @@ pub async fn get_price(
         }
         // TODO: support other term ledgers here
         DataLedger::Submit => Err(("Term ledger not supported", StatusCode::BAD_REQUEST).into()),
+        DataLedger::OneYear => Err((
+            "OneYear term ledger pricing not implemented",
+            StatusCode::BAD_REQUEST,
+        )
+            .into()),
+        DataLedger::ThirtyDay => Err((
+            "ThirtyDay term ledger pricing not implemented",
+            StatusCode::BAD_REQUEST,
+        )
+            .into()),
     }
 }
 

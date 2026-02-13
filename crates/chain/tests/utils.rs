@@ -1847,19 +1847,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         height: u64,
         include_chunk: bool,
     ) -> eyre::Result<IrysBlockHeader> {
-        self.node_ctx
+        let block = self
+            .node_ctx
             .block_index_guard
             .read()
             .get_item(height)
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))?;
+        self.node_ctx
+            .db
+            .view_eyre(|tx| {
+                irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
+            })?
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-            .and_then(|block| {
-                self.node_ctx
-                    .db
-                    .view_eyre(|tx| {
-                        irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
-                    })?
-                    .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-            })
     }
 
     pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<IrysBlockHeader> {

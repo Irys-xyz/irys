@@ -63,13 +63,13 @@ struct MockedServices {
 }
 
 impl MockedServices {
-    async fn new(config: &Config) -> Self {
+    fn new(config: &Config) -> Self {
         let db = DatabaseProvider(Arc::new(
             open_or_create_irys_consensus_data_db(&config.node_config.base_directory)
                 .expect("can't open temp dir"),
         ));
 
-        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config).await;
+        let block_status_provider_mock = BlockStatusProvider::mock(&config.node_config, db.clone());
 
         let block_discovery_stub = BlockDiscoveryStub {
             blocks: Arc::new(RwLock::new(vec![])),
@@ -161,7 +161,7 @@ async fn should_process_block() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled: _,
-    } = MockedServices::new(&config).await;
+    } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
     let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -303,8 +303,7 @@ async fn should_process_block_with_intermediate_block_in_api() {
         MempoolReadGuard::stub(),
     ));
 
-    let data_handler =
-        data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
+    let data_handler = data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone());
 
     let sync_service_inner = ChainSyncServiceInner::new(
         sync_state.clone(),
@@ -492,8 +491,8 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         sync_state.clone(),
         block_pool.clone(),
         &config,
-    )
-    .await;
+        db.clone(),
+    );
 
     let sync_service_inner = ChainSyncServiceInner::new(
         sync_state.clone(),
@@ -608,7 +607,7 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled: _,
-    } = MockedServices::new(&config).await;
+    } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
     let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -691,7 +690,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled,
-    } = MockedServices::new(&config).await;
+    } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
     let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -742,8 +741,7 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         MempoolReadGuard::stub(),
     ));
 
-    let data_handler =
-        data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
+    let data_handler = data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone());
 
     let sync_service_inner = ChainSyncServiceInner::new(
         sync_state.clone(),
@@ -872,7 +870,7 @@ async fn should_not_fast_track_block_already_in_index() {
         mempool_stub,
         service_senders,
         is_vdf_mining_enabled: _,
-    } = MockedServices::new(&config).await;
+    } = MockedServices::new(&config);
 
     // Create a direct channel for the sync service
     let (sync_sender, _sync_receiver) = tokio::sync::mpsc::unbounded_channel();

@@ -28,6 +28,13 @@ impl Inner {
         &self,
         tx: &DataTransactionHeader,
     ) -> Result<(DataLedger, u64), TxIngressError> {
+        // Fast-fail if this tx targets an unsupported term ledger
+        match DataLedger::try_from(tx.ledger_id) {
+            Ok(DataLedger::Publish | DataLedger::Submit) => {
+                // Valid ledgers - continue
+            }
+            _ => return Err(TxIngressError::InvalidLedger(tx.ledger_id)),
+        }
         // Fast-fail if we've recently seen this exact invalid payload (by signature fingerprint)
         {
             // Compute composite fingerprint: keccak(signature + prehash + id)
@@ -173,8 +180,8 @@ impl Inner {
             DataLedger::Publish => {
                 // Gossip path: skip API-only checks here
             }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
+            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
+                // Term ledgers and direct Submit targeting are not yet supported
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }
@@ -221,8 +228,8 @@ impl Inner {
                 // Publish ledger - permanent storage
                 self.validate_fee_structure_api_only(&tx)?;
             }
-            DataLedger::Submit => {
-                // Submit ledger - a data transaction cannot target the submit ledger directly
+            DataLedger::OneYear | DataLedger::ThirtyDay | DataLedger::Submit => {
+                // Term ledgers and direct Submit targeting are not yet supported
                 return Err(TxIngressError::InvalidLedger(ledger as u32));
             }
         }

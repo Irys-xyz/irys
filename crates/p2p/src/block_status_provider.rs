@@ -81,8 +81,10 @@ impl BlockStatusProvider {
         let block_is_anywhere_in_the_tree = self.is_block_in_the_tree(block_hash);
         let binding = self.block_index_read_guard.read();
         let index_item = binding.get_item(block_height);
-        let hash_is_in_the_index = index_item.is_some_and(|idx| idx.block_hash == *block_hash);
         let height_is_in_the_index = index_item.is_some();
+        let hash_is_in_the_index = index_item
+            .as_ref()
+            .is_some_and(|idx| idx.block_hash == *block_hash);
 
         if height_is_in_the_index {
             if hash_is_in_the_index {
@@ -173,7 +175,7 @@ impl BlockStatusProvider {
 
     pub fn latest_block_in_index(&self) -> Option<BlockIndexItem> {
         let binding = self.block_index_read_guard.read();
-        binding.get_latest_item().cloned()
+        binding.get_latest_item()
     }
 
     /// Get the block tree read guard
@@ -204,7 +206,7 @@ impl BlockStatusProvider {
 #[cfg(test)]
 impl BlockStatusProvider {
     #[cfg(test)]
-    pub async fn mock(node_config: &NodeConfig) -> Self {
+    pub fn mock(node_config: &NodeConfig, db: irys_types::DatabaseProvider) -> Self {
         use irys_domain::{BlockIndex, BlockTree};
 
         let mut genesis = IrysBlockHeader::new_mock_header();
@@ -216,11 +218,7 @@ impl BlockStatusProvider {
                 &genesis,
                 node_config.consensus_config(),
             )))),
-            block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
-                BlockIndex::new(node_config)
-                    .await
-                    .expect("to create a mock block index"),
-            ))),
+            block_index_read_guard: BlockIndexReadGuard::new(BlockIndex::new_for_testing(db)),
         }
     }
 
@@ -314,25 +312,32 @@ impl BlockStatusProvider {
 
     #[cfg(test)]
     pub fn add_block_to_index_and_tree_for_testing(&self, block: &IrysBlockHeader) {
-        let mut binding = self.block_index_read_guard.write();
+        let block_index = self.block_index_read_guard.read();
 
-        if binding.items.is_empty() {
+        if block_index.num_blocks() == 0 {
             let genesis = IrysBlockHeader::default();
-            binding
-                .push_item(&BlockIndexItem {
-                    block_hash: genesis.block_hash,
-                    num_ledgers: 0,
-                    ledgers: vec![],
-                })
+            block_index
+                .push_item(
+                    &BlockIndexItem {
+                        block_hash: genesis.block_hash,
+                        num_ledgers: 0,
+                        ledgers: vec![],
+                    },
+                    0,
+                )
                 .unwrap();
         }
 
-        binding
-            .push_item(&BlockIndexItem {
-                block_hash: block.block_hash,
-                num_ledgers: 0,
-                ledgers: vec![],
-            })
+        let next_height = block_index.num_blocks();
+        block_index
+            .push_item(
+                &BlockIndexItem {
+                    block_hash: block.block_hash,
+                    num_ledgers: 0,
+                    ledgers: vec![],
+                },
+                next_height,
+            )
             .unwrap();
         warn!(
             "Added block {:?} (height {}) to index",
