@@ -1579,6 +1579,12 @@ impl GossipClient {
                     debug!("Peer {} is healthy: {}", peer.0, is_healthy);
                     peer_list.set_is_online_by_peer_id(&peer.0, is_healthy);
                 }
+                Err(GossipClientError::CircuitBreakerOpen(peer_id)) => {
+                    debug!(
+                        ?peer_id,
+                        "Circuit breaker open, skipping online status update"
+                    );
+                }
                 Err(err) => {
                     warn!(
                         "Failed to check the health of peer {}: {}, setting offline status",
