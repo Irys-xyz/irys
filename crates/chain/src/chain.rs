@@ -32,7 +32,6 @@ use irys_api_server::{create_listener, run_server, ApiState};
 use irys_config::chain::chainspec::build_unsigned_irys_genesis_block;
 use irys_config::submodules::StorageSubmodulesConfig;
 use irys_database::db::RethDbWrapper;
-use irys_database::reth_db::DatabaseError;
 use irys_database::{add_genesis_commitments, database, get_genesis_commitments};
 use irys_domain::chain_sync_state::ChainSyncState;
 use irys_domain::forkchoice_markers::ForkChoiceMarkers;
@@ -404,11 +403,11 @@ impl IrysNode {
             node_config.gossip.public_port = node_config.gossip.bind_port;
         }
 
-        // Initialize database early to get/create peer_id
-        let irys_db = init_irys_db(&node_config)?;
+        // Get or create peer_id from file
+        let peer_id = get_or_create_peer_id(&node_config)?;
 
-        // Get or create peer_id from database
-        let peer_id = get_or_create_peer_id(&irys_db)?;
+        // Initialize database
+        let irys_db = init_irys_db(&node_config)?;
 
         let config = Config::new(node_config, peer_id);
         config.validate()?;
@@ -2193,19 +2192,42 @@ fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Erro
     Ok(irys_db)
 }
 
-/// Gets the peer_id from the database, or generates a new one and stores it.
-pub fn get_or_create_peer_id(db: &DatabaseProvider) -> eyre::Result<irys_types::IrysPeerId> {
-    let peer_id = db.update(|tx| -> Result<irys_types::IrysPeerId, DatabaseError> {
-        if let Some(existing_peer_id) = database::get_peer_id(tx)? {
-            info!("Loaded peer_id from database: {:?}", existing_peer_id);
-            return Ok(existing_peer_id);
-        }
+/// Gets the peer_id from the peer key file, or generates a new keypair and stores it.
+///
+/// The private key is stored as raw 32 bytes in `<peer_info_dir>/peer_key.bin`.
+/// The PeerId is derived from the key using standard secp256k1 address derivation.
+pub fn get_or_create_peer_id(
+    node_config: &NodeConfig,
+) -> eyre::Result<irys_types::IrysPeerId> {
+    let peer_info_dir = node_config.peer_info_dir();
+    let key_path = peer_info_dir.join("peer_key.bin");
 
-        let new_peer_id = irys_types::IrysPeerId::random();
-        database::set_peer_id(tx, new_peer_id)?;
-        info!("Generated new peer_id: {:?}", new_peer_id);
-        Ok(new_peer_id)
-    })??;
+    let signing_key = if key_path.exists() {
+        let bytes = std::fs::read(&key_path)
+            .with_context(|| format!("Failed to read peer key from {}", key_path.display()))?;
+        let key = k256::ecdsa::SigningKey::from_slice(&bytes)
+            .with_context(|| "Failed to parse peer key file as secp256k1 private key")?;
+        let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+        info!("Loaded peer_id from {}: {:?}", key_path.display(), peer_id);
+        key
+    } else {
+        use rand::rngs::OsRng;
+        let key = k256::ecdsa::SigningKey::random(&mut OsRng);
+        std::fs::create_dir_all(&peer_info_dir).with_context(|| {
+            format!(
+                "Failed to create peer info directory {}",
+                peer_info_dir.display()
+            )
+        })?;
+        std::fs::write(&key_path, key.to_bytes().as_slice()).with_context(|| {
+            format!("Failed to write peer key to {}", key_path.display())
+        })?;
+        let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
+        info!("Generated new peer_id, key saved to {}: {:?}", key_path.display(), peer_id);
+        key
+    };
+
+    let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&signing_key));
     Ok(peer_id)
 }
 

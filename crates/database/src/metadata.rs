@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum MetadataKey {
     DBSchemaVersion = 1,
-    PeerId = 2,
 }
 
 impl Encode for MetadataKey {
@@ -24,7 +23,6 @@ impl Decode for MetadataKey {
         let value = u32::decode(value)?;
         match value {
             1 => Ok(Self::DBSchemaVersion),
-            2 => Ok(Self::PeerId),
             _ => Err(DatabaseError::Decode),
         }
     }
