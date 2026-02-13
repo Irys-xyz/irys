@@ -3,7 +3,7 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
-    irys_testing_utils::IrysBlockHeaderTestExt,
+    irys_testing_utils::IrysBlockHeaderTestExt as _,
     irys_types::{
         irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig,
     },

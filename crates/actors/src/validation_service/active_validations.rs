@@ -472,7 +472,7 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
-    use irys_testing_utils::IrysBlockHeaderTestExt;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{serialization::H256List, BlockBody, BlockHash, IrysBlockHeader};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};

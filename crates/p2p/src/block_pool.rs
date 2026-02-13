@@ -1226,7 +1226,7 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use irys_testing_utils::IrysBlockHeaderTestExt;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
     use irys_types::{DataTransactionHeader, IrysBlockHeaderV1, SystemLedger};
     use std::sync::Arc;
 
