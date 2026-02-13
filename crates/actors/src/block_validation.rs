@@ -228,6 +228,8 @@ pub enum PreValidationError {
     IngressProofMismatch { tx_id: H256 },
     #[error("Duplicate ingress proof signer {signer} for transaction {tx_id}")]
     DuplicateIngressProofSigner { tx_id: H256, signer: IrysAddress },
+    #[error("Ingress proof signer {signer} is not staked for transaction {tx_id}")]
+    UnstakedIngressProofSigner { tx_id: H256, signer: IrysAddress },
     #[error("Database Error {error}")]
     DatabaseError { error: String },
     #[error("Invalid Epoch snapshot {error}")]
@@ -586,19 +588,15 @@ pub async fn prevalidate_block(
         });
     }
 
-    // Validate ingress proof signer uniqueness
-    validate_unique_ingress_proof_signers(block)?;
+    // Validate ingress proof signers are unique and staked
+    validate_ingress_proof_signers(block, &parent_epoch_snapshot)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
-        "ingress_proof_signers_unique",
+        "ingress_proof_signers_valid",
     );
 
     // After pre-validating a bunch of quick checks we validate the signature
-    // TODO: We may want to further check if the signer is a staked address
-    // this is a little more advanced though as it requires knowing what the
-    // commitment states looked like when this block was produced. For now
-    // we just accept any valid signature.
     if !block.is_signature_valid() {
         return Err(PreValidationError::BlockSignatureInvalid);
     }
@@ -2609,9 +2607,10 @@ fn extract_data_ledgers(
     Ok((publish_ledger, submit_ledger))
 }
 
-/// Validates that all ingress proof signers are unique for each transaction in the Publish ledger
-fn validate_unique_ingress_proof_signers(
+/// Validates that all ingress proof signers are unique and staked for each transaction in the Publish ledger
+fn validate_ingress_proof_signers(
     block: &IrysBlockHeader,
+    parent_epoch_snapshot: &EpochSnapshot,
 ) -> Result<(), PreValidationError> {
     // Extract publish ledger
     let publish_ledger = block
@@ -2635,7 +2634,7 @@ fn validate_unique_ingress_proof_signers(
         });
     }
 
-    // For each transaction in the publish ledger, validate unique signers
+    // For each transaction in the publish ledger, validate signers are unique and staked
     for tx_id in &publish_ledger.tx_ids.0 {
         let tx_proofs = get_ingress_proofs(publish_ledger, tx_id).map_err(|e| {
             PreValidationError::InvalidIngressProof {
@@ -2655,6 +2654,14 @@ fn validate_unique_ingress_proof_signers(
                     reason: e.to_string(),
                 }
             })?;
+
+            // Validate that the signer is staked in the parent epoch snapshot
+            if !parent_epoch_snapshot.is_staked(signer) {
+                return Err(PreValidationError::UnstakedIngressProofSigner {
+                    tx_id: *tx_id,
+                    signer,
+                });
+            }
 
             // Increment the count for this signer
             *signer_counts.entry(signer).or_insert(0) += 1;
