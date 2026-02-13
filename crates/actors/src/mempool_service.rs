@@ -35,7 +35,7 @@ use irys_domain::{
 };
 use irys_reth_node_bridge::{ext::IrysRethRpcTestContextExt as _, IrysRethNodeAdapter};
 use irys_storage::RecoveredMempoolState;
-use irys_types::ingress::IngressProof;
+use irys_types::ingress::{CachedIngressProof, IngressProof};
 use irys_types::transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges};
 use irys_types::{
     app_state::DatabaseProvider, BoundedFee, Config, IrysBlockHeader, IrysTransactionCommon,
@@ -1287,10 +1287,7 @@ impl Inner {
                 }
 
                 // Check for minimum number of ingress proofs
-                let total_miners = epoch_snapshot
-                    .commitment_state
-                    .stake_commitments
-                    .len();
+                let total_miners = epoch_snapshot.commitment_state.stake_commitments.len();
 
                 // Take the smallest value, the configured total proofs count or the number
                 // of staked miners that can produce a valid proof.
@@ -1310,25 +1307,30 @@ impl Inner {
                     continue;
                 }
 
-                let mut all_tx_proofs: Vec<IngressProof> = Vec::with_capacity(all_proofs.len());
+                let mut all_tx_proofs: Vec<CachedIngressProof> =
+                    Vec::with_capacity(all_proofs.len());
 
                 //filter all these ingress proofs by their anchor validity
-                for (_hash, proof) in all_proofs {
-                    let proof = proof.0.proof;
+                for (_hash, cached) in all_proofs {
+                    let cached_proof = cached.0;
                     // validate the anchor is still valid
                     let anchor_is_valid = self.validate_ingress_proof_anchor_for_inclusion(
                         min_ingress_proof_anchor_height,
-                        &proof,
+                        &cached_proof.proof,
                     )?;
                     if anchor_is_valid {
-                        all_tx_proofs.push(proof)
+                        all_tx_proofs.push(cached_proof)
                     }
                     // note: data root lifecycle work includes code to handle ingress proofs we find as invalid
                 }
 
+                // Extract IngressProofs for get_assigned_ingress_proofs API
+                let proofs_only: Vec<IngressProof> =
+                    all_tx_proofs.iter().map(|c| c.proof.clone()).collect();
+
                 // Get assigned and unassigned proofs using the existing utility function
                 let (assigned_proofs, assigned_miners) = match get_assigned_ingress_proofs(
-                    &all_tx_proofs,
+                    &proofs_only,
                     tx_header,
                     |hash| self.handle_get_block_header_message(hash, false), // Closure captures self
                     &self.block_tree_read_guard,
@@ -1380,15 +1382,12 @@ impl Inner {
 
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
-                    .filter(|p| !assigned_proof_set.contains(&p.proof.0))
-                    .filter(|p| {
+                    .filter(|c| !assigned_proof_set.contains(&c.proof.proof.0))
+                    .filter(|c| {
                         // Filter out proofs from unstaked signers
-                        match p.recover_signer() {
-                            Ok(signer) => epoch_snapshot.is_staked(signer),
-                            Err(_) => false,
-                        }
+                        epoch_snapshot.is_staked(c.address)
                     })
-                    .cloned()
+                    .map(|c| c.proof.clone())
                     .collect();
 
                 // Build the final proof list
