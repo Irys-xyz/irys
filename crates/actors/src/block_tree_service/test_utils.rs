@@ -7,8 +7,10 @@ use irys_domain::{
     dummy_ema_snapshot, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
     EpochSnapshot,
 };
+use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{
-    storage_pricing::TOKEN_SCALE, BlockTransactions, Config, IrysBlockHeader, IrysTokenPrice, H256,
+    storage_pricing::TOKEN_SCALE, BlockBody, Config, IrysBlockHeader, IrysTokenPrice, SealedBlock,
+    H256,
 };
 use reth::tasks::{TaskExecutor, TaskManager};
 use rust_decimal::Decimal;
@@ -58,15 +60,12 @@ pub fn deterministic_price(height: u64) -> IrysTokenPrice {
 }
 
 pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeReadGuard {
-    let mut block_hash = if blocks[0].0.block_hash == H256::default() {
-        H256::random()
-    } else {
-        blocks[0].0.block_hash
-    };
     let mut iter = blocks.iter_mut();
     let genesis_block = &mut (iter.next().unwrap()).0;
-    genesis_block.block_hash = block_hash;
     genesis_block.cumulative_diff = 0.into();
+    // Sign genesis block to get a valid signature and block_hash
+    genesis_block.test_sign();
+    let mut block_hash = genesis_block.block_hash;
 
     let mut block_tree_cache =
         BlockTree::new(genesis_block, irys_types::ConsensusConfig::testing());
@@ -74,17 +73,23 @@ pub fn genesis_tree(blocks: &mut [(IrysBlockHeader, ChainState)]) -> BlockTreeRe
     for (block, state) in iter {
         block.previous_block_hash = block_hash;
         block.cumulative_diff = block.height.into();
-        if block.block_hash == H256::default() {
-            block_hash = H256::random();
-            block.block_hash = block_hash;
-        } else {
-            block_hash = block.block_hash;
-        }
+        // Sign block to get a valid signature and block_hash
+        block.test_sign();
+        block_hash = block.block_hash;
+        let sealed = Arc::new(
+            SealedBlock::new(
+                block.clone(),
+                BlockBody {
+                    block_hash: block.block_hash,
+                    ..Default::default()
+                },
+            )
+            .expect("sealing block with empty body"),
+        );
         block_tree_cache
             .add_common(
                 block.block_hash,
-                block,
-                BlockTransactions::default(),
+                &sealed,
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),
@@ -159,8 +164,9 @@ pub fn setup_chain_for_fork_test(max_height: u64) -> (BlockTreeReadGuard, Vec<Pr
         header.height = height;
         header.oracle_irys_price = deterministic_price(height);
         header.ema_irys_price = deterministic_price(height);
-        header.block_hash = H256::random();
         header.previous_block_hash = last_hash;
+        // Sign to get valid signature and block_hash
+        header.test_sign();
         last_hash = header.block_hash;
 
         prices.push(PriceInfo {
@@ -232,9 +238,10 @@ pub fn create_and_apply_fork(
             // Use different prices to distinguish from old fork
             header.oracle_irys_price = deterministic_price(header.height + 100);
             header.ema_irys_price = deterministic_price(header.height + 100);
-            header.block_hash = H256::random();
             // Much higher difficulty to ensure it becomes canonical
             header.cumulative_diff = (height + fork_height).into();
+            // Sign to get valid signature and block_hash
+            header.test_sign();
             last_hash = header.block_hash;
 
             // Collect the price info for this fork block
@@ -244,10 +251,19 @@ pub fn create_and_apply_fork(
             });
 
             // Add to block tree as validated but not yet canonical
+            let sealed = Arc::new(
+                SealedBlock::new(
+                    header.clone(),
+                    BlockBody {
+                        block_hash: header.block_hash,
+                        ..Default::default()
+                    },
+                )
+                .expect("sealing block with empty body"),
+            );
             tree.add_common(
                 header.block_hash,
-                &header,
-                BlockTransactions::default(),
+                &sealed,
                 Arc::new(CommitmentSnapshot::default()),
                 Arc::new(EpochSnapshot::default()),
                 dummy_ema_snapshot(),

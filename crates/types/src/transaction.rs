@@ -22,6 +22,7 @@ use tracing::error;
 pub mod bounded_fee;
 pub mod fee_distribution;
 
+use crate::DataLedger;
 pub use bounded_fee::BoundedFee;
 
 pub type IrysTransactionId = H256;
@@ -411,7 +412,7 @@ impl DataTransactionHeaderV1 {
             header_size: 0,
             term_fee: BoundedFee::zero(),
             perm_fee: None,
-            ledger_id: 0,
+            ledger_id: DataLedger::Publish.into(),
             bundle_format: None,
             chain_id: config.chain_id,
             signature: Signature::test_signature().into(),
@@ -811,7 +812,7 @@ mod test_helpers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner};
+    use crate::{decode_rlp_version, encode_rlp_version, irys::IrysSigner, DataLedger};
 
     use alloy_rlp::Decodable as _;
     use k256::ecdsa::SigningKey;
@@ -889,7 +890,7 @@ mod tests {
             header_size: 0,
             term_fee: BoundedFee::from(100_u64),
             perm_fee: Some(BoundedFee::from(200_u64)),
-            ledger_id: 1,
+            ledger_id: DataLedger::Submit.into(),
             bundle_format: None,
             chain_id: 1,
             signature: IrysSignature::new(Signature::try_from([0_u8; 65].as_slice()).unwrap()),
@@ -1189,7 +1190,7 @@ mod tests {
                 header_size: 0,
                 term_fee: BoundedFee::from(100_u64),
                 perm_fee: Some(BoundedFee::from(200_u64)),
-                ledger_id: 1,
+                ledger_id: DataLedger::Submit.into(),
                 bundle_format: None,
                 chain_id: config.chain_id,
                 signature: Signature::test_signature().into(),

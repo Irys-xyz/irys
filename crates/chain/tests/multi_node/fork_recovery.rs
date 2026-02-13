@@ -1394,11 +1394,13 @@ async fn heavy_reorg_tip_moves_across_nodes_publish_txs(
             // For full-validation correctness, we only need to guarantee the receiver has chunks for published txs when validating.
             // We use send_full_block for B→A and C→A (those contain Publish txs with proofs),
             // but we use a lighter header delivery for A→B/C to avoid the EVM payload requirement of send_full_block()
+            let a_block2_sealed =
+                crate::utils::build_sealed_block(a_block2.as_ref().clone(), &a_block2_txs)?;
             node_a
-                .send_block_to_peer(&node_b, &a_block2, a_block2_txs.clone())
+                .send_block_to_peer(&node_b, Arc::clone(&a_block2_sealed))
                 .await?;
             node_a
-                .send_block_to_peer(&node_c, &a_block2, a_block2_txs.clone())
+                .send_block_to_peer(&node_c, Arc::clone(&a_block2_sealed))
                 .await?;
         } else {
             // Gossip all blocks so everyone syncs

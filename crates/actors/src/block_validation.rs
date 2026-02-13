@@ -29,7 +29,7 @@ use irys_types::{
     transaction::fee_distribution::{PublishFeeCharges, TermFeeCharges},
     validate_path, BoundedFee, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
     DataTransactionHeader, DataTransactionLedger, DifficultyAdjustmentConfig, IrysAddress,
-    IrysBlockHeader, PoaData, SystemLedger, UnixTimestamp, H256, U256,
+    IrysBlockHeader, PoaData, SealedBlock, SystemLedger, UnixTimestamp, H256, U256,
 };
 use irys_types::{get_ingress_proofs, IngressProof, LedgerChunkOffset};
 use irys_types::{u256_from_le_bytes as hash_to_number, IrysTransactionId};
@@ -156,6 +156,12 @@ pub enum PreValidationError {
         "Transaction {tx_id} already included in previous Publish ledger in block {block_hash:?}"
     )]
     PublishTxAlreadyIncluded { tx_id: H256, block_hash: BlockHash },
+    #[error("Transaction {tx_id} cannot be promoted from {from:?} to {to:?}")]
+    InvalidPromotionPath {
+        tx_id: H256,
+        from: DataLedger,
+        to: DataLedger,
+    },
 
     #[error("Transaction {tx_id} in Submit ledger was already included in past {ledger:?} ledger in block {block_hash:?}")]
     SubmitTxAlreadyIncluded {
@@ -181,11 +187,13 @@ pub enum PreValidationError {
     #[error("Failed to get previous transaction inclusions: {0}")]
     PreviousTxInclusionsFailed(String),
     #[error("Transaction {tx_id} has invalid ledger_id. Expected: {expected}, Actual: {actual}")]
-    InvalidLedgerId {
+    InvalidLedgerIdForTx {
         tx_id: H256,
         expected: u32,
         actual: u32,
     },
+    #[error("Ledger id :{ledger_id} is invalid at block height: {block_height}")]
+    InvalidLedgerId { ledger_id: u32, block_height: u64 },
     #[error("Failed to calculate fees: {0}")]
     FeeCalculationFailed(String),
     #[error("Transaction {tx_id} has insufficient perm_fee. Expected at least: {expected}, Actual: {actual}")]
@@ -385,16 +393,18 @@ pub enum ValidationError {
 }
 
 /// Full pre-validation steps for a block
-#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
+#[tracing::instrument(level = "trace", skip_all, fields(block.hash = %sealed_block.header().block_hash, block.height = sealed_block.header().height))]
 pub async fn prevalidate_block(
-    block: IrysBlockHeader,
-    previous_block: IrysBlockHeader,
+    sealed_block: &SealedBlock,
+    previous_block: &IrysBlockHeader,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     config: Config,
     reward_curve: Arc<HalvingCurve>,
     parent_ema_snapshot: &EmaSnapshot,
-    transactions: &BlockTransactions,
 ) -> Result<(), PreValidationError> {
+    let block = sealed_block.header();
+    let transactions = sealed_block.transactions();
+
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -417,7 +427,7 @@ pub async fn prevalidate_block(
     }
 
     // Check prev_output (vdf)
-    prev_output_is_valid(&block, &previous_block)?;
+    prev_output_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -425,7 +435,7 @@ pub async fn prevalidate_block(
     );
 
     // Check block height continuity
-    height_is_valid(&block, &previous_block)?;
+    height_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -441,15 +451,15 @@ pub async fn prevalidate_block(
 
     // Check the difficulty
     difficulty_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         &config.consensus.difficulty_adjustment,
     )?;
 
     // Validate the last_diff_timestamp field
     last_diff_timestamp_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         &config.consensus.difficulty_adjustment,
     )?;
 
@@ -460,7 +470,7 @@ pub async fn prevalidate_block(
     );
 
     // Validate previous_cumulative_diff points to parent's cumulative_diff
-    previous_cumulative_difficulty_is_valid(&block, &previous_block)?;
+    previous_cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -468,7 +478,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the cumulative difficulty
-    cumulative_difficulty_is_valid(&block, &previous_block)?;
+    cumulative_difficulty_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -479,7 +489,7 @@ pub async fn prevalidate_block(
     debug!("poa data not expired");
 
     // Check the solution_hash
-    solution_hash_is_valid(&block, &previous_block)?;
+    solution_hash_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -487,7 +497,7 @@ pub async fn prevalidate_block(
     );
 
     // Verify the solution_hash cryptographic link to PoA chunk, partition_chunk_offset and VDF seed
-    solution_hash_link_is_valid(&block, &poa_chunk)?;
+    solution_hash_link_is_valid(block, &poa_chunk)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -495,7 +505,7 @@ pub async fn prevalidate_block(
     );
 
     // Check the previous solution hash references the parent correctly
-    previous_solution_hash_is_valid(&block, &previous_block)?;
+    previous_solution_hash_is_valid(block, previous_block)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -505,7 +515,7 @@ pub async fn prevalidate_block(
     // Validate VDF seeds/next_seed against parent before any VDF-related processing
     let vdf_reset_frequency: u64 = config.vdf.reset_frequency as u64;
     if !matches!(
-        is_seed_data_valid(&block, &previous_block, vdf_reset_frequency),
+        is_seed_data_valid(block, previous_block, vdf_reset_frequency),
         ValidationResult::Valid
     ) {
         return Err(PreValidationError::VDFCheckpointsInvalid(
@@ -515,8 +525,8 @@ pub async fn prevalidate_block(
 
     // Ensure the last_epoch_hash field correctly references the most recent epoch block
     last_epoch_hash_is_valid(
-        &block,
-        &previous_block,
+        block,
+        previous_block,
         config.consensus.epoch.num_blocks_in_epoch,
     )?;
     debug!(
@@ -544,7 +554,7 @@ pub async fn prevalidate_block(
     let ema_valid = {
         let res = parent_ema_snapshot
             .calculate_ema_for_new_block(
-                &previous_block,
+                previous_block,
                 block.oracle_irys_price,
                 config.consensus.token_price_safe_range,
                 config.consensus.ema.price_adjustment_interval,
@@ -575,7 +585,7 @@ pub async fn prevalidate_block(
     }
 
     // Validate ingress proof signers are unique and staked
-    validate_ingress_proof_signers(&block, &parent_epoch_snapshot)?;
+    validate_ingress_proof_signers(block, &parent_epoch_snapshot)?;
     debug!(
         block.hash = ?block.block_hash,
         block.height = ?block.height,
@@ -590,6 +600,24 @@ pub async fn prevalidate_block(
     // TODO: add validation for the term ledger 'expires' field,
     // ensuring it gets properly updated on epoch boundaries, and it's
     // consistent with the block's height and parent block's height
+
+    // ========================================
+    // Data Ledger Validation
+    // ========================================
+    // Ensure only active data ledgers are present in the block
+    for ledger in &block.data_ledgers {
+        match DataLedger::try_from(ledger.ledger_id) {
+            Ok(DataLedger::Publish | DataLedger::Submit) => {
+                // Valid ledgers - continue
+            }
+            _ => {
+                return Err(PreValidationError::InvalidLedgerId {
+                    ledger_id: ledger.ledger_id,
+                    block_height: block.height,
+                })
+            }
+        }
+    }
 
     // ========================================
     // Transaction validation
@@ -1261,7 +1289,7 @@ pub async fn shadow_transactions_are_valid(
     payload_provider: ExecutionPayloadCache,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
-    block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     transactions: &BlockTransactions,
 ) -> eyre::Result<ExecutionData> {
     // 1. Get the execution payload for validation
@@ -1511,7 +1539,7 @@ async fn generate_expected_shadow_transactions(
     db: &DatabaseProvider,
     parent_epoch_snapshot: Arc<EpochSnapshot>,
     parent_commitment_snapshot: Arc<CommitmentSnapshot>,
-    block_index: Arc<std::sync::RwLock<BlockIndex>>,
+    block_index: BlockIndex,
     transactions: &BlockTransactions,
 ) -> eyre::Result<Vec<ShadowTransaction>> {
     // Look up previous block to get EVM hash
@@ -2143,40 +2171,66 @@ pub async fn data_txs_are_valid(
 
                         debug!("Transaction {} is new in Submit ledger", tx.id);
                     }
+                    DataLedger::OneYear => {
+                        // TODO some validation
+                    }
+                    DataLedger::ThirtyDay => {
+                        // TODO some validation
+                    }
                 }
             }
             TxInclusionState::Found {
                 ledger_current: (ledger_current, current_block_hash),
                 ledger_historical: (ledger_historical, historical_block_hash),
             } => {
-                match (ledger_current, ledger_historical) {
-                    (DataLedger::Publish, DataLedger::Submit) => {
-                        if current_block_hash == historical_block_hash
-                            && current_block_hash == &block.block_hash
-                        {
-                            // tx was included & promoted within the same block
-                            validate_price(tx)?;
-                        }
+                match ledger_current {
+                    DataLedger::Publish => {
+                        match ledger_historical {
+                            DataLedger::Submit => {
+                                if current_block_hash == historical_block_hash
+                                    && current_block_hash == &block.block_hash
+                                {
+                                    // tx was included & promoted within the same block
+                                    validate_price(tx)?;
+                                }
 
-                        // OK: Transaction promoted from past Submit to current Publish
-                        debug!(
-                            "Transaction {} promoted from past Submit to current Publish ledger",
-                            tx.id
-                        );
+                                // OK: Transaction promoted from past Submit to current Publish
+                                debug!(
+                        "Transaction {} promoted from past Submit to current Publish ledger",
+                        tx.id
+                    );
+                            }
+                            DataLedger::Publish => {
+                                return Err(PreValidationError::PublishTxAlreadyIncluded {
+                                    tx_id: tx.id,
+                                    block_hash: *historical_block_hash,
+                                });
+                            }
+                            _ => {
+                                // Unexpected historical ledger for Publish
+                                return Err(PreValidationError::InvalidPromotionPath {
+                                    tx_id: tx.id,
+                                    from: *ledger_historical,
+                                    to: DataLedger::Publish,
+                                });
+                            }
+                        }
                     }
-                    (DataLedger::Publish, DataLedger::Publish) => {
-                        return Err(PreValidationError::PublishTxAlreadyIncluded {
-                            tx_id: tx.id,
-                            block_hash: *historical_block_hash,
-                        });
-                    }
-                    (DataLedger::Submit, _) => {
+                    DataLedger::Submit => {
                         // Submit tx should not have any past inclusion
                         return Err(PreValidationError::SubmitTxAlreadyIncluded {
                             tx_id: tx.id,
                             ledger: *ledger_historical,
                             block_hash: *historical_block_hash,
                         });
+                    }
+                    DataLedger::OneYear => {
+                        // TODO: Validate OneYear term ledger data tx
+                        // For now, accept any historical state
+                    }
+                    DataLedger::ThirtyDay => {
+                        // TODO: Validate ThirtyDay term ledger data tx
+                        // For now, accept any historical state
                     }
                 }
             }
@@ -2201,7 +2255,7 @@ pub async fn data_txs_are_valid(
         // All data transactions must have ledger_id set to Publish
         // TODO: support other term ledgers here
         if tx.ledger_id != DataLedger::Publish as u32 {
-            return Err(PreValidationError::InvalidLedgerId {
+            return Err(PreValidationError::InvalidLedgerIdForTx {
                 tx_id: tx.id,
                 expected: DataLedger::Publish as u32,
                 actual: tx.ledger_id,
@@ -2967,12 +3021,12 @@ mod tests {
         DataTransaction, DataTransactionHeader, DataTransactionLedger, H256List, IrysAddress,
         IrysBlockHeaderV1, NodeConfig, Signature, H256, U256,
     };
-    use std::sync::{Arc, RwLock};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tracing::{debug, info};
 
     pub(super) struct TestContext {
-        pub block_index: Arc<RwLock<BlockIndex>>,
+        pub block_index: BlockIndex,
         pub block_index_tx: tokio::sync::mpsc::UnboundedSender<BlockIndexServiceMessage>,
         #[expect(dead_code)]
         pub block_index_handle: TokioServiceHandle,
@@ -3023,11 +3077,12 @@ mod tests {
         let miner_address = signer.address();
 
         // Create epoch service with random miner address
-        let block_index = Arc::new(RwLock::new(
-            BlockIndex::new(&node_config)
-                .await
-                .expect("Expected to create block index"),
-        ));
+        let db_env = irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(
+            &data_dir.path().to_path_buf(),
+        )
+        .expect("to create DB");
+        let db = irys_types::DatabaseProvider(Arc::new(db_env));
+        let block_index = BlockIndex::new_for_testing(db);
 
         // Spawn Tokio BlockIndex service
         let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -3241,14 +3296,7 @@ mod tests {
         chunk_size: usize,
     ) {
         // Initialize genesis block at height 0
-        let height: u64;
-        {
-            height = context
-                .block_index
-                .read()
-                .expect("Expected to be able to read block index")
-                .num_blocks();
-        }
+        let height = context.block_index.num_blocks();
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
@@ -3275,7 +3323,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(txs[poa_tx_num].proofs[poa_chunk_num].proof.clone())),
             chunk: Some(Base64(poa_chunk.clone())),
-            ledger_id: Some(1),
+            ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),
@@ -3445,14 +3493,7 @@ mod tests {
         chunk_size: usize,
     ) {
         // Initialize genesis block at height 0
-        let height: u64;
-        {
-            height = context
-                .block_index
-                .read()
-                .expect("To read block index")
-                .num_blocks();
-        }
+        let height = context.block_index.num_blocks();
 
         let mut entropy_chunk = Vec::<u8>::with_capacity(chunk_size);
         compute_entropy_chunk(
@@ -3534,7 +3575,7 @@ mod tests {
             tx_path: Some(Base64(tx_path[poa_tx_num].proof.clone())),
             data_path: Some(Base64(hacked_data_path.clone())),
             chunk: Some(Base64(hacked_data.clone())), // Use RAW data, PoA validation will entropy-pack it
-            ledger_id: Some(1),
+            ledger_id: Some(DataLedger::Submit.into()),
             partition_chunk_offset: (poa_tx_num * 3 /* 3 chunks in each tx */ + poa_chunk_num)
                 .try_into()
                 .expect("Value exceeds u32::MAX"),

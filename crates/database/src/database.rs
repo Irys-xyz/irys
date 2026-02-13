@@ -1,11 +1,13 @@
+use std::ops::RangeBounds;
 use std::path::Path;
 
 use crate::db_cache::{
     CachedChunk, CachedChunkIndexEntry, CachedChunkIndexMetadata, CachedDataRoot,
 };
 use crate::tables::{
-    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof, IngressProofs,
-    IrysBlockHeaders, IrysCommitments, IrysDataTxHeaders, IrysPoAChunks, Metadata, PeerListItems,
+    CachedChunks, CachedChunksIndex, CachedDataRoots, CompactCachedIngressProof,
+    CompactLedgerIndexItem, IngressProofs, IrysBlockHeaders, IrysBlockIndexItems, IrysCommitments,
+    IrysDataTxHeaders, IrysPoAChunks, Metadata, MigratedBlockHashes, PeerListItems,
 };
 
 use crate::metadata::MetadataKey;
@@ -13,9 +15,10 @@ use crate::reth_ext::IrysRethDatabaseEnvMetricsExt as _;
 use irys_types::ingress::CachedIngressProof;
 use irys_types::irys::IrysSigner;
 use irys_types::{
-    BlockHash, ChunkPathHash, CommitmentTransaction, DataRoot, DataTransactionHeader,
-    DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader, IrysPeerId, IrysTransactionId,
-    PeerListItem, TxChunkOffset, UnixTimestamp, UnpackedChunk, H256, MEGABYTE,
+    BlockHash, BlockHeight, BlockIndexItem, ChunkPathHash, CommitmentTransaction, DataLedger,
+    DataRoot, DataTransactionHeader, DatabaseProvider, IngressProof, IrysAddress, IrysBlockHeader,
+    IrysPeerId, IrysTransactionId, LedgerIndexItem, PeerListItem, TxChunkOffset, UnixTimestamp,
+    UnpackedChunk, H256, MEGABYTE,
 };
 use reth_db::cursor::DbDupCursorRO as _;
 use reth_db::mdbx::init_db_for;
@@ -507,6 +510,169 @@ pub fn store_external_ingress_proof_checked<T: DbTx + DbTxMut>(
             proof: ingress_proof.clone(),
         }),
     )?;
+    Ok(())
+}
+
+/// Stores block index data in the database for a given block.
+///
+/// Decomposes the block header into individual LedgerIndexItems for efficient storage
+/// and pruning. Each ledger (Publish, Submit, etc.) is stored as a separate SubKey under the
+/// block_height, allowing ledgers to be pruned independently without affecting others in the block.
+pub fn insert_block_index_items_for_block<T: DbTxMut>(
+    tx: &T,
+    block: &IrysBlockHeader,
+) -> eyre::Result<()> {
+    // Loop though each ledger in the blocks data_ledger list  and
+    // create a CompactLedgerIndexItem for it at that height
+    // Build a CompactIrysBlockIndexItem wrapper for each LedgerIndexItem
+    // Post all of them to the DB with a single write TX
+
+    // Delete any existing dups for this height to make the insert idempotent
+    let _ = tx.delete::<IrysBlockIndexItems>(block.height, None);
+
+    for data_ledger in block.data_ledgers.iter() {
+        // Create a LedgerIndexItem for each data ledger in the block
+        let ledger_enum = DataLedger::try_from(data_ledger.ledger_id)?;
+        let ledger_index_item = LedgerIndexItem {
+            total_chunks: data_ledger.total_chunks,
+            tx_root: data_ledger.tx_root,
+            ledger: ledger_enum,
+        };
+
+        // Convert it to a compact type for db persistence
+        let compact_ledger_index_item = CompactLedgerIndexItem(ledger_index_item);
+
+        // Use the db write tx to persist the entry at the specified block_height
+        tx.put::<IrysBlockIndexItems>(block.height, compact_ledger_index_item)?;
+    }
+
+    // Update the block hash index as well
+    tx.put::<MigratedBlockHashes>(block.height, block.block_hash)?;
+
+    Ok(())
+}
+
+/// Reconstructs a BlockIndexItem from the db for a given block height.
+///
+/// Retrieves block_hash and all LedgerIndexItems at the specified height, then combines them
+/// into a single BlockIndexItem structure used for chunk validation during mining.
+pub fn block_index_item_by_height<T: DbTx>(
+    tx: &T,
+    height: &BlockHeight,
+) -> eyre::Result<BlockIndexItem> {
+    // Step 1: Retrieve CompactLedgerIndexItems for each DataLedger at the given block_height.
+    let mut cursor = tx.cursor_dup_read::<IrysBlockIndexItems>()?;
+    let walker = cursor.walk_dup(Some(*height), None)?; // iterate over all subkeys
+    let ledger_index_items: Vec<(BlockHeight, CompactLedgerIndexItem)> =
+        walker.collect::<Result<Vec<_>, DatabaseError>>()?;
+
+    // Step 2: Retrieve the block_hash
+    let block_hash = tx
+        .get::<MigratedBlockHashes>(*height)?
+        .ok_or_else(|| eyre::eyre!("No block hash found at height {}", height))?;
+
+    // Step 3: Transform the CompactLedgerIndexItems into a single BlockIndexItem.
+    // This transformation is necessary because:
+    // - CompactLedgerIndexItem: Optimized for pruning term ledgers efficiently
+    // - BlockIndexItem: Optimized for validation of chunks within a block (mining)
+    let mut ledgers: Vec<LedgerIndexItem> = Vec::new();
+    for ledger_item in &ledger_index_items {
+        ledgers.push(LedgerIndexItem {
+            total_chunks: ledger_item.1.total_chunks,
+            tx_root: ledger_item.1.tx_root,
+            ledger: ledger_item.1.ledger,
+        });
+    }
+
+    // Step 4: Build and return the BlockIndexItem
+    let num_ledgers: u8 = ledger_index_items.len().try_into()?;
+    let block_index_item = BlockIndexItem {
+        num_ledgers,
+        block_hash,
+        ledgers,
+    };
+
+    Ok(block_index_item)
+}
+
+/// Deletes all LedgerIndexItems for the specified ledger bounded by the height range.
+///
+/// This function preserves LedgerIndexItems for other ledgers at the same heights,
+/// only removing entries that match the target ledger.
+pub fn prune_ledger_range<T: DbTxMut, U: RangeBounds<BlockHeight>>(
+    tx: &T,
+    ledger: DataLedger,
+    range: U,
+) -> eyre::Result<()> {
+    let mut cursor = tx.cursor_write::<IrysBlockIndexItems>()?;
+    let mut range_walker = cursor.walk_range(range)?;
+
+    while let Some(result) = range_walker.next() {
+        let (_height, item) = result?;
+        if item.ledger == ledger {
+            range_walker.delete_current()?;
+        }
+    }
+    Ok(())
+}
+
+/// Inserts a single [`BlockIndexItem`] into the block index tables.
+///
+/// Writes the `block_hash` to [`MigratedBlockHashes`] and each [`LedgerIndexItem`]
+/// to [`IrysBlockIndexItems`]. Used by the migration path and `push_item`.
+pub fn insert_block_index_item<T: DbTxMut>(
+    tx: &T,
+    height: BlockHeight,
+    item: &BlockIndexItem,
+) -> eyre::Result<()> {
+    // Delete any existing dups for this height to make the insert idempotent
+    let _ = tx.delete::<IrysBlockIndexItems>(height, None);
+
+    tx.put::<MigratedBlockHashes>(height, item.block_hash)?;
+    for ledger_item in &item.ledgers {
+        tx.put::<IrysBlockIndexItems>(height, CompactLedgerIndexItem(ledger_item.clone()))?;
+    }
+    Ok(())
+}
+
+/// Returns the latest (highest) block height in the block index, or `None` if empty.
+pub fn block_index_latest_height<T: DbTx>(tx: &T) -> eyre::Result<Option<u64>> {
+    let mut cursor = tx.cursor_read::<MigratedBlockHashes>()?;
+    Ok(cursor.last()?.map(|(height, _)| height))
+}
+
+/// Returns the number of blocks stored in the block index.
+pub fn block_index_num_blocks<T: DbTx>(tx: &T) -> eyre::Result<u64> {
+    let count = tx.entries::<MigratedBlockHashes>()?;
+    Ok(count as u64)
+}
+
+/// Deletes block index entries for all heights in the given range from both tables.
+///
+/// Used for rollback operations. Removes entries from both [`IrysBlockIndexItems`]
+/// and [`MigratedBlockHashes`].
+pub fn delete_block_index_range<T: DbTxMut, U: RangeBounds<BlockHeight> + Clone>(
+    tx: &T,
+    range: U,
+) -> eyre::Result<()> {
+    // Delete from IrysBlockIndexItems
+    let mut cursor = tx.cursor_write::<IrysBlockIndexItems>()?;
+    let mut range_walker = cursor.walk_range(range.clone())?;
+    while let Some(result) = range_walker.next() {
+        let (_height, _item) = result?;
+        range_walker.delete_current()?;
+    }
+    drop(range_walker);
+    drop(cursor);
+
+    // Delete from MigratedBlockHashes
+    let mut cursor = tx.cursor_write::<MigratedBlockHashes>()?;
+    let mut range_walker = cursor.walk_range(range)?;
+    while let Some(result) = range_walker.next() {
+        let (_height, _hash) = result?;
+        range_walker.delete_current()?;
+    }
+
     Ok(())
 }
 
