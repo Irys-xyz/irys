@@ -5,14 +5,12 @@ use irys_database::reth_db::{Database as _, DatabaseEnv, DatabaseEnvKind};
 use irys_reth_node_bridge::dump::dump_state;
 use irys_reth_node_bridge::genesis::init_state;
 use irys_types::chainspec::irys_chain_spec;
-use irys_types::{Config, NodeConfig, H256};
+use irys_types::{Config, DatabaseProvider, NodeConfig, H256};
 use reth_node_core::version::default_client_version;
 use reth_node_types::NodeTypesWithDBAdapter;
 use reth_provider::{providers::StaticFileProvider, ProviderFactory};
 use std::time::SystemTime;
 use std::{path::PathBuf, sync::Arc};
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt as _;
 use tracing::level_filters::LevelFilter;
 use tracing::{info, warn};
 use tracing_error::ErrorLayer;
@@ -120,86 +118,77 @@ async fn main() -> eyre::Result<()> {
         }
         Commands::RollbackBlocks { mode } => {
             let node_config: NodeConfig = load_config()?;
-            let db = cli_init_irys_db(DatabaseEnvKind::RW)?;
+            let db_env = cli_init_irys_db(DatabaseEnvKind::RW)?;
+            let db = DatabaseProvider(db_env);
 
-            let block_index = irys_domain::BlockIndex::new(&node_config).await?;
+            // Construct BlockIndex backed by DB (triggers migration if needed)
+            let block_index = irys_domain::BlockIndex::new(&node_config, db.clone())?;
 
-            let (retained, removed) = {
-                let count = match mode {
-                    RollbackMode::ToBlock { target } => {
-                        if let Ok(height) = target.parse::<u64>() {
-                            if block_index.latest_height() < height {
-                                warn!("Block index is at {}, which is smaller than rollback height {}", &block_index.latest_height(), &height);
-                                return Ok(());
-                            }
-                            block_index.latest_height().saturating_sub(height)
-                        } else if let Ok(hash) = H256::from_base58_result(&target) {
-                            let idx = block_index
-                                .items
-                                .iter()
-                                .position(|itm| itm.block_hash == hash)
-                                .ok_or_eyre(format!(
-                                    "Unable to find block {} in the block index",
-                                    hash
-                                ))?;
-                            // the idx is the height
-                            info!("Found block {} at height {}", &hash, &idx);
-                            block_index.latest_height().saturating_sub(idx as u64)
-                        } else {
-                            bail!("Invalid target {} - could not parse as a height or a valid irys block hash", &target)
+            let latest = block_index.latest_height();
+            let num = block_index.num_blocks();
+
+            let target_height = match mode {
+                RollbackMode::ToBlock { target } => {
+                    if let Ok(height) = target.parse::<u64>() {
+                        if latest < height {
+                            warn!(
+                                "Block index is at {}, which is smaller than rollback height {}",
+                                latest, &height
+                            );
+                            return Ok(());
                         }
+                        height
+                    } else if let Ok(hash) = H256::from_base58_result(&target) {
+                        // Search for the block hash in the index
+                        let mut found_height = None;
+                        for h in 0..num {
+                            if let Some(item) = block_index.get_item(h) {
+                                if item.block_hash == hash {
+                                    found_height = Some(h);
+                                    break;
+                                }
+                            }
+                        }
+                        let height = found_height.ok_or_eyre(format!(
+                            "Unable to find block {} in the block index",
+                            hash
+                        ))?;
+                        info!("Found block {} at height {}", &hash, &height);
+                        height
+                    } else {
+                        bail!("Invalid target {} - could not parse as a height or a valid irys block hash", &target)
                     }
-                    RollbackMode::Count { count } => count,
-                };
-
-                &block_index.items.split_at(
-                    block_index
-                        .items
-                        .len()
-                        .saturating_sub(count.try_into().unwrap()),
-                )
+                }
+                RollbackMode::Count { count } => latest.saturating_sub(count),
             };
 
+            let remove_count = latest.saturating_sub(target_height);
+
             info!(
-                "Old len: {}, new {} - retaining <{}, removing {} -> {} ",
-                block_index.items.len(),
-                retained.len(),
-                retained.len(),
-                retained.len(),
-                retained.len() + removed.len()
+                "Old height: {}, target height: {} - removing {} blocks",
+                latest, target_height, remove_count
             );
 
-            // remove every block in `removed` from the database
+            // Remove block headers and block index entries in a single write transaction
             use irys_database::reth_db::transaction::DbTxMut as _;
             let rw_tx = db.tx_mut()?;
 
-            for itm in removed.iter() {
-                let hdr = rw_tx
-                    .get::<irys_database::tables::IrysBlockHeaders>(itm.block_hash)?
-                    .unwrap();
-                info!("Removing {}@{}", &hdr.block_hash, &hdr.height);
-                rw_tx.delete::<irys_database::tables::IrysBlockHeaders>(itm.block_hash, None)?;
+            // Remove block headers for the rolled-back range
+            for h in (target_height + 1)..=latest {
+                if let Some(item) = block_index.get_item(h) {
+                    info!("Removing block {}@{}", &item.block_hash, h);
+                    rw_tx
+                        .delete::<irys_database::tables::IrysBlockHeaders>(item.block_hash, None)?;
+                }
             }
 
-            std::fs::copy(
-                block_index.block_index_file.clone(),
-                node_config.block_index_dir().join("index.dat.bak"),
-            )?;
-
-            let mut f = OpenOptions::new()
-                .truncate(true)
-                .write(true)
-                .open(block_index.block_index_file)
-                .await?;
-            // TODO: update this so it a.) removes other data from the DB, and 2.) removes entries more efficiently (we know the size of each entry ahead of time)
-            for item in retained.iter() {
-                f.write_all(&item.to_bytes()).await?
-            }
-            f.sync_all().await?;
+            // Delete block index entries
+            irys_database::delete_block_index_range(&rw_tx, (target_height + 1)..=latest)?;
 
             use irys_database::reth_db::transaction::DbTx as _;
             rw_tx.commit()?;
 
+            info!("Rollback complete. New tip is at height {}", target_height);
             Ok(())
         }
         Commands::Tui {

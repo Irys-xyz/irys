@@ -1,13 +1,13 @@
 use irys_actors::block_validation::{
     poa_is_valid, previous_solution_hash_is_valid, solution_hash_link_is_valid, PreValidationError,
 };
+use irys_database::open_or_create_db;
 use irys_domain::{BlockIndex, BlockIndexReadGuard, EpochSnapshot};
 use irys_types::{
     compute_solution_hash, partition::PartitionAssignment, Base64, BlockIndexItem, ConsensusConfig,
-    DataLedger, IrysAddress, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
+    DataLedger, DatabaseProvider, IrysAddress, IrysBlockHeader, LedgerIndexItem, PoaData, H256,
 };
-use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[test_log::test(test)]
 /// test that a parent blocks solution_hash must equal the current blocks previous_solution_hash
@@ -30,7 +30,7 @@ fn invalid_previous_solution_hash_rejected() {
 fn poa_chunk_offset_out_of_bounds_returns_error() {
     let config = ConsensusConfig::testing();
 
-    let block_index_items = vec![
+    let block_index_items = [
         BlockIndexItem {
             block_hash: H256::zero(),
             num_ledgers: 2,
@@ -38,10 +38,12 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
                 LedgerIndexItem {
                     total_chunks: 0,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 0,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         },
@@ -52,10 +54,12 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
                 LedgerIndexItem {
                     total_chunks: 10,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 10,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         },
@@ -66,20 +70,29 @@ fn poa_chunk_offset_out_of_bounds_returns_error() {
                 LedgerIndexItem {
                     total_chunks: 20,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Publish,
                 },
                 LedgerIndexItem {
                     total_chunks: 20,
                     tx_root: H256::zero(),
+                    ledger: DataLedger::Submit,
                 },
             ],
         },
     ];
 
-    let block_index = BlockIndex {
-        items: block_index_items.into(),
-        block_index_file: PathBuf::new(),
-    };
-    let block_index_guard = BlockIndexReadGuard::new(Arc::new(RwLock::new(block_index)));
+    let db_env = open_or_create_db(
+        irys_testing_utils::utils::temporary_directory(None, false),
+        irys_database::tables::IrysTables::ALL,
+        None,
+    )
+    .unwrap();
+    let db = DatabaseProvider(Arc::new(db_env));
+    let block_index = BlockIndex::new_for_testing(db);
+    for (height, item) in block_index_items.iter().enumerate() {
+        block_index.push_item(item, height as u64).unwrap();
+    }
+    let block_index_guard = BlockIndexReadGuard::new(block_index);
 
     let mut epoch_snapshot = EpochSnapshot::default();
     let partition_hash = H256::zero();

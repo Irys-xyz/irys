@@ -1039,6 +1039,14 @@ impl Inner {
                     );
                     continue;
                 }
+                DataLedger::OneYear | DataLedger::ThirtyDay => {
+                    warn!(
+                        tx.id = ?tx.id,
+                        tx.ledger = ?ledger,
+                        "Skipping unsupported term ledger"
+                    );
+                    continue;
+                }
             }
 
             if !self
