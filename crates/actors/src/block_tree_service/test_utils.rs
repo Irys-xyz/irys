@@ -7,7 +7,7 @@ use irys_domain::{
     dummy_ema_snapshot, BlockTree, BlockTreeReadGuard, ChainState, CommitmentSnapshot,
     EpochSnapshot,
 };
-use irys_testing_utils::IrysBlockHeaderTestExt;
+use irys_testing_utils::IrysBlockHeaderTestExt as _;
 use irys_types::{
     storage_pricing::TOKEN_SCALE, BlockBody, Config, IrysBlockHeader, IrysTokenPrice, SealedBlock,
     H256,

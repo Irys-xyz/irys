@@ -1591,7 +1591,7 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
-    use irys_testing_utils::IrysBlockHeaderTestExt;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
 
     /// Creates a SealedBlock from a header with an empty body (no transactions).
     /// Signs the header if the signature is invalid (e.g., after modifying fields).
