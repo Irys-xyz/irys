@@ -554,43 +554,54 @@ impl BlockTreeServiceInner {
             .next_snapshot(&block, &parent_block_entry.block, &self.config.consensus)
             .map_err(|e| PreValidationError::EmaSnapshotError(e.to_string()))?;
 
-        let add_result = cache.add_block(
-            &block,
-            transactions.clone(),
-            commitment_snapshot,
-            arc_epoch_snapshot,
-            ema_snapshot,
-        );
-
-        if add_result.is_ok() {
-            // Mark as scheduled and schedule validation
-            if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
+        cache
+            .add_block(
+                &block,
+                transactions.clone(),
+                commitment_snapshot,
+                arc_epoch_snapshot,
+                ema_snapshot,
+            )
+            .map_err(|e| {
                 error!(
-                    "Unable to mark block {} as ValidationScheduled: {:?}",
-                    block_hash, err
+                    block.hash = ?block_hash,
+                    block.height = block.height,
+                    ?e,
+                    "Failed to add block to block tree"
                 );
-                return Err(PreValidationError::UpdateCacheForScheduledValidationError(
-                    *block_hash,
-                ));
-            }
+                PreValidationError::AddBlockFailed {
+                    block_hash: *block_hash,
+                    reason: e.to_string(),
+                }
+            })?;
 
-            // Record validation started for diagnostics
-            self.chain_sync_state.record_validation_started(*block_hash);
-
-            self.service_senders
-                .validation_service
-                .send(ValidationServiceMessage::ValidateBlock {
-                    block: block.clone(),
-                    transactions,
-                    skip_vdf_validation: skip_vdf,
-                })
-                .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
-
-            debug!(
-                "scheduling block for validation: {} height: {}",
-                block_hash, block.height
+        // Mark as scheduled and schedule validation
+        if let Err(err) = cache.mark_block_as_validation_scheduled(block_hash) {
+            error!(
+                "Unable to mark block {} as ValidationScheduled: {:?}",
+                block_hash, err
             );
+            return Err(PreValidationError::UpdateCacheForScheduledValidationError(
+                *block_hash,
+            ));
         }
+
+        // Record validation started for diagnostics
+        self.chain_sync_state.record_validation_started(*block_hash);
+
+        self.service_senders
+            .validation_service
+            .send(ValidationServiceMessage::ValidateBlock {
+                block: block.clone(),
+                transactions,
+                skip_vdf_validation: skip_vdf,
+            })
+            .map_err(|_| PreValidationError::ValidationServiceUnreachable)?;
+
+        debug!(
+            "scheduling block for validation: {} height: {}",
+            block_hash, block.height
+        );
 
         Ok(())
     }

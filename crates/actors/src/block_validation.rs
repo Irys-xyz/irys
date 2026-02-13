@@ -272,6 +272,10 @@ pub enum PreValidationError {
     /// Invalid data ledgers length
     #[error("Invalid data ledgers length: expected {expected} ledgers, got {got}")]
     InvalidDataLedgersLength { expected: u32, got: usize },
+
+    /// Failed to add block to block tree
+    #[error("Failed to add block {block_hash} to block tree: {reason}")]
+    AddBlockFailed { block_hash: H256, reason: String },
 }
 
 /// Validation error type that covers all block validation failures.
