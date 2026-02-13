@@ -16,7 +16,7 @@ use irys_database::db_cache::CachedDataRoot;
 pub use types::*;
 
 use crate::block_discovery::get_data_tx_in_parallel_inner;
-use crate::block_tree_service::{BlockMigratedEvent, ReorgEvent};
+use crate::block_tree_service::ReorgEvent;
 use crate::block_validation::{calculate_perm_storage_total_fee, get_assigned_ingress_proofs};
 use crate::pledge_provider::MempoolPledgeProvider;
 use crate::services::ServiceSenders;
@@ -269,6 +269,13 @@ pub enum MempoolServiceMessage {
     /// `GetDataTxs`) when possible, and avoid holding the guard across long‑running
     /// operations to prevent reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
+    /// Clean up in-memory mempool pools after block migration.
+    /// Sent by BlockMigrationService after DB persistence is complete.
+    MigrationCleanup {
+        block_height: u64,
+        commitment_tx_ids: Vec<H256>,
+        submit_tx_ids: Vec<H256>,
+    },
 }
 
 impl MempoolServiceMessage {
@@ -295,6 +302,7 @@ impl MempoolServiceMessage {
             Self::CloneStakeAndPledgeWhitelist(_) => "CloneStakeAndPledgeWhitelist",
             Self::GetMempoolStatus(_) => "GetMempoolStatus",
             Self::GetReadGuard(_) => "GetReadGuard",
+            Self::MigrationCleanup { .. } => "MigrationCleanup",
         }
     }
 }
@@ -449,8 +457,34 @@ impl Inner {
                     tracing::error!("response.send() error: {:?}", e);
                 };
             }
+            MempoolServiceMessage::MigrationCleanup {
+                block_height: _,
+                commitment_tx_ids,
+                submit_tx_ids,
+            } => {
+                self.handle_migration_cleanup(commitment_tx_ids, submit_tx_ids)
+                    .await;
+            }
         }
         Ok(())
+    }
+
+    /// Handles in-memory cleanup after block migration.
+    /// DB persistence has already been handled by BlockMigrationService.
+    async fn handle_migration_cleanup(
+        &self,
+        commitment_tx_ids: Vec<H256>,
+        submit_tx_ids: Vec<H256>,
+    ) {
+        // Remove commitment txs from mempool
+        self.mempool_state
+            .remove_commitment_txs(commitment_tx_ids.into_iter())
+            .await;
+
+        // Remove submit txs from the pending valid pool
+        self.mempool_state
+            .remove_transactions_from_pending_valid_pool(&submit_tx_ids)
+            .await;
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -2958,7 +2992,6 @@ pub struct MempoolService {
     shutdown: Shutdown,
     msg_rx: UnboundedReceiver<MempoolServiceMessage>, // mempool message receiver
     reorg_rx: broadcast::Receiver<ReorgEvent>,        // reorg broadcast receiver
-    block_migrated_rx: broadcast::Receiver<BlockMigratedEvent>, // block broadcast migrated receiver
     inner: Arc<Inner>,
 }
 
@@ -2996,7 +3029,6 @@ impl MempoolService {
         let storage_modules_guard = storage_modules_guard;
         let service_senders = service_senders.clone();
         let reorg_rx = service_senders.subscribe_reorgs();
-        let block_migrated_rx = service_senders.subscribe_block_migrated();
 
         let handle_for_inner = runtime_handle.clone();
         let handle = runtime_handle.spawn(
@@ -3014,7 +3046,6 @@ impl MempoolService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     reorg_rx,
-                    block_migrated_rx,
                     inner: Arc::new(Inner {
                         block_tree_read_guard,
                         config,
@@ -3134,14 +3165,6 @@ impl MempoolService {
                         self.inner.handle_reorg(event).await?;
                     }
                 }
-
-                // Handle block migrated events
-                 migrated_result = self.block_migrated_rx.recv() => {
-                    if let Some(event) = handle_broadcast_recv(migrated_result, "BlockMigrated") {
-                        self.inner.handle_block_migrated(event).await?;
-                    }
-                }
-
 
                 // Handle shutdown signal
                 _ = &mut shutdown_future => {

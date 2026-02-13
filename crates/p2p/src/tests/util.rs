@@ -51,7 +51,6 @@ pub(crate) struct MempoolStub {
     pub txs: Arc<RwLock<Vec<DataTransactionHeader>>>,
     pub chunks: Arc<RwLock<Vec<UnpackedChunk>>>,
     pub internal_message_bus: mpsc::UnboundedSender<GossipBroadcastMessageV2>,
-    pub migrated_blocks: Arc<RwLock<Vec<Arc<IrysBlockHeader>>>>,
     pub blocks: Arc<RwLock<Vec<IrysBlockHeader>>>,
     pub mempool_state: AtomicMempoolState,
 }
@@ -66,7 +65,6 @@ impl MempoolStub {
             txs: Arc::default(),
             chunks: Arc::default(),
             internal_message_bus,
-            migrated_blocks: Arc::new(RwLock::new(Vec::new())),
             blocks: Arc::new(RwLock::new(Vec::new())),
             mempool_state,
         }
@@ -202,18 +200,6 @@ impl MempoolFacade for MempoolStub {
     ) -> std::result::Result<Option<IrysBlockHeader>, TxReadError> {
         let blocks = self.blocks.read().expect("to unlock blocks");
         Ok(blocks.iter().find(|b| b.block_hash == block_hash).cloned())
-    }
-
-    async fn migrate_block(
-        &self,
-        irys_block_header: Arc<IrysBlockHeader>,
-        _transactions: Arc<BlockTransactions>,
-    ) -> std::result::Result<usize, TxIngressError> {
-        self.migrated_blocks
-            .write()
-            .expect("to unlock migrated blocks")
-            .push(irys_block_header);
-        Ok(1)
     }
 
     async fn remove_from_blacklist(&self, _tx_ids: Vec<H256>) -> eyre::Result<()> {

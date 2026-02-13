@@ -1424,6 +1424,17 @@ impl IrysNode {
             runtime_handle.clone(),
         );
 
+        // Spawn the block migration service
+        let block_migration_handle =
+            irys_actors::block_migration_service::BlockMigrationService::spawn_service(
+                receivers.block_migration,
+                irys_db.clone(),
+                block_tree_guard.clone(),
+                block_index_guard.clone(),
+                service_senders.clone(),
+                runtime_handle.clone(),
+            );
+
         let is_vdf_mining_enabled = Arc::new(AtomicBool::new(false));
         // Spawn VDF service
         let vdf_state = Arc::new(RwLock::new(irys_vdf::state::create_state(
@@ -1715,6 +1726,7 @@ impl IrysNode {
 
             // 7. State management
             services.push(block_index_handle);
+            services.push(block_migration_handle);
             services.push(mempool_handle);
 
             // 8. Core infrastructure (shutdown last)

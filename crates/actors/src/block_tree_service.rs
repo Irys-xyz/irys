@@ -1,7 +1,6 @@
 use crate::{
-    block_index_service::BlockIndexServiceMessage,
+    block_migration_service::BlockMigrationServiceMessage,
     block_validation::PreValidationError,
-    chunk_migration_service::ChunkMigrationServiceMessage,
     mempool_service::MempoolServiceMessage,
     mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
     reth_service::{ForkChoiceUpdateMessage, RethServiceMessage},
@@ -9,7 +8,6 @@ use crate::{
     validation_service::ValidationServiceMessage,
     StorageModuleServiceMessage,
 };
-use eyre::ensure;
 use eyre::OptionExt as _;
 use irys_config::StorageSubmodulesConfig;
 use irys_domain::{
@@ -19,12 +17,11 @@ use irys_domain::{
     BlockTreeEntry, BlockTreeReadGuard, ChainState, EpochReplayData,
 };
 use irys_types::{
-    BlockHash, BlockTransactions, Config, DataLedger, DataTransactionHeader, DatabaseProvider,
-    H256List, IrysAddress, IrysBlockHeader, TokioServiceHandle, H256,
+    BlockHash, BlockTransactions, Config, DatabaseProvider, H256List, IrysAddress, IrysBlockHeader,
+    TokioServiceHandle, H256,
 };
 use reth::tasks::shutdown::Shutdown;
 use std::{
-    collections::HashMap,
     sync::{Arc, RwLock},
     time::SystemTime,
 };
@@ -87,12 +84,6 @@ pub struct ReorgEvent {
     pub new_tip: BlockHash,
     pub timestamp: SystemTime,
     pub db: Option<DatabaseProvider>,
-}
-
-#[derive(Debug, Clone)]
-pub struct BlockMigratedEvent {
-    pub block: Arc<IrysBlockHeader>,
-    pub transactions: Arc<BlockTransactions>,
 }
 
 /// Event broadcast when a block's state changes in the block tree.
@@ -254,73 +245,6 @@ impl BlockTreeServiceInner {
         Ok(())
     }
 
-    /// Sends block-migration notifications to services after a block reaches migration depth.
-    ///
-    /// This method:
-    /// - Uses the transactions passed in from the block tree (no mempool lookup needed)
-    /// - Emits a block migration message to the `BlockIndexService` and `ChunkMigrationService`
-    ///
-    /// Errors
-    /// Returns an error if the block header cannot be fetched or if any mempool/database access fails.
-    #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block_header.block_hash, block.height = block_header.height))]
-    async fn send_block_migration_message(
-        &self,
-        block_header: Arc<IrysBlockHeader>,
-        transactions: &BlockTransactions,
-    ) -> eyre::Result<()> {
-        let submit_txs = transactions
-            .data_txs
-            .get(&DataLedger::Submit)
-            .cloned()
-            .unwrap_or_default();
-        let publish_txs = transactions
-            .data_txs
-            .get(&DataLedger::Publish)
-            .cloned()
-            .unwrap_or_default();
-
-        // TODO: Migrate block_index to use the HashMap so we don't have to close these headers
-        let mut all_txs = vec![];
-        all_txs.extend(publish_txs.clone());
-        all_txs.extend(submit_txs.clone());
-
-        let mut all_txs_map: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
-        all_txs_map.insert(DataLedger::Submit, submit_txs);
-        all_txs_map.insert(DataLedger::Publish, publish_txs);
-
-        info!(
-            "Migrating to block_index - hash: {} height: {}",
-            &block_header.block_hash, &block_header.height
-        );
-
-        let arc_block = block_header;
-        let arc_all_txs = Arc::new(all_txs);
-
-        // Let block_index know about the migrated block
-        let (tx, rx) = oneshot::channel();
-        self.service_senders
-            .block_index
-            .send(BlockIndexServiceMessage::MigrateBlock {
-                block_header: arc_block.clone(),
-                all_txs: arc_all_txs.clone(),
-                response: tx,
-            })?;
-        rx.await
-            .map_err(|e| eyre::eyre!("Failed to receive BlockIndexService response: {e}"))?
-            .map_err(|e| eyre::eyre!("BlockIndexService error during migration: {e}"))?;
-
-        // Let the chunk_migration_service know about the block migration
-        self.service_senders
-            .chunk_migration
-            .send(ChunkMigrationServiceMessage::BlockMigrated(
-                arc_block,
-                Arc::new(all_txs_map),
-            ))
-            .map_err(|e| eyre::eyre!("Failed to send BlockMigrated message: {}", e))?;
-
-        Ok(())
-    }
-
     #[tracing::instrument(level = "trace", skip_all, fields(fcu.head = %markers.head.block_hash, fcu.migration = %markers.migration_block.block_hash))]
     async fn emit_fcu(&self, markers: &ForkChoiceMarkers) -> eyre::Result<()> {
         let tip_block = &markers.head;
@@ -357,143 +281,28 @@ impl BlockTreeServiceInner {
             .expect("mempool service has unexpectedly become unreachable");
     }
 
-    /// Ensures blocks can be migrated by verifying height continuity and chain linkage.
-    fn validate_migration_continuity(
-        &self,
-        migration_block: &Arc<IrysBlockHeader>,
-    ) -> eyre::Result<()> {
-        let blocks_to_migrate = self.get_blocks_to_migrate(migration_block)?;
-
-        // Nothing to validate if no blocks need migration
-        let Some(first_block) = blocks_to_migrate.first() else {
-            return Ok(());
-        };
-
-        let block_index = self.block_index_guard.read();
-        let latest_indexed = block_index
-            .get_latest_item()
-            .ok_or_eyre("Block index is empty")?;
-
-        // Ensure continuous height progression
-        ensure!(
-            block_index.latest_height() + 1 == first_block.height,
-            "Height gap detected: block index at height {} ({}), trying to migrate height {} ({})",
-            &block_index.latest_height(),
-            &latest_indexed.block_hash,
-            &first_block.height,
-            &first_block.block_hash
-        );
-
-        // Ensure proper chain linkage
-        ensure!(
-            latest_indexed.block_hash == first_block.previous_block_hash,
-            "Chain break detected: migration block ({}) doesn't link to indexed chain ({})",
-            &latest_indexed.block_hash,
-            &first_block.previous_block_hash
-        );
-
-        Ok(())
-    }
-
-    /// Collect blocks to migrate by walking backwards from the current migration block
-    /// to the head of the `block_index`
-    fn get_blocks_to_migrate(
-        &self,
-        migration_block: &Arc<IrysBlockHeader>,
-    ) -> eyre::Result<Vec<Arc<IrysBlockHeader>>> {
-        let mut blocks_to_migrate = vec![];
-
-        // Get the last migrated block hash
-        let bi = self.block_index_guard.read();
-        let last_migrated = bi
-            .get_latest_item()
-            .ok_or_eyre("must have at least a single item in block index")?;
-        let last_migrated_hash = last_migrated.block_hash;
-        drop(bi);
-
-        // Get the block tree
-        let block_tree = self.cache.read().expect("poisoned lock");
-
-        // Walk backwards from the given block to the last migrated block
-        let mut current_hash = migration_block.block_hash;
-
-        while current_hash != last_migrated_hash {
-            // Get the block
-            let current_block = block_tree.get_block(&current_hash).ok_or_else(|| {
-                eyre::eyre!(
-                    "block {} not found while collecting blocks for migration",
-                    current_hash
-                )
-            })?;
-
-            // Add to list
-            let arc_block = Arc::new(current_block.clone());
-            blocks_to_migrate.push(arc_block.clone());
-
-            // Move to previous block
-            current_hash = arc_block.previous_block_hash;
-        }
-
-        // Reverse to get oldest-first order
-        blocks_to_migrate.reverse();
-        Ok(blocks_to_migrate)
-    }
-
-    /// Checks if a block that is `block_migration_depth` blocks behind `arc_block`
-    /// should be migrated. If eligible, sends migration message unless block
-    /// is already in `block_index`. Panics if the `block_tree` and `block_index` are
-    /// inconsistent.
+    /// Delegates block migration to the BlockMigrationService.
+    ///
+    /// Sends the migration block to the dedicated service which handles:
+    /// - Continuity validation
+    /// - Block collection (walking backwards from migration block)
+    /// - DB persistence (txs, metadata, block headers)
+    /// - BlockIndex update (synchronous)
+    /// - ChunkMigration notification (fire-and-forget)
+    /// - Mempool cleanup (fire-and-forget)
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
-        // Check if the block is already in the block index
-        // let binding = self.block_index_guard.clone();
+        debug!(block.hash = %block.block_hash, block.height = block.height, "delegating block migration to BlockMigrationService");
 
-        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating irys block");
-
-        // Collect blocks to migrate by walking backwards from the current migration block
-        let blocks_to_migrate = self.get_blocks_to_migrate(block)?;
-
-        // Send all blocks in order (oldest to newest)
-        for block_to_migrate in blocks_to_migrate {
-            // Extract transactions from block tree
-            let transactions = {
-                let cache = self.cache.read().expect("poisoned lock");
-                cache
-                    .blocks
-                    .get(&block_to_migrate.block_hash)
-                    .map(|meta| meta.transactions.clone())
-                    .ok_or_else(|| {
-                        eyre::eyre!(
-                            "missing cache entry for block {} during block migration",
-                            block_to_migrate.block_hash
-                        )
-                    })?
-            };
-
-            // NOTE: order of events is very important! block migration event
-            // writes chunks to db, which is expected by `send_block_migration_message`.
-            let block_migrated_event = BlockMigratedEvent {
-                block: Arc::clone(&block_to_migrate),
-                transactions: Arc::new(transactions.clone()),
-            };
-            if let Err(e) = self
-                .service_senders
-                .block_migrated_events
-                .send(block_migrated_event)
-            {
-                debug!("No reorg subscribers: {:?}", e);
-            }
-            let block_hash = block_to_migrate.block_hash;
-            let block_height = block_to_migrate.height;
-            self.send_block_migration_message(block_to_migrate, &transactions)
-                .await
-                .inspect_err(|e| {
-                    error!(
-                        "Unable to send block migration message for block {} (height {}): {:?}",
-                        block_hash, block_height, e
-                    )
-                })?
-        }
+        let (tx, rx) = oneshot::channel();
+        self.service_senders.block_migration.send(
+            BlockMigrationServiceMessage::MigrateToBlock {
+                migration_block: Arc::clone(block),
+                response: tx,
+            },
+        )?;
+        rx.await
+            .map_err(|e| eyre::eyre!("Failed to receive BlockMigrationService response: {e}"))??;
         Ok(())
     }
 
@@ -941,9 +750,7 @@ impl BlockTreeServiceInner {
         }
 
         if let Some(markers) = &new_canonical_markers {
-            // Validate migration will succeed BEFORE emitting any events
             if tip_changed {
-                self.validate_migration_continuity(&markers.migration_block)?;
                 info!(
                     block.height = arc_block.height,
                     block.hash = ?arc_block.block_hash,
@@ -952,11 +759,11 @@ impl BlockTreeServiceInner {
                 );
             }
 
-            // Emit consensus events (only after we know migration will succeed)
+            // Emit consensus events
             self.emit_fcu(markers).await?;
             self.emit_block_confirmed(markers);
 
-            // Perform the actual migration
+            // Delegate migration to BlockMigrationService (validates continuity internally)
             if tip_changed {
                 self.migrate_block(&markers.migration_block).await?;
             }
