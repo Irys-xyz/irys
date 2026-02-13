@@ -1,11 +1,11 @@
 # Agent cluster — local 3-node Irys cluster for development.
 #
 # Managed by agent_cluster.sh. Configs live in ./configs/.
-# Uses debug image with shell (required for peer bash entrypoints).
+# Uses local image with shell (required for peer bash entrypoints).
 
 services:
   test-irys-1:
-    image: ${IMAGE_NAME:-irys:debug}
+    image: ${IMAGE_NAME:-irys:local}
     pull_policy: never
     container_name: test-irys-1
     restart: unless-stopped
@@ -23,7 +23,7 @@ services:
       - NET_ADMIN
 
   test-irys-2:
-    image: ${IMAGE_NAME:-irys:debug}
+    image: ${IMAGE_NAME:-irys:local}
     pull_policy: never
     container_name: test-irys-2
     restart: unless-stopped
@@ -46,7 +46,7 @@ services:
     entrypoint: ["bash", "/app/start_peer_with_auto_restart.sh"]
 
   test-irys-3:
-    image: ${IMAGE_NAME:-irys:debug}
+    image: ${IMAGE_NAME:-irys:local}
     pull_policy: never
     container_name: test-irys-3
     restart: unless-stopped

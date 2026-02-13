@@ -119,8 +119,8 @@ start_node() {
     log "Failed to get genesis hash, starting with base config: $CONFIG"
   fi
 
-  # Launch node in foreground (so we can supervise PID)
-  "$IRYS_BIN"
+  # Replace subshell with irys binary so captured PID targets it directly
+  exec "$IRYS_BIN"
 }
 
 monitor_and_restart() {

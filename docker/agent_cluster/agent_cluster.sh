@@ -10,15 +10,17 @@
 #   agent_cluster.sh <command> [options]
 #
 # Commands:
-#   build [OPTIONS]       Build the irys:debug image (incremental, uses cargo cache)
+#   build [OPTIONS]       Build the irys:local image (incremental, uses cargo cache)
 #     -f, --force           Force rebuild even if source unchanged
 #     -r, --ref REF         Build from a git branch/tag/SHA instead of working tree
+#     --native              Skip Docker, build natively (cross-compile on macOS)
 #   deploy [OPTIONS]      Build + deploy cluster (wipes volumes by default)
 #     -n, --nodes N         Number of nodes (1-3, default 3)
 #     -k, --keep-data       Keep existing volumes (don't wipe)
 #     -s, --skip-build      Skip build, use existing image
 #     -f, --force-rebuild   Force rebuild even if source unchanged
 #     -r, --ref REF         Build from a git branch/tag/SHA instead of working tree
+#     --native              Skip Docker for build (cross-compile on macOS)
 #   restart [NODE]        Restart node(s) without wiping data
 #                          No arg = rolling restart all; NODE = single node (1/2/3)
 #   status                Show health and block heights for all running nodes
@@ -29,6 +31,7 @@
 #                          Preserves writable layer (index.dat, DB, etc.)
 #                          No arg = atomic all-node deploy (stop-all, copy, start-all)
 #                          NODE = single node rolling deploy (1/2/3)
+#   clean [target|all]    Remove build caches (default: target only)
 #   exec NODE CMD...      Run a command inside a node container
 #   validate-configs      Check consensus config consistency across all nodes
 #
@@ -43,6 +46,23 @@ HASH_FILE="$BUILD_OUTPUT/.source_hash"
 CARGO_CACHE_DIR="${HOME}/.cache/irys-docker-cargo"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yaml"
 CONFIG_DIR="$SCRIPT_DIR/configs"
+
+# ── Platform detection ─────────────────────────────────────────────────────
+
+HOST_OS="$(uname -s)"  # Darwin or Linux
+
+# Platform-aware defaults (overridable via env)
+if [[ "$HOST_OS" == "Darwin" ]]; then
+    # macOS Docker Desktop: conservative defaults (VM shares host resources)
+    CARGO_JOBS="${CARGO_JOBS:-4}"
+    BUILD_MEMORY="${BUILD_MEMORY:-14g}"
+else
+    # Native Linux: use more resources (no VM overhead)
+    CARGO_JOBS="${CARGO_JOBS:-$(( $(nproc 2>/dev/null || echo 4) / 2 ))}"
+    local_mem=$(free -g 2>/dev/null | awk '/Mem:/{print $2}' || echo 0)
+    BUILD_MEMORY="${BUILD_MEMORY:-$(( local_mem * 3 / 4 > 0 ? local_mem * 3 / 4 : 14 ))g}"
+    unset local_mem
+fi
 
 ALL_NODES=(test-irys-1 test-irys-2 test-irys-3)
 NODE_PORTS=(19080 19081 19082)
@@ -92,12 +112,14 @@ source_hash() {
 cmd_build() {
     local force=false
     local build_ref=""
+    local native=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -f|--force) force=true; shift ;;
             -r|--ref)
                 build_ref="${2:?--ref requires a branch/tag/SHA}"
                 shift 2 ;;
+            --native) native=true; shift ;;
             *) die "build: unknown option: $1" ;;
         esac
     done
@@ -111,22 +133,62 @@ cmd_build() {
     local start=$SECONDS
 
     # Smart skip check
-    if [[ "$force" == false ]]; then
-        local current_hash stored_hash=""
-        if [[ -n "$build_ref" ]]; then
-            current_hash=$(git -C "$REPO_ROOT" rev-parse "$build_ref")
-        else
-            current_hash=$(source_hash)
-        fi
-        [[ -f "$HASH_FILE" ]] && stored_hash=$(cat "$HASH_FILE")
+    local current_hash stored_hash=""
+    if [[ -n "$build_ref" ]]; then
+        current_hash=$(git -C "$REPO_ROOT" rev-parse "$build_ref")
+    else
+        current_hash=$(source_hash)
+    fi
+    [[ -f "$HASH_FILE" ]] && stored_hash=$(cat "$HASH_FILE")
+    local hash_changed=true
+    if [[ "$current_hash" == "$stored_hash" ]] \
+       && [[ -f "$BUILD_OUTPUT/irys" ]] \
+       && docker image inspect irys:local > /dev/null 2>&1; then
+        hash_changed=false
+    fi
 
-        if [[ "$current_hash" == "$stored_hash" ]] \
-           && [[ -f "$BUILD_OUTPUT/irys" ]] \
-           && docker image inspect irys:debug > /dev/null 2>&1; then
+    if [[ "$hash_changed" == false ]]; then
+        if [[ "$force" == false ]]; then
             ok "Source unchanged — skipping build ($(elapsed $(( SECONDS - start ))))"
             return 0
+        else
+            warn "No source changes detected — forcing rebuild"
         fi
     fi
+
+    mkdir -p "$BUILD_OUTPUT"
+
+    # ── Native build path (no Docker) ──────────────────────────────────────
+    if [[ "$native" == true ]]; then
+        if [[ -n "$build_ref" ]]; then
+            die "build: --native and --ref cannot be combined (native builds use the working tree)"
+        fi
+
+        if [[ "$HOST_OS" == "Darwin" ]]; then
+            info "Native cross-compile (aarch64-unknown-linux-gnu) with -j$CARGO_JOBS..."
+            (cd "$REPO_ROOT" && \
+                CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-unknown-linux-gnu-gcc \
+                cargo build --release --bin irys -p irys-chain --locked \
+                --target aarch64-unknown-linux-gnu -j"$CARGO_JOBS")
+            cp "$REPO_ROOT/target/aarch64-unknown-linux-gnu/release/irys" "$BUILD_OUTPUT/irys"
+        else
+            info "Native Linux build with -j$CARGO_JOBS..."
+            (cd "$REPO_ROOT" && cargo build --release --bin irys -p irys-chain --locked -j"$CARGO_JOBS")
+            cp "$REPO_ROOT/target/release/irys" "$BUILD_OUTPUT/irys"
+        fi
+
+        # Package runtime image
+        info "Packaging runtime image..."
+        docker build -f "$REPO_ROOT/docker/Dockerfile.local" -t irys:local "$REPO_ROOT"
+
+        # Store hash
+        source_hash > "$HASH_FILE"
+
+        ok "Native build complete ($(elapsed $(( SECONDS - start ))))"
+        return 0
+    fi
+
+    # ── Docker build path ──────────────────────────────────────────────────
 
     # Ensure builder image
     if ! docker image inspect irys-builder:latest > /dev/null 2>&1; then
@@ -135,9 +197,29 @@ cmd_build() {
     fi
 
     # Compile
-    info "Compiling Linux binary..."
-    mkdir -p "$CARGO_CACHE_DIR/registry" "$CARGO_CACHE_DIR/git" "$CARGO_CACHE_DIR/target" "$CARGO_CACHE_DIR/rustup"
-    mkdir -p "$BUILD_OUTPUT"
+    info "Compiling Linux binary (Docker, -j$CARGO_JOBS, mem=$BUILD_MEMORY)..."
+
+    # Platform-aware volume mounts
+    local VOLUME_ARGS=()
+    if [[ "$HOST_OS" == "Darwin" ]]; then
+        # macOS: named volumes avoid VirtioFS overhead (use Linux VM's native ext4)
+        VOLUME_ARGS=(
+            -v cargo-registry:/usr/local/cargo/registry
+            -v cargo-git:/usr/local/cargo/git
+            -v rustup:/usr/local/rustup
+            -v workspace-target:/workspace-target
+        )
+    else
+        # Linux: bind mounts are optimal (zero overhead on native Docker)
+        mkdir -p "$CARGO_CACHE_DIR/registry" "$CARGO_CACHE_DIR/git" \
+                 "$CARGO_CACHE_DIR/target" "$CARGO_CACHE_DIR/rustup"
+        VOLUME_ARGS=(
+            -v "$CARGO_CACHE_DIR/registry:/usr/local/cargo/registry"
+            -v "$CARGO_CACHE_DIR/git:/usr/local/cargo/git"
+            -v "$CARGO_CACHE_DIR/rustup:/usr/local/rustup"
+            -v "$CARGO_CACHE_DIR/target:/workspace-target"
+        )
+    fi
 
     # Pipe source via tar to avoid Docker Desktop VirtioFS file truncation bugs.
     # This bypasses the macOS file sharing layer entirely.
@@ -159,6 +241,10 @@ cmd_build() {
         fi
     fi
 
+    # Track changed files for build container logging
+    local sync_changes_file="$BUILD_OUTPUT/.sync_changes"
+    rm -f "$sync_changes_file"
+
     if [[ "$need_sync" == true ]]; then
         info "Syncing source into build volume (rsync — only changed files)..."
         if [[ -n "$build_ref" ]]; then
@@ -168,17 +254,12 @@ cmd_build() {
             git -C "$REPO_ROOT" archive --format=tar "$build_ref" \
             | docker run --rm -i \
                 -v "$src_vol:/workspace" \
+                -v "$BUILD_OUTPUT:/build-output" \
                 irys-builder:latest \
                 bash -c '
                     mkdir -p /tmp/staging && tar xf - -C /tmp/staging
-                    changes=$(rsync -a --checksum --delete -i /tmp/staging/ /workspace/ | grep -v "^\." || true)
-                    if [ -n "$changes" ]; then
-                        echo "==> Changed source files:"
-                        echo "$changes"
-                    else
-                        echo "==> No source files changed"
-                    fi
-                    echo "==> Sync complete"
+                    rsync -a --checksum --delete -i /tmp/staging/ /workspace/ \
+                        | grep -v "^\." | sed "s/^[^ ]* //" > /build-output/.sync_changes || true
                     rm -rf /tmp/staging
                 '
             # Record which ref is on the volume
@@ -193,30 +274,18 @@ cmd_build() {
             head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null | head -c 12)
             git -C "$REPO_ROOT" diff --quiet 2>/dev/null || dirty=" (dirty)"
             info "Building working tree: $head_ref (${head_sha})${dirty}"
-            # Capture changed files to display in build container log
-            local changed_files=""
-            changed_files=$(cd "$REPO_ROOT" && {
-                git diff --name-status 2>/dev/null
-                git diff --name-status --cached 2>/dev/null
-                git ls-files --others --exclude-standard 2>/dev/null | sed 's/^/??\t/'
-            } | sort -u)
             tar -C "$REPO_ROOT" -cf - \
                 --exclude='./target' --exclude='./.git' --exclude='./docker/build-output' \
                 --exclude='./crates/.tmp' --exclude='./venv' \
                 . \
             | docker run --rm -i \
                 -v "$src_vol:/workspace" \
+                -v "$BUILD_OUTPUT:/build-output" \
                 irys-builder:latest \
                 bash -c '
                     mkdir -p /tmp/staging && tar xf - -C /tmp/staging
-                    changes=$(rsync -a --checksum --delete -i /tmp/staging/ /workspace/ | grep -v "^\." || true)
-                    if [ -n "$changes" ]; then
-                        echo "==> Changed source files:"
-                        echo "$changes"
-                    else
-                        echo "==> No source files changed"
-                    fi
-                    echo "==> Sync complete"
+                    rsync -a --checksum --delete -i /tmp/staging/ /workspace/ \
+                        | grep -v "^\." | sed "s/^[^ ]* //" > /build-output/.sync_changes || true
                     rm -rf /tmp/staging
                 '
             # Clear ref marker since volume now has working tree
@@ -225,30 +294,32 @@ cmd_build() {
     fi
 
     docker run --rm \
-        --memory=14g --memory-swap=-1 \
-        -e CHANGED_FILES="${changed_files:-}" \
+        --memory="$BUILD_MEMORY" --memory-swap=-1 \
+        -e HASH_CHANGED="$hash_changed" \
         -v "$src_vol:/workspace:ro" \
-        -v "$CARGO_CACHE_DIR/registry:/usr/local/cargo/registry" \
-        -v "$CARGO_CACHE_DIR/git:/usr/local/cargo/git" \
-        -v "$CARGO_CACHE_DIR/rustup:/usr/local/rustup" \
-        -v "$CARGO_CACHE_DIR/target:/workspace-target" \
+        "${VOLUME_ARGS[@]}" \
         -v "$BUILD_OUTPUT:/build-output" \
         -w /workspace \
         irys-builder:latest \
         bash -c '
-            if [ -n "$CHANGED_FILES" ]; then
-                echo "==> Local changes being built:"
-                echo "$CHANGED_FILES"
-                echo ""
+            if [ "$HASH_CHANGED" = "false" ]; then
+                echo "⚠  No source changes detected — forced rebuild"
             fi
-            echo "==> Starting cargo build..."
-            CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-chain --locked -j2 \
+            if [ -s /build-output/.sync_changes ]; then
+                echo "==> Changed files:"
+                cat /build-output/.sync_changes
+                echo ""
+            elif [ -f /build-output/.sync_changes ]; then
+                echo "==> No files changed since last sync"
+            fi
+            echo "==> Starting cargo build (-j'"$CARGO_JOBS"', mem='"$BUILD_MEMORY"')..."
+            CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-chain --locked -j'"$CARGO_JOBS"' \
             && cp /workspace-target/release/irys /build-output/irys
         '
 
     # Package runtime image
     info "Packaging runtime image..."
-    docker build -f "$REPO_ROOT/docker/Dockerfile.local" -t irys:debug "$REPO_ROOT"
+    docker build -f "$REPO_ROOT/docker/Dockerfile.local" -t irys:local "$REPO_ROOT"
 
     # Store hash
     if [[ -n "$build_ref" ]]; then
@@ -260,10 +331,38 @@ cmd_build() {
     ok "Build complete ($(elapsed $(( SECONDS - start ))))"
 }
 
+# ── Clean ────────────────────────────────────────────────────────────────────
+
+cmd_clean() {
+    local target="${1:-target}"
+    case "$target" in
+        target)
+            info "Removing build target cache..."
+            if [[ "$HOST_OS" == "Darwin" ]]; then
+                docker volume rm workspace-target 2>/dev/null || true
+            else
+                rm -rf "$CARGO_CACHE_DIR/target"
+            fi
+            ok "Target cache cleared"
+            ;;
+        all)
+            info "Removing all build caches..."
+            if [[ "$HOST_OS" == "Darwin" ]]; then
+                docker volume rm cargo-registry cargo-git rustup workspace-target 2>/dev/null || true
+            else
+                rm -rf "$CARGO_CACHE_DIR"
+            fi
+            docker volume rm irys-build-src 2>/dev/null || true
+            ok "All build caches cleared"
+            ;;
+        *) die "clean: expected 'target' or 'all', got '$target'" ;;
+    esac
+}
+
 # ── Deploy ───────────────────────────────────────────────────────────────────
 
 cmd_deploy() {
-    local nodes=3 keep_data=false skip_build=false force_rebuild=false build_ref=""
+    local nodes=3 keep_data=false skip_build=false force_rebuild=false build_ref="" native=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -n|--nodes)
@@ -276,6 +375,7 @@ cmd_deploy() {
             -r|--ref)
                 build_ref="${2:?--ref requires a branch/tag/SHA}"
                 shift 2 ;;
+            --native) native=true; shift ;;
             *) die "deploy: unknown option: $1" ;;
         esac
     done
@@ -283,9 +383,10 @@ cmd_deploy() {
     # Build
     local build_args=()
     [[ -n "$build_ref" ]] && build_args+=(--ref "$build_ref")
+    [[ "$native" == true ]] && build_args+=(--native)
 
     if [[ "$skip_build" == true ]]; then
-        docker image inspect irys:debug > /dev/null 2>&1 || die "irys:debug image not found. Remove --skip-build."
+        docker image inspect irys:local > /dev/null 2>&1 || die "irys:local image not found. Remove --skip-build."
     elif [[ "$force_rebuild" == true ]]; then
         cmd_build --force "${build_args[@]:+${build_args[@]}}"
     else
@@ -382,14 +483,14 @@ cmd_status() {
         }
 
         local height bi_height peers mining syncing
-        height=$(echo "$info_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('height','?'))" 2>/dev/null)
-        bi_height=$(echo "$info_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('blockIndexHeight','?'))" 2>/dev/null)
-        peers=$(echo "$info_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('peerCount','?'))" 2>/dev/null)
-        mining=$(echo "$info_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('miningAddress','?'))" 2>/dev/null)
-        syncing=$(echo "$info_json" | python3 -c "import sys,json; print(json.load(sys.stdin).get('isSyncing',False))" 2>/dev/null)
+        height=$(echo "$info_json" | jq -r '.height // "?"')
+        bi_height=$(echo "$info_json" | jq -r '.blockIndexHeight // "?"')
+        peers=$(echo "$info_json" | jq -r '.peerCount // "?"')
+        mining=$(echo "$info_json" | jq -r '.miningAddress // "?"')
+        syncing=$(echo "$info_json" | jq -r '.isSyncing // false')
 
         local status_str="${GREEN}healthy${RESET}"
-        if [[ "$syncing" == "True" ]]; then
+        if [[ "$syncing" == "true" ]]; then
             status_str="${YELLOW}syncing${RESET}"
         fi
 
@@ -617,6 +718,7 @@ case "$COMMAND" in
     stop)    cmd_stop "$@" ;;
     destroy)   cmd_destroy "$@" ;;
     hotdeploy) cmd_hotdeploy "$@" ;;
+    clean)     cmd_clean "$@" ;;
     exec)      cmd_exec "$@" ;;
     validate-configs) cmd_validate_configs "$@" ;;
     -h|--help|help|"") usage ;;
