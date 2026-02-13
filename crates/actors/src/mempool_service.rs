@@ -1214,6 +1214,8 @@ impl Inner {
                 acc
             });
 
+            let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
+
             for tx_header in &tx_headers {
                 debug!(
                     "Processing publish candidate tx {} {:#?}",
@@ -1285,10 +1287,7 @@ impl Inner {
                 }
 
                 // Check for minimum number of ingress proofs
-                let total_miners = self
-                    .block_tree_read_guard
-                    .read()
-                    .canonical_epoch_snapshot()
+                let total_miners = epoch_snapshot
                     .commitment_state
                     .stake_commitments
                     .len();
@@ -1378,8 +1377,6 @@ impl Inner {
                     .iter()
                     .map(|p| &p.proof.0) // Use signature as unique identifier
                     .collect();
-
-                let epoch_snapshot = self.block_tree_read_guard.read().canonical_epoch_snapshot();
 
                 let unassigned_proofs: Vec<IngressProof> = all_tx_proofs
                     .iter()
