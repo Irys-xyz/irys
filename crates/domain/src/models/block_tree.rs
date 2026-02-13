@@ -974,7 +974,11 @@ impl BlockTree {
             .blocks
             .get(&hash)
             .expect("max difficulty block must exist in tree");
-        (hash, entry.block.header().height, self.can_be_built_upon(&hash))
+        (
+            hash,
+            entry.block.header().height,
+            self.can_be_built_upon(&hash),
+        )
     }
 
     /// Check if a block can be built upon
