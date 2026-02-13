@@ -1,8 +1,9 @@
 use irys_config::StorageSubmodulesConfig;
 use irys_database::{block_header_by_hash, commitment_tx_by_txid, tx_header_by_txid};
 use irys_types::{
-    BlockHash, BlockTransactions, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
-    DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SystemLedger, H256, U256,
+    BlockBody, BlockHash, CommitmentTransaction, Config, ConsensusConfig, DataLedger,
+    DataTransactionHeader, DatabaseProvider, H256List, IrysBlockHeader, SealedBlock, SystemLedger,
+    H256, U256,
 };
 use itertools::{EitherOrBoth, Itertools as _};
 use reth_db::Database as _;
@@ -52,9 +53,7 @@ pub struct BlockTree {
 
 #[derive(Debug)]
 pub struct BlockMetadata {
-    // todo: wrap into Arc to avoid expensive clones
-    pub block: IrysBlockHeader,
-    pub transactions: BlockTransactions,
+    pub block: Arc<SealedBlock>,
     pub chain_state: ChainState,
     pub timestamp: SystemTime,
     pub children: HashSet<H256>,
@@ -102,13 +101,13 @@ impl BlockTree {
     /// on-chain and set as the tip. Only used in testing that doesn't intersect
     /// the commitment snapshot so it stubs one out
     #[cfg(any(feature = "test-utils", test))]
-    pub fn new(genesis_block: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
+    pub fn new(genesis_block_header: &IrysBlockHeader, consensus_config: ConsensusConfig) -> Self {
         use crate::dummy_epoch_snapshot;
 
-        let block_hash = genesis_block.block_hash;
-        let solution_hash = genesis_block.solution_hash;
-        let height = genesis_block.height;
-        let cumulative_diff = genesis_block.cumulative_diff;
+        let block_hash = genesis_block_header.block_hash;
+        let solution_hash = genesis_block_header.solution_hash;
+        let height = genesis_block_header.height;
+        let cumulative_diff = genesis_block_header.cumulative_diff;
 
         let mut blocks = HashMap::new();
         let mut solutions = HashMap::new();
@@ -118,13 +117,21 @@ impl BlockTree {
         let commitment_snapshot = Arc::new(CommitmentSnapshot::default());
 
         // Create EMA cache for genesis block
-        let ema_snapshot = EmaSnapshot::genesis(genesis_block);
+        let ema_snapshot = EmaSnapshot::genesis(genesis_block_header);
+
+        // Create SealedBlock for genesis (empty body since genesis has no transactions)
+        let genesis_body = BlockBody {
+            block_hash,
+            ..Default::default()
+        };
+        let sealed_genesis = SealedBlock::new(genesis_block_header.clone(), genesis_body)
+            .expect("genesis block must seal successfully");
 
         // Create initial block entry for genesis block, marking it as confirmed
         // and part of the canonical chain
+
         let block_entry = BlockMetadata {
-            block: genesis_block.clone(),
-            transactions: BlockTransactions::default(),
+            block: Arc::new(sealed_genesis),
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -139,7 +146,7 @@ impl BlockTree {
         height_index.insert(height, HashSet::from([block_hash]));
 
         // Initialize longest chain cache to contain the genesis block
-        let entry = make_block_tree_entry(genesis_block);
+        let entry = make_block_tree_entry(genesis_block_header);
         let longest_chain_cache = (vec![(entry)], 0);
 
         Self {
@@ -271,18 +278,19 @@ impl BlockTree {
         let ema_snapshot =
             build_current_ema_snapshot_from_index(&start_block, db.clone(), consensus_config);
 
-        // Load transactions for the start block from DB
+        // Load transactions for the start block from DB and construct SealedBlock
         let start_block_commitment_txs = load_commitment_transactions(&start_block, &db)?;
         let start_block_data_txs = load_data_transactions(&start_block, &db)?;
-        let start_block_transactions = BlockTransactions {
-            commitment_txs: start_block_commitment_txs,
-            data_txs: start_block_data_txs,
+        let start_block_body = BlockBody {
+            block_hash: start_block.block_hash,
+            data_transactions: start_block_data_txs.into_values().flatten().collect(),
+            commitment_transactions: start_block_commitment_txs,
         };
+        let sealed_start_block = Arc::new(SealedBlock::new(start_block.clone(), start_block_body)?);
 
         // Create a Block Entry for the start block
         let block_entry = BlockMetadata {
-            block: start_block.clone(),
-            transactions: start_block_transactions,
+            block: sealed_start_block,
             chain_state: ChainState::Onchain,
             timestamp: SystemTime::now(),
             children: HashSet::new(),
@@ -356,12 +364,14 @@ impl BlockTree {
                 consensus_config,
             );
 
-            // Load data transactions for this block from DB
+            // Load data transactions for this block from DB and construct SealedBlock
             let data_txs = load_data_transactions(&block, &db)?;
-            let block_transactions = BlockTransactions {
-                commitment_txs: commitment_txs.clone(),
-                data_txs,
+            let block_body = BlockBody {
+                block_hash: block.block_hash,
+                data_transactions: data_txs.into_values().flatten().collect(),
+                commitment_transactions: commitment_txs.clone(),
             };
+            let sealed_block = Arc::new(SealedBlock::new(block.clone(), block_body)?);
 
             prev_commitment_snapshot = arc_commitment_snapshot.clone();
             prev_ema_snapshot = arc_ema_snapshot.clone();
@@ -369,8 +379,7 @@ impl BlockTree {
             block_tree_cache
                 .add_common(
                     block.block_hash,
-                    &block,
-                    block_transactions,
+                    &sealed_block,
                     arc_commitment_snapshot,
                     epoch_snapshot,
                     arc_ema_snapshot,
@@ -408,8 +417,7 @@ impl BlockTree {
     pub fn add_common(
         &mut self,
         hash: BlockHash,
-        block: &IrysBlockHeader,
-        transactions: BlockTransactions,
+        block: &Arc<SealedBlock>,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         epoch_snapshot: Arc<EpochSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
@@ -418,9 +426,13 @@ impl BlockTree {
         // Validate that transactions match the header
         {
             // Check commitment transactions
-            let expected_commitment_ids: HashSet<H256> =
-                block.get_commitment_ledger_tx_ids().into_iter().collect();
-            let actual_commitment_ids: HashSet<H256> = transactions
+            let expected_commitment_ids: HashSet<H256> = block
+                .header()
+                .get_commitment_ledger_tx_ids()
+                .into_iter()
+                .collect();
+            let actual_commitment_ids: HashSet<H256> = block
+                .transactions()
                 .commitment_txs
                 .iter()
                 .map(irys_types::CommitmentTransaction::id)
@@ -435,10 +447,13 @@ impl BlockTree {
 
             // Check data transactions per-ledger
             // Verify no extra ledgers in transactions that aren't in header
-            let extra_ledger = transactions
-                .data_txs
-                .keys()
-                .find(|k| !block.data_ledgers.iter().any(|l| l.ledger_id == **k as u32));
+            let extra_ledger = block.transactions().data_txs.keys().find(|k| {
+                !block
+                    .header()
+                    .data_ledgers
+                    .iter()
+                    .any(|l| l.ledger_id == **k as u32)
+            });
             eyre::ensure!(
                 extra_ledger.is_none(),
                 "Extra ledger {:?} in BlockTransactions not in header for block {}",
@@ -447,12 +462,13 @@ impl BlockTree {
             );
 
             // Check each ledger's tx IDs match
-            for ledger in &block.data_ledgers {
+            for ledger in &block.header().data_ledgers {
                 let ledger_type = DataLedger::try_from(ledger.ledger_id).map_err(|_| {
                     eyre::eyre!("Invalid ledger_id {} in block {}", ledger.ledger_id, hash)
                 })?;
 
-                let actual_txs = transactions
+                let actual_txs = block
+                    .transactions()
                     .data_txs
                     .get(&ledger_type)
                     .map(std::vec::Vec::as_slice)
@@ -476,7 +492,7 @@ impl BlockTree {
             }
         }
 
-        let prev_hash = block.previous_block_hash;
+        let prev_hash = block.header().previous_block_hash;
 
         // Get parent
         let prev_entry = self
@@ -487,32 +503,33 @@ impl BlockTree {
         // Update indices
         prev_entry.children.insert(hash);
         self.solutions
-            .entry(block.solution_hash)
+            .entry(block.header().solution_hash)
             .or_default()
             .insert(hash);
         self.height_index
-            .entry(block.height)
+            .entry(block.header().height)
             .or_default()
             .insert(hash);
 
         debug!(
             "adding block: max_cumulative_difficulty: {} block.cumulative_diff: {} {}, commitment_snapshot_hash: {}, epoch_snapshot_hash: {}, ema_snapshot_hash: {}",
-            self.max_cumulative_difficulty.0, block.cumulative_diff, block.block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &ema_snapshot.get_hash()
+            self.max_cumulative_difficulty.0, block.header().cumulative_diff, block.header().block_hash, &commitment_snapshot.get_hash(), &epoch_snapshot.get_hash(), &ema_snapshot.get_hash()
         );
 
-        if block.cumulative_diff > self.max_cumulative_difficulty.0 {
+        if block.header().cumulative_diff > self.max_cumulative_difficulty.0 {
             debug!(
                 "setting max_cumulative_difficulty ({}, {}) for height: {}",
-                block.cumulative_diff, hash, block.height
+                block.header().cumulative_diff,
+                hash,
+                block.header().height
             );
-            self.max_cumulative_difficulty = (block.cumulative_diff, hash);
+            self.max_cumulative_difficulty = (block.header().cumulative_diff, hash);
         }
 
         self.blocks.insert(
             hash,
             BlockMetadata {
-                block: block.clone(),
-                transactions,
+                block: Arc::clone(block),
                 chain_state,
                 timestamp: SystemTime::now(),
                 children: HashSet::new(),
@@ -534,17 +551,17 @@ impl BlockTree {
     /// 3. **Block Index Migration** - Only then is the block added to the block_index
     pub fn add_block(
         &mut self,
-        block: &IrysBlockHeader,
-        transactions: BlockTransactions,
+        block: &Arc<SealedBlock>,
         commitment_snapshot: Arc<CommitmentSnapshot>,
         epoch_snapshot: Arc<EpochSnapshot>,
         ema_snapshot: Arc<EmaSnapshot>,
     ) -> eyre::Result<()> {
-        let hash = block.block_hash;
+        let hash = block.header().block_hash;
 
         debug!(
             "add_block() - {} height: {}",
-            block.block_hash, block.height
+            block.header().block_hash,
+            block.header().height
         );
 
         if matches!(
@@ -558,7 +575,6 @@ impl BlockTree {
         self.add_common(
             hash,
             block,
-            transactions,
             commitment_snapshot,
             epoch_snapshot,
             ema_snapshot,
@@ -573,9 +589,9 @@ impl BlockTree {
             .get(block_hash)
             .ok_or_else(|| eyre::eyre!("Block not found"))?;
 
-        let solution_hash = block_entry.block.solution_hash;
-        let height = block_entry.block.height;
-        let prev_hash = block_entry.block.previous_block_hash;
+        let solution_hash = block_entry.block.header().solution_hash;
+        let height = block_entry.block.header().height;
+        let prev_hash = block_entry.block.header().previous_block_hash;
 
         // Update parent's children set
         if let Some(prev_entry) = self.blocks.get_mut(&prev_hash) {
@@ -637,7 +653,7 @@ impl BlockTree {
     fn find_max_difficulty(&self) -> (U256, BlockHash) {
         self.blocks
             .iter()
-            .map(|(hash, entry)| (entry.block.cumulative_diff, *hash))
+            .map(|(hash, entry)| (entry.block.header().cumulative_diff, *hash))
             .max_by_key(|(diff, _)| *diff)
             .unwrap_or((U256::zero(), BlockHash::default()))
     }
@@ -694,14 +710,14 @@ impl BlockTree {
                     // Reset everything and continue from parent block
                     pairs.clear();
                     not_onchain_count = 0;
-                    current = entry.block.previous_block_hash;
+                    current = entry.block.header().previous_block_hash;
                     blocks_to_collect = self.consensus_config.block_tree_depth;
                     continue;
                 }
 
                 ChainState::Onchain => {
                     // Include OnChain blocks in pairs
-                    let chain_cache_entry = make_block_tree_entry(&entry.block);
+                    let chain_cache_entry = make_block_tree_entry(entry.block.header());
                     pairs.push(chain_cache_entry);
 
                     if blocks_to_collect == 0 {
@@ -711,7 +727,7 @@ impl BlockTree {
                 }
 
                 ChainState::Validated(_) => {
-                    let chain_cache_entry = make_block_tree_entry(&entry.block);
+                    let chain_cache_entry = make_block_tree_entry(entry.block.header());
                     pairs.push(chain_cache_entry);
 
                     not_onchain_count += 1;
@@ -723,7 +739,7 @@ impl BlockTree {
                 }
 
                 ChainState::NotOnchain(block_state) => {
-                    let chain_cache_entry = make_block_tree_entry(&entry.block);
+                    let chain_cache_entry = make_block_tree_entry(entry.block.header());
                     pairs.push(chain_cache_entry);
 
                     // We only count this as not onchain if it's validated
@@ -738,10 +754,10 @@ impl BlockTree {
                 }
             }
 
-            if entry.block.height == 0 {
+            if entry.block.header().height == 0 {
                 break;
             } else {
-                current = entry.block.previous_block_hash;
+                current = entry.block.header().previous_block_hash;
             }
         }
 
@@ -767,19 +783,19 @@ impl BlockTree {
     }
 
     /// Helper to recursively mark blocks on-chain
-    fn mark_on_chain(&mut self, block: &IrysBlockHeader) -> eyre::Result<()> {
-        let prev_hash = block.previous_block_hash;
+    fn mark_on_chain(&mut self, block_header: &IrysBlockHeader) -> eyre::Result<()> {
+        let prev_hash = block_header.previous_block_hash;
 
         match self.blocks.get(&prev_hash) {
             None => Ok(()), // Reached the end
             Some(prev_entry) => {
-                let prev_block = prev_entry.block.clone();
+                let prev_header = prev_entry.block.header().clone();
                 let prev_children = prev_entry.children.clone();
 
                 match prev_entry.chain_state {
                     ChainState::Onchain => {
                         // Mark other branches as not onchain (but preserve their validation state)
-                        self.mark_off_chain(prev_children, &block.block_hash);
+                        self.mark_off_chain(prev_children, &block_header.block_hash);
                         Ok(())
                     }
                     ChainState::NotOnchain(BlockState::ValidBlock) | ChainState::Validated(_) => {
@@ -788,7 +804,7 @@ impl BlockTree {
                             entry.chain_state = ChainState::Onchain;
                         }
                         // Recursively mark previous blocks
-                        self.mark_on_chain(&prev_block)
+                        self.mark_on_chain(&prev_header)
                     }
                     ChainState::NotOnchain(_) => Err(eyre::eyre!("invalid_tip")),
                 }
@@ -805,18 +821,18 @@ impl BlockTree {
             .get(block_hash)
             .ok_or_else(|| eyre::eyre!("Block not found in cache"))?;
 
-        let block = block_entry.block.clone();
+        let block_header = block_entry.block.header().clone();
         let old_tip = self.tip;
 
         let (canonical_diff, canonical_block_hash) = self.max_cumulative_difficulty;
 
-        if block.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
+        if block_header.cumulative_diff == canonical_diff && canonical_block_hash != *block_hash {
             // "Cannot move tip away from canonical for another block with same cumulative_diff"
             return Ok(false);
         }
 
         // Recursively mark previous blocks
-        self.mark_on_chain(&block)?;
+        self.mark_on_chain(&block_header)?;
 
         // Mark the tip block as on_chain
         if let Some(entry) = self.blocks.get_mut(block_hash) {
@@ -828,7 +844,7 @@ impl BlockTree {
 
         debug!(
             "\u{001b}[32mmark tip: hash:{} height: {}\u{001b}[0m",
-            block_hash, block.height
+            block_hash, block_header.height
         );
 
         Ok(old_tip != *block_hash)
@@ -869,7 +885,7 @@ impl BlockTree {
                 _ => Err(eyre::eyre!(
                     "unable to mark block as valid: chain_state {:?} {}",
                     entry.chain_state,
-                    entry.block.block_hash,
+                    entry.block.header().block_hash,
                 )),
             }
         } else {
@@ -882,7 +898,9 @@ impl BlockTree {
     /// Gets block by hash
     #[must_use]
     pub fn get_block(&self, block_hash: &BlockHash) -> Option<&IrysBlockHeader> {
-        self.blocks.get(block_hash).map(|entry| &entry.block)
+        self.blocks
+            .get(block_hash)
+            .map(|entry| -> &IrysBlockHeader { entry.block.header() })
     }
 
     pub fn canonical_commitment_snapshot(&self) -> Arc<CommitmentSnapshot> {
@@ -981,7 +999,9 @@ impl BlockTree {
     ) -> Option<(&IrysBlockHeader, &ChainState)> {
         self.blocks
             .get(block_hash)
-            .map(|entry| (&entry.block, &entry.chain_state))
+            .map(|entry| -> (&IrysBlockHeader, &ChainState) {
+                (entry.block.header(), &entry.chain_state)
+            })
     }
 
     /// Walk backwards from a block to find the validation status of the chain
@@ -1015,11 +1035,11 @@ impl BlockTree {
                 }
             }
 
-            if entry.block.height == 0 {
+            if entry.block.header().height == 0 {
                 break; // Reached genesis
             }
 
-            current_hash = entry.block.previous_block_hash;
+            current_hash = entry.block.header().previous_block_hash;
         }
 
         (blocks_awaiting, last_validated)
@@ -1028,17 +1048,18 @@ impl BlockTree {
     /// Collect previous blocks up to the last on-chain block
     pub fn get_fork_blocks(&self, block: &IrysBlockHeader) -> Vec<&IrysBlockHeader> {
         let mut prev_hash = block.previous_block_hash;
-        let mut fork_blocks = Vec::new();
+        let mut fork_blocks: Vec<&IrysBlockHeader> = Vec::new();
 
         while let Some(prev_entry) = self.blocks.get(&prev_hash) {
+            let header: &IrysBlockHeader = prev_entry.block.header();
             match prev_entry.chain_state {
                 ChainState::Onchain => {
-                    fork_blocks.push(&prev_entry.block);
+                    fork_blocks.push(header);
                     break;
                 }
                 ChainState::Validated(_) | ChainState::NotOnchain(_) => {
-                    fork_blocks.push(&prev_entry.block);
-                    prev_hash = prev_entry.block.previous_block_hash;
+                    fork_blocks.push(header);
+                    prev_hash = header.previous_block_hash;
                 }
             }
         }
@@ -1055,27 +1076,29 @@ impl BlockTree {
         block: &'a BlockMetadata,
     ) -> Option<(&'a BlockMetadata, Vec<&'a IrysBlockHeader>, SystemTime)> {
         let mut current_entry = block;
-        let mut prev_block = &current_entry.block;
+        let mut prev_header: &IrysBlockHeader = current_entry.block.header();
         let mut depth_count = 0;
 
-        while prev_block.height > 0 && depth_count < self.consensus_config.block_tree_depth {
-            let prev_hash = prev_block.previous_block_hash;
+        while prev_header.height > 0 && depth_count < self.consensus_config.block_tree_depth {
+            let prev_hash = prev_header.previous_block_hash;
             let prev_entry = self.blocks.get(&prev_hash)?;
             debug!(
                 "get_earliest_not_onchain: prev_entry.chain_state: {:?} {} height: {}",
-                prev_entry.chain_state, prev_hash, prev_entry.block.height
+                prev_entry.chain_state,
+                prev_hash,
+                prev_entry.block.header().height
             );
             match prev_entry.chain_state {
                 ChainState::Validated(BlockState::ValidBlock) | ChainState::Onchain => {
                     return Some((
                         current_entry,
-                        self.get_fork_blocks(prev_block),
+                        self.get_fork_blocks(prev_header),
                         current_entry.timestamp,
                     ));
                 }
                 ChainState::NotOnchain(_) | ChainState::Validated(_) => {
                     current_entry = prev_entry;
-                    prev_block = &current_entry.block;
+                    prev_header = current_entry.block.header();
                     depth_count += 1;
                 }
             }
@@ -1098,7 +1121,7 @@ impl BlockTree {
 
         // Get the tip's cumulative difficulty
         let tip_entry = self.blocks.get(&self.tip)?;
-        let tip_cdiff = tip_entry.block.cumulative_diff;
+        let tip_cdiff = tip_entry.block.header().cumulative_diff;
 
         // Check if tip's difficulty exceeds max difficulty
         if tip_cdiff >= self.max_cumulative_difficulty.0 {
@@ -1110,7 +1133,7 @@ impl BlockTree {
 
         debug!(
             "get_earliest_not_onchain_in_longest_chain() with max_diff_hash: {} height: {} state: {:?}",
-            max_diff_hash, entry.block.height, entry.chain_state
+            max_diff_hash, entry.block.header().height, entry.chain_state
         );
 
         // Check if it's part of a fork and get the start of the fork
@@ -1174,23 +1197,23 @@ impl BlockTree {
             }
 
             if let Some(entry) = self.blocks.get(&hash) {
-                let block = &entry.block;
+                let header: &IrysBlockHeader = entry.block.header();
 
                 // Case 1: Exact cumulative_diff match - return immediately
-                if block.cumulative_diff == cumulative_difficulty {
-                    return Some(block);
+                if header.cumulative_diff == cumulative_difficulty {
+                    return Some(header);
                 }
 
                 // Case 2: Double signing case - return immediately
-                if block.cumulative_diff > previous_cumulative_difficulty
-                    && cumulative_difficulty > block.previous_cumulative_diff
+                if header.cumulative_diff > previous_cumulative_difficulty
+                    && cumulative_difficulty > header.previous_cumulative_diff
                 {
-                    return Some(block);
+                    return Some(header);
                 }
 
                 // Store as best block seen so far if we haven't found one yet
                 if best_block.is_none() {
-                    best_block = Some(block);
+                    best_block = Some(header);
                 }
             }
         }
@@ -1207,6 +1230,7 @@ impl BlockTree {
             .get(&self.tip)
             .expect("Tip block not found")
             .block
+            .header()
             .height;
         let min_keep_height = tip_height.saturating_sub(depth);
 
@@ -1313,17 +1337,17 @@ pub async fn get_optimistic_chain(tree: BlockTreeReadGuard) -> eyre::Result<Vec<
         debug!("get_optimistic_chain with latest_cache_tip: {}", current);
 
         while let Some(entry) = cache.blocks.get(&current) {
-            chain_cache.push((current, entry.block.height));
+            chain_cache.push((current, entry.block.header().height));
 
             if blocks_to_collect == 0 {
                 break;
             }
             blocks_to_collect -= 1;
 
-            if entry.block.height == 0 {
+            if entry.block.header().height == 0 {
                 break;
             } else {
-                current = entry.block.previous_block_hash;
+                current = entry.block.header().previous_block_hash;
             }
         }
 
@@ -1584,6 +1608,45 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
+    use irys_testing_utils::IrysBlockHeaderTestExt as _;
+
+    /// Creates a SealedBlock from a header with an empty body (no transactions).
+    /// Signs the header if the signature is invalid (e.g., after modifying fields).
+    fn seal_block(header: &mut IrysBlockHeader) -> Arc<SealedBlock> {
+        header.ensure_test_signed();
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            ..Default::default()
+        };
+        Arc::new(SealedBlock::new(header.clone(), body).expect("sealing block with empty body"))
+    }
+
+    /// Creates a properly signed data transaction for testing.
+    fn create_signed_data_tx() -> DataTransactionHeader {
+        use irys_types::irys::IrysSigner;
+        use irys_types::transaction::IrysTransactionCommon as _;
+
+        let config = ConsensusConfig::testing();
+        let signer = IrysSigner::random_signer(&config);
+        DataTransactionHeader::new(&config)
+            .sign(&signer)
+            .expect("signing test tx")
+    }
+
+    /// Creates a SealedBlock from a header with matching data transactions in the body.
+    /// Signs the header if the signature is invalid (e.g., after adding tx_ids).
+    fn seal_block_with_data_txs(
+        header: &mut IrysBlockHeader,
+        data_txs: Vec<DataTransactionHeader>,
+    ) -> Arc<SealedBlock> {
+        header.ensure_test_signed();
+        let body = BlockBody {
+            block_hash: header.block_hash,
+            data_transactions: data_txs,
+            commitment_transactions: vec![],
+        };
+        Arc::new(SealedBlock::new(header.clone(), body).expect("sealing block with txs"))
+    }
 
     fn dummy_ema_snapshot() -> Arc<EmaSnapshot> {
         let config = irys_types::ConsensusConfig::testing();
@@ -1632,16 +1695,15 @@ mod tests {
 
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Adding `b1` again shouldn't change the state because it is confirmed
-        // onchain
-        let mut b1_test = b1.clone();
-        b1_test.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .push(H256::random());
+        // Not sure how much sense this test makes now - it's impossible to
+        // have a different block with the same hash
+        // Re-adding `b1` shouldn't change the state because it is
+        // confirmed onchain
+        let mut b1_dup = b1.clone();
+        let sealed_b1_dup = seal_block(&mut b1_dup);
         assert_matches!(
             cache.add_block(
-                &b1_test,
-                BlockTransactions::default(),
+                &sealed_b1_dup,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1670,12 +1732,15 @@ mod tests {
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Add b2 block as not_validated
+        // Add b2 block (with a transaction) as not_validated
+        let b2_tx = create_signed_data_tx();
+        let txid = b2_tx.id;
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
+        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
+        b2.test_sign();
         assert_matches!(
             cache.add_block(
-                &b2,
-                BlockTransactions::default(),
+                &seal_block_with_data_txs(&mut b2, vec![b2_tx.clone()]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1688,27 +1753,14 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b2.block_hash
         );
 
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
-        let txid = H256::random();
-        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        // Must provide matching transactions now that validation is enforced
-        let b2_txs = mock_transactions_for_block(&b2);
-        assert_matches!(
-            cache.add_block(
-                &b2,
-                b2_txs,
-                comm_cache.clone(),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
-            ),
-            Ok(())
-        );
+        // Verify b2's transaction is in the cache
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -1741,11 +1793,9 @@ mod tests {
         // Re-add b2_1 and add a competing b2 block called b1_2, it will be built
         // on b1 but share the same solution_hash
         // b2 has tx IDs from earlier modification, so need matching transactions
-        let b2_txs = mock_transactions_for_block(&b2);
         assert_matches!(
             cache.add_block(
-                &b2,
-                b2_txs,
+                &seal_block_with_data_txs(&mut b2, vec![b2_tx.clone()]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1756,8 +1806,7 @@ mod tests {
         b1_2.solution_hash = b1.solution_hash;
         assert_matches!(
             cache.add_block(
-                &b1_2,
-                BlockTransactions::default(),
+                &seal_block(&mut b1_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1897,8 +1946,7 @@ mod tests {
         let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
         assert_matches!(
             cache.add_block(
-                &b1_2,
-                BlockTransactions::default(),
+                &seal_block(&mut b1_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1906,11 +1954,9 @@ mod tests {
             Ok(())
         );
         // b2 still has tx IDs from earlier modification
-        let b2_txs = mock_transactions_for_block(&b2);
         assert_matches!(
             cache.add_block(
-                &b2,
-                b2_txs,
+                &seal_block_with_data_txs(&mut b2, vec![b2_tx]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1918,15 +1964,14 @@ mod tests {
             Ok(())
         );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
-        let b2_2 = extend_chain(random_block(U256::one()), &b2);
+        let mut b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &b2_2,
-                BlockTransactions::default(),
+                &seal_block(&mut b2_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1939,20 +1984,20 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b1_2.block_hash
         );
 
         // b2_3->b2_2->b2->b1 is longer and heavier but only b2->b1 are validated.
-        let b2_3 = extend_chain(random_block(U256::from(3)), &b2_2);
+        let mut b2_3 = extend_chain(random_block(U256::from(3)), &b2_2);
         println!(
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &b2_3,
-                BlockTransactions::default(),
+                &seal_block(&mut b2_3),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1965,6 +2010,7 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b2_2.block_hash
         );
@@ -1975,8 +2021,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b2_2.block_hash,
-                &b2_2,
-                BlockTransactions::default(),
+                &seal_block(&mut b2_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -1994,21 +2039,21 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b2_3.block_hash
         );
         assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 1, &cache), Ok(()));
 
         // Now the b3->b2->b1 fork is heaviest
-        let b3 = extend_chain(random_block(U256::from(4)), &b2);
+        let mut b3 = extend_chain(random_block(U256::from(4)), &b2);
         println!(
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &b3,
-                BlockTransactions::default(),
+                &seal_block(&mut b3),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2018,8 +2063,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b3.block_hash,
-                &b3,
-                BlockTransactions::default(),
+                &seal_block(&mut b3),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2039,21 +2083,21 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b3.block_hash
         );
         assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
 
         // add not validated b4, b3->b2->b1 fork is still heaviest
-        let b4 = extend_chain(random_block(U256::from(5)), &b3);
+        let mut b4 = extend_chain(random_block(U256::from(5)), &b3);
         println!(
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &b4,
-                BlockTransactions::default(),
+                &seal_block(&mut b4),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2066,6 +2110,7 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b4.block_hash
         );
@@ -2192,18 +2237,17 @@ mod tests {
         // <Reset the cache>
         let b11 = random_block(U256::zero());
         let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
-        let b12 = extend_chain(random_block(U256::one()), &b11);
+        let mut b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(
-                &b12,
-                BlockTransactions::default(),
+                &seal_block(&mut b12),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
             ),
             Ok(())
         );
-        let b13 = extend_chain(random_block(U256::one()), &b11);
+        let mut b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
         println!(
@@ -2223,8 +2267,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b13.block_hash,
-                &b13,
-                BlockTransactions::default(),
+                &seal_block(&mut b13),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2244,6 +2287,7 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b12.block_hash
         );
@@ -2259,11 +2303,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
 
         // Extend the b13->b11 chain
-        let b14 = extend_chain(random_block(U256::from(2)), &b13);
+        let mut b14 = extend_chain(random_block(U256::from(2)), &b13);
         assert_matches!(
             cache.add_block(
-                &b14,
-                BlockTransactions::default(),
+                &seal_block(&mut b14),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2276,6 +2319,7 @@ mod tests {
                 .unwrap()
                 .0
                 .block
+                .header()
                 .block_hash,
             b14.block_hash
         );
@@ -2354,11 +2398,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
 
         // add a b15 block
-        let b15 = extend_chain(random_block(U256::from(3)), &b14);
+        let mut b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(
             cache.add_block(
-                &b15,
-                BlockTransactions::default(),
+                &seal_block(&mut b15),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2379,8 +2422,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b14.block_hash,
-                &b14,
-                BlockTransactions::default(),
+                &seal_block(&mut b14),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2404,11 +2446,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
 
         // add a b16 block
-        let b16 = extend_chain(random_block(U256::from(4)), &b15);
+        let mut b16 = extend_chain(random_block(U256::from(4)), &b15);
         assert_matches!(
             cache.add_block(
-                &b16,
-                BlockTransactions::default(),
+                &seal_block(&mut b16),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2465,18 +2506,17 @@ mod tests {
         // <Reset the cache>
         let b11 = random_block(U256::zero());
         let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
-        let b12 = extend_chain(random_block(U256::one()), &b11);
+        let mut b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(
-                &b12,
-                BlockTransactions::default(),
+                &seal_block(&mut b12),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
             ),
             Ok(())
         );
-        let b13 = extend_chain(random_block(U256::from(2)), &b12);
+        let mut b13 = extend_chain(random_block(U256::from(2)), &b12);
         println!("---");
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
@@ -2487,8 +2527,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b13.block_hash,
-                &b13,
-                BlockTransactions::default(),
+                &seal_block(&mut b13),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2514,12 +2553,11 @@ mod tests {
         let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
-        let b12 = extend_chain(random_block(U256::one()), &b11);
+        let mut b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_common(
                 b12.block_hash,
-                &b12,
-                BlockTransactions::default(),
+                &seal_block(&mut b12),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2532,14 +2570,13 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
 
         // Create a fork at b12
-        let b13a = extend_chain(random_block(U256::from(2)), &b12);
-        let b13b = extend_chain(random_block(U256::from(2)), &b12);
+        let mut b13a = extend_chain(random_block(U256::from(2)), &b12);
+        let mut b13b = extend_chain(random_block(U256::from(2)), &b12);
 
         assert_matches!(
             cache.add_common(
                 b13a.block_hash,
-                &b13a,
-                BlockTransactions::default(),
+                &seal_block(&mut b13a),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2550,8 +2587,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b13b.block_hash,
-                &b13b,
-                BlockTransactions::default(),
+                &seal_block(&mut b13b),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2566,12 +2602,11 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(()));
 
         // extend the fork to make it canonical
-        let b14b = extend_chain(random_block(U256::from(3)), &b13b);
+        let mut b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
             cache.add_common(
                 b14b.block_hash,
-                &b14b,
-                BlockTransactions::default(),
+                &seal_block(&mut b14b),
                 comm_cache,
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2596,44 +2631,11 @@ mod tests {
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
         let mut block = IrysBlockHeader::new_mock_header();
-        block.block_hash = BlockHash::random();
         block.solution_hash = H256::random(); // Ensure unique solution hash
         block.height = 0; // Default to genesis
         block.cumulative_diff = cumulative_diff;
+        block.test_sign();
         block
-    }
-
-    /// Creates mock BlockTransactions that matches the block header's tx IDs.
-    /// For testing purposes, creates stub DataTransactionHeader entries with matching IDs.
-    fn mock_transactions_for_block(block: &IrysBlockHeader) -> BlockTransactions {
-        use irys_types::DataTransactionHeader;
-
-        let mut data_txs: HashMap<DataLedger, Vec<DataTransactionHeader>> = HashMap::new();
-
-        for data_ledger in &block.data_ledgers {
-            // Map ledger_id to DataLedger enum
-            let Ok(ledger) = DataLedger::try_from(data_ledger.ledger_id) else {
-                continue; // Skip unknown ledgers
-            };
-            let mut ledger_txs = Vec::new();
-
-            for tx_id in data_ledger.tx_ids.0.iter() {
-                // Create a minimal mock DataTransactionHeader with matching ID
-                let mut mock_tx = DataTransactionHeader::new(&ConsensusConfig::testing());
-                mock_tx.id = *tx_id;
-                ledger_txs.push(mock_tx);
-            }
-
-            if !ledger_txs.is_empty() {
-                data_txs.insert(ledger, ledger_txs);
-            }
-        }
-
-        // For commitment transactions, we'd need to do similar but tests don't use them
-        BlockTransactions {
-            commitment_txs: Vec::new(),
-            data_txs,
-        }
     }
 
     fn extend_chain(
@@ -2643,7 +2645,8 @@ mod tests {
         new_block.previous_block_hash = previous_block.block_hash();
         new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;
-        // Don't modify solution_hash - keep the random one from block creation
+        // Re-sign after modifying fields that affect the signature hash
+        new_block.test_sign();
         new_block
     }
 
@@ -2657,9 +2660,9 @@ mod tests {
             let c_s = &block_entry.chain_state;
 
             ensure!(
-                block_entry.block.block_hash == *block_hash,
+                block_entry.block.header().block_hash == *block_hash,
                 "Wrong unvalidated block found: {} expected:{}",
-                block_entry.block.block_hash,
+                block_entry.block.header().block_hash,
                 block_hash
             );
 

@@ -15,10 +15,7 @@ use irys_types::{
     LedgerChunkRange, Proof, TokioServiceHandle, TxChunkOffset, UnpackedChunk, H256,
 };
 use reth::tasks::shutdown::Shutdown;
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 use tracing::{error, instrument};
 
@@ -38,7 +35,7 @@ pub struct ChunkMigrationService {
 #[derive(Debug)]
 pub struct ChunkMigrationServiceInner {
     /// Tracks block boundaries and offsets for locating chunks in ledgers
-    pub block_index: Arc<RwLock<BlockIndex>>,
+    pub block_index: BlockIndex,
     /// Configuration parameters for storage system
     pub config: Config,
     /// Collection of storage modules for distributing chunk data
@@ -76,7 +73,7 @@ pub enum ChunkMigrationServiceMessage {
 impl ChunkMigrationServiceInner {
     #[tracing::instrument(level = "trace", skip_all)]
     pub fn new(
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         storage_modules_guard: &StorageModulesReadGuard,
         db: DatabaseProvider,
         service_senders: ServiceSenders,
@@ -219,13 +216,13 @@ pub fn process_ledger_transactions(
     block: &Arc<IrysBlockHeader>,
     ledger: DataLedger,
     txs: &[DataTransactionHeader],
-    block_index: &Arc<RwLock<BlockIndex>>,
+    block_index: &BlockIndex,
     chunk_size: usize,
     storage_modules_guard: &StorageModulesReadGuard,
     db: &Arc<DatabaseProvider>,
 ) -> Result<(), MigrationError> {
     let path_pairs = get_tx_path_pairs(block, ledger, txs).unwrap();
-    let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index.clone());
+    let block_offsets = get_block_offsets_in_ledger(block, ledger, block_index);
     let mut prev_chunk_offset = block_offsets.start();
 
     for ((_txid, tx_path), tx) in path_pairs {
@@ -316,14 +313,13 @@ fn process_transaction_chunks(
 fn get_block_offsets_in_ledger(
     block: &IrysBlockHeader,
     ledger: DataLedger,
-    block_index: Arc<RwLock<BlockIndex>>,
+    block_index: &BlockIndex,
 ) -> LedgerChunkRange {
     // Use the block index to get the ledger relative chunk offset of the
     // start of this new block from the previous block.
-    let index_reader = block_index.read().unwrap();
     let start_chunk_offset = if block.height > 0 {
         // We subtract 1 from `total_chunks` to get the offsets
-        index_reader
+        block_index
             .get_item(block.height - 1)
             .map(|prev| prev.ledgers[ledger].total_chunks)
             .unwrap_or(0)
@@ -463,7 +459,7 @@ fn write_chunk_to_module(
 impl ChunkMigrationService {
     pub fn spawn_service(
         rx: UnboundedReceiver<ChunkMigrationServiceMessage>,
-        block_index: Arc<RwLock<BlockIndex>>,
+        block_index: BlockIndex,
         storage_modules_guard: &StorageModulesReadGuard,
         db: DatabaseProvider,
         service_senders: ServiceSenders,

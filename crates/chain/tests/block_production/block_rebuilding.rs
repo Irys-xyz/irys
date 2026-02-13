@@ -10,9 +10,7 @@
 //! 2. Valid solution reuse - parent changes but solution remains valid
 
 use irys_actors::{async_trait, BlockProdStrategy, BlockProducerInner, ProductionStrategy};
-use irys_types::{
-    block_production::SolutionContext, BlockTransactions, IrysBlockHeader, NodeConfig, H256,
-};
+use irys_types::{block_production::SolutionContext, NodeConfig, H256};
 use std::sync::Arc;
 use tokio::sync::{oneshot, Mutex};
 use tracing::info;
@@ -43,13 +41,7 @@ impl BlockProdStrategy for TrackingStrategy {
     async fn fully_produce_new_block(
         &self,
         solution: SolutionContext,
-    ) -> eyre::Result<
-        Option<(
-            Arc<IrysBlockHeader>,
-            reth::payload::EthBuiltPayload,
-            BlockTransactions,
-        )>,
-    > {
+    ) -> eyre::Result<Option<(Arc<irys_types::SealedBlock>, reth::payload::EthBuiltPayload)>> {
         // Track the solution hash and VDF step
         *self.solution_hash_tracked.lock().await = Some(solution.solution_hash);
         *self.solution_vdf_tracked.lock().await = Some(solution.vdf_step);
@@ -274,17 +266,19 @@ async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
 
     // Get the result
     let result = handle.await??;
-    let (block, _eth_payload, _) = result.expect("Block should be produced successfully");
+    let (block, _eth_payload) = result.expect("Block should be produced successfully");
 
     // Verify the block was built on node2's block (parent changed)
     assert_eq!(
-        block.previous_block_hash, node2_block.block_hash,
+        block.header().previous_block_hash,
+        node2_block.block_hash,
         "Block should be built on the new parent"
     );
 
     // Verify same solution hash was used
     assert_eq!(
-        block.solution_hash, original_solution_hash,
+        block.header().solution_hash,
+        original_solution_hash,
         "Same solution hash should be reused after parent change"
     );
 
@@ -299,18 +293,18 @@ async fn solution_reused_when_parent_changes_but_valid() -> eyre::Result<()> {
     info!("SUCCESS: Solution was reused when parent changed but remained valid");
     info!("Original solution hash: {}", original_solution_hash);
     info!("Block built on new parent: {}", node2_block.block_hash);
-    info!("Final block height: {}", block.height);
+    info!("Final block height: {}", block.header().height);
 
     // Verify both nodes have validated the newly produced block
     info!(
         "Waiting for both nodes to validate the new block at height {}",
-        block.height
+        block.header().height
     );
-    node1.wait_until_height(block.height, 10).await?;
-    node2.wait_until_height(block.height, 10).await?;
+    node1.wait_until_height(block.header().height, 10).await?;
+    node2.wait_until_height(block.header().height, 10).await?;
     info!(
         "Both nodes have successfully validated the block at height {}",
-        block.height
+        block.header().height
     );
 
     // Cleanup

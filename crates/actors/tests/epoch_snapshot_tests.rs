@@ -757,11 +757,13 @@ async fn epoch_blocks_reinitialization_test() {
     let num_blocks_in_epoch = config.consensus.epoch.num_blocks_in_epoch;
 
     let (block_index_tx, block_index_rx) = tokio::sync::mpsc::unbounded_channel();
+    let db_env =
+        irys_storage::irys_consensus_data_db::open_or_create_irys_consensus_data_db(&base_path)
+            .expect("to create DB");
+    let db = irys_types::DatabaseProvider(std::sync::Arc::new(db_env));
     let _block_index_handle = irys_actors::block_index_service::BlockIndexService::spawn_service(
         block_index_rx,
-        Arc::new(RwLock::new(
-            BlockIndex::new(&config.node_config).await.unwrap(),
-        )),
+        BlockIndex::new_for_testing(db),
         None, // No supply state needed for tests
         &config.consensus,
         tokio::runtime::Handle::current(),

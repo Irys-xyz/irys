@@ -47,8 +47,9 @@ use irys_testing_utils::utils::temporary_directory;
 use irys_types::v2::GossipBroadcastMessageV2;
 use irys_types::{
     block_production::Seed, block_production::SolutionContext, irys::IrysSigner,
-    partition::PartitionAssignment, BlockHash, BlockTransactions, DataLedger, EvmBlockHash,
-    H256List, IrysAddress, NetworkConfigWithDefaults as _, SyncMode, H256, U256,
+    partition::PartitionAssignment, BlockBody, BlockHash, BlockTransactions, DataLedger,
+    EvmBlockHash, H256List, IrysAddress, NetworkConfigWithDefaults as _, SealedBlock, SyncMode,
+    H256, U256,
 };
 use irys_types::{
     Base64, ChunkBytes, CommitmentTransaction, CommitmentTransactionV2, CommitmentTypeV2,
@@ -1253,7 +1254,12 @@ impl IrysNodeTest<IrysNodeCtx> {
             .block_producer
             .send(BlockProducerCommand::SetTestBlocksRemaining(Some(0)))
             .unwrap();
-        maybe.ok_or_eyre("block not returned")
+        let (sealed_block, eth_payload) = maybe.ok_or_eyre("block not returned")?;
+        Ok((
+            sealed_block.header().clone(),
+            eth_payload,
+            BlockTransactions::clone(sealed_block.transactions()),
+        ))
     }
 
     pub async fn mine_block_without_gossip(
@@ -1841,19 +1847,18 @@ impl IrysNodeTest<IrysNodeCtx> {
         height: u64,
         include_chunk: bool,
     ) -> eyre::Result<IrysBlockHeader> {
-        self.node_ctx
+        let block = self
+            .node_ctx
             .block_index_guard
             .read()
             .get_item(height)
+            .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))?;
+        self.node_ctx
+            .db
+            .view_eyre(|tx| {
+                irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
+            })?
             .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-            .and_then(|block| {
-                self.node_ctx
-                    .db
-                    .view_eyre(|tx| {
-                        irys_database::block_header_by_hash(tx, &block.block_hash, include_chunk)
-                    })?
-                    .ok_or_else(|| eyre::eyre!("Block at height {} not found", height))
-            })
     }
 
     pub async fn get_block_by_height(&self, height: u64) -> eyre::Result<IrysBlockHeader> {
@@ -1972,29 +1977,24 @@ impl IrysNodeTest<IrysNodeCtx> {
     pub async fn send_block_to_peer(
         &self,
         peer: &Self,
-        irys_block_header: &IrysBlockHeader,
-        block_transactions: BlockTransactions,
+        sealed_block: Arc<SealedBlock>,
     ) -> eyre::Result<()> {
         match BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(Arc::clone(&sealed_block), false)
             .await
         {
             Ok(_) => Ok(()),
             Err(res) => {
                 tracing::error!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 );
                 Err(eyre!(
                     "Sent block to peer. Block {:?} ({}) failed pre-validation: {:?}",
-                    &irys_block_header.block_hash.0,
-                    &irys_block_header.height,
+                    &sealed_block.header().block_hash.0,
+                    &sealed_block.header().height,
                     res
                 ))
             }
@@ -2132,13 +2132,11 @@ impl IrysNodeTest<IrysNodeCtx> {
             .add_execution_payload_to_cache(eth_payload.block().clone())
             .await;
 
+        let sealed_block = build_sealed_block(irys_block_header.clone(), &block_transactions)?;
+
         // Deliver block header (this triggers validation)
         BlockDiscoveryFacadeImpl::new(peer.node_ctx.service_senders.block_discovery.clone())
-            .handle_block(
-                Arc::new(irys_block_header.clone()),
-                block_transactions,
-                false,
-            )
+            .handle_block(sealed_block, false)
             .await
             .map_err(|e| eyre::eyre!("{e:?}"))?;
 
@@ -3453,4 +3451,19 @@ pub async fn gossip_data_tx_to_node(
 
     resp_rx.await??;
     Ok(())
+}
+
+/// Helper function to construct a SealedBlock from a header and transactions.
+/// This centralizes the BlockBody construction and SealedBlock::new validation
+/// for consistent usage across tests.
+pub fn build_sealed_block(
+    header: IrysBlockHeader,
+    txs: &BlockTransactions,
+) -> eyre::Result<Arc<SealedBlock>> {
+    let block_body = BlockBody {
+        block_hash: header.block_hash,
+        data_transactions: txs.all_data_txs().cloned().collect(),
+        commitment_transactions: txs.commitment_txs.clone(),
+    };
+    Ok(Arc::new(SealedBlock::new(header, block_body)?))
 }
