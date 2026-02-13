@@ -472,7 +472,8 @@ mod tests {
         dummy_ema_snapshot, dummy_epoch_snapshot, BlockState, BlockTree, BlockTreeReadGuard,
         ChainState, CommitmentSnapshot,
     };
-    use irys_types::{serialization::H256List, BlockBody, BlockHash, IrysBlockHeader, H256};
+    use irys_testing_utils::IrysBlockHeaderTestExt;
+    use irys_types::{serialization::H256List, BlockBody, BlockHash, IrysBlockHeader};
     use priority_queue::PriorityQueue;
     use std::sync::{Arc, RwLock};
 
@@ -608,8 +609,8 @@ mod tests {
         // Create genesis block
         let mut genesis = IrysBlockHeader::new_mock_header();
         genesis.height = 0;
-        genesis.block_hash = H256::random();
         genesis.cumulative_diff = 0.into();
+        genesis.test_sign();
 
         // Create block tree with genesis
         let mut block_tree = BlockTree::new(&genesis, irys_types::ConsensusConfig::testing());
@@ -623,8 +624,8 @@ mod tests {
             let mut header = IrysBlockHeader::new_mock_header();
             header.height = height;
             header.previous_block_hash = last_hash;
-            header.block_hash = H256::random();
             header.cumulative_diff = height.into();
+            header.test_sign();
 
             let sealed = Arc::new(
                 SealedBlock::new(
@@ -682,8 +683,8 @@ mod tests {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
                 header.previous_block_hash = last_hash;
-                header.block_hash = H256::random();
                 header.cumulative_diff = height.into();
+                header.test_sign();
                 last_hash = header.block_hash;
 
                 let sealed = Arc::new(
@@ -740,8 +741,8 @@ mod tests {
                 let mut header = IrysBlockHeader::new_mock_header();
                 header.height = height;
                 header.previous_block_hash = last_hash;
-                header.block_hash = H256::random();
                 header.cumulative_diff = height.into();
+                header.test_sign();
                 last_hash = header.block_hash;
 
                 let sealed = Arc::new(

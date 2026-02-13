@@ -1226,6 +1226,7 @@ fn check_block_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irys_testing_utils::IrysBlockHeaderTestExt;
     use irys_types::{DataTransactionHeader, IrysBlockHeaderV1, SystemLedger};
     use std::sync::Arc;
 
@@ -1243,8 +1244,7 @@ mod tests {
     }
 
     fn make_sealed_block(
-        block_byte: u8,
-        parent_byte: u8,
+        parent_hash: BlockHash,
         height: u64,
         mut body: BlockBody,
     ) -> Arc<SealedBlock> {
@@ -1282,14 +1282,15 @@ mod tests {
             });
         }
 
-        let header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height,
-            block_hash: BlockHash::repeat_byte(block_byte),
-            previous_block_hash: BlockHash::repeat_byte(parent_byte),
+            previous_block_hash: parent_hash,
             data_ledgers,
             system_ledgers,
             ..IrysBlockHeaderV1::default()
         });
+        // Sign the header to get a valid signature and block_hash
+        header.test_sign();
         // Ensure body.block_hash matches header.block_hash for consistency
         body.block_hash = header.block_hash();
         Arc::new(SealedBlock::new(header, body).expect("Failed to create SealedBlock"))
@@ -1299,7 +1300,7 @@ mod tests {
     fn add_single_block() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xAA);
-        let child1 = make_sealed_block(0x01, 0xAA, 10, Default::default());
+        let child1 = make_sealed_block(parent, 10, Default::default());
 
         cache.add_block(child1.clone(), false);
 
@@ -1323,8 +1324,8 @@ mod tests {
     fn add_multiple_sibling_blocks_only_first_cached() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xBB);
-        let child1 = make_sealed_block(0x02, 0xBB, 11, Default::default());
-        let child2 = make_sealed_block(0x03, 0xBB, 12, Default::default());
+        let child1 = make_sealed_block(parent, 11, Default::default());
+        let child2 = make_sealed_block(parent, 12, Default::default());
 
         cache.add_block(child1.clone(), true); // fast track first
         cache.add_block(child2.clone(), false); // second sibling
@@ -1354,8 +1355,8 @@ mod tests {
     fn remove_blocks_updates_mappings() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xCC);
-        let child1 = make_sealed_block(0x10, 0xCC, 20, Default::default());
-        let child2 = make_sealed_block(0x11, 0xCC, 21, Default::default());
+        let child1 = make_sealed_block(parent, 20, Default::default());
+        let child2 = make_sealed_block(parent, 21, Default::default());
         cache.add_block(child1.clone(), false);
         cache.add_block(child2.clone(), false);
 
@@ -1378,7 +1379,7 @@ mod tests {
     #[test]
     fn change_processing_status() {
         let mut cache = BlockCacheInner::new();
-        let block = make_sealed_block(0x20, 0xDD, 30, Default::default());
+        let block = make_sealed_block(BlockHash::repeat_byte(0xDD), 30, Default::default());
         cache.add_block(block.clone(), false);
 
         assert!(
@@ -1414,7 +1415,7 @@ mod tests {
     fn remove_single_orphan_removes_parent_entry() {
         let mut cache = BlockCacheInner::new();
         let parent = BlockHash::repeat_byte(0xAB);
-        let child = make_sealed_block(0xCD, 0xAB, 42, Default::default());
+        let child = make_sealed_block(parent, 42, Default::default());
         cache.add_block(child.clone(), false);
         // Sanity: parent entry exists
         assert!(cache.orphaned_blocks_by_parent.get(&parent).is_some());
@@ -1427,17 +1428,17 @@ mod tests {
     #[test]
     fn block_body_storage_and_retrieval() {
         let mut cache = BlockCacheInner::new();
-        let _parent = BlockHash::repeat_byte(0xFA);
-        let block_hash = BlockHash::repeat_byte(0x50);
+        let parent = BlockHash::repeat_byte(0xFA);
 
         // Create a non-empty BlockBody with a valid test transaction
         let block_body = BlockBody {
-            block_hash,
             data_transactions: vec![make_test_data_tx()],
             commitment_transactions: vec![],
+            ..Default::default()
         };
 
-        let child1 = make_sealed_block(0x50, 0xFA, 100, block_body);
+        let child1 = make_sealed_block(parent, 100, block_body);
+        let block_hash = child1.header().block_hash;
 
         // Add block with the BlockBody
         cache.add_block(child1, false);
@@ -1457,9 +1458,8 @@ mod tests {
     #[test]
     fn block_body_storage_with_default() {
         let mut cache = BlockCacheInner::new();
-        let _parent = BlockHash::repeat_byte(0xFB);
-        let block_hash = BlockHash::repeat_byte(0x51);
-        let child1 = make_sealed_block(0x51, 0xFB, 101, Default::default());
+        let parent = BlockHash::repeat_byte(0xFB);
+        let child1 = make_sealed_block(parent, 101, Default::default());
 
         // Add block with Default::default() BlockBody (as used in existing call sites)
         cache.add_block(child1.clone(), false);
@@ -1467,7 +1467,7 @@ mod tests {
         // Retrieve the cached block
         let cached = cache
             .blocks
-            .get(&block_hash)
+            .get(&child1.header().block_hash)
             .expect("child1 should be stored in blocks cache");
 
         // Verify BlockBody is stored (block_hash will be set to header's block_hash by make_sealed_block)
@@ -1509,8 +1509,7 @@ mod tests {
         let commitment_tx_id1 = commitment_tx.id();
 
         // Create block header with specific transaction ordering
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xAA),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 50,
             data_ledgers: vec![
                 irys_types::DataTransactionLedger {
@@ -1537,9 +1536,8 @@ mod tests {
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1]),
             }],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Create matching transactions (deliberately in different order than header)
         // Note: submit_tx1 appears in both submit and publish ledgers
@@ -1597,8 +1595,7 @@ mod tests {
         let submit_tx_id2 = submit_tx2.id();
 
         // Create block header expecting two submit transactions
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xBB),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 51,
             // Only include Submit ledger at correct index (1)
             // Need to have Publish at index 0 (even if empty) since Submit is at index 1
@@ -1624,9 +1621,8 @@ mod tests {
             ],
             system_ledgers: vec![],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Create body with only ONE transaction (mismatch - header expects 2)
         let data_txs = vec![submit_tx1];
@@ -1677,8 +1673,7 @@ mod tests {
         actual_tx = actual_tx.sign(&signer).expect("Failed to sign");
 
         // Create block header expecting expected_tx_id in Submit ledger
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xCC),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 52,
             // Need Publish at index 0 (empty) and Submit at index 1
             data_ledgers: vec![
@@ -1703,9 +1698,8 @@ mod tests {
             ],
             system_ledgers: vec![],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Create body with actual_tx that has a different ID than expected
         // (simulating the transaction being missing from expected ledger)
@@ -1759,8 +1753,7 @@ mod tests {
         let commitment_tx_id2 = commitment_tx2.id();
 
         // Create block header expecting two commitment transactions
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xDD),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 53,
             data_ledgers: vec![],
             system_ledgers: vec![SystemTransactionLedger {
@@ -1768,9 +1761,8 @@ mod tests {
                 tx_ids: irys_types::H256List(vec![commitment_tx_id1, commitment_tx_id2]),
             }],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Create body with only ONE commitment transaction (mismatch)
         let data_txs = vec![];
@@ -1814,8 +1806,7 @@ mod tests {
         let dual_tx_id = dual_tx.id();
 
         // Create block header with transaction in BOTH ledgers (Publish at index 0, Submit at index 1)
-        let header = IrysBlockHeaderV1 {
-            block_hash: BlockHash::repeat_byte(0xEE),
+        let mut header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
             height: 54,
             data_ledgers: vec![
                 irys_types::DataTransactionLedger {
@@ -1839,9 +1830,8 @@ mod tests {
             ],
             system_ledgers: vec![],
             ..Default::default()
-        };
-
-        let header = IrysBlockHeader::V1(header);
+        });
+        header.test_sign();
 
         // Provide the transaction once in the body
         let data_txs = vec![dual_tx];

@@ -3,6 +3,7 @@ use irys_types::{block_provider::BlockProvider, BlockHash, BlockIndexItem, VDFLi
 use tracing::debug;
 #[cfg(test)]
 use {
+    irys_testing_utils::IrysBlockHeaderTestExt,
     irys_types::{
         irys::IrysSigner, ConsensusConfig, IrysBlockHeader, IrysBlockHeaderV1, NodeConfig,
     },
@@ -206,9 +207,13 @@ impl BlockStatusProvider {
     pub async fn mock(node_config: &NodeConfig) -> Self {
         use irys_domain::{BlockIndex, BlockTree};
 
+        let mut genesis = IrysBlockHeader::new_mock_header();
+        genesis.height = 0;
+        genesis.previous_block_hash = BlockHash::zero();
+        genesis.test_sign();
         Self {
             block_tree_read_guard: BlockTreeReadGuard::new(Arc::new(RwLock::new(BlockTree::new(
-                &IrysBlockHeader::new_mock_header(),
+                &genesis,
                 node_config.consensus_config(),
             )))),
             block_index_read_guard: BlockIndexReadGuard::new(Arc::new(RwLock::new(
@@ -222,6 +227,13 @@ impl BlockStatusProvider {
     #[cfg(test)]
     pub fn tree_tip(&self) -> BlockHash {
         self.block_tree_read_guard.read().tip
+    }
+
+    /// Returns the genesis header from the mock tree (the tip of a freshly created mock).
+    #[cfg(test)]
+    pub fn genesis_header(&self) -> IrysBlockHeader {
+        self.get_block_from_tree(&self.tree_tip())
+            .expect("mock tree should have a genesis block")
     }
 
     #[cfg(test)]

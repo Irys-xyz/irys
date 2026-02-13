@@ -4,9 +4,7 @@ use core::time::Duration;
 use irys_actors::MempoolFacade as _;
 use irys_types::irys::IrysSigner;
 use irys_types::v2::GossipBroadcastMessageV2;
-use irys_types::{
-    BlockHash, DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1,
-};
+use irys_types::{DataLedger, DataTransactionLedger, H256List, IrysBlockHeader, IrysBlockHeaderV1};
 use reth::builder::Block as _;
 use reth::primitives::{Block, BlockBody, Header};
 use std::sync::Arc;
@@ -243,9 +241,11 @@ async fn heavy_should_fetch_missing_transactions_for_block() -> eyre::Result<()>
     fixture1.add_peer(&fixture2);
     fixture2.add_peer(&fixture1);
 
-    // Create a test block with transactions
+    // Create a test block with transactions, connecting to fixture2's genesis
+    let genesis = fixture2.block_status_provider.genesis_header();
     let mut block_header = IrysBlockHeader::V1(IrysBlockHeaderV1 {
-        block_hash: BlockHash::random(),
+        height: genesis.height + 1,
+        previous_block_hash: genesis.block_hash,
         ..IrysBlockHeaderV1::new_mock_header()
     });
     let tx1 = generate_test_tx().header;
@@ -373,9 +373,11 @@ async fn heavy_should_gossip_execution_payloads() -> eyre::Result<()> {
     };
     let sealed_block = evm_block.clone().seal_slow();
 
-    // Create a test block with transactions
+    // Create a test block connecting to fixture2's genesis
+    let genesis = fixture2.block_status_provider.genesis_header();
     let mut block = IrysBlockHeader::V1(IrysBlockHeaderV1 {
-        block_hash: BlockHash::random(),
+        height: genesis.height + 1,
+        previous_block_hash: genesis.block_hash,
         evm_block_hash: sealed_block.hash(),
         ..IrysBlockHeaderV1::new_mock_header()
     });

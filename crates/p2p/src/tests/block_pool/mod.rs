@@ -180,7 +180,8 @@ async fn should_process_block() {
         MempoolReadGuard::stub(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 
@@ -221,11 +222,23 @@ async fn should_process_block_with_intermediate_block_in_api() {
     // Wait for the server to start
     tokio::time::sleep(Duration::from_secs(5)).await;
 
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_data_guard,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        service_senders,
+        is_vdf_mining_enabled,
+    } = MockedServices::new(&config).await;
+
     // Create three blocks in a chain: block1 -> block2 -> block3
     // block1: in database
     // block2: in API client
     // block3: test block to be processed
-    let test_chain = BlockStatusProvider::produce_mock_chain(3, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let test_chain = BlockStatusProvider::produce_mock_chain(3, Some(&genesis), &config.consensus);
 
     // Create block1 (will be in the database)
     let block1 = test_chain[0].clone();
@@ -249,17 +262,6 @@ async fn should_process_block_with_intermediate_block_in_api() {
         "Block 3 previous_block_hash: {:?}",
         block3.previous_block_hash
     );
-
-    let MockedServices {
-        block_status_provider_mock,
-        block_discovery_stub,
-        peer_list_data_guard,
-        db,
-        execution_payload_provider,
-        mempool_stub,
-        service_senders,
-        is_vdf_mining_enabled,
-    } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
     let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -396,12 +398,24 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
     // Wait for the server to start
     tokio::time::sleep(Duration::from_secs(5)).await;
 
+    let MockedServices {
+        block_status_provider_mock,
+        block_discovery_stub,
+        peer_list_data_guard,
+        db,
+        execution_payload_provider,
+        mempool_stub,
+        service_senders,
+        is_vdf_mining_enabled,
+    } = MockedServices::new(&config).await;
+
     // Create four blocks in a chain: block1 -> block2 -> block3 -> block4
     // block1: in database
     // block2: in API client, but fails. It doesn't make it all the way to the block pool
     // block3: test block to be processed - getting stuck when processing block2
     // block4: new block that should trigger reprocessing of block2 and then block3
-    let test_chain = BlockStatusProvider::produce_mock_chain(4, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let test_chain = BlockStatusProvider::produce_mock_chain(4, Some(&genesis), &config.consensus);
 
     // Create block1 (will be in the database)
     let block1 = test_chain[0].clone();
@@ -432,17 +446,6 @@ async fn heavy_should_reprocess_block_again_if_processing_its_parent_failed_when
         "Block 4 previous_block_hash: {:?}",
         block4.previous_block_hash
     );
-
-    let MockedServices {
-        block_status_provider_mock,
-        block_discovery_stub,
-        peer_list_data_guard,
-        db,
-        execution_payload_provider,
-        mempool_stub,
-        service_senders,
-        is_vdf_mining_enabled,
-    } = MockedServices::new(&config).await;
 
     // Create a direct channel for the sync service
     let (sync_sender, sync_receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -625,7 +628,8 @@ async fn should_warn_about_mismatches_for_very_old_block() {
         MempoolReadGuard::stub(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, Some(&genesis), &config.consensus);
 
     // Test case: 5 older blocks are in the index, but pruned from the tree;
     // 5 newer blocks are in the tree and in the index
@@ -758,7 +762,8 @@ async fn should_refuse_fresh_block_trying_to_build_old_chain() {
         tokio::runtime::Handle::current(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(15, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(15, Some(&genesis), &config.consensus);
 
     // Test case: 5 older blocks are in the index, but pruned from the tree;
     // 5 newer blocks are in the tree and in the index
@@ -887,7 +892,8 @@ async fn should_not_fast_track_block_already_in_index() {
         MempoolReadGuard::stub(),
     );
 
-    let mock_chain = BlockStatusProvider::produce_mock_chain(2, None, &config.consensus);
+    let genesis = block_status_provider_mock.genesis_header();
+    let mock_chain = BlockStatusProvider::produce_mock_chain(2, Some(&genesis), &config.consensus);
     let parent_block_header = mock_chain[0].clone();
     let test_header = mock_chain[1].clone();
 

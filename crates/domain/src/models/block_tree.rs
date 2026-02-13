@@ -1591,10 +1591,12 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use eyre::ensure;
+    use irys_testing_utils::IrysBlockHeaderTestExt;
 
     /// Creates a SealedBlock from a header with an empty body (no transactions).
-    /// The header must have no tx_ids in its ledgers for validation to pass.
-    fn seal_block(header: &IrysBlockHeader) -> Arc<SealedBlock> {
+    /// Signs the header if the signature is invalid (e.g., after modifying fields).
+    fn seal_block(header: &mut IrysBlockHeader) -> Arc<SealedBlock> {
+        header.ensure_test_signed();
         let body = BlockBody {
             block_hash: header.block_hash,
             ..Default::default()
@@ -1615,10 +1617,12 @@ mod tests {
     }
 
     /// Creates a SealedBlock from a header with matching data transactions in the body.
+    /// Signs the header if the signature is invalid (e.g., after adding tx_ids).
     fn seal_block_with_data_txs(
-        header: &IrysBlockHeader,
+        header: &mut IrysBlockHeader,
         data_txs: Vec<DataTransactionHeader>,
     ) -> Arc<SealedBlock> {
+        header.ensure_test_signed();
         let body = BlockBody {
             block_hash: header.block_hash,
             data_transactions: data_txs,
@@ -1674,17 +1678,15 @@ mod tests {
 
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Adding `b1` again shouldn't change the state because it is confirmed
-        // onchain
-        let test_tx = create_signed_data_tx();
-        let mut b1_test = b1.clone();
-        b1_test.data_ledgers[DataLedger::Submit]
-            .tx_ids
-            .push(test_tx.id);
-        let sealed_b1_test = seal_block_with_data_txs(&b1_test, vec![test_tx]);
+        // Not sure how much sense this test makes now - it's impossible to
+        // have a different block with the same hash
+        // Re-adding `b1` shouldn't change the state because it is
+        // confirmed onchain
+        let mut b1_dup = b1.clone();
+        let sealed_b1_dup = seal_block(&mut b1_dup);
         assert_matches!(
             cache.add_block(
-                &sealed_b1_test,
+                &sealed_b1_dup,
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1713,11 +1715,15 @@ mod tests {
         assert_matches!(cache.get_earliest_not_onchain_in_longest_chain(), None);
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Add b2 block as not_validated
+        // Add b2 block (with a transaction) as not_validated
+        let b2_tx = create_signed_data_tx();
+        let txid = b2_tx.id;
         let mut b2 = extend_chain(random_block(U256::from(1)), &b1);
+        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
+        b2.test_sign();
         assert_matches!(
             cache.add_block(
-                &seal_block(&b2),
+                &seal_block_with_data_txs(&mut b2, vec![b2_tx.clone()]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1737,19 +1743,7 @@ mod tests {
 
         assert_matches!(check_longest_chain(&[&b1], 0, &cache), Ok(()));
 
-        // Add a TXID to b2, and re-add it to the cache, but still don't mark as validated
-        let b2_tx = create_signed_data_tx();
-        let txid = b2_tx.id;
-        b2.data_ledgers[DataLedger::Submit].tx_ids.push(txid);
-        assert_matches!(
-            cache.add_block(
-                &seal_block_with_data_txs(&b2, vec![b2_tx.clone()]),
-                comm_cache.clone(),
-                dummy_epoch_snapshot(),
-                dummy_ema_snapshot()
-            ),
-            Ok(())
-        );
+        // Verify b2's transaction is in the cache
         assert_eq!(
             cache.get_block(&b2.block_hash).unwrap().data_ledgers[DataLedger::Submit].tx_ids[0],
             txid
@@ -1784,7 +1778,7 @@ mod tests {
         // b2 has tx IDs from earlier modification, so need matching transactions
         assert_matches!(
             cache.add_block(
-                &seal_block_with_data_txs(&b2, vec![b2_tx.clone()]),
+                &seal_block_with_data_txs(&mut b2, vec![b2_tx.clone()]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1795,7 +1789,7 @@ mod tests {
         b1_2.solution_hash = b1.solution_hash;
         assert_matches!(
             cache.add_block(
-                &seal_block(&b1_2),
+                &seal_block(&mut b1_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1935,7 +1929,7 @@ mod tests {
         let mut cache = BlockTree::new(&b1, ConsensusConfig::testing());
         assert_matches!(
             cache.add_block(
-                &seal_block(&b1_2),
+                &seal_block(&mut b1_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1945,7 +1939,7 @@ mod tests {
         // b2 still has tx IDs from earlier modification
         assert_matches!(
             cache.add_block(
-                &seal_block_with_data_txs(&b2, vec![b2_tx]),
+                &seal_block_with_data_txs(&mut b2, vec![b2_tx]),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1953,14 +1947,14 @@ mod tests {
             Ok(())
         );
         assert_matches!(cache.mark_tip(&b2.block_hash), Ok(_));
-        let b2_2 = extend_chain(random_block(U256::one()), &b2);
+        let mut b2_2 = extend_chain(random_block(U256::one()), &b2);
         println!(
             "b2_2: {} cdiff: {} solution_hash: {}",
             b2_2.block_hash, b2_2.cumulative_diff, b2_2.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &seal_block(&b2_2),
+                &seal_block(&mut b2_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -1979,14 +1973,14 @@ mod tests {
         );
 
         // b2_3->b2_2->b2->b1 is longer and heavier but only b2->b1 are validated.
-        let b2_3 = extend_chain(random_block(U256::from(3)), &b2_2);
+        let mut b2_3 = extend_chain(random_block(U256::from(3)), &b2_2);
         println!(
             "b2_3: {} cdiff: {} solution_hash: {}",
             b2_3.block_hash, b2_3.cumulative_diff, b2_3.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &seal_block(&b2_3),
+                &seal_block(&mut b2_3),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2010,7 +2004,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b2_2.block_hash,
-                &seal_block(&b2_2),
+                &seal_block(&mut b2_2),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2035,14 +2029,14 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1, &b2, &b2_2], 1, &cache), Ok(()));
 
         // Now the b3->b2->b1 fork is heaviest
-        let b3 = extend_chain(random_block(U256::from(4)), &b2);
+        let mut b3 = extend_chain(random_block(U256::from(4)), &b2);
         println!(
             "b3:   {} cdiff: {} solution_hash: {}",
             b3.block_hash, b3.cumulative_diff, b3.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &seal_block(&b3),
+                &seal_block(&mut b3),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2052,7 +2046,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b3.block_hash,
-                &seal_block(&b3),
+                &seal_block(&mut b3),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2079,14 +2073,14 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b1, &b2, &b3], 1, &cache), Ok(()));
 
         // add not validated b4, b3->b2->b1 fork is still heaviest
-        let b4 = extend_chain(random_block(U256::from(5)), &b3);
+        let mut b4 = extend_chain(random_block(U256::from(5)), &b3);
         println!(
             "b4:   {} cdiff: {} solution_hash: {}",
             b4.block_hash, b4.cumulative_diff, b4.solution_hash
         );
         assert_matches!(
             cache.add_block(
-                &seal_block(&b4),
+                &seal_block(&mut b4),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2226,17 +2220,17 @@ mod tests {
         // <Reset the cache>
         let b11 = random_block(U256::zero());
         let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
-        let b12 = extend_chain(random_block(U256::one()), &b11);
+        let mut b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(
-                &seal_block(&b12),
+                &seal_block(&mut b12),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
             ),
             Ok(())
         );
-        let b13 = extend_chain(random_block(U256::one()), &b11);
+        let mut b13 = extend_chain(random_block(U256::one()), &b11);
 
         println!("---");
         println!(
@@ -2256,7 +2250,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b13.block_hash,
-                &seal_block(&b13),
+                &seal_block(&mut b13),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2292,10 +2286,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11], 0, &cache), Ok(()));
 
         // Extend the b13->b11 chain
-        let b14 = extend_chain(random_block(U256::from(2)), &b13);
+        let mut b14 = extend_chain(random_block(U256::from(2)), &b13);
         assert_matches!(
             cache.add_block(
-                &seal_block(&b14),
+                &seal_block(&mut b14),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2387,10 +2381,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
 
         // add a b15 block
-        let b15 = extend_chain(random_block(U256::from(3)), &b14);
+        let mut b15 = extend_chain(random_block(U256::from(3)), &b14);
         assert_matches!(
             cache.add_block(
-                &seal_block(&b15),
+                &seal_block(&mut b15),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2411,7 +2405,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b14.block_hash,
-                &seal_block(&b14),
+                &seal_block(&mut b14),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2435,10 +2429,10 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b13, &b14], 1, &cache), Ok(()));
 
         // add a b16 block
-        let b16 = extend_chain(random_block(U256::from(4)), &b15);
+        let mut b16 = extend_chain(random_block(U256::from(4)), &b15);
         assert_matches!(
             cache.add_block(
-                &seal_block(&b16),
+                &seal_block(&mut b16),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
@@ -2495,17 +2489,17 @@ mod tests {
         // <Reset the cache>
         let b11 = random_block(U256::zero());
         let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
-        let b12 = extend_chain(random_block(U256::one()), &b11);
+        let mut b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_block(
-                &seal_block(&b12),
+                &seal_block(&mut b12),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot()
             ),
             Ok(())
         );
-        let b13 = extend_chain(random_block(U256::from(2)), &b12);
+        let mut b13 = extend_chain(random_block(U256::from(2)), &b12);
         println!("---");
         assert_matches!(cache.mark_tip(&b12.block_hash), Ok(_));
 
@@ -2516,7 +2510,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b13.block_hash,
-                &seal_block(&b13),
+                &seal_block(&mut b13),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2542,11 +2536,11 @@ mod tests {
         let mut cache = BlockTree::new(&b11, ConsensusConfig::testing());
         assert_matches!(cache.mark_tip(&b11.block_hash), Ok(_));
 
-        let b12 = extend_chain(random_block(U256::one()), &b11);
+        let mut b12 = extend_chain(random_block(U256::one()), &b11);
         assert_matches!(
             cache.add_common(
                 b12.block_hash,
-                &seal_block(&b12),
+                &seal_block(&mut b12),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2559,13 +2553,13 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b12], 0, &cache), Ok(()));
 
         // Create a fork at b12
-        let b13a = extend_chain(random_block(U256::from(2)), &b12);
-        let b13b = extend_chain(random_block(U256::from(2)), &b12);
+        let mut b13a = extend_chain(random_block(U256::from(2)), &b12);
+        let mut b13b = extend_chain(random_block(U256::from(2)), &b12);
 
         assert_matches!(
             cache.add_common(
                 b13a.block_hash,
-                &seal_block(&b13a),
+                &seal_block(&mut b13a),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2576,7 +2570,7 @@ mod tests {
         assert_matches!(
             cache.add_common(
                 b13b.block_hash,
-                &seal_block(&b13b),
+                &seal_block(&mut b13b),
                 comm_cache.clone(),
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2591,11 +2585,11 @@ mod tests {
         assert_matches!(check_longest_chain(&[&b11, &b12, &b13a], 0, &cache), Ok(()));
 
         // extend the fork to make it canonical
-        let b14b = extend_chain(random_block(U256::from(3)), &b13b);
+        let mut b14b = extend_chain(random_block(U256::from(3)), &b13b);
         assert_matches!(
             cache.add_common(
                 b14b.block_hash,
-                &seal_block(&b14b),
+                &seal_block(&mut b14b),
                 comm_cache,
                 dummy_epoch_snapshot(),
                 dummy_ema_snapshot(),
@@ -2620,10 +2614,10 @@ mod tests {
 
     fn random_block(cumulative_diff: U256) -> IrysBlockHeader {
         let mut block = IrysBlockHeader::new_mock_header();
-        block.block_hash = BlockHash::random();
         block.solution_hash = H256::random(); // Ensure unique solution hash
         block.height = 0; // Default to genesis
         block.cumulative_diff = cumulative_diff;
+        block.test_sign();
         block
     }
 
@@ -2634,7 +2628,8 @@ mod tests {
         new_block.previous_block_hash = previous_block.block_hash();
         new_block.height = previous_block.height() + 1;
         new_block.previous_cumulative_diff = previous_block.cumulative_diff;
-        // Don't modify solution_hash - keep the random one from block creation
+        // Re-sign after modifying fields that affect the signature hash
+        new_block.test_sign();
         new_block
     }
 

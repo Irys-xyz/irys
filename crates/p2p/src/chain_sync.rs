@@ -1778,8 +1778,8 @@ mod tests {
         use irys_testing_utils::utils::setup_tracing_and_temp_dir;
         use irys_types::v2::{GossipDataRequestV2, GossipDataV2};
         use irys_types::{
-            Config, DatabaseProvider, IrysAddress, IrysBlockHeader, NodeConfig, NodeInfo,
-            PeerAddress, PeerListItem, PeerNetworkSender, PeerScore, SyncMode,
+            Config, DatabaseProvider, IrysAddress, NodeConfig, NodeInfo, PeerAddress, PeerListItem,
+            PeerNetworkSender, PeerScore, SyncMode,
         };
         use std::net::SocketAddr;
         use std::sync::{Arc, Mutex};
@@ -1811,7 +1811,7 @@ mod tests {
                     let mut c = s2_calls_clone.lock().unwrap();
                     *c += 1;
                     GossipResponse::Accepted(Some(GossipDataV2::BlockHeader(Arc::new(
-                        IrysBlockHeader::new_mock_header(),
+                        irys_testing_utils::new_mock_signed_header(),
                     ))))
                 }
                 _ => GossipResponse::Accepted(None),
