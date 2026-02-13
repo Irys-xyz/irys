@@ -126,7 +126,7 @@ async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre:
     };
 
     // 9. Produce malicious block
-    let (block, _adjustment_stats, transactions, _eth_payload) = block_prod_strategy
+    let (block, _adjustment_stats, _eth_payload) = block_prod_strategy
         .fully_produce_new_block_without_gossip(&solution_context(&genesis_node.node_ctx).await?)
         .await?
         .unwrap();
@@ -140,7 +140,7 @@ async fn slow_heavy_block_with_unstaked_ingress_proof_signer_rejected() -> eyre:
             .clone(),
     );
     let result = block_discovery
-        .handle_block(block.clone(), transactions, false)
+        .handle_block(block.clone(), false)
         .await;
 
     // 11. Assert validation fails with UnstakedIngressProofSigner
