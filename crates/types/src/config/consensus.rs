@@ -916,6 +916,26 @@ mod tests {
     }
 
     #[test]
+    fn test_genesis_and_peer_consensus_hash_match() {
+        let mut genesis_config = ConsensusConfig::testing();
+        assert!(genesis_config.expected_genesis_hash.is_none());
+
+        let fake_hash = H256::from_base58("5VoHFxVrC4WM7VHDwUJrFWZ2yVJXkY3JHEsR2U9bQxXH");
+
+        let mut peer_config = ConsensusConfig::testing();
+        peer_config.expected_genesis_hash = Some(fake_hash);
+
+        // Simulate what Genesis node does at runtime
+        genesis_config.expected_genesis_hash = Some(fake_hash);
+
+        assert_eq!(
+            genesis_config.keccak256_hash(),
+            peer_config.keccak256_hash(),
+            "Genesis and Peer nodes with same expected_genesis_hash must have matching consensus hashes"
+        );
+    }
+
+    #[test]
     fn test_consensus_hash_regression() {
         // This test verifies that the hash of the testing config remains stable.
         // If this test fails, it indicates a breaking change in either:
