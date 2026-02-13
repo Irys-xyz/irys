@@ -1630,7 +1630,7 @@ mod tests {
             );
 
             let data_handler =
-                data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone()).await;
+                data_handler_stub(&config, &peer_list_guard, db.clone(), sync_state.clone());
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
@@ -1744,7 +1744,7 @@ mod tests {
                 true,
             );
 
-            let data_handler = data_handler_stub(&config, &peer_list, db, sync_state.clone()).await;
+            let data_handler = data_handler_stub(&config, &peer_list, db, sync_state.clone());
 
             // Check that the sync status is syncing
             assert!(sync_state.is_syncing());
@@ -1897,8 +1897,7 @@ mod tests {
 
             // Build data handler
             let db = db.clone();
-            let data_handler =
-                data_handler_stub(&config, &peer_list_guard, db, sync_state.clone()).await;
+            let data_handler = data_handler_stub(&config, &peer_list_guard, db, sync_state.clone());
 
             // Execute helper
             pull_unique_highest_blocks::<_, _>(
@@ -2025,8 +2024,7 @@ mod tests {
             peer_list_guard.add_or_update_peer(peer2, true);
 
             let db = db.clone();
-            let data_handler =
-                data_handler_stub(&config, &peer_list_guard, db, sync_state.clone()).await;
+            let data_handler = data_handler_stub(&config, &peer_list_guard, db, sync_state.clone());
 
             pull_unique_highest_blocks::<_, _>(
                 &peer_list_guard,

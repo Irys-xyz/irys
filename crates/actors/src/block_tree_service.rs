@@ -409,7 +409,7 @@ impl BlockTreeServiceInner {
             .get_latest_item()
             .ok_or_eyre("must have at least a single item in block index")?;
         let last_migrated_hash = last_migrated.block_hash;
-        drop(bi);
+        let _ = bi;
 
         // Get the block tree
         let block_tree = self.cache.read().expect("poisoned lock");
@@ -770,7 +770,7 @@ impl BlockTreeServiceInner {
                 let block_index_read = self.block_index_guard.read();
                 let markers = ForkChoiceMarkers::from_block_tree(
                     &cache,
-                    &block_index_read,
+                    block_index_read,
                     &self.db,
                     self.config.consensus.block_migration_depth as usize,
                     self.config.consensus.block_tree_depth as usize,
