@@ -702,8 +702,6 @@ pub fn database_schema_version<T: DbTx>(tx: &mut T) -> Result<Option<u32>, Datab
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use arbitrary::Arbitrary as _;

@@ -2196,9 +2196,7 @@ fn init_irys_db(node_config: &NodeConfig) -> Result<DatabaseProvider, eyre::Erro
 ///
 /// The private key is stored as raw 32 bytes in `<peer_info_dir>/peer_key.bin`.
 /// The PeerId is derived from the key using standard secp256k1 address derivation.
-pub fn get_or_create_peer_id(
-    node_config: &NodeConfig,
-) -> eyre::Result<irys_types::IrysPeerId> {
+pub fn get_or_create_peer_id(node_config: &NodeConfig) -> eyre::Result<irys_types::IrysPeerId> {
     let peer_info_dir = node_config.peer_info_dir();
     let key_path = peer_info_dir.join("peer_key.bin");
 
@@ -2219,15 +2217,19 @@ pub fn get_or_create_peer_id(
                 peer_info_dir.display()
             )
         })?;
-        std::fs::write(&key_path, key.to_bytes().as_slice()).with_context(|| {
-            format!("Failed to write peer key to {}", key_path.display())
-        })?;
+        std::fs::write(&key_path, key.to_bytes().as_slice())
+            .with_context(|| format!("Failed to write peer key to {}", key_path.display()))?;
         let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&key));
-        info!("Generated new peer_id, key saved to {}: {:?}", key_path.display(), peer_id);
+        info!(
+            "Generated new peer_id, key saved to {}: {:?}",
+            key_path.display(),
+            peer_id
+        );
         key
     };
 
-    let peer_id = irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&signing_key));
+    let peer_id =
+        irys_types::IrysPeerId::from(irys_types::IrysAddress::from_private_key(&signing_key));
     Ok(peer_id)
 }
 
