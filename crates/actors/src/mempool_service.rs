@@ -270,9 +270,8 @@ pub enum MempoolServiceMessage {
     /// operations to prevent reducing mempool write throughput.
     GetReadGuard(oneshot::Sender<MempoolReadGuard>),
     /// Clean up in-memory mempool pools after block migration.
-    /// Sent by BlockMigrationService after DB persistence is complete.
+    /// Sent by BlockMigrator after DB persistence is complete.
     MigrationCleanup {
-        block_height: u64,
         commitment_tx_ids: Vec<H256>,
         submit_tx_ids: Vec<H256>,
     },
@@ -458,7 +457,6 @@ impl Inner {
                 };
             }
             MempoolServiceMessage::MigrationCleanup {
-                block_height: _,
                 commitment_tx_ids,
                 submit_tx_ids,
             } => {
@@ -470,7 +468,7 @@ impl Inner {
     }
 
     /// Handles in-memory cleanup after block migration.
-    /// DB persistence has already been handled by BlockMigrationService.
+    /// DB persistence has already been handled by BlockMigrator.
     async fn handle_migration_cleanup(
         &self,
         commitment_tx_ids: Vec<H256>,

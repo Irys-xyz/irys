@@ -2,7 +2,6 @@ use crate::mining_bus::{MiningBroadcastEvent, MiningBus};
 use crate::{
     block_discovery::BlockDiscoveryMessage,
     block_index_service::BlockIndexServiceMessage,
-    block_migration_service::BlockMigrationServiceMessage,
     block_producer::BlockProducerCommand,
     block_tree_service::{BlockStateUpdated, BlockTreeServiceMessage, ReorgEvent},
     cache_service::CacheServiceAction,
@@ -98,7 +97,6 @@ pub struct ServiceReceivers {
     pub gossip_broadcast: UnboundedReceiver<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedReceiver<BlockTreeServiceMessage>,
     pub block_index: UnboundedReceiver<BlockIndexServiceMessage>,
-    pub block_migration: UnboundedReceiver<BlockMigrationServiceMessage>,
     pub validation_service: UnboundedReceiver<ValidationServiceMessage>,
     pub block_producer: UnboundedReceiver<BlockProducerCommand>,
     pub reth_service: UnboundedReceiver<RethServiceMessage>,
@@ -121,7 +119,6 @@ pub struct ServiceSendersInner {
     pub gossip_broadcast: UnboundedSender<GossipBroadcastMessageV2>,
     pub block_tree: UnboundedSender<BlockTreeServiceMessage>,
     pub block_index: UnboundedSender<BlockIndexServiceMessage>,
-    pub block_migration: UnboundedSender<BlockMigrationServiceMessage>,
     pub validation_service: UnboundedSender<ValidationServiceMessage>,
     pub block_producer: UnboundedSender<BlockProducerCommand>,
     pub reth_service: UnboundedSender<RethServiceMessage>,
@@ -150,8 +147,6 @@ impl ServiceSendersInner {
             unbounded_channel::<BlockTreeServiceMessage>();
         let (block_index_sender, block_index_receiver) =
             unbounded_channel::<BlockIndexServiceMessage>();
-        let (block_migration_sender, block_migration_receiver) =
-            unbounded_channel::<BlockMigrationServiceMessage>();
         let (validation_sender, validation_receiver) =
             unbounded_channel::<ValidationServiceMessage>();
         let (block_producer_sender, block_producer_receiver) =
@@ -179,7 +174,6 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_sender,
             block_tree: block_tree_sender,
             block_index: block_index_sender,
-            block_migration: block_migration_sender,
             validation_service: validation_sender,
             block_producer: block_producer_sender,
             reth_service: reth_service_sender,
@@ -201,7 +195,6 @@ impl ServiceSendersInner {
             gossip_broadcast: gossip_broadcast_receiver,
             block_tree: block_tree_receiver,
             block_index: block_index_receiver,
-            block_migration: block_migration_receiver,
             validation_service: validation_receiver,
             block_producer: block_producer_receiver,
             reth_service: reth_service_receiver,

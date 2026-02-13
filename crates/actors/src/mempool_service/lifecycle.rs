@@ -2,164 +2,54 @@ use crate::block_tree_service::ReorgEvent;
 use crate::mempool_service::Inner;
 use crate::mempool_service::TxIngressError;
 use eyre::OptionExt as _;
-use irys_database::tx_header_by_txid;
-use irys_database::{db::IrysDatabaseExt as _, insert_tx_header};
+use irys_database::db::IrysDatabaseExt as _;
 use irys_types::{
     get_ingress_proofs, CommitmentTransaction, DataLedger, IrysBlockHeader, IrysTransactionCommon,
     IrysTransactionId, SystemLedger, H256,
 };
-use reth_db::Database as _;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 
 impl Inner {
-    /// read publish txs from block. Overwrite copies in mempool with proof
+    /// Updates in-memory mempool state for a confirmed block.
+    ///
+    /// DB persistence of included_height, promoted_height, and tx headers is deferred
+    /// to migration time (handled by `BlockMigrator`). This handler only updates:
+    /// - In-memory metadata (included_height, promoted_height)
+    /// - `CachedDataRoots` DB cache (needed for chunk ingress validation)
+    /// - Pending tx pruning
     #[instrument(skip_all, fields(block.hash= %block.block_hash(), block.height = %block.height()), err)]
     pub async fn handle_block_confirmed_message(
         &self,
         block: Arc<IrysBlockHeader>,
     ) -> Result<(), TxIngressError> {
-        // Persist included_height for all txs in this confirmed block.
-        // This drives the /v1/tx/{txId}/status endpoint's INCLUDED status.
         let submit_txids = block.data_ledgers[DataLedger::Submit].tx_ids.0.clone();
         let publish_txids = block.data_ledgers[DataLedger::Publish].tx_ids.0.clone();
         let commitment_txids = block.get_commitment_ledger_tx_ids();
 
-        let all_tx_ids: Vec<H256> = submit_txids
-            .iter()
-            .chain(publish_txids.iter())
-            .chain(commitment_txids.iter())
-            .copied()
-            .collect();
-
-        if !all_tx_ids.is_empty() {
-            // Persist included_height to database - this is critical for transaction status
-            self.irys_db.update_eyre(|tx| {
-                // Set included_height for data transactions
-                let data_tx_ids: Vec<_> = submit_txids
-                    .iter()
-                    .chain(publish_txids.iter())
-                    .copied()
-                    .collect();
-                if !data_tx_ids.is_empty() {
-                    irys_database::batch_set_data_tx_included_height(
-                        tx,
-                        &data_tx_ids,
-                        block.height,
-                    )
-                    .map_err(|e| eyre::eyre!("Failed to batch set data tx included_height for {} txs at block {}: {:?}", data_tx_ids.len(), block.height, e))?;
-                }
-                // Set included_height for commitment transactions
-                if !commitment_txids.is_empty() {
-                    irys_database::batch_set_commitment_tx_included_height(
-                        tx,
-                        &commitment_txids,
-                        block.height,
-                    )
-                    .map_err(|e| eyre::eyre!("Failed to batch set commitment tx included_height for {} txs at block {}: {:?}", commitment_txids.len(), block.height, e))?;
-                }
-                Ok(())
-            }).map_err(|e| TxIngressError::DatabaseError(format!("Failed to persist included_height to database: {}", e)))?;
-
-            // Also update mempool metadata for data transactions (with overwrite for canonical blocks)
-            for txid in submit_txids.iter().chain(publish_txids.iter()) {
-                self.mempool_state
-                    .set_data_tx_included_height_overwrite(*txid, block.height)
-                    .await;
-            }
-
-            // Update commitment transactions in mempool
-            for txid in commitment_txids.iter() {
-                self.mempool_state
-                    .set_commitment_tx_included_height(*txid, block.height)
-                    .await;
-            }
+        // Update in-memory mempool metadata for data transactions
+        for txid in submit_txids.iter().chain(publish_txids.iter()) {
+            self.mempool_state
+                .set_data_tx_included_height_overwrite(*txid, block.height)
+                .await;
         }
 
-        let published_txids = &block.data_ledgers[DataLedger::Publish].tx_ids.0;
-
-        // Persist promoted_height for publish ledger txs.
-        if !published_txids.is_empty() {
-            if let Err(e) = self.irys_db.update_eyre(|tx| {
-                irys_database::batch_set_data_tx_promoted_height(tx, published_txids, block.height)
-                    .map_err(|e| eyre::eyre!("{:?}", e))
-            }) {
-                tracing::error!("Failed to batch set promoted_height in database: {}", e);
-            }
+        // Update in-memory mempool metadata for commitment transactions
+        for txid in commitment_txids.iter() {
+            self.mempool_state
+                .set_commitment_tx_included_height(*txid, block.height)
+                .await;
         }
 
-        if !published_txids.is_empty() {
-            for txid in block.data_ledgers[DataLedger::Publish].tx_ids.0.iter() {
-                // Check if tx exists in DB first
-                let db_header = self
-                    .irys_db
-                    .view(|tx| tx_header_by_txid(tx, txid))
-                    .map_err(|e| {
-                        warn!("Failed to open DB read transaction: {}", e);
-                        e
-                    })
-                    .ok()
-                    .and_then(|result| match result {
-                        Ok(Some(h)) => {
-                            debug!("Got tx {} from DB", txid);
-                            Some(h)
-                        }
-                        Ok(None) => {
-                            debug!("Tx {} not found in DB", txid);
-                            None
-                        }
-                        Err(e) => {
-                            warn!("DB error loading tx {}: {}", txid, e);
-                            None
-                        }
-                    });
-
-                // Try atomic mempool update first - this holds the lock
-                if let Some(promoted_header) = self
-                    .mempool_state
-                    .set_promoted_height(*txid, block.height)
-                    .await
-                {
-                    // Only update DB if the tx was already in DB (to match original behavior)
-                    // This prevents writing mempool-only txs to DB which would cause reorg issues
-                    if let Some(ref mut db_tx) = db_header.clone() {
-                        if db_tx.promoted_height().is_none() {
-                            // Set promoted_height in metadata
-                            db_tx.metadata_mut().promoted_height = Some(block.height);
-                            if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, db_tx)) {
-                                error!("Failed to update tx header in DB for tx {}: {}", txid, e);
-                            }
-                        }
-                    }
-                    info!("Promoted tx:\n{:#?}", promoted_header);
-                    continue;
-                }
-
-                // Tx not in mempool - fall back to DB path
-                debug!("Tx {} not in mempool, checking DB", txid);
-
-                let Some(mut header) = db_header else {
-                    error!("No transaction header found for txid: {}", txid);
-                    continue;
-                };
-
-                if header.promoted_height().is_none() {
-                    // Set promoted_height in metadata
-                    header.metadata_mut().promoted_height = Some(block.height);
-                }
-
-                // Update DB with promoted header
-                if let Err(e) = self.irys_db.update(|tx| insert_tx_header(tx, &header)) {
-                    error!("Failed to update tx header in DB for tx {}: {}", txid, e);
-                }
-
-                // Also insert into mempool for consistency
-                self.mempool_state
-                    .bounded_insert_data_tx(header.clone())
-                    .await;
-
-                info!("Promoted tx (from DB):\n{:#?}", header);
+        // Update promoted_height in mempool for publish ledger txs (in-memory only)
+        for txid in publish_txids.iter() {
+            if let Some(promoted_header) = self
+                .mempool_state
+                .set_promoted_height(*txid, block.height)
+                .await
+            {
+                info!("Promoted tx:\n{:#?}", promoted_header);
             }
         }
 

@@ -1,5 +1,5 @@
 use crate::{
-    block_migration_service::BlockMigrationServiceMessage,
+    block_migrator::BlockMigrator,
     block_validation::PreValidationError,
     mempool_service::MempoolServiceMessage,
     mining_bus::{BroadcastDifficultyUpdate, BroadcastPartitionsExpiration},
@@ -72,6 +72,8 @@ pub struct BlockTreeServiceInner {
     pub storage_submodules_config: StorageSubmodulesConfig,
     /// Channels for communicating with the services
     pub service_senders: ServiceSenders,
+    /// Inline block migration logic (replaces the old BlockMigrationService actor)
+    block_migrator: BlockMigrator,
     /// Chain sync state for diagnostics
     pub chain_sync_state: ChainSyncState,
 }
@@ -142,6 +144,7 @@ impl BlockTreeService {
                     shutdown: shutdown_rx,
                     msg_rx: rx,
                     inner: BlockTreeServiceInner {
+                        block_migrator: BlockMigrator::new(db.clone(), bi_guard.clone()),
                         db,
                         cache: Arc::new(RwLock::new(cache)),
                         miner_address,
@@ -281,29 +284,36 @@ impl BlockTreeServiceInner {
             .expect("mempool service has unexpectedly become unreachable");
     }
 
-    /// Delegates block migration to the BlockMigrationService.
+    /// Migrates a block inline using the `BlockMigrator`.
     ///
-    /// Sends the migration block to the dedicated service which handles:
+    /// This replaces the old approach of delegating to a separate `BlockMigrationService` actor.
+    /// The migrator handles:
     /// - Continuity validation
     /// - Block collection (walking backwards from migration block)
     /// - DB persistence (txs, metadata, block headers)
     /// - BlockIndex update (synchronous)
     /// - ChunkMigration notification (fire-and-forget)
     /// - Mempool cleanup (fire-and-forget)
+    ///
+    /// Split into two phases so the `RwLockReadGuard` is dropped before any `.await`:
+    /// 1. `prepare_migration` (sync) -- reads all needed data from the cache
+    /// 2. `process_migration` (async) -- persists to DB and notifies services
     #[tracing::instrument(level = "trace", skip_all, fields(block.hash = %block.block_hash, block.height = block.height))]
     async fn migrate_block(&self, block: &Arc<IrysBlockHeader>) -> eyre::Result<()> {
-        debug!(block.hash = %block.block_hash, block.height = block.height, "delegating block migration to BlockMigrationService");
+        debug!(block.hash = %block.block_hash, block.height = block.height, "migrating block via BlockMigrator");
 
-        let (tx, rx) = oneshot::channel();
-        self.service_senders.block_migration.send(
-            BlockMigrationServiceMessage::MigrateToBlock {
-                migration_block: Arc::clone(block),
-                response: tx,
-            },
-        )?;
-        rx.await
-            .map_err(|e| eyre::eyre!("Failed to receive BlockMigrationService response: {e}"))??;
-        Ok(())
+        // Phase 1: synchronous -- hold the read lock only for preparation
+        let prepared = {
+            let cache = self.cache.read().expect("block tree lock poisoned");
+            self.block_migrator.prepare_migration(block, &cache)?
+        }; // RwLockReadGuard dropped here
+
+        debug!(block.hash = %block.block_hash, block.height = block.height, "prepared {} block(s) for migration", prepared.len());
+
+        // Phase 2: async -- process without the cache lock
+        self.block_migrator
+            .process_migration(prepared, &self.service_senders)
+            .await
     }
 
     /// Handles pre-validated blocks received from the validation service.
@@ -763,7 +773,7 @@ impl BlockTreeServiceInner {
             self.emit_fcu(markers).await?;
             self.emit_block_confirmed(markers);
 
-            // Delegate migration to BlockMigrationService (validates continuity internally)
+            // Delegate migration to BlockMigrator (validates continuity internally)
             if tip_changed {
                 self.migrate_block(&markers.migration_block).await?;
             }

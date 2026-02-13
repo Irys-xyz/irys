@@ -1,6 +1,6 @@
 pub mod block_discovery;
 pub mod block_index_service;
-pub mod block_migration_service;
+pub mod block_migrator;
 pub mod block_producer;
 pub mod block_tree_service;
 pub mod block_validation;
