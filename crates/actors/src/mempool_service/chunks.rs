@@ -520,7 +520,7 @@ impl Inner {
             let gossip_sender = self.service_senders.gossip_broadcast.clone();
             let cache_sender = self.service_senders.chunk_cache.clone();
             let _fut = self.exec.clone().spawn_blocking(async move {
-                if let Err(e) = generate_and_store_ingress_proof(
+                if let Err(error) = generate_and_store_ingress_proof(
                     &block_tree_read_guard,
                     &db,
                     &config,
@@ -529,7 +529,11 @@ impl Inner {
                     &gossip_sender,
                     &cache_sender,
                 ) {
-                    tracing::warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {e}");
+                    if error.is_benign() {
+                        debug!(proof.data_root = ?chunk_data_root, "Skipped ingress proof generation: {error}");
+                    } else {
+                        warn!(proof.data_root = ?chunk_data_root, "Failed to generate ingress proof: {error}");
+                    }
                 }
             }).in_current_span();
         }
