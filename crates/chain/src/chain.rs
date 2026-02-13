@@ -733,7 +733,10 @@ impl IrysNode {
         // Genesis node: now that the genesis hash is known, set expected_genesis_hash
         // so our consensus config hash matches peer nodes during P2P handshakes.
         if self.config.consensus.expected_genesis_hash.is_none() {
-            info!("Setting expected_genesis_hash to {} (was None)", genesis_hash);
+            info!(
+                "Setting expected_genesis_hash to {} (was None)",
+                genesis_hash
+            );
             self.config = self.config.clone().with_expected_genesis_hash(genesis_hash);
             info!(
                 "Consensus config hash after update: {}",
