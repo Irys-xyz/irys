@@ -169,7 +169,18 @@ cmd_build() {
             | docker run --rm -i \
                 -v "$src_vol:/workspace" \
                 irys-builder:latest \
-                bash -c 'mkdir -p /tmp/staging && tar xf - -C /tmp/staging && echo "==> Changed source files:" && rsync -a --checksum --delete -i /tmp/staging/ /workspace/ | grep -v "^\." && echo "==> Sync complete" && rm -rf /tmp/staging'
+                bash -c '
+                    mkdir -p /tmp/staging && tar xf - -C /tmp/staging
+                    changes=$(rsync -a --checksum --delete -i /tmp/staging/ /workspace/ | grep -v "^\." || true)
+                    if [ -n "$changes" ]; then
+                        echo "==> Changed source files:"
+                        echo "$changes"
+                    else
+                        echo "==> No source files changed"
+                    fi
+                    echo "==> Sync complete"
+                    rm -rf /tmp/staging
+                '
             # Record which ref is on the volume
             local resolved_ref
             resolved_ref=$(git -C "$REPO_ROOT" rev-parse "$build_ref")
@@ -182,6 +193,13 @@ cmd_build() {
             head_sha=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null | head -c 12)
             git -C "$REPO_ROOT" diff --quiet 2>/dev/null || dirty=" (dirty)"
             info "Building working tree: $head_ref (${head_sha})${dirty}"
+            # Capture changed files to display in build container log
+            local changed_files=""
+            changed_files=$(cd "$REPO_ROOT" && {
+                git diff --name-status 2>/dev/null
+                git diff --name-status --cached 2>/dev/null
+                git ls-files --others --exclude-standard 2>/dev/null | sed 's/^/??\t/'
+            } | sort -u)
             tar -C "$REPO_ROOT" -cf - \
                 --exclude='./target' --exclude='./.git' --exclude='./docker/build-output' \
                 --exclude='./crates/.tmp' --exclude='./venv' \
@@ -189,7 +207,18 @@ cmd_build() {
             | docker run --rm -i \
                 -v "$src_vol:/workspace" \
                 irys-builder:latest \
-                bash -c 'mkdir -p /tmp/staging && tar xf - -C /tmp/staging && echo "==> Changed source files:" && rsync -a --checksum --delete -i /tmp/staging/ /workspace/ | grep -v "^\." && echo "==> Sync complete" && rm -rf /tmp/staging'
+                bash -c '
+                    mkdir -p /tmp/staging && tar xf - -C /tmp/staging
+                    changes=$(rsync -a --checksum --delete -i /tmp/staging/ /workspace/ | grep -v "^\." || true)
+                    if [ -n "$changes" ]; then
+                        echo "==> Changed source files:"
+                        echo "$changes"
+                    else
+                        echo "==> No source files changed"
+                    fi
+                    echo "==> Sync complete"
+                    rm -rf /tmp/staging
+                '
             # Clear ref marker since volume now has working tree
             rm -f "$ref_marker_file"
         fi
@@ -197,6 +226,7 @@ cmd_build() {
 
     docker run --rm \
         --memory=14g --memory-swap=-1 \
+        -e CHANGED_FILES="${changed_files:-}" \
         -v "$src_vol:/workspace:ro" \
         -v "$CARGO_CACHE_DIR/registry:/usr/local/cargo/registry" \
         -v "$CARGO_CACHE_DIR/git:/usr/local/cargo/git" \
@@ -206,6 +236,12 @@ cmd_build() {
         -w /workspace \
         irys-builder:latest \
         bash -c '
+            if [ -n "$CHANGED_FILES" ]; then
+                echo "==> Local changes being built:"
+                echo "$CHANGED_FILES"
+                echo ""
+            fi
+            echo "==> Starting cargo build..."
             CARGO_TARGET_DIR=/workspace-target cargo build --release --bin irys -p irys-chain --locked -j2 \
             && cp /workspace-target/release/irys /build-output/irys
         '
@@ -251,9 +287,9 @@ cmd_deploy() {
     if [[ "$skip_build" == true ]]; then
         docker image inspect irys:debug > /dev/null 2>&1 || die "irys:debug image not found. Remove --skip-build."
     elif [[ "$force_rebuild" == true ]]; then
-        cmd_build --force "${build_args[@]}"
+        cmd_build --force "${build_args[@]:+${build_args[@]}}"
     else
-        cmd_build "${build_args[@]}"
+        cmd_build "${build_args[@]:+${build_args[@]}}"
     fi
 
     # Validate config consistency before deploying
