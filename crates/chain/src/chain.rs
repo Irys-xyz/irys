@@ -857,12 +857,8 @@ impl IrysNode {
                 sleep(Duration::from_secs(2)).await;
                 let config = config;
                 let latest_block = latest_block;
-                const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
-                let mut validation_tracker = BlockValidationTracker::new(
-                    block_tree_guard.clone(),
-                    service_senders,
-                    MAX_WAIT_TIME,
-                );
+                let mut validation_tracker =
+                    BlockValidationTracker::new(block_tree_guard.clone(), service_senders);
                 // wait for any pending blocks to finish validating
                 let latest_hash = validation_tracker
                     .wait_for_validation()

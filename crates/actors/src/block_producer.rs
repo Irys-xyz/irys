@@ -291,18 +291,18 @@ impl BlockProducerService {
         );
         loop {
             tokio::select! {
-                biased; // enable bias so polling happens in definition order
+                biased;
 
-                // Check for shutdown signal
                 _ = &mut self.shutdown => {
                     info!("Shutdown signal received for block producer service");
                     break;
                 }
-                // Handle commands
                 cmd = self.cmd_rx.recv() => {
                     match cmd {
                         Some(cmd) => {
-                            self.handle_command(cmd).await?;
+                            if self.handle_command(cmd).await? {
+                                break;
+                            }
                         }
                         None => {
                             warn!("Command channel closed unexpectedly");
@@ -317,8 +317,9 @@ impl BlockProducerService {
         Ok(())
     }
 
+    /// Handles a single command. Returns `true` if the service should shut down.
     #[tracing::instrument(level = "trace", skip_all)]
-    async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<()> {
+    async fn handle_command(&mut self, cmd: BlockProducerCommand) -> eyre::Result<bool> {
         match cmd {
             BlockProducerCommand::SolutionFound { solution, response } => {
                 let solution_hash = solution.solution_hash;
@@ -336,7 +337,7 @@ impl BlockProducerService {
                             "No more blocks needed for test, skipping block production"
                         );
                         let _ = response.send(Ok(None));
-                        return Ok(());
+                        return Ok(false);
                     }
                     debug!("Test blocks remaining: {}", blocks_remaining);
                 }
@@ -344,16 +345,24 @@ impl BlockProducerService {
                 let production_strategy = ProductionStrategy {
                     inner: self.inner.clone(),
                 };
-                let result = production_strategy
-                    .fully_produce_new_block(solution)
-                    .await?;
+
+                // Race production against shutdown so we don't block graceful shutdown.
+                let result = tokio::select! {
+                    biased;
+                    _ = &mut self.shutdown => {
+                        info!("Shutdown during block production, cancelling");
+                        let _ = response.send(Ok(None));
+                        return Ok(true);
+                    }
+                    r = production_strategy.fully_produce_new_block(solution) => r?
+                };
 
                 if let Some((block, eth_built_payload)) = result {
                     // Final guard: ensure tests haven't exhausted quota
                     if matches!(self.blocks_remaining_for_test, Some(0)) {
                         info!("Test guard exhausted; dropping candidate block before publication");
                         let _ = response.send(Ok(None));
-                        return Ok(());
+                        return Ok(false);
                     }
 
                     info!(
@@ -368,11 +377,11 @@ impl BlockProducerService {
                     }
 
                     let _ = response.send(Ok(Some((block, eth_built_payload))));
-                    return Ok(());
+                    return Ok(false);
                 } else {
                     info!("Block production skipped (solution outdated or invalid)");
                     let _ = response.send(Ok(None));
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             BlockProducerCommand::SetTestBlocksRemaining(remaining) => {
@@ -384,7 +393,7 @@ impl BlockProducerService {
                 self.blocks_remaining_for_test = remaining;
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -547,19 +556,17 @@ pub trait BlockProdStrategy {
     /// Selects the parent block for new block production.
     ///
     /// Targets the block with highest cumulative difficulty, but only if fully validated.
-    /// If validation is pending, waits up to 10 seconds for completion. Falls back to
-    /// the latest validated block on timeout to ensure production continues.
+    /// Waits indefinitely for validation to complete, switching targets if a new block
+    /// with higher cumulative difficulty appears.
     ///
     /// Returns the selected parent block header and its EMA snapshot.
     #[tracing::instrument(skip_all, level = "debug")]
     async fn parent_irys_block(&self) -> eyre::Result<(IrysBlockHeader, Arc<EmaSnapshot>)> {
-        const MAX_WAIT_TIME: Duration = Duration::from_secs(10);
         let inner = self.inner();
         // Use BlockValidationTracker to select the parent block
         let parent_block_hash = BlockValidationTracker::new(
             inner.block_tree_guard.clone(),
             inner.service_senders.clone(),
-            MAX_WAIT_TIME,
         )
         .wait_for_validation()
         .await?;
